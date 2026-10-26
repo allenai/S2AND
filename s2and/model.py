@@ -3143,14 +3143,14 @@ class Clusterer:
             # work and the last, exposed linkage is the smallest. Blocks cluster
             # independently, and results are collected in block order.
             overlap_limit_bytes = memory_budget.resolve_total_ram_bytes(total_ram_bytes)[0] // 10
-            block_results: dict[str, Future[tuple[list, float]] | None] = {}
+            block_results: dict[str, Future[tuple[np.ndarray | list[int], float]] | None] = {}
             blocks_largest_first = sorted(block_dict.items(), key=lambda item: len(item[1]), reverse=True)
-            pending: Future[tuple[list, float]] | None = None
+            pending: Future[tuple[np.ndarray | list[int], float]] | None = None
             pending_bytes = 0
 
             def timed_cluster(
                 block_key: str, signatures: list[str], dist_matrix: np.ndarray | None
-            ) -> tuple[list, float]:
+            ) -> tuple[np.ndarray | list[int], float]:
                 start = time.perf_counter()
                 labels = self._cluster_one_block_with_logging(
                     signatures,
@@ -4507,7 +4507,7 @@ class Clusterer:
         *,
         incremental_dont_use_cluster_seeds: bool = False,
         prediction_state: PredictionState | None = None,
-    ) -> list:
+    ) -> np.ndarray | list[int]:
         """Cluster one block from a distance matrix and return labels."""
         if len(block_signatures) == 0:
             return []
@@ -4539,7 +4539,7 @@ class Clusterer:
         *,
         incremental_dont_use_cluster_seeds: bool = False,
         prediction_state: PredictionState | None = None,
-    ) -> list:
+    ) -> np.ndarray | list[int]:
         """Relabel outliers and join seed groups after a block's cluster-model fit."""
         max_label = labels.max()
         # In HDBSCAN, label -1 denotes outliers.
@@ -4551,7 +4551,7 @@ class Clusterer:
             cluster_seeds_require = (
                 dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require
             )
-            labels = merge_seed_labels(block_signatures, labels, cluster_seeds_require, disallow_adjacency)
+            return merge_seed_labels(block_signatures, labels, cluster_seeds_require, disallow_adjacency)
         return labels
 
     def predict_eps_grid(
@@ -4646,7 +4646,7 @@ class Clusterer:
         block_key: str,
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
-    ) -> list:
+    ) -> np.ndarray | list[int]:
         """Cluster one block and emit explicit entry/exit logs around the cluster-model fit."""
         cluster_model_name = type(self.cluster_model).__name__
         logger.info(

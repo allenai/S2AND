@@ -296,8 +296,10 @@ class PairwiseModeler:
 
         # refitting but only on training data so as not to leak anything
         # Only this fit is kept, so only it needs names; the trials score unnamed arrays.
-        fit_kwargs = {} if feature_names is None else {"feature_name": [str(name) for name in feature_names]}
-        self.classifier = self.estimator.fit(X_train, y_train, **fit_kwargs)
+        if feature_names is None:
+            self.classifier = self.estimator.fit(X_train, y_train)
+        else:
+            self.classifier = self.estimator.fit(X_train, y_train, feature_name=[str(name) for name in feature_names])
 
         assert self.hyperopt_trials_store is not None
         return self.hyperopt_trials_store

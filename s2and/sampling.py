@@ -5,7 +5,10 @@ https://github.com/glouppe/beard/blob/9fb268736d195dd0c27cd0ae2915d8e00bbb4e2c/e
 
 import math
 import random
-from typing import Any
+from collections.abc import Sequence
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 
 def sampling(
@@ -110,7 +113,7 @@ def sampling(
     return rng.sample(pairs, len(pairs))
 
 
-def random_sampling(possible: list[Any], sample_size: int, random_seed: int) -> list[Any]:
+def random_sampling(possible: Sequence[_T], sample_size: int, random_seed: int) -> list[_T]:
     """
     Randomly samples a list
 

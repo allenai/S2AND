@@ -1,452 +1,287 @@
-# mypy: ignore-errors
+"""Predict author clusters with a complete S2AND production model.
+
+Download the `inference` and `dataset` bundles into `s2and/data/` first; see docs/data.md.
+The Arrow route runs in Rust through `Clusterer.predict_from_arrow` and clusters every block:
+
+  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
+      --model-path s2and/data/production_model_v1.3 \
+      --arrow-dataset s2and/data/benchmarks/qian \
+      --n-jobs 4 --output-json qian_clusters.json
+
+Incremental prediction links new signatures to existing author profiles through
+`Clusterer.predict_incremental_from_arrow`. This example uses one block of released data.
+Labeled signatures on papers before 2015 play the existing profiles; the block's other
+signatures arrive as new papers:
+
+  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
+      --model-path s2and/data/production_model_v1.3 \
+      --arrow-dataset s2and/data/benchmarks/aminer \
+      --incremental-block "j wang" \
+      --seed-clusters s2and/data/benchmarks/aminer/aminer_clusters.json \
+      --seed-before-year 2015 --n-jobs 4
+
+The JSON route runs in Python through `Clusterer.predict` on an `ANDData` built from
+`signatures.json`, `papers.json`, and a SPECTER2 embedding pickle:
+
+  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
+      --model-path s2and/data/production_model_v1.3 \
+      --json-dir path/to/records --specter-pickle path/to/specter2.pkl \
+      --name-counts-index s2and/data/name_counts_index --n-jobs 4
+
+The tutorial does not score the result.
+`release_pairwise.py evaluate-heldout` computes the release metrics; see docs/reproduce.md.
 """
-This script demonstrates how to use the checked-in production S2AND model bundle for clustering.
 
-The production-oriented path uses Arrow inputs and calls
-`Clusterer.predict_from_arrow_paths(...)`. JSON/ANDData input remains available
-for legacy fixtures and subblocking knob examples.
-You can also point `--data-root` to `tests` and run `--dataset qian`.
-
-Examples:
-  # Arrow release + Rust backend
-  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --input-format arrow --use-rust 1 --dataset qian --arrow-data-root s2and/data
-
-  # Bundled JSON fixture + Rust backend
-  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --input-format json --use-rust 1 --dataset qian --data-root tests --load-name-counts 0
-
-  # Show subblocking + memory budget knobs (for large blocks)
-  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --use-rust 1 --dataset qian --batching-threshold 5000 --desired-memory-use 25000000
-
-  # Warm Rust featurizer before prediction
-  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --use-rust 1 --dataset qian --warm-rust-featurizer-before-predict 1
-"""
+from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-
-def _apply_backend_flag(use_rust: int | None) -> None:
-    if use_rust is None:
-        return
-    os.environ["S2AND_BACKEND"] = "rust" if use_rust else "python"
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 
 
-def _resolve_root(project_root: str, maybe_relative: str) -> str:
-    return maybe_relative if os.path.isabs(maybe_relative) else os.path.join(project_root, maybe_relative)
+def _read_columns(arrow_dataset: ArrowDataset, table_name: str, columns: Sequence[str]) -> Any:
+    """Read selected columns of one table of the dataset."""
+    import pyarrow as pa
+
+    with arrow_dataset.use() as lease, lease.open_file(table_name) as infile:
+        with pa.PythonFile(infile, mode="r") as source:
+            return pa.ipc.open_file(source).read_all().select(list(columns))
 
 
-def _resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str, fallback_name: str) -> str:
-    preferred_path = os.path.join(data_root, dataset_name, preferred_name)
-    if os.path.exists(preferred_path):
-        return preferred_path
-    fallback_path = os.path.join(data_root, dataset_name, fallback_name)
-    if os.path.exists(fallback_path):
-        return fallback_path
-    raise FileNotFoundError(
-        f"Missing dataset file for '{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
-    )
+def arrow_blocks(arrow_dataset: ArrowDataset) -> dict[str, list[str]]:
+    """Group the dataset's signature IDs by their S2 author block."""
+    table = _read_columns(arrow_dataset, "signatures", ["signature_id", "author_block"])
+    blocks: dict[str, list[str]] = defaultdict(list)
+    signature_ids = table.column("signature_id").to_pylist()
+    author_blocks = table.column("author_block").to_pylist()
+    for signature_id, author_block in zip(signature_ids, author_blocks, strict=True):
+        blocks[str(author_block)].append(str(signature_id))
+    return dict(blocks)
 
 
-def _select_input_route(
+def predict_arrow(
+    clusterer: Any,
+    dataset_dir: Path,
     *,
-    requested_input_format: str,
-    dataset_name: str,
-    arrow_data_root: str,
-    specter_suffix: str,
     batching_threshold: int | None,
-    desired_memory_use: int | None,
-    warm_rust_featurizer_before_predict: int,
-    resolve_arrow_dataset_paths,
-) -> tuple[str, dict[str, str] | None]:
-    """Resolve tutorial input routing without loading models or ANDData."""
-
-    input_format = requested_input_format
-    arrow_paths = None
-    if input_format in {"auto", "arrow"}:
-        try:
-            arrow_paths = resolve_arrow_dataset_paths(arrow_data_root, dataset_name, specter_suffix)
-        except FileNotFoundError:
-            if input_format == "arrow":
-                raise
-            input_format = "json"
-        else:
-            if input_format == "auto" and (batching_threshold is not None or desired_memory_use is not None):
-                input_format = "json"
-            else:
-                input_format = "arrow"
-
-    if input_format == "arrow":
-        if batching_threshold is not None or desired_memory_use is not None:
-            raise ValueError("--batching-threshold and --desired-memory-use are JSON/ANDData tutorial knobs")
-        if warm_rust_featurizer_before_predict:
-            raise ValueError("--warm-rust-featurizer-before-predict is only valid for JSON/ANDData input")
-        if arrow_paths is None:
-            raise RuntimeError("Arrow input selected without resolved Arrow paths")
-    return input_format, arrow_paths
+    total_ram_bytes: int | None,
+) -> dict[str, list[str]]:
+    """Cluster every block of one Arrow dataset through the Rust route."""
+    with ArrowDataset.open(dataset_dir, require_specter=True, require_name_counts_index=True) as arrow_dataset:
+        clusters, _distances = clusterer.predict_from_arrow(
+            arrow_blocks(arrow_dataset),
+            arrow_dataset,
+            batching_threshold=batching_threshold,
+            total_ram_bytes=total_ram_bytes,
+        )
+    return clusters
 
 
-def _cluster_eval_with_predict_options(
-    dataset,
-    clusterer,
+def seed_profiles_before_year(
+    arrow_dataset: ArrowDataset,
+    signature_ids: Sequence[str],
     *,
-    split: str,
-    use_s2_clusters: bool,
+    labeled_clusters: dict[str, Any],
+    before_year: int,
+) -> dict[str, str]:
+    """Map each labeled signature on a paper before `before_year` to its labeled cluster.
+
+    These signatures play the existing author profiles. The other signatures arrive as new papers.
+    """
+    signatures = _read_columns(arrow_dataset, "signatures", ["signature_id", "paper_id"])
+    try:
+        papers = _read_columns(arrow_dataset, "papers", ["paper_id", "year"])
+    except KeyError as exc:
+        # The public format makes papers.year optional; this example needs it to order the papers.
+        raise ValueError("Seeding by year needs the optional papers.year column, which this dataset lacks") from exc
+    signature_paper = dict(
+        zip(
+            map(str, signatures.column("signature_id").to_pylist()),
+            map(str, signatures.column("paper_id").to_pylist()),
+            strict=True,
+        )
+    )
+    paper_year = dict(
+        zip(map(str, papers.column("paper_id").to_pylist()), papers.column("year").to_pylist(), strict=True)
+    )
+    labels = {
+        str(signature_id): str(cluster_id)
+        for cluster_id, cluster in labeled_clusters.items()
+        for signature_id in cluster["signature_ids"]
+    }
+    seeds = {}
+    for signature_id in signature_ids:
+        year = paper_year.get(signature_paper[signature_id])
+        if signature_id in labels and year is not None and year < before_year:
+            seeds[signature_id] = labels[signature_id]
+    return seeds
+
+
+def predict_incremental_arrow(
+    clusterer: Any,
+    dataset_dir: Path,
+    *,
+    block: str,
+    seed_clusters: Path,
+    seed_before_year: int,
     batching_threshold: int | None,
-    desired_memory_use: int | None,
-):
-    import numpy as np
-
-    from s2and.eval import b3_precision_recall_fscore, pairwise_precision_recall_fscore
-
-    train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
-    if split == "test":
-        block_dict = test_block_dict
-    elif split == "val":
-        block_dict = val_block_dict
-    elif split == "train":
-        block_dict = train_block_dict
-    else:
-        raise ValueError("Split must be one of: train, val, test")
-
-    cluster_to_signatures = dataset.construct_cluster_to_signatures(block_dict)
-    pred_clusters, _ = clusterer.predict(
-        block_dict,
-        dataset,
-        use_s2_clusters=use_s2_clusters,
-        batching_threshold=batching_threshold,
-        desired_memory_use=desired_memory_use,
-    )
-
-    (
-        b3_p,
-        b3_r,
-        b3_f1,
-        b3_metrics_per_signature,
-        pred_bigger_ratios,
-        true_bigger_ratios,
-    ) = b3_precision_recall_fscore(cluster_to_signatures, pred_clusters)
-    metrics = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
-    metrics["Cluster (P, R F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, pred_clusters, block_dict, "clusters"
-    )
-    metrics["Cluster Macro (P, R, F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, pred_clusters, block_dict, "cmacro"
-    )
-
-    def _mean_or_nan(xs):
-        if len(xs) == 0:
-            return float("nan")
-        return float(np.round(np.mean(xs), 2))
-
-    metrics["Pred bigger ratio (mean, count)"] = (_mean_or_nan(pred_bigger_ratios), len(pred_bigger_ratios))
-    metrics["True bigger ratio (mean, count)"] = (_mean_or_nan(true_bigger_ratios), len(true_bigger_ratios))
-    return metrics, b3_metrics_per_signature
+    total_ram_bytes: int | None,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Link one block's newer signatures to profiles seeded from its older labeled signatures."""
+    labeled_clusters = json.loads(seed_clusters.read_text(encoding="utf-8"))
+    with ArrowDataset.open(dataset_dir, require_specter=True, require_name_counts_index=True) as arrow_dataset:
+        blocks = arrow_blocks(arrow_dataset)
+        if block not in blocks:
+            raise ValueError(f"Block {block!r} is not in {dataset_dir}")
+        seeds = seed_profiles_before_year(
+            arrow_dataset,
+            blocks[block],
+            labeled_clusters=labeled_clusters,
+            before_year=seed_before_year,
+        )
+        result = clusterer.predict_incremental_from_arrow(
+            blocks[block],
+            arrow_dataset,
+            cluster_seeds_require=seeds,
+            batching_threshold=batching_threshold,
+            total_ram_bytes=total_ram_bytes,
+        )
+    return result["clusters"], seeds
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--use-rust",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Set 1 to force Rust path, 0 to force Python path (default: env settings).",
+def predict_json(
+    clusterer: Any,
+    json_dir: Path,
+    *,
+    specter_pickle: Path,
+    name_counts_index: Path,
+    n_jobs: int,
+) -> dict[str, list[str]]:
+    """Cluster every full block of one S2AND JSON dataset through the Python route."""
+    from s2and.data import ANDData
+
+    dataset = ANDData(
+        signatures=str(json_dir / "signatures.json"),
+        papers=str(json_dir / "papers.json"),
+        name=json_dir.name,
+        mode="inference",
+        specter_embeddings=str(specter_pickle),
+        name_counts_index=str(name_counts_index),
+        n_jobs=n_jobs,
     )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Run a single dataset by name (default: run all).",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=str,
-        default=os.path.join("s2and", "data", "s2and_mini"),
-        help=(
-            "Root directory containing per-dataset subfolders. "
-            "Supports both <dataset>_*.json naming (mini) and plain *.json naming (tests fixtures)."
-        ),
-    )
-    parser.add_argument(
-        "--input-format",
-        choices=["auto", "arrow", "json"],
-        default="auto",
-        help=(
-            "Input route. auto uses Arrow when the requested dataset exists under --arrow-data-root, "
-            "unless JSON-only subblocking knobs are supplied."
-        ),
-    )
-    parser.add_argument(
-        "--arrow-data-root",
-        type=str,
-        default=os.path.join("s2and", "data"),
-        help="Arrow release root containing per-dataset manifests, relative to repo root or absolute.",
-    )
-    parser.add_argument(
-        "--specter-suffix",
-        choices=["_specter.pickle", "_specter2.pkl"],
-        default="_specter2.pkl",
-        help="Embedding/model suffix used to select the Arrow embedding file.",
-    )
-    parser.add_argument(
-        "--arrow-total-ram-bytes",
-        type=int,
-        default=1_000_000_000_000,
-        help="Memory budget passed to Clusterer.predict_from_arrow_paths.",
-    )
-    parser.add_argument(
-        "--load-name-counts",
-        type=int,
-        choices=[0, 1],
-        default=1,
-        help="Set 0 to skip name-count artifact loading (useful for lightweight fixtures).",
-    )
-    parser.add_argument(
-        "--n-jobs",
-        type=int,
-        default=4,
-        help="Parallel jobs for ANDData/clusterer (default: 4).",
-    )
-    parser.add_argument(
-        "--use-cache",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help=(
-            "Set 1 to enable the persistent pair-feature SQLite cache during cache-aware prediction paths. "
-            "Same-process Rust featurizer reuse is independent of this flag."
-        ),
-    )
-    parser.add_argument(
-        "--warm-rust-featurizer-before-predict",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help="Set 1 to warm Rust featurizer once per dataset before running prediction.",
-    )
+    clusters, _distances = clusterer.predict(dataset.get_blocks(), dataset)
+    return clusters
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete production model directory.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--arrow-dataset", type=Path, help="Arrow dataset directory that holds manifest.json.")
+    source.add_argument("--json-dir", type=Path, help="Directory with signatures.json and papers.json.")
+    parser.add_argument("--specter-pickle", type=Path, help="SPECTER2 embedding pickle for --json-dir.")
+    parser.add_argument("--name-counts-index", type=Path, help="Name-count index directory for --json-dir.")
+    parser.add_argument("--n-jobs", type=int, default=4, help="Threads for prediction (default: 4).")
     parser.add_argument(
         "--batching-threshold",
         type=int,
         default=None,
-        help=(
-            "Optional subblocking threshold for Clusterer.predict. "
-            "Blocks larger than this use subblocking/incremental flow."
-        ),
+        help="Optional maximum subblock size for --arrow-dataset; larger blocks use native subblocking.",
     )
+    parser.add_argument("--total-ram-bytes", type=int, default=None, help="Memory budget for the Arrow route.")
     parser.add_argument(
-        "--desired-memory-use",
-        type=int,
+        "--incremental-block",
         default=None,
-        help=(
-            "Optional desired memory budget for subblocked predict path "
-            "(signature-pair units). Requires --batching-threshold."
-        ),
+        help="Run incremental prediction on this block of --arrow-dataset instead of clustering every block.",
     )
     parser.add_argument(
-        "--split",
-        type=str,
-        choices=["train", "val", "test"],
-        default="test",
-        help="Evaluation split for reported metrics (default: test).",
+        "--seed-clusters",
+        type=Path,
+        default=None,
+        help="Labeled clusters JSON, such as benchmarks/aminer/aminer_clusters.json, for --incremental-block.",
     )
     parser.add_argument(
-        "--model-path",
-        type=str,
-        default=os.path.join("s2and", "data", "production_model_v1.21"),
-        help="Production model bundle directory or legacy pickle path, relative to repo root or absolute.",
+        "--seed-before-year",
+        type=int,
+        default=2015,
+        help="Labeled signatures on papers before this year seed the existing profiles (default: 2015).",
     )
-    args = parser.parse_args()
+    parser.add_argument("--output-json", type=Path, default=None, help="New file for the predicted clusters.")
+    return parser
 
-    if args.desired_memory_use is not None and args.batching_threshold is None:
-        raise ValueError("--desired-memory-use requires --batching-threshold")
 
-    _apply_backend_flag(args.use_rust)
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.json_dir is not None and (args.specter_pickle is None or args.name_counts_index is None):
+        parser.error("--json-dir requires --specter-pickle and --name-counts-index")
+    # The Python route clusters full blocks only; reject subblocking before slow preprocessing starts.
+    if args.json_dir is not None and args.batching_threshold is not None:
+        parser.error("--batching-threshold requires --arrow-dataset; the --json-dir route clusters full blocks")
+    if args.incremental_block is not None and (args.arrow_dataset is None or args.seed_clusters is None):
+        parser.error("--incremental-block requires --arrow-dataset and --seed-clusters")
+    if args.output_json is not None and args.output_json.exists():
+        parser.error(f"--output-json already exists: {args.output_json}")
 
-    from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
-    from s2and.data import ANDData
-    from s2and.feature_port import warm_rust_featurizer
-    from s2and.featurizer import FeaturizationInfo
+    # LightGBM and other OpenMP libraries read this variable when they first load.
+    os.environ["OMP_NUM_THREADS"] = str(args.n_jobs)
     from s2and.production_model import load_production_model
-    from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
 
-    n_jobs = args.n_jobs
-    use_cache = bool(args.use_cache)
-
-    # Limit BLAS threads to keep things responsive
-    os.environ["OMP_NUM_THREADS"] = f"{n_jobs}"
-
-    data_original = _resolve_root(PROJECT_ROOT_PATH, args.data_root)
-    arrow_data_root = _resolve_root(PROJECT_ROOT_PATH, args.arrow_data_root)
-
-    random_seed = 42
-
-    datasets = [
-        "arnetminer",
-        "inspire",
-        "kisti",
-        "pubmed",
-        "qian",
-        "zbmath",
-    ]
-    if args.dataset is not None:
-        datasets = [args.dataset]
-
-    features_to_use = [
-        "name_similarity",
-        "affiliation_similarity",
-        "email_similarity",
-        "coauthor_similarity",
-        "venue_similarity",
-        "year_diff",
-        "title_similarity",
-        # "reference_features",  # removed in the v1.1. model
-        "misc_features",
-        "name_counts",
-        "embedding_similarity",
-        "journal_similarity",
-        "advanced_name_similarity",
-    ]
-
-    # we also have this special second "nameless" model that doesn't use any name-based features
-    # it helps to improve clustering performance by preventing model overreliance on names
-    nameless_features_to_use = [
-        feature_name
-        for feature_name in features_to_use
-        if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-    ]
-
-    # we store all the information about the features in this convenient wrapper
-    # note: we don't need these objects in this script, but they are useful for documentation purposes
-    featurization_info = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
-    nameless_featurization_info = FeaturizationInfo(
-        features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
-    )
-    _ = (featurization_info, nameless_featurization_info)
-
-    # this defaults to the checked-in native production bundle; override via --model-path if needed
-    model_path = _resolve_root(PROJECT_ROOT_PATH, args.model_path)
-    clusterer = load_production_model(model_path)
-    clusterer.use_cache = use_cache
-    clusterer.n_jobs = n_jobs
-
-    print(
-        "Config: "
-        f"backend={os.environ.get('S2AND_BACKEND', 'auto')}, "
-        f"split={args.split}, n_jobs={n_jobs}, use_cache={int(use_cache)}, "
-        f"warm_rust_featurizer={args.warm_rust_featurizer_before_predict}, "
-        f"batching_threshold={args.batching_threshold}, "
-        f"desired_memory_use={args.desired_memory_use}, "
-        f"load_name_counts={args.load_name_counts}, "
-        f"input_format={args.input_format}"
-    )
-    print(f"Model: {model_path}")
-    print(f"Data root: {data_original}")
-    print(f"Arrow data root: {arrow_data_root}")
-
-    cluster_metrics_all = []
-    for dataset_name in datasets:
-        input_format, arrow_paths = _select_input_route(
-            requested_input_format=args.input_format,
-            dataset_name=dataset_name,
-            arrow_data_root=arrow_data_root,
-            specter_suffix=args.specter_suffix,
-            batching_threshold=args.batching_threshold,
-            desired_memory_use=args.desired_memory_use,
-            warm_rust_featurizer_before_predict=args.warm_rust_featurizer_before_predict,
-            resolve_arrow_dataset_paths=resolve_arrow_dataset_paths,
-        )
-
-        if input_format == "arrow":
-            if arrow_paths is None:
-                raise RuntimeError("Arrow input selected without resolved Arrow paths")
-            cluster_metrics, _b3_metrics_per_signature = cluster_eval_arrow(
-                arrow_paths,
-                clusterer,
-                random_seed=random_seed,
-                n_jobs=n_jobs,
-                split=args.split,
-                total_ram_bytes=int(args.arrow_total_ram_bytes),
-            )
-            print(f"[{dataset_name}] Arrow predict_from_arrow_paths")
-            print(cluster_metrics)
-            cluster_metrics_all.append(cluster_metrics)
-            continue
-
-        signatures_path = _resolve_dataset_file(
-            data_original, dataset_name, f"{dataset_name}_signatures.json", "signatures.json"
-        )
-        papers_path = _resolve_dataset_file(data_original, dataset_name, f"{dataset_name}_papers.json", "papers.json")
-        clusters_path = _resolve_dataset_file(
-            data_original, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"
-        )
-        try:
-            specter_path = _resolve_dataset_file(
-                data_original, dataset_name, f"{dataset_name}_specter.pickle", "specter.pickle"
-            )
-        except FileNotFoundError:
-            specter_path = None
-            print(f"[{dataset_name}] No specter file found; embedding features will be missing.")
-
-        anddata = ANDData(
-            signatures=signatures_path,
-            papers=papers_path,
-            name=dataset_name,
-            mode="train",
-            specter_embeddings=specter_path,
-            clusters=clusters_path,
-            block_type="s2",
-            train_pairs=None,
-            val_pairs=None,
-            test_pairs=None,
-            train_pairs_size=100000,
-            val_pairs_size=10000,
-            test_pairs_size=10000,
-            n_jobs=n_jobs,
-            load_name_counts=bool(args.load_name_counts),
-            preprocess=True,
-            random_seed=random_seed,
-            name_tuples="filtered",
-            use_orcid_id=True,
-            use_sinonym_overwrite=True,
-        )
-
-        if args.warm_rust_featurizer_before_predict:
-            if anddata.runtime_context.resolved_backend == "rust":
-                warm_rust_featurizer(anddata)
-                print(f"[{dataset_name}] Warmed Rust featurizer")
-            else:
-                print(
-                    f"[{dataset_name}] Skipping warm_rust_featurizer: "
-                    f"resolved backend is {anddata.runtime_context.resolved_backend}"
-                )
-
-        cluster_metrics, _b3_metrics_per_signature = _cluster_eval_with_predict_options(
-            anddata,
+    clusterer = load_production_model(args.model_path, n_jobs=args.n_jobs)
+    if args.incremental_block is not None:
+        clusters, seeds = predict_incremental_arrow(
             clusterer,
-            split=args.split,
-            use_s2_clusters=False,
+            args.arrow_dataset,
+            block=args.incremental_block,
+            seed_clusters=args.seed_clusters,
+            seed_before_year=args.seed_before_year,
             batching_threshold=args.batching_threshold,
-            desired_memory_use=args.desired_memory_use,
+            total_ram_bytes=args.total_ram_bytes,
         )
-        print(cluster_metrics)
-        cluster_metrics_all.append(cluster_metrics)
+        new_signatures = sum(len(members) for members in clusters.values()) - len(seeds)
+        joined = sum(
+            1
+            for members in clusters.values()
+            if any(str(member) in seeds for member in members)
+            for member in members
+            if str(member) not in seeds
+        )
+        print(f"Seeded {len(set(seeds.values()))} profiles with {len(seeds)} signatures.")
+        print(f"Linked {new_signatures} new signatures: {joined} joined a profile, {new_signatures - joined} did not.")
+    elif args.arrow_dataset is not None:
+        clusters = predict_arrow(
+            clusterer,
+            args.arrow_dataset,
+            batching_threshold=args.batching_threshold,
+            total_ram_bytes=args.total_ram_bytes,
+        )
+    else:
+        clusters = predict_json(
+            clusterer,
+            args.json_dir,
+            specter_pickle=args.specter_pickle,
+            name_counts_index=args.name_counts_index,
+            n_jobs=args.n_jobs,
+        )
 
-    b3s = [i["B3 (P, R, F1)"][-1] for i in cluster_metrics_all]
-    print(b3s, sum(b3s) / len(b3s))
-
-    for i in range(len(datasets)):
-        print(f"Performance on {datasets[i]}: {cluster_metrics_all[i]['B3 (P, R, F1)']}")
-        print()
+    sizes = sorted((len(members) for members in clusters.values()), reverse=True)
+    print(f"Predicted {len(sizes)} clusters for {sum(sizes)} signatures.")
+    print(f"Largest cluster sizes: {sizes[:5]}")
+    if args.output_json is not None:
+        payload = {str(cluster_id): sorted(map(str, members)) for cluster_id, members in clusters.items()}
+        args.output_json.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"Wrote {args.output_json}")
 
 
 if __name__ == "__main__":

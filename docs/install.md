@@ -4,9 +4,13 @@ This document covers the fuller install and setup options for S2AND.
 
 ## Requirements
 
-- Python `3.11.x`
+- Python `3.11`, `3.12`, or `3.13`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- Rust, if you want to build the native extension from source: [`rustup`](https://www.rust-lang.org/tools/install)
+- Rust, if you are working from a source checkout or building the native extension from source:
+  [`rustup`](https://www.rust-lang.org/tools/install)
+
+The `s2and` wheel includes `s2and._s2and_rust`. Installing a supported wheel needs no Rust compiler.
+Source installations compile the extension from the same source archive.
 
 If you are building the Rust extension from source, install OS prerequisites first.
 
@@ -31,29 +35,35 @@ cargo --version
 
 ## Package install
 
-Python-only runtime:
+> **Update at v1.3 release:** PyPI holds only `0.51.2`, which cannot read `1.3` models or data.
+> Use the checkout flow below until `1.0.0` is published.
+
+Runtime install:
 
 ```bash
-uv pip install s2and
+uv pip install "s2and==1.0.0"
 ```
 
-Rust-enabled runtime when wheels are available:
-
-```bash
-uv pip install "s2and[rust]"
-```
+The `s2and==1.0.0` distribution supports model/public-data version `1.3`.
 
 ## Repo checkout
 
-Create and activate a Python 3.11 environment:
+Download the model, the index, and the data from S3 with [the data guide](data.md#download).
+
+Install repo dependencies into the project environment (`.venv`), building
+the Rust extension:
 
 ```bash
-uv venv --python 3.11.13
+uv sync               # runtime
+uv sync --extra dev   # runtime plus the test, lint, and build tools
 ```
 
-Activation examples:
+To choose the interpreter or work in an activated environment instead, create
+it first, activate it, and sync with `--active`:
 
 ```bash
+uv venv --python 3.11
+
 # macOS / Linux
 source .venv/bin/activate
 
@@ -62,39 +72,57 @@ source .venv/bin/activate
 
 # Windows CMD
 .venv\Scripts\activate.bat
-```
 
-Install repo dependencies:
-
-```bash
 uv sync --active --extra dev
 ```
 
-If you do not want to activate the environment first, `uv sync --extra dev` also works and will use the project environment.
+The `dev` extra includes everything the tests need. Outside it, the
+`orcid-counts` extra installs `orjson`, which the ORCID prefix-count producer
+(`scripts/production/counts/generate_orcid_name_prefix_counts.py`) requires.
 
 ## Build the Rust extension from source
 
-Install the extension into the active environment:
+`uv sync --extra dev` builds the unified `s2and` package and installs it
+into the project environment, and syncing `uv run` commands rebuild it after
+ordinary Rust edits. The test suite stops before collection if the installed
+extension was built from different native sources than the checkout.
+
+If a rebuild is missed, force a refresh:
 
 ```bash
-uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
+uv sync --extra dev --reinstall-package s2and
+```
+
+If a forced reinstall still reports a mismatch (for example after edits that
+preserve timestamps, or after switching checkouts that share
+`CARGO_TARGET_DIR`), clear the local crates' cached release artifacts and
+repeat the forced refresh:
+
+```bash
+uv run --no-sync cargo clean -p s2and_rust -p cld2 -p cld2-sys --manifest-path s2and_rust/Cargo.toml --release
 ```
 
 Notes:
 
-- This installs the compiled module into `site-packages`.
 - If you just installed Rust with `rustup` in the current shell, load its environment first if needed.
-- If you prefer a non-editable repo install, you can `uv pip install .` and then run the `maturin develop` step.
+- Keep the Python code and native extension from the same checkout.
+- Editable builds place the extension inside `s2and/`. After switching revisions, force a reinstall.
+
+How rebuild detection and the source digest work is described in
+[native build troubleshooting](development.md#native-build-troubleshooting).
 
 ## Running repo scripts
 
-When running scripts from a repo checkout, prefer:
+Run repository scripts with:
 
 ```bash
-uv run --no-project python path/to/script.py
+uv run python path/to/script.py
 ```
 
-This keeps imports pointed at the installed package and compiled extension in `site-packages`. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
+The command rebuilds the extension when its inputs change.
+Use `uv run --no-sync python` only in an environment that you already synchronized.
+
+For expensive model jobs, follow the [bounded model run instructions](development.md#bounded-model-runs).
 
 ## WSL notes
 

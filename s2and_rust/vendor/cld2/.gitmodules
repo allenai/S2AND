@@ -1,4 +1,0 @@
-[submodule "cld2-sys/cld2"]
-	path = cld2-sys/cld2
-	url = https://github.com/emk/cld2
-	branch = for-rust-cld2

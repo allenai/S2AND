@@ -1,5 +1,4 @@
 {
-  "schema_version": "s2and_arrow_schema_contract_v1",
   "tables": {
     "altered_cluster_signatures": [
       {"name": "signature_id", "datatype": "string", "required": true}
@@ -11,6 +10,11 @@
     "cluster_seeds": [
       {"name": "signature_id", "datatype": "string", "required": true},
       {"name": "cluster_id", "datatype": "string", "required": true}
+    ],
+    "incremental_query_signatures": [
+      {"name": "signature_id", "datatype": "string", "required": true},
+      {"name": "query_view", "datatype": "string", "required": true},
+      {"name": "query_author", "datatype": "string", "required": true}
     ],
     "paper_authors": [
       {"name": "paper_id", "datatype": "string", "required": true},
@@ -25,7 +29,8 @@
       {"name": "journal_name", "datatype": "string", "required": true},
       {"name": "year", "datatype": "int64", "required": false},
       {"name": "predicted_language", "datatype": "string", "required": false},
-      {"name": "is_reliable", "datatype": "bool", "required": false}
+      {"name": "is_reliable", "datatype": "bool", "required": false},
+      {"name": "language_reliability", "datatype": "float64", "required": false}
     ],
     "signatures": [
       {"name": "signature_id", "datatype": "string", "required": true},
@@ -35,7 +40,7 @@
       {"name": "author_last", "datatype": "string", "required": true},
       {"name": "author_suffix", "datatype": "string", "required": true},
       {"name": "author_affiliations", "datatype": "list<string>", "required": true},
-      {"name": "author_orcid", "datatype": "string", "required": true},
+      {"name": "author_orcid", "datatype": "string", "required": false},
       {"name": "author_position", "datatype": "int64", "required": true},
       {"name": "author_block", "datatype": "string", "required": false},
       {"name": "author_email", "datatype": "string", "required": false},

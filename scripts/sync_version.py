@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Sync versions from VERSION into package manifests and runtime guards.
+Sync versions from VERSION into package manifests and lockfiles.
 
 Usage:
   uv run python scripts/sync_version.py
   uv run python scripts/sync_version.py --check
+  uv run python scripts/sync_version.py --print-targets
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION_FILE = ROOT / "VERSION"
 
 
 @dataclass(frozen=True)
@@ -23,71 +23,58 @@ class VersionTarget:
     name: str
     relative_path: Path
     pattern: str
+    # Cargo requires SemVer pre-release spelling (1.0.0-beta.1); Python files use PEP 440 (1.0.0b1).
+    cargo: bool = False
 
     def path(self, root: Path) -> Path:
         return root / self.relative_path
 
+    def spelled(self, version: str) -> str:
+        return cargo_version(version) if self.cargo else version
 
-SEMVER_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+"
+
+PEP440_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?"
+CARGO_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)\.[0-9]+)?"
+_CARGO_PRERELEASE_TAGS = {"a": "alpha", "b": "beta", "rc": "rc"}
+
+
+def cargo_version(version: str) -> str:
+    """Spell a PEP 440 release or pre-release the way Cargo requires, e.g. 1.0.0b1 -> 1.0.0-beta.1."""
+    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)(?:(a|b|rc)([0-9]+))?", version)
+    if match is None:
+        raise SystemExit(f"Unsupported version for Cargo: {version}")
+    base, tag, number = match.groups()
+    return base if tag is None else f"{base}-{_CARGO_PRERELEASE_TAGS[tag]}.{number}"
 
 
 def version_targets() -> tuple[VersionTarget, ...]:
     return (
         VersionTarget(
-            name="pyproject_rust_extra",
+            name="pyproject",
             relative_path=Path("pyproject.toml"),
-            pattern=rf'(?m)^(?P<indent>\s*)"s2and-rust(?:==|>=)(?P<version>{SEMVER_PATTERN})(?P<suffix>",\s*)$',
-        ),
-        VersionTarget(
-            name="rust_pyproject",
-            relative_path=Path("s2and_rust") / "pyproject.toml",
-            pattern=rf'(?m)^(?P<prefix>version = ")(?P<version>{SEMVER_PATTERN})(?P<suffix>"\s*)$',
+            pattern=rf'(?m)^(?P<prefix>version = ")(?P<version>{PEP440_PATTERN})(?P<suffix>"\s*)$',
         ),
         VersionTarget(
             name="cargo_toml",
             relative_path=Path("s2and_rust") / "Cargo.toml",
-            pattern=rf'(?m)^(?P<prefix>version = ")(?P<version>{SEMVER_PATTERN})(?P<suffix>"\s*)$',
-        ),
-        VersionTarget(
-            name="runtime_minimum",
-            relative_path=Path("s2and") / "runtime.py",
-            pattern=(
-                r"(?m)^(?P<prefix>MIN_SUPPORTED_RUST_EXTENSION_VERSION = \()"
-                r"(?P<version_tuple>[0-9]+,\s*[0-9]+,\s*[0-9]+)(?P<suffix>\)\r?)$"
-            ),
-        ),
-        VersionTarget(
-            name="readme_version_workflow",
-            relative_path=Path("README.md"),
-            pattern=rf"(?m)^(?P<prefix>echo )(?P<version>{SEMVER_PATTERN})(?P<suffix> > VERSION\s*)$",
-        ),
-        VersionTarget(
-            name="development_version_workflow",
-            relative_path=Path("docs") / "development.md",
-            pattern=rf"(?m)^(?P<prefix>echo )(?P<version>{SEMVER_PATTERN})(?P<suffix> > VERSION\s*)$",
-        ),
-        VersionTarget(
-            name="rust_readme_checkout_version",
-            relative_path=Path("s2and_rust") / "README.md",
-            pattern=(
-                rf"(?m)^(?P<prefix>This checkout is `)(?P<version>{SEMVER_PATTERN})"
-                rf"(?P<suffix>`, so use a local build when working from this tree\s*)$"
-            ),
+            pattern=rf'(?m)^(?P<prefix>version = ")(?P<version>{CARGO_PATTERN})(?P<suffix>"\s*)$',
+            cargo=True,
         ),
         VersionTarget(
             name="cargo_lock",
             relative_path=Path("s2and_rust") / "Cargo.lock",
             pattern=(
                 rf'(?m)^(?P<prefix>\[\[package\]\]\r?\nname = "s2and_rust"\r?\nversion = ")'
-                rf'(?P<version>{SEMVER_PATTERN})(?P<suffix>")'
+                rf'(?P<version>{CARGO_PATTERN})(?P<suffix>")'
             ),
+            cargo=True,
         ),
         VersionTarget(
             name="uv_lock",
             relative_path=Path("uv.lock"),
             pattern=(
-                rf'(?m)^(?P<prefix>\[\[package\]\]\r?\nname = "s2and-rust"\r?\nversion = ")'
-                rf'(?P<version>{SEMVER_PATTERN})(?P<suffix>")'
+                rf'(?m)^(?P<prefix>\[\[package\]\]\r?\nname = "s2and"\r?\nversion = ")'
+                rf'(?P<version>{PEP440_PATTERN})(?P<suffix>")'
             ),
         ),
     )
@@ -98,8 +85,8 @@ def read_version(root: Path = ROOT) -> str:
     if not version_file.exists():
         raise SystemExit(f"VERSION file not found: {version_file}")
     version = _read_text(version_file).strip()
-    if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", version):
-        raise SystemExit(f"VERSION must be semver (X.Y.Z). Got: {version}")
+    if not re.fullmatch(PEP440_PATTERN, version):
+        raise SystemExit(f"VERSION must be X.Y.Z or a PEP 440 pre-release such as X.Y.Zb1. Got: {version}")
     return version
 
 
@@ -113,10 +100,6 @@ def _write_text(path: Path, text: str) -> None:
         handle.write(text)
 
 
-def _version_tuple_literal(version: str) -> str:
-    return ", ".join(version.split("."))
-
-
 def _single_match(path: Path, pattern: str) -> tuple[str, re.Match[str]]:
     text = _read_text(path)
     matches = list(re.finditer(pattern, text))
@@ -125,37 +108,23 @@ def _single_match(path: Path, pattern: str) -> tuple[str, re.Match[str]]:
     return text, matches[0]
 
 
-def _versions_from_match(match: re.Match[str]) -> tuple[str, ...]:
+def _version_from_match(match: re.Match[str]) -> str:
     groups = match.groupdict()
-    if groups.get("version") is not None:
-        versions = [groups["version"]]
-        if groups.get("version_2") is not None:
-            versions.append(groups["version_2"])
-        return tuple(versions)
-    version_tuple = groups.get("version_tuple")
-    if version_tuple is None:
-        raise SystemExit("Internal error: version pattern has neither version nor version_tuple group")
-    parts = [part.strip() for part in version_tuple.split(",")]
-    if len(parts) != 3 or any(not part.isdigit() for part in parts):
-        raise SystemExit(f"Invalid runtime version tuple: {version_tuple}")
-    return (".".join(parts),)
+    version = groups.get("version")
+    if version is None:
+        raise SystemExit("Internal error: version pattern has no version group")
+    return version
 
 
 def _replacement_from_match(match: re.Match[str], version: str) -> str:
     groups = match.groupdict()
-    if groups.get("indent") is not None:
-        return f'{groups["indent"]}"s2and-rust=={version}{groups["suffix"]}'
-    if groups.get("version_2") is not None:
-        return f'{groups["prefix"]}{version}{groups["middle"]}{version}{groups["suffix"]}'
-    if groups.get("version_tuple") is not None:
-        return f'{groups["prefix"]}{_version_tuple_literal(version)}{groups["suffix"]}'
-    return f'{groups["prefix"]}{version}{groups["suffix"]}'
+    return f"{groups['prefix']}{version}{groups['suffix']}"
 
 
 def sync_target(root: Path, target: VersionTarget, version: str) -> None:
     path = target.path(root)
     text, match = _single_match(path, target.pattern)
-    replacement = _replacement_from_match(match, version)
+    replacement = _replacement_from_match(match, target.spelled(version))
     new_text = text[: match.start()] + replacement + text[match.end() :]
     if new_text != text:
         _write_text(path, new_text)
@@ -164,9 +133,10 @@ def sync_target(root: Path, target: VersionTarget, version: str) -> None:
 def check_target(root: Path, target: VersionTarget, expected: str) -> None:
     path = target.path(root)
     _, match = _single_match(path, target.pattern)
-    for found in _versions_from_match(match):
-        if found != expected:
-            raise SystemExit(f"Version mismatch in {path} ({target.name}): found {found}, expected {expected}")
+    found = _version_from_match(match)
+    expected = target.spelled(expected)
+    if found != expected:
+        raise SystemExit(f"Version mismatch in {path} ({target.name}): found {found}, expected {expected}")
 
 
 def sync_version(version: str, root: Path = ROOT) -> None:
@@ -181,22 +151,30 @@ def verify_version(version: str, root: Path = ROOT) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="Only verify versions match VERSION.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="Only verify versions match VERSION.")
+    mode.add_argument(
+        "--print-targets",
+        action="store_true",
+        help="Print repository-relative files updated or regenerated by version sync.",
+    )
     args = parser.parse_args()
+
+    if args.print_targets:
+        print("VERSION")
+        for target in version_targets():
+            print(target.relative_path.as_posix())
+        return
 
     version = read_version()
     if args.check:
         verify_version(version)
-        print(f"OK: versions and runtime guards match {version}")
+        print(f"OK: package versions match {version}")
         return
-
     sync_version(version)
     verify_version(version)
-    print(f"Updated versions and runtime guards to {version}")
-    print(
-        "Next: run `uv sync --extra dev` and "
-        "`uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml`."
-    )
+    print(f"Updated package versions to {version}")
+    print("Both lockfiles are updated. Next: run `uv sync --extra dev` to rebuild the environment.")
 
 
 if __name__ == "__main__":

@@ -15,8 +15,6 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
-import orjson
-
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
 from s2and.orcid_prefix_counts import (
@@ -315,6 +313,10 @@ def _publication_payloads(
     name_tuples_sha256: str,
 ) -> dict[str, bytes]:
     """Serialize the trusted runtime data and its tuple dependency."""
+
+    # orjson is the optional orcid-counts extra. Importing it here keeps this module, and the
+    # EPS review scripts that share EXCLUDED_ORCID_GROUPS, importable after a plain `uv sync`.
+    import orjson
 
     validate_orcid_prefix_counts(counts, context="counts")
     data_payload = orjson.dumps(counts, option=orjson.OPT_SORT_KEYS)

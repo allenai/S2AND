@@ -75,6 +75,32 @@ def test_incremental_linking_modules_import_without_training_or_model_dependenci
     )
 
 
+def test_reproduction_scripts_import_without_optional_extras() -> None:
+    """docs/reproduce.md runs these scripts after a plain `uv sync`, without extras."""
+    _run_in_fresh_python(
+        """
+        import importlib
+        import importlib.abc
+        import sys
+
+        class NoExtras(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split(".")[0] in {"orjson", "boto3", "duckdb", "ijson"}:
+                    raise ModuleNotFoundError(f"optional extra imported: {fullname}", name=fullname)
+
+        sys.meta_path.insert(0, NoExtras())
+        for module in (
+            "scripts.production.model.train_pairwise",
+            "scripts.production.model.release_pairwise",
+            "scripts.production.model.train_linker_and_finalize",
+            "scripts.verification.evaluate_incremental_gold",
+            "scripts.eps_sweep.apply_reviewed_eps",
+        ):
+            importlib.import_module(module)
+        """
+    )
+
+
 def test_arrow_string_array_matches_pyarrow_without_importing_pandas() -> None:
     """pa.array imports pandas, so request-path string arrays are built from buffers."""
     _run_in_fresh_python(

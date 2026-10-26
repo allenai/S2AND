@@ -24,6 +24,8 @@
 - `train_pairwise.py` boosters now name their features, as the released `1.3` boosters do, instead of
   LightGBM's `Column_N` defaults. Trees and predictions are unchanged. `PairwiseModeler.fit` takes an optional
   `feature_names` for the final LightGBM fit.
+- `apply_reviewed_eps.py` runs after a plain `uv sync` again. It imported `orjson`, from the optional
+  `orcid-counts` extra, through the ORCID count producer; the producer now imports it only to publish counts.
 
 
 ## Unreleased 1.0.0 simplification

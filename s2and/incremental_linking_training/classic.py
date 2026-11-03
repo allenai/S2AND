@@ -783,7 +783,7 @@ def _score_query_choices(
             row["candidate_kind"] = "multi_candidate" if len(ranked) > 1 else "single_candidate"
             row["top1_correct"] = int(chosen["label"])
         rows.append(row)
-    return pd.DataFrame(rows, columns=output_columns)
+    return pd.DataFrame(rows, columns=pd.Index(output_columns))
 
 
 def _query_gate_bucket(rows: pd.DataFrame) -> pd.Series:

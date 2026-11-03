@@ -353,6 +353,13 @@ TEXT_FUNCTIONS = [
 ]
 
 
+def _fasttext_top_label(ft_model, text: str) -> str:
+    # fasttext's Python wrapper calls np.array(..., copy=False), which NumPy 2 rejects;
+    # use the native binding that wrapper delegates to.
+    predictions = ft_model.f.predict(text + "\n", 1, 0.0, "strict")
+    return predictions[0][1]
+
+
 def detect_language(text: str):
     if len(text.split()) <= 1:
         return (False, False, "un")
@@ -364,11 +371,9 @@ def detect_language(text: str):
     ft_model = _get_fasttext_model()
     if ft_model is not None:
         if sum(isuppers) / len(isuppers) > 0.9:
-            fasttext_pred = ft_model.predict(text.lower().replace("\n", " "))
-            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+            predicted_language_ft = _fasttext_top_label(ft_model, text.lower().replace("\n", " ")).split("__")[-1]
         else:
-            fasttext_pred = ft_model.predict(text.replace("\n", " "))
-            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+            predicted_language_ft = _fasttext_top_label(ft_model, text.replace("\n", " ")).split("__")[-1]
     else:
         predicted_language_ft = "un_ft"
 

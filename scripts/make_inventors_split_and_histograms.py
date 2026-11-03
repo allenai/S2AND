@@ -194,7 +194,7 @@ def plot_histogram_from_freq(
         bins = np.geomspace(1.0, float(max_x) + 1.0, num=80)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.hist(x, bins=bins, weights=weights, color="#2C7FB8", alpha=0.9)
+    ax.hist(x, bins=bins.tolist(), weights=weights, color="#2C7FB8", alpha=0.9)
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_title(title)

@@ -312,7 +312,7 @@ def main() -> None:
         raise ValueError(f"Need > {args.n_blocks} unique blocks to sample from; found {len(block_counts):,}.")
 
     all_blocks = np.array(list(block_counts.keys()))
-    all_sizes = np.array([block_counts[b] for b in all_blocks], dtype=np.int32)
+    all_sizes = np.array([block_counts[b] for b in all_blocks.tolist()], dtype=np.int32)
     sampled_blocks, sample_bins_used, sample_was_stratified = stratified_take(
         items=all_blocks,
         sizes=all_sizes,
@@ -497,7 +497,7 @@ def main() -> None:
 
     print("Pass 9/9: train/val split on merged blocks...")
     merged_blocks = np.array(sorted(merged_block_counts.keys()))
-    merged_sizes = np.array([merged_block_counts[b] for b in merged_blocks], dtype=np.int32)
+    merged_sizes = np.array([merged_block_counts[b] for b in merged_blocks.tolist()], dtype=np.int32)
     train_blocks, val_blocks, split_bins_used, split_was_stratified = stratified_train_val_split(
         blocks=merged_blocks,
         sizes=merged_sizes,

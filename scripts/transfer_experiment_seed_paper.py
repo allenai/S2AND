@@ -1177,13 +1177,13 @@ def main(
             logger.info("")
             logger.info("disparity analysis")
             print("Gender Disparity in F1:")
-            gender_disparity_df = pd.DataFrame(gender_disparity, index=[0])
+            gender_disparity_df = pd.DataFrame(gender_disparity, index=pd.Index([0]))
             print(gender_disparity_df)
 
             print()
 
             print("Ethnicity Disparity in F1:")
-            ethnicity_disparity_df = pd.DataFrame(ethnicity_disparity, index=[0])
+            ethnicity_disparity_df = pd.DataFrame(ethnicity_disparity, index=pd.Index([0]))
             print(ethnicity_disparity_df)
 
             print()
@@ -1208,13 +1208,13 @@ def main(
             )
 
         print("S2AND Feature effect in F1:")
-        s2and_feature_df = pd.DataFrame(s2and_feature_summary, index=[0])
+        s2and_feature_df = pd.DataFrame(s2and_feature_summary, index=pd.Index([0]))
         print(s2and_feature_df)
 
         print()
 
         print("S2 Feature effect  in F1:")
-        s2_feature_df = pd.DataFrame(s2_feature_summary, index=[0])
+        s2_feature_df = pd.DataFrame(s2_feature_summary, index=pd.Index([0]))
         print(s2_feature_df)
 
         s2and_feature_df.to_csv(

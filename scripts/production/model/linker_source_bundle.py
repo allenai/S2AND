@@ -1,0 +1,370 @@
+"""Assemble the reviewed linker source bundle and public data root."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import stat
+import sys
+from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from s2and._sha256 import sha256_file  # noqa: E402
+from s2and.arrow_inputs import (  # noqa: E402
+    ArrowDataset,
+    _load_artifact_specs,
+    build_arrow_artifact_manifest,
+    read_arrow_collection_root,
+    require_name_counts_index_artifact,
+    write_arrow_artifact_manifest,
+)
+from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
+from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
+    preflight_source_rows,
+    validate_source_bundle_support_files,
+)
+from s2and.production_training_contract import load_model_plan  # noqa: E402
+from scripts.convert_to_arrow import _write_root_manifest  # noqa: E402
+from scripts.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
+
+_RESERVED_SUPPORT_ROOT_NAMES = frozenset({"LICENSE.txt", "datasets", "manifest.json", "name_counts_index"})
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"{path} must contain a JSON object")
+    return payload
+
+
+def _dataset_manifests(root: Path) -> dict[str, Path]:
+    dataset_manifests, replay_bundles, release_version = read_arrow_collection_root(root / "manifest.json")
+    if release_version is not None or replay_bundles:
+        raise ValueError(f"Assembly input must be a generic Arrow collection without replay bundles: {root}")
+    return dataset_manifests
+
+
+def _portable_dataset_manifests(root: Path) -> dict[str, Path]:
+    """Return dataset manifests from a generic or public source bundle."""
+
+    entries, replay_bundles, _release_version = read_arrow_collection_root(root / "manifest.json")
+    for bundle_name, manifest_path in replay_bundles.items():
+        nested, nested_replays, release_version = read_arrow_collection_root(manifest_path)
+        if nested_replays or release_version is not None:
+            raise ValueError(f"Replay manifest must contain a generic Arrow collection: {manifest_path}")
+        entries.update({f"{bundle_name}/{name}": path for name, path in nested.items()})
+    return entries
+
+
+def _resolved_manifest_artifact_path(manifest_path: Path, raw_path: Any, *, key: str) -> Path:
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError(f"{manifest_path} paths.{key} must be a non-empty string")
+    path = Path(raw_path)
+    if path.is_absolute():
+        raise ValueError(f"{manifest_path} paths.{key} must be manifest-relative")
+    resolved = (manifest_path.parent / path).resolve()
+    if key != "name_counts_index":
+        try:
+            resolved.relative_to(manifest_path.parent.resolve())
+        except ValueError as exc:
+            raise ValueError(f"{manifest_path} paths.{key} escapes the dataset directory") from exc
+    return resolved
+
+
+def _validate_root_name_counts_binding(
+    root: Path,
+    *,
+    authoritative_manifest_sha256: str,
+    dataset_manifests: Mapping[str, Path] | None = None,
+) -> None:
+    """Require every dataset manifest to bind the authoritative count index."""
+
+    entries = _dataset_manifests(root) if dataset_manifests is None else dataset_manifests
+    for dataset, manifest_path in entries.items():
+        manifest = _read_json(manifest_path)
+        paths = manifest.get("paths")
+        if not isinstance(paths, Mapping):
+            raise ValueError(f"{manifest_path} must contain paths")
+        observed_index = _resolved_manifest_artifact_path(
+            manifest_path,
+            paths.get("name_counts_index"),
+            key="name_counts_index",
+        )
+        observed_manifest = observed_index / "manifest.json"
+        if not observed_manifest.is_file():
+            raise FileNotFoundError(observed_manifest)
+        observed_sha256 = sha256_file(observed_manifest)
+
+        files = manifest.get("files")
+        file_entry = files.get("name_counts_index") if isinstance(files, Mapping) else None
+        declared_sha256 = file_entry.get("sha256") if isinstance(file_entry, Mapping) else None
+        if observed_sha256 != authoritative_manifest_sha256 or declared_sha256 != authoritative_manifest_sha256:
+            raise ValueError(
+                f"{manifest_path} ({dataset}) name_counts_index does not match the authoritative index: "
+                f"resolved_manifest_sha256={observed_sha256} "
+                f"declared_manifest_sha256={declared_sha256!r} "
+                f"authoritative_manifest_sha256={authoritative_manifest_sha256}"
+            )
+
+
+def _copy_arrow_root_without_name_counts(source: Path, destination: Path) -> None:
+    """Copy one Arrow root while omitting its replaceable shared count index."""
+
+    def ignore(source_dir: str, names: list[str]) -> set[str]:
+        if Path(source_dir).resolve() == source.resolve() and "name_counts_index" in names:
+            return {"name_counts_index"}
+        return set()
+
+    shutil.copytree(source, destination, ignore=ignore)
+
+
+def _reject_filesystem_links(root: Path, *, context: str) -> None:
+    """Reject symlinks and junctions, because a copy must not depend on paths outside the root."""
+
+    for directory, names, files in os.walk(root):
+        for name in (*names, *files):
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise ValueError(f"{context} contains a filesystem link: {path}")
+
+
+def _rebind_dataset_manifest(manifest_path: Path, *, name_counts_index: Path) -> None:
+    """Verify payloads before a shared-index path update."""
+
+    # A rebuild must not repair invalid metadata or changed payloads.
+    _load_artifact_specs(manifest_path.parent)
+    manifest = _read_json(manifest_path)
+    paths = manifest.get("paths")
+    if not isinstance(paths, Mapping):
+        raise ValueError(f"{manifest_path} must contain paths")
+    resolved_paths = {
+        str(key): (
+            name_counts_index
+            if str(key) == "name_counts_index"
+            else _resolved_manifest_artifact_path(manifest_path, value, key=str(key))
+        )
+        for key, value in paths.items()
+    }
+    rebuilt = build_arrow_artifact_manifest(resolved_paths, manifest_path.parent)
+    if rebuilt["files"] != manifest["files"]:
+        raise ValueError(f"Arrow artifact inventory mismatch before index relocation: {manifest_path}")
+    manifest["paths"]["name_counts_index"] = rebuilt["paths"]["name_counts_index"]
+    write_arrow_artifact_manifest(manifest, manifest_path.parent)
+
+
+def _rebind_dataset_manifests(root: Path, *, name_counts_index: Path) -> None:
+    """Verify each original generation before relocating its shared-index path."""
+
+    entries = _dataset_manifests(root)
+    for manifest_path in entries.values():
+        _rebind_dataset_manifest(manifest_path, name_counts_index=name_counts_index)
+    _write_root_manifest(
+        root,
+        dataset_manifests={
+            dataset: manifest_path.relative_to(root.resolve()).as_posix() for dataset, manifest_path in entries.items()
+        },
+    )
+
+
+def _validate_support_root(source_root: Path) -> None:
+    conflicts = sorted(child.name for child in source_root.iterdir() if child.name in _RESERVED_SUPPORT_ROOT_NAMES)
+    if conflicts:
+        raise ValueError(f"linker support root contains reserved assembled paths: {conflicts}")
+
+
+def _validate_bundle_paths(root: Path) -> None:
+    """Reject support paths that cannot survive a directory relocation."""
+
+    bundle = _read_json(root / "bundle.json")
+
+    def check(value: Any, field: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"bundle.{field} must be a non-empty relative path")
+        relative = Path(value)
+        resolved = (root / relative).resolve()
+        if relative.is_absolute() or not resolved.is_relative_to(root.resolve()):
+            raise ValueError(f"bundle.{field} escapes the source bundle: {value!r}")
+        if not resolved.exists():
+            raise FileNotFoundError(f"bundle.{field}: {resolved}")
+
+    def assets(value: Any, field: str) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                assets(child, f"{field}.{key}")
+        else:
+            check(value, field)
+
+    def model_paths(value: Any, field: str) -> None:
+        if not isinstance(value, Mapping):
+            return
+        for key, child in value.items():
+            child_field = f"{field}.{key}"
+            if str(key).endswith("_path") and child is not None:
+                check(child, child_field)
+            elif str(key).endswith("_paths") and isinstance(child, Mapping):
+                assets(child, child_field)
+            else:
+                model_paths(child, child_field)
+
+    assets(bundle["assets"], "assets")
+    model_paths(bundle["models"], "models")
+    runtime_root = bundle.get("runtime_contract", {}).get("arrow_dataset_root")
+    if runtime_root is not None:
+        check(runtime_root, "runtime_contract.arrow_dataset_root")
+
+
+def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
+    """Verify all operational paths and payloads within one portable root."""
+
+    root = root.resolve()
+    _reject_filesystem_links(root, context="portable source bundle")
+    _validate_bundle_paths(root)
+    entries = _portable_dataset_manifests(root)
+    shared_index = root / "name_counts_index"
+    index_sha256 = sha256_file(shared_index / "manifest.json")
+    for manifest_path in entries.values():
+        if not manifest_path.is_relative_to(root):
+            raise ValueError(f"dataset manifest escapes the source bundle: {manifest_path}")
+        manifest = _read_json(manifest_path)
+        for key, value in manifest["paths"].items():
+            resolved = _resolved_manifest_artifact_path(manifest_path, value, key=key)
+            if not resolved.is_relative_to(root):
+                raise ValueError(f"{manifest_path} paths.{key} escapes the source bundle")
+            if key == "name_counts_index" and resolved != shared_index:
+                raise ValueError(f"{manifest_path} must bind the shared name_counts_index")
+    _validate_root_name_counts_binding(root, authoritative_manifest_sha256=index_sha256, dataset_manifests=entries)
+    bundle = load_bundle(root)
+    validate_source_bundle_support_files(bundle)
+    with ExitStack() as arrow_stack:
+        selected_rows, datasets = preflight_source_rows(
+            bundle, name_counts_index_root=shared_index, arrow_stack=arrow_stack
+        )
+        opened_roots = {dataset.root.resolve() for dataset in datasets.values()}
+        # Unreferenced datasets can become active after a future label update.
+        for manifest_path in entries.values():
+            dataset_root = manifest_path.parent.resolve()
+            if dataset_root not in opened_roots:
+                arrow_stack.enter_context(
+                    ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True)
+                )
+                opened_roots.add(dataset_root)
+    return {
+        "dataset_count": len(entries),
+        "datasets": sorted(entries),
+        "name_counts_manifest_sha256": index_sha256,
+        "selected_source_rows": selected_rows,
+        "source_bundle": str(root),
+    }
+
+
+def assemble_source_bundle(
+    *,
+    source_root: Path,
+    benchmark_arrow_root: Path,
+    replay_arrow_root: Path,
+    name_counts_index: Path,
+    model_plan: Path,
+    output_source_bundle: Path,
+    output_data_root: Path,
+) -> dict[str, Any]:
+    """Copy reviewed inputs into fresh source and public-data roots."""
+
+    source_root, benchmark_arrow_root, replay_arrow_root, name_counts_index, model_plan = (
+        path.resolve() for path in (source_root, benchmark_arrow_root, replay_arrow_root, name_counts_index, model_plan)
+    )
+    release_version = load_model_plan(model_plan).release_version
+    output_source_bundle, output_data_root = output_source_bundle.resolve(), output_data_root.resolve()
+    if output_source_bundle.exists() or output_data_root.exists():
+        raise FileExistsError("assembly output directories must not exist")
+    if output_source_bundle.is_relative_to(output_data_root) or output_data_root.is_relative_to(output_source_bundle):
+        raise ValueError("assembly output directories must not overlap")
+    if not source_root.is_dir():
+        raise FileNotFoundError(source_root)
+    for arrow_root in (benchmark_arrow_root, replay_arrow_root):
+        if not arrow_root.is_dir():
+            raise FileNotFoundError(arrow_root)
+    input_roots = (source_root, benchmark_arrow_root, replay_arrow_root, name_counts_index)
+    for output in (output_source_bundle, output_data_root):
+        if any(output.is_relative_to(input_root) for input_root in input_roots):
+            raise ValueError(f"assembly output must not be nested beneath an input root: {output}")
+    _validate_support_root(source_root)
+    require_name_counts_index_artifact(
+        name_counts_index,
+        context="linker source assembly",
+        producer_hint="pass the reviewed name_counts_index directory with --name-counts-index",
+        verify=True,
+    )
+    authoritative_manifest_sha256 = sha256_file(name_counts_index / "manifest.json")
+    for arrow_root in (benchmark_arrow_root, replay_arrow_root):
+        _validate_root_name_counts_binding(
+            arrow_root,
+            authoritative_manifest_sha256=authoritative_manifest_sha256,
+        )
+
+    _copy_arrow_root_without_name_counts(replay_arrow_root, output_source_bundle)
+    shutil.copytree(name_counts_index, output_source_bundle / "name_counts_index")
+    shutil.copytree(source_root, output_source_bundle, dirs_exist_ok=True)
+    _rebind_dataset_manifests(
+        output_source_bundle,
+        name_counts_index=output_source_bundle / "name_counts_index",
+    )
+
+    _copy_arrow_root_without_name_counts(benchmark_arrow_root, output_data_root)
+    shutil.copytree(name_counts_index, output_data_root / "name_counts_index")
+    _copy_arrow_root_without_name_counts(replay_arrow_root, output_data_root / "linker_replay")
+    _rebind_dataset_manifests(
+        output_data_root,
+        name_counts_index=output_data_root / "name_counts_index",
+    )
+    _rebind_dataset_manifests(
+        output_data_root / "linker_replay",
+        name_counts_index=output_data_root / "name_counts_index",
+    )
+    _write_root_manifest(
+        output_data_root,
+        dataset_manifests={
+            dataset: manifest_path.relative_to(output_data_root.resolve()).as_posix()
+            for dataset, manifest_path in _dataset_manifests(output_data_root).items()
+        },
+        replay_bundles={"linker_replay": "linker_replay/manifest.json"},
+        release_version=release_version,
+    )
+
+    source_report = validate_portable_source_bundle(output_source_bundle)
+    validate_release_root(output_data_root)
+    return {
+        "data_root": str(output_data_root),
+        "name_counts_manifest_sha256": authoritative_manifest_sha256,
+        "release_version": release_version,
+        "selected_source_rows": source_report["selected_source_rows"],
+        "source_bundle": str(output_source_bundle),
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    for option in (
+        "source-root",
+        "benchmark-arrow-root",
+        "replay-arrow-root",
+        "name-counts-index",
+        "model-plan",
+        "output-source-bundle",
+        "output-data-root",
+    ):
+        parser.add_argument(f"--{option}", type=Path, required=True)
+    print(json.dumps(assemble_source_bundle(**vars(parser.parse_args(argv))), indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

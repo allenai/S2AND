@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import pickle
+import math
 import random
 import sys
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from s2and._atomic_io import write_fresh_json  # noqa: E402
+from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.subblocking import (  # noqa: E402
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,
@@ -43,11 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arrow-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--raw-root", type=Path, default=None)
-    parser.add_argument("--specter-pickle", type=Path, default=None)
-    parser.add_argument("--python-source", choices=("raw", "arrow"), default="raw")
-    parser.add_argument("--comparison-mode", choices=("python-vs-rust", "rust-only"), default="python-vs-rust")
-    parser.add_argument("--component-members-parquet", type=Path, default=None)
+    parser.add_argument("--component-members-parquet", type=Path, required=True)
     parser.add_argument("--maximum-size", type=int, required=True)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--allow-full", action="store_true")
@@ -113,12 +112,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("provide --limit for a bounded run, or --allow-full to run the full block explicitly")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
-    if (
-        args.comparison_mode == "python-vs-rust"
-        and args.python_source == "raw"
-        and (args.raw_root is None or args.specter_pickle is None)
-    ):
-        parser.error("--python-source raw requires --raw-root and --specter-pickle")
+    for option in ("maximum_size", "top_diff_subblocks"):
+        if getattr(args, option) <= 0:
+            parser.error(f"--{option.replace('_', '-')} must be positive")
+    try:
+        _graph_config(args)
+    except ValueError as error:
+        parser.error(str(error))
     return args
 
 
@@ -130,13 +130,6 @@ def _required_path(path: Path) -> Path:
 
 def _log_progress(message: str) -> None:
     print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {message}", file=sys.stderr, flush=True)
-
-
-def _load_json_map(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected object-shaped JSON in {path}")
-    return {str(key): value for key, value in payload.items()}
 
 
 def _select_signature_ids(
@@ -172,136 +165,35 @@ def _paper_author_blocks(paper: Mapping[str, Any] | None, signature_position: in
     return tuple(sorted(set(out)))
 
 
-def _signature_from_raw(signature_id: str, row: Mapping[str, Any], papers: Mapping[str, Any]) -> SimpleNamespace:
-    author_info = row.get("author_info") or {}
-    paper_id = str(row.get("paper_id"))
-    position_raw = author_info.get("position")
-    try:
-        position = int(position_raw) if position_raw is not None else None
-    except (TypeError, ValueError):
-        position = None
-    affiliations = tuple(str(value) for value in (author_info.get("affiliations") or ()))
-    paper = papers.get(paper_id)
-    return SimpleNamespace(
-        signature_id=str(row.get("signature_id", signature_id)),
-        paper_id=paper_id,
-        author_info_first=author_info.get("first"),
-        author_info_middle=author_info.get("middle"),
-        author_info_first_normalized_without_apostrophe=None,
-        author_info_middle_normalized_without_apostrophe=None,
-        author_info_affiliations=affiliations,
-        author_info_affiliations_n_grams=None,
-        author_info_coauthor_blocks=_paper_author_blocks(paper, position),
-        author_info_coauthors=None,
-        author_info_orcid=author_info.get("orcid"),
-        author_info_position=position,
-    )
-
-
-def _load_specter_subset(path: Path, needed_paper_ids: set[str]) -> dict[str, np.ndarray]:
-    with path.open("rb") as infile:
-        payload = pickle.load(infile)
-    if isinstance(payload, tuple) and len(payload) == 2:
-        matrix, paper_ids = payload
-        matrix = np.asarray(matrix, dtype=np.float32)
-        if len(paper_ids) != matrix.shape[0]:
-            raise ValueError(f"SPECTER tuple ids={len(paper_ids)} rows={matrix.shape[0]}")
-        return {
-            str(paper_id): np.asarray(matrix[index], dtype=np.float32)
-            for index, paper_id in enumerate(paper_ids)
-            if str(paper_id) in needed_paper_ids
-        }
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Unsupported SPECTER pickle payload type: {type(payload).__name__}")
-    out: dict[str, np.ndarray] = {}
-    for paper_id in needed_paper_ids:
-        value = payload.get(paper_id)
-        if value is None:
-            try:
-                value = payload.get(int(paper_id))
-            except ValueError:
-                value = None
-        if value is not None:
-            out[paper_id] = np.asarray(value, dtype=np.float32)
-    return out
-
-
-def load_lightweight_dataset(
-    raw_root: Path,
-    specter_pickle: Path,
-    *,
-    limit: int | None,
-    sample_mode: str,
-    seed: int,
-) -> tuple[SimpleNamespace, list[str]]:
-    signatures_raw = _load_json_map(_required_path(raw_root / "signatures.json"))
-    signature_ids = _select_signature_ids(
-        signatures_raw.keys(),
-        limit=limit,
-        sample_mode=sample_mode,
-        seed=seed,
-    )
-    paper_ids = {str(signatures_raw[signature_id].get("paper_id")) for signature_id in signature_ids}
-    papers_raw = _load_json_map(_required_path(raw_root / "papers.json"))
-    papers = {paper_id: papers_raw[paper_id] for paper_id in paper_ids if paper_id in papers_raw}
-    signatures = {
-        signature_id: _signature_from_raw(signature_id, signatures_raw[signature_id], papers)
-        for signature_id in signature_ids
-    }
-    dataset = SimpleNamespace(
-        signatures=signatures,
-        papers=papers,
-        specter_embeddings=_load_specter_subset(_required_path(specter_pickle), paper_ids),
-        random_seed=int(seed),
-    )
-    return dataset, signature_ids
-
-
-def _arrow_paths(arrow_root: Path) -> dict[str, str]:
-    specter_key = "specter2" if (arrow_root / "specter2.arrow").exists() else "specter"
-    if specter_key == "specter2":
-        specter_index_path = arrow_root / "specter2.specter2_batch_index.bin"
-        if not specter_index_path.exists():
-            specter_index_path = arrow_root / "specter2.specter_batch_index.bin"
-    else:
-        specter_index_path = arrow_root / "specter.specter_batch_index.bin"
-    paths = {
-        "signatures": arrow_root / "signatures.arrow",
-        "signatures_batch_index": arrow_root / "signatures.signatures_batch_index.bin",
-        "paper_authors": arrow_root / "paper_authors.arrow",
-        "paper_authors_batch_index": arrow_root / "paper_authors.paper_authors_batch_index.bin",
-        specter_key: arrow_root / f"{specter_key}.arrow",
-        f"{specter_key}_batch_index": specter_index_path,
-    }
-    missing = sorted(str(path) for path in paths.values() if not path.exists())
-    if missing:
-        raise FileNotFoundError(f"Missing required Arrow paths: {missing}")
-    return {key: str(value) for key, value in paths.items()}
-
-
-def _read_arrow_column_values(path: str | Path, column_name: str) -> list[Any]:
+def _read_arrow_column_values(source_file: BinaryIO, column_name: str) -> list[Any]:
     pa = __import__("pyarrow")
-    with pa.memory_map(str(path), "r") as source:
+    with pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
         column_index = reader.schema.get_field_index(column_name)
         if column_index < 0:
-            raise ValueError(f"Arrow file {path} is missing required column: {column_name!r}")
+            raise ValueError(f"Arrow file is missing required column: {column_name!r}")
         values: list[Any] = []
         for batch_index in range(reader.num_record_batches):
             values.extend(reader.get_batch(batch_index).column(column_index).to_pylist())
     return values
 
 
-def _read_arrow_rows(path: str | Path, required_columns: set[str]) -> list[dict[str, Any]]:
+def _read_arrow_rows(
+    source_file: BinaryIO,
+    required_columns: set[str],
+    *,
+    optional_columns: Sequence[str] = (),
+) -> list[dict[str, Any]]:
     pa = __import__("pyarrow")
-    with pa.memory_map(str(path), "r") as source:
+    with pa.PythonFile(source_file, mode="r") as source:
         reader = pa.ipc.open_file(source)
+        selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
         column_indices = {
-            column_name: reader.schema.get_field_index(column_name) for column_name in sorted(required_columns)
+            column_name: reader.schema.get_field_index(column_name) for column_name in sorted(selected_columns)
         }
         missing_columns = [column_name for column_name, column_index in column_indices.items() if column_index < 0]
         if missing_columns:
-            raise ValueError(f"Arrow file {path} is missing required columns: {missing_columns!r}")
+            raise ValueError(f"Arrow file is missing required columns: {missing_columns!r}")
         rows: list[dict[str, Any]] = []
         for batch_index in range(reader.num_record_batches):
             batch = reader.get_batch(batch_index)
@@ -322,14 +214,6 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in value if item is not None)
 
 
-def _specter_path_keys(paths: Mapping[str, str]) -> tuple[str, str]:
-    if "specter" in paths:
-        return "specter", "specter_batch_index"
-    if "specter2" in paths:
-        return "specter2", "specter2_batch_index"
-    raise ValueError("Arrow paths require specter or specter2")
-
-
 def _paper_author_rows_by_paper(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = defaultdict(list)
     seen_positions: dict[str, set[int]] = defaultdict(set)
@@ -344,9 +228,10 @@ def _paper_author_rows_by_paper(rows: Iterable[Mapping[str, Any]]) -> dict[str, 
         if position in seen_positions[paper_id]:
             raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position): ({paper_id!r}, {position})")
         seen_positions[paper_id].add(position)
-        author_name = str(row.get("author_name") or "").strip()
-        if not author_name:
-            raise ValueError("paper_authors Arrow cannot contain empty author_name values")
+        author_name_value = row.get("author_name")
+        if author_name_value is None:
+            raise ValueError("paper_authors Arrow cannot contain null author_name values")
+        author_name = str(author_name_value)
         out[paper_id].append({"position": position, "author_name": author_name})
     for authors in out.values():
         authors.sort(key=lambda author: int(author["position"]))
@@ -373,8 +258,8 @@ def _signatures_from_arrow_rows(
             paper_id=paper_id,
             author_info_first=None if row.get("author_first") is None else str(row.get("author_first")),
             author_info_middle=None if row.get("author_middle") is None else str(row.get("author_middle")),
-            author_info_first_normalized_without_apostrophe=None,
-            author_info_middle_normalized_without_apostrophe=None,
+            author_info_first_normalized=None,
+            author_info_middle_normalized=None,
             author_info_affiliations=affiliations,
             author_info_affiliations_n_grams=None,
             author_info_coauthor_blocks=_paper_author_blocks(paper, position),
@@ -386,25 +271,31 @@ def _signatures_from_arrow_rows(
 
 
 def load_lightweight_dataset_from_arrow(
-    arrow_root: Path,
+    arrow_lease: Any,
     *,
     limit: int | None,
     sample_mode: str,
     seed: int,
     include_specter: bool = True,
 ) -> tuple[SimpleNamespace, list[str]]:
-    paths = _arrow_paths(arrow_root)
+    """Load bounded Python comparison state from one retained generation."""
+
+    lease = arrow_lease
     signature_columns = {
         "signature_id",
         "paper_id",
         "author_first",
         "author_middle",
         "author_affiliations",
-        "author_orcid",
         "author_position",
     }
     if limit is None:
-        signature_rows = _read_arrow_rows(paths["signatures"], signature_columns)
+        with lease.open_file("signatures") as source_file:
+            signature_rows = _read_arrow_rows(
+                source_file,
+                signature_columns,
+                optional_columns=("author_orcid",),
+            )
         signature_ids = _select_signature_ids(
             (str(row["signature_id"]) for row in signature_rows if row.get("signature_id") is not None),
             limit=None,
@@ -412,11 +303,12 @@ def load_lightweight_dataset_from_arrow(
             seed=seed,
         )
     else:
-        all_signature_ids = [
-            str(signature_id)
-            for signature_id in _read_arrow_column_values(paths["signatures"], "signature_id")
-            if signature_id is not None
-        ]
+        with lease.open_file("signatures") as source_file:
+            all_signature_ids = [
+                str(signature_id)
+                for signature_id in _read_arrow_column_values(source_file, "signature_id")
+                if signature_id is not None
+            ]
         signature_ids = _select_signature_ids(
             all_signature_ids,
             limit=limit,
@@ -424,11 +316,12 @@ def load_lightweight_dataset_from_arrow(
             seed=seed,
         )
         signature_rows = _read_arrow_rows_by_values(
-            paths["signatures"],
-            paths["signatures_batch_index"],
+            lease,
+            "signatures",
             "signature_id",
             signature_ids,
             required_columns=signature_columns,
+            optional_columns=("author_orcid",),
             table_name="signatures",
         )
     signature_rows_by_id = {str(row["signature_id"]): row for row in signature_rows}
@@ -439,15 +332,16 @@ def load_lightweight_dataset_from_arrow(
     paper_author_columns = {"paper_id", "position", "author_name"}
     if limit is None:
         paper_id_set = set(paper_ids)
-        paper_author_rows = [
-            row
-            for row in _read_arrow_rows(paths["paper_authors"], paper_author_columns)
-            if str(row.get("paper_id") or "") in paper_id_set
-        ]
+        with lease.open_file("paper_authors") as source_file:
+            paper_author_rows = [
+                row
+                for row in _read_arrow_rows(source_file, paper_author_columns)
+                if str(row.get("paper_id") or "") in paper_id_set
+            ]
     else:
         paper_author_rows = _read_arrow_rows_by_values(
-            paths["paper_authors"],
-            paths["paper_authors_batch_index"],
+            lease,
+            "paper_authors",
             "paper_id",
             paper_ids,
             required_columns=paper_author_columns,
@@ -457,19 +351,19 @@ def load_lightweight_dataset_from_arrow(
     papers = {paper_id: {"authors": paper_authors_by_paper.get(paper_id, [])} for paper_id in paper_ids}
     specter_embeddings = {}
     if include_specter:
-        specter_key, specter_index_key = _specter_path_keys(paths)
         specter_columns = {"paper_id", "embedding"}
         if limit is None:
             paper_id_set = set(paper_ids)
-            specter_rows = [
-                row
-                for row in _read_arrow_rows(paths[specter_key], specter_columns)
-                if str(row.get("paper_id") or "") in paper_id_set
-            ]
+            with lease.open_file("specter") as source_file:
+                specter_rows = [
+                    row
+                    for row in _read_arrow_rows(source_file, specter_columns)
+                    if str(row.get("paper_id") or "") in paper_id_set
+                ]
         else:
             specter_rows = _read_arrow_rows_by_values(
-                paths[specter_key],
-                paths[specter_index_key],
+                lease,
+                "specter",
                 "paper_id",
                 paper_ids,
                 required_columns=specter_columns,
@@ -491,53 +385,50 @@ def load_lightweight_dataset_from_arrow(
     )
 
 
+def _validate_graph_config(config: GraphSubblockingConfig) -> GraphSubblockingConfig:
+    """Reject non-finite weights and nonpositive sizes, which silently change the graph."""
+    for field, default in asdict(_DEFAULT_GRAPH_CONFIG).items():
+        value = getattr(config, field)
+        option = "--" + field.replace("_", "-")
+        if isinstance(default, bool | str):
+            continue
+        if isinstance(default, int):
+            minimum = 0 if field == "local_move_passes" else 1
+            if value < minimum:
+                raise ValueError(f"{option} must be at least {minimum}")
+        elif isinstance(default, float) and not math.isfinite(value):
+            raise ValueError(f"{option} must be finite")
+    return config
+
+
 def _graph_config(args: argparse.Namespace) -> GraphSubblockingConfig:
-    return GraphSubblockingConfig(
-        neighbor_mode=str(args.neighbor_mode),
-        neighbors=int(args.neighbors),
-        min_edge_score=float(args.min_edge_score),
-        specter_weight=float(args.specter_weight),
-        coauthor_weight=float(args.coauthor_weight),
-        affiliation_weight=float(args.affiliation_weight),
-        max_exact_knn_group_size=int(args.max_exact_knn_group_size),
-        projection_count=int(args.projection_count),
-        projection_window=int(args.projection_window),
-        max_candidate_edges=int(args.max_candidate_edges),
-        pack_components=bool(args.pack_components),
-        component_pack_strategy=str(args.component_pack_strategy),
-        sparse_evidence_edges=bool(args.sparse_evidence_edges),
-        sparse_evidence_max_posting_size=int(args.sparse_evidence_max_posting_size),
-        sparse_evidence_neighbors=int(args.sparse_evidence_neighbors),
-        sparse_evidence_min_weight=float(args.sparse_evidence_min_weight),
-        sparse_evidence_include_coauthors=bool(args.sparse_evidence_include_coauthors),
-        sparse_evidence_include_affiliations=bool(args.sparse_evidence_include_affiliations),
-        component_pack_top_k=int(args.component_pack_top_k),
-        local_move_passes=int(args.local_move_passes),
-        adaptive_projection=bool(args.adaptive_projection),
-        adaptive_projection_max_group_size=int(args.adaptive_projection_max_group_size),
-        adaptive_projection_count=int(args.adaptive_projection_count),
-        adaptive_projection_window=int(args.adaptive_projection_window),
-    )
-
-
-def load_signature_ids_from_arrow(
-    arrow_root: Path,
-    *,
-    limit: int | None,
-    sample_mode: str,
-    seed: int,
-) -> list[str]:
-    paths = _arrow_paths(arrow_root)
-    all_signature_ids = [
-        str(signature_id)
-        for signature_id in _read_arrow_column_values(paths["signatures"], "signature_id")
-        if signature_id is not None
-    ]
-    return _select_signature_ids(
-        all_signature_ids,
-        limit=limit,
-        sample_mode=sample_mode,
-        seed=seed,
+    return _validate_graph_config(
+        GraphSubblockingConfig(
+            neighbor_mode=str(args.neighbor_mode),
+            neighbors=int(args.neighbors),
+            min_edge_score=float(args.min_edge_score),
+            specter_weight=float(args.specter_weight),
+            coauthor_weight=float(args.coauthor_weight),
+            affiliation_weight=float(args.affiliation_weight),
+            max_exact_knn_group_size=int(args.max_exact_knn_group_size),
+            projection_count=int(args.projection_count),
+            projection_window=int(args.projection_window),
+            max_candidate_edges=int(args.max_candidate_edges),
+            pack_components=bool(args.pack_components),
+            component_pack_strategy=str(args.component_pack_strategy),
+            sparse_evidence_edges=bool(args.sparse_evidence_edges),
+            sparse_evidence_max_posting_size=int(args.sparse_evidence_max_posting_size),
+            sparse_evidence_neighbors=int(args.sparse_evidence_neighbors),
+            sparse_evidence_min_weight=float(args.sparse_evidence_min_weight),
+            sparse_evidence_include_coauthors=bool(args.sparse_evidence_include_coauthors),
+            sparse_evidence_include_affiliations=bool(args.sparse_evidence_include_affiliations),
+            component_pack_top_k=int(args.component_pack_top_k),
+            local_move_passes=int(args.local_move_passes),
+            adaptive_projection=bool(args.adaptive_projection),
+            adaptive_projection_max_group_size=int(args.adaptive_projection_max_group_size),
+            adaptive_projection_count=int(args.adaptive_projection_count),
+            adaptive_projection_window=int(args.adaptive_projection_window),
+        )
     )
 
 
@@ -563,6 +454,25 @@ def _partition_metrics(subblocks: Mapping[str, Iterable[str]]) -> dict[str, Any]
         "p95_subblock_size": float(np.percentile(sizes, 95)),
         "within_subblock_pair_count": int(sum(int(size) * (int(size) - 1) // 2 for size in sizes)),
     }
+
+
+def _validated_partition(
+    subblocks: Mapping[str, list[str]],
+    signature_ids: Sequence[str],
+    maximum_size: int,
+    component_labels: Mapping[str, str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    observed_ids = set(_signature_to_subblock(subblocks))
+    expected_ids = {str(signature_id) for signature_id in signature_ids}
+    if observed_ids != expected_ids:
+        raise ValueError("Subblocking output lost or added signatures")
+    partition = _partition_metrics(subblocks)
+    if partition["max_subblock_size"] > maximum_size:
+        raise ValueError("Subblocking output exceeds maximum_size")
+    components = _component_preservation_metrics(subblocks, component_labels)
+    if components and components["component_preserved_count"] != components["repeated_component_count"]:
+        raise ValueError("Subblocking output split a required component")
+    return partition, components
 
 
 def _load_component_labels(path: Path | None, selected_signature_ids: set[str]) -> dict[str, str]:
@@ -702,17 +612,19 @@ def _run_python_subblocking(
 
 def _run_rust_subblocking(
     args: argparse.Namespace,
+    arrow_dataset: ArrowDataset,
     signature_ids: Sequence[str],
     config: GraphSubblockingConfig,
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
-    return _make_subblocks_with_telemetry_arrow_rust(
-        _arrow_paths(args.arrow_root),
+    subblocks, telemetry, _no_middle_dead_ends = _make_subblocks_with_telemetry_arrow_rust(
+        arrow_dataset,
         signature_ids,
         maximum_size=int(args.maximum_size),
         graph_subblocking_config=config,
         graph_subblocking_random_seed=int(args.seed),
         use_orcid_subblocking=bool(args.orcid_subblocking),
     )
+    return subblocks, telemetry
 
 
 def _baseline_deltas(summary: dict[str, Any], baseline_path: Path | None) -> dict[str, Any]:
@@ -737,100 +649,36 @@ def _baseline_deltas(summary: dict[str, Any], baseline_path: Path | None) -> dic
 
 def main() -> None:
     args = parse_args()
+    report_path = args.output_dir / "subblocking_evaluation_report.json"
+    if report_path.exists():
+        raise FileExistsError(f"Report output already exists: {report_path}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config = _graph_config(args)
-    _log_progress(
-        f"starting comparison_mode={args.comparison_mode} python_source={args.python_source} "
-        f"maximum_size={args.maximum_size} limit={args.limit}"
-    )
+    _log_progress(f"starting maximum_size={args.maximum_size} limit={args.limit}")
     load_start = time.perf_counter()
-    if args.comparison_mode == "rust-only":
-        signature_ids = load_signature_ids_from_arrow(
-            args.arrow_root,
-            limit=args.limit,
-            sample_mode=str(args.sample_mode),
-            seed=int(args.seed),
-        )
-        component_labels = _load_component_labels(args.component_members_parquet, set(signature_ids))
-        load_seconds = time.perf_counter() - load_start
-        _log_progress(f"loaded signatures={len(signature_ids)} component_labels={len(component_labels)}")
-        rust_start = time.perf_counter()
-        _log_progress("running Rust graph subblocking")
-        rust_subblocks, rust_telemetry = _run_rust_subblocking(args, signature_ids, config)
-        rust_seconds = time.perf_counter() - rust_start
-        _write_subblocks(args.output_dir / "rust_subblocks.json", rust_subblocks)
-        summary = {
-            "inputs": {
-                "comparison_mode": "rust-only",
-                "python_source": None,
-                "raw_root": None,
-                "specter_pickle": None,
-                "arrow_root": str(args.arrow_root),
-                "component_members_parquet": str(args.component_members_parquet)
-                if args.component_members_parquet is not None
-                else None,
-                "limit": args.limit,
-                "allow_full": bool(args.allow_full),
-                "sample_mode": str(args.sample_mode),
-                "seed": int(args.seed),
-                "maximum_size": int(args.maximum_size),
-                "orcid_subblocking": bool(args.orcid_subblocking),
-                "load_seconds": float(load_seconds),
-            },
-            "graph_config": config.__dict__,
-            "counts": {
-                "signature_count": int(len(signature_ids)),
-            },
-            "rust": {
-                "seconds": float(rust_seconds),
-                "telemetry": rust_telemetry,
-                "partition": _partition_metrics(rust_subblocks),
-                "component_preservation": _component_preservation_metrics(rust_subblocks, component_labels),
-            },
-            "artifacts": {
-                "summary": str(args.output_dir / "summary.json"),
-                "rust_subblocks": str(args.output_dir / "rust_subblocks.json"),
-            },
-        }
-        summary["baseline_deltas"] = _baseline_deltas(summary, args.baseline_summary)
-        (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        print(json.dumps(summary, indent=2), flush=True)
-        return
-
-    dataset: SimpleNamespace | None = None
-    if args.python_source == "arrow":
-        dataset, signature_ids = load_lightweight_dataset_from_arrow(
-            args.arrow_root,
-            limit=args.limit,
-            sample_mode=str(args.sample_mode),
-            seed=int(args.seed),
-            include_specter=True,
-        )
-    else:
-        if args.raw_root is None or args.specter_pickle is None:
-            raise ValueError("--python-source raw requires --raw-root and --specter-pickle")
-        dataset, signature_ids = load_lightweight_dataset(
-            args.raw_root,
-            args.specter_pickle,
-            limit=args.limit,
-            sample_mode=str(args.sample_mode),
-            seed=int(args.seed),
-        )
+    with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
+        with arrow_dataset.use(require_specter=True) as arrow_lease:
+            dataset, signature_ids = load_lightweight_dataset_from_arrow(
+                arrow_lease,
+                limit=args.limit,
+                sample_mode=str(args.sample_mode),
+                seed=int(args.seed),
+                include_specter=True,
+            )
     component_labels = _load_component_labels(args.component_members_parquet, set(signature_ids))
     load_seconds = time.perf_counter() - load_start
     _log_progress(f"loaded signatures={len(signature_ids)} component_labels={len(component_labels)}")
     source_label = "python"
     source_start = time.perf_counter()
-    if dataset is None:
-        raise RuntimeError("Python comparison requires a loaded Python dataset")
     _log_progress("running Python graph subblocking")
     source_subblocks, source_telemetry = _run_python_subblocking(args, dataset, signature_ids, config)
     source_hook_telemetry = {}
     source_seconds = time.perf_counter() - source_start
-    rust_start = time.perf_counter()
-    _log_progress("running Rust graph subblocking")
-    rust_subblocks, rust_telemetry = _run_rust_subblocking(args, signature_ids, config)
-    rust_seconds = time.perf_counter() - rust_start
+    with ArrowDataset.open(args.arrow_root, require_specter=True) as arrow_dataset:
+        rust_start = time.perf_counter()
+        _log_progress("running Rust graph subblocking")
+        rust_subblocks, rust_telemetry = _run_rust_subblocking(args, arrow_dataset, signature_ids, config)
+        rust_seconds = time.perf_counter() - rust_start
     if set(_signature_to_subblock(source_subblocks)) != set(_signature_to_subblock(rust_subblocks)):
         raise ValueError(f"{source_label} and Rust partitions cover different signature IDs")
 
@@ -856,13 +704,25 @@ def main() -> None:
     ).to_csv(rust_diff_path, index=False)
     _write_subblocks(args.output_dir / f"{source_label}_subblocks.json", source_subblocks)
     _write_subblocks(args.output_dir / "rust_subblocks.json", rust_subblocks)
+    source_partition, source_components = _validated_partition(
+        source_subblocks,
+        signature_ids,
+        int(args.maximum_size),
+        component_labels,
+    )
+    rust_partition, rust_components = _validated_partition(
+        rust_subblocks,
+        signature_ids,
+        int(args.maximum_size),
+        component_labels,
+    )
+    source_subblocks_path = args.output_dir / f"{source_label}_subblocks.json"
+    rust_subblocks_path = args.output_dir / "rust_subblocks.json"
 
     summary = {
         "inputs": {
             "comparison_mode": "python-vs-rust",
-            "python_source": str(args.python_source),
-            "raw_root": str(args.raw_root) if args.raw_root is not None else None,
-            "specter_pickle": str(args.specter_pickle) if args.specter_pickle is not None else None,
+            "python_source": "arrow",
             "arrow_root": str(args.arrow_root),
             "component_members_parquet": str(args.component_members_parquet)
             if args.component_members_parquet is not None
@@ -884,25 +744,25 @@ def main() -> None:
             "seconds": float(source_seconds),
             "telemetry": source_telemetry,
             "hook_telemetry": source_hook_telemetry,
-            "partition": _partition_metrics(source_subblocks),
-            "component_preservation": _component_preservation_metrics(source_subblocks, component_labels),
+            "partition": source_partition,
+            "component_preservation": source_components,
         },
         "rust": {
             "seconds": float(rust_seconds),
             "telemetry": rust_telemetry,
-            "partition": _partition_metrics(rust_subblocks),
-            "component_preservation": _component_preservation_metrics(rust_subblocks, component_labels),
+            "partition": rust_partition,
+            "component_preservation": rust_components,
         },
         "artifacts": {
-            "summary": str(args.output_dir / "summary.json"),
+            "summary": str(report_path),
             f"{source_label}_diff_csv": str(source_diff_path),
             "rust_diff_csv": str(rust_diff_path),
-            f"{source_label}_subblocks": str(args.output_dir / f"{source_label}_subblocks.json"),
-            "rust_subblocks": str(args.output_dir / "rust_subblocks.json"),
+            f"{source_label}_subblocks": str(source_subblocks_path),
+            "rust_subblocks": str(rust_subblocks_path),
         },
     }
     summary["baseline_deltas"] = _baseline_deltas(summary, args.baseline_summary)
-    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    write_fresh_json(report_path, summary)
     print(json.dumps(summary, indent=2), flush=True)
 
 

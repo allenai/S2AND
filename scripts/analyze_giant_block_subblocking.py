@@ -1,14 +1,16 @@
-"""Sweep subblocking thresholds on a giant extracted block and write plots/tables.
+"""Sweep subblocking thresholds on a giant Arrow block and write plots/tables.
 
 This script evaluates candidate `maximum_size` thresholds using repeated ORCID groups as
-an external preservation signal. It disables ORCID subblocking explicitly so the metric
-reflects only name-based and SPECTER-based partitioning, not the ORCID co-location override
-in `make_subblocks(...)`.
+an external preservation signal. It runs the native Arrow subblocker that
+`Clusterer.predict_from_arrow(..., batching_threshold=...)` uses, with the default
+`GraphSubblockingConfig`. It disables ORCID subblocking explicitly so the metric
+reflects only name-based and fallback partitioning, not the ORCID co-location override.
 
-It also reports how often SPECTER fallback was actually invoked while building subblocks,
+It also reports how often the fallback was actually invoked while building subblocks,
 plus the size of the downstream retrieval target:
 
-`single-letter-first-name signatures UNION signatures that end up in a SPECTER-made subblock`.
+`single-letter-first-name signatures UNION signatures that end up in a fallback-made subblock`.
+The `*specter*` metric names are historical: fallback subblocks keep the `|specter=` key.
 """
 
 from __future__ import annotations
@@ -18,7 +20,9 @@ import json
 import os
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import matplotlib
@@ -27,24 +31,34 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.ipc as ipc
 
-from s2and.data import ANDData, Signature
+from s2and.arrow_inputs import ArrowDataset
 from s2and.subblocking import (
-    make_subblocks_with_telemetry,
+    GraphSubblockingConfig,
+    _make_subblocks_with_telemetry_arrow_rust,
     normalize_orcid_for_subblocking,
     signature_name_parts_for_subblocking,
+    subblocking_name_parts,
 )
-from s2and.text import set_fasttext_loading_enabled
+
+Signature = SimpleNamespace
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--dataset-root",
+        "--arrow-dataset",
         type=Path,
         required=True,
-        help="Directory with signatures/papers/specter files.",
+        help="Arrow dataset directory with manifest.json and SPECTER embeddings.",
+    )
+    parser.add_argument(
+        "--block",
+        default=None,
+        help="Author block to analyze; the default analyzes every signature in the dataset.",
     )
     parser.add_argument(
         "--thresholds",
@@ -54,17 +68,14 @@ def parse_args() -> argparse.Namespace:
         help="Subblocking thresholds to evaluate, for example: --thresholds 2000 4000 6000 7500 10000",
     )
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory for CSV/JSON/plot artifacts.")
-    parser.add_argument("--n-jobs", type=int, default=8, help="Worker count for ANDData preprocessing.")
-    parser.add_argument("--random-seed", type=int, default=42, help="Random seed for deterministic preprocessing.")
-    return parser.parse_args()
-
-
-def _required_file(dataset_root: Path, filename: str) -> Path:
-    """Return a required file under `dataset_root`."""
-    path = dataset_root / filename
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required file: {path}")
-    return path
+    parser.add_argument("--n-jobs", type=int, default=8, help="Native worker threads.")
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Graph subblocking seed; production uses the model's random_state (default: 42).",
+    )
+    return parser.parse_args(argv)
 
 
 def _normalize_orcid(orcid: str | None) -> str | None:
@@ -87,12 +98,19 @@ def _build_repeated_orcid_groups(signatures: dict[str, Signature]) -> dict[str, 
     }
 
 
-def _single_letter_first_name_ids(signatures: dict[str, Signature]) -> set[str]:
-    """Return signature IDs whose normalized first name is empty or one character."""
+def _single_letter_first_name_ids(
+    signatures: dict[str, Signature], signature_ids: list[str], maximum_size: int
+) -> set[str]:
+    """Return signature IDs whose subblock-key first name is empty or one character.
+
+    The key of a compound first name depends on the threshold, so call this once per threshold.
+    """
+    key_names = subblocking_name_parts(
+        [signature_name_parts_for_subblocking(signatures[signature_id]) for signature_id in signature_ids],
+        maximum_size,
+    )
     return {
-        str(signature_id)
-        for signature_id, signature in signatures.items()
-        if len(signature_name_parts_for_subblocking(signature)[0]) <= 1
+        signature_id for signature_id, (first, _middle) in zip(signature_ids, key_names, strict=True) if len(first) <= 1
     }
 
 
@@ -266,45 +284,95 @@ def _write_overview_plot(summary_df: pd.DataFrame, output_path: Path) -> None:
     plt.close(fig)
 
 
-def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
-    """Load the extracted block as ANDData."""
-    signatures_path = _required_file(dataset_root, "signatures.json")
-    papers_path = _required_file(dataset_root, "papers.json")
-    specter_path = _required_file(dataset_root, "specter.pickle")
+def _optional_str(value: Any) -> str | None:
+    """Return None for missing Arrow strings and the string otherwise."""
+    return None if value is None else str(value)
 
-    set_fasttext_loading_enabled(False)
-    os.environ.setdefault("S2AND_BACKEND", "python")
-    os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
 
-    return ANDData(
-        signatures=str(signatures_path),
-        papers=str(papers_path),
-        name=f"{dataset_root.name}_threshold_sweep",
-        mode="inference",
-        clusters=None,
-        specter_embeddings=str(specter_path),
-        cluster_seeds=None,
-        altered_cluster_signatures=None,
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=1000,
-        val_pairs_size=1000,
-        test_pairs_size=1000,
-        n_jobs=int(n_jobs),
-        load_name_counts=False,
-        preprocess=True,
-        random_seed=int(random_seed),
-        name_tuples="filtered",
-        use_orcid_id=True,
-        use_sinonym_overwrite=False,
-        compute_reference_features=False,
+def load_block_signatures(arrow_dataset: ArrowDataset, block: str | None) -> dict[str, Signature]:
+    """Read the name, paper, and ORCID fields of one block's signatures from Arrow.
+
+    Normalized names stay empty, so ``signature_name_parts_for_subblocking`` canonicalizes the raw
+    names exactly as native subblocking does.
+    """
+    columns = ["signature_id", "paper_id", "author_first", "author_middle", "author_last", "author_block"]
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
+        with pa.PythonFile(infile, mode="r") as source:
+            table = ipc.open_file(source).read_all()
+    missing = sorted(set(columns) - set(table.column_names))
+    if missing:
+        raise ValueError(f"Arrow signatures table is missing columns: {missing}")
+    has_orcid = "author_orcid" in table.column_names
+    data = table.select(columns + (["author_orcid"] if has_orcid else [])).to_pydict()
+    signatures: dict[str, Signature] = {}
+    for index, signature_id in enumerate(data["signature_id"]):
+        if block is not None and data["author_block"][index] != block:
+            continue
+        signatures[str(signature_id)] = Signature(
+            paper_id=_optional_str(data["paper_id"][index]),
+            author_info_first=_optional_str(data["author_first"][index]),
+            author_info_first_normalized=None,
+            author_info_middle=_optional_str(data["author_middle"][index]),
+            author_info_middle_normalized=None,
+            author_info_last=_optional_str(data["author_last"][index]),
+            author_info_orcid=_optional_str(data["author_orcid"][index]) if has_orcid else None,
+        )
+    if not signatures:
+        raise ValueError(f"No signatures found for block {block!r}")
+    return signatures
+
+
+def _threshold_row(
+    arrow_dataset: ArrowDataset,
+    signatures: dict[str, Signature],
+    all_signature_ids: list[str],
+    repeated_orcid_groups: dict[str, list[str]],
+    *,
+    threshold: int,
+    random_seed: int,
+) -> dict[str, Any]:
+    """Subblock one block natively at one threshold and summarize the partition."""
+    threshold_start = time.perf_counter()
+    subblocks, telemetry, _no_middle_dead_ends = _make_subblocks_with_telemetry_arrow_rust(
+        arrow_dataset,
+        all_signature_ids,
+        maximum_size=int(threshold),
+        graph_subblocking_config=GraphSubblockingConfig(),
+        graph_subblocking_random_seed=random_seed,
+        use_orcid_subblocking=False,
     )
+    signature_to_subblock = _signature_to_subblock(subblocks)
+    if set(signature_to_subblock) != set(all_signature_ids):
+        raise ValueError("Native subblocking must return every input signature exactly once")
+    single_letter_ids = _single_letter_first_name_ids(signatures, all_signature_ids, int(threshold))
+    preservation_metrics = _orcid_preservation_metrics(repeated_orcid_groups, signature_to_subblock)
+    subblock_metrics = _subblock_size_metrics(subblocks)
+    final_specter_signature_ids = _specter_signature_ids(subblocks)
+    retrieval_target_signature_ids = single_letter_ids.union(final_specter_signature_ids)
+    row = {
+        "threshold": int(threshold),
+        **telemetry,
+        **preservation_metrics,
+        **subblock_metrics,
+        "single_letter_first_name_signature_count": int(len(single_letter_ids)),
+        "final_specter_signature_fraction": float(len(final_specter_signature_ids) / len(all_signature_ids)),
+        "retrieval_target_signature_count": int(len(retrieval_target_signature_ids)),
+        "retrieval_target_signature_fraction": float(len(retrieval_target_signature_ids) / len(all_signature_ids)),
+        "retrieval_target_specter_only_signature_count": int(len(final_specter_signature_ids - single_letter_ids)),
+        "elapsed_seconds": round(time.perf_counter() - threshold_start, 3),
+    }
+    print(
+        f"threshold={threshold} preserved={row['orcid_group_preservation_rate']:.4f} "
+        f"specter_invocations={row['specter_invocation_count']} "
+        f"target_sigs={row['retrieval_target_signature_count']} "
+        f"elapsed_s={row['elapsed_seconds']:.3f}"
+    )
+    return row
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """Run the threshold sweep and write artifacts."""
-    args = parse_args()
+    args = parse_args(argv)
     thresholds = sorted(set(int(threshold) for threshold in args.thresholds))
     if not thresholds:
         raise ValueError("Need at least one threshold")
@@ -312,44 +380,26 @@ def main() -> None:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Native and OpenMP pools read these variables when they first start.
+    os.environ["RAYON_NUM_THREADS"] = str(max(1, int(args.n_jobs)))
+    os.environ["OMP_NUM_THREADS"] = str(max(1, int(args.n_jobs)))
     start = time.perf_counter()
-    dataset = load_dataset(args.dataset_root, n_jobs=int(args.n_jobs), random_seed=int(args.random_seed))
-    all_signature_ids = sorted(str(signature_id) for signature_id in dataset.signatures.keys())
-    repeated_orcid_groups = _build_repeated_orcid_groups(dataset.signatures)
-    single_letter_ids = _single_letter_first_name_ids(dataset.signatures)
-    rows: list[dict[str, Any]] = []
-    for threshold in thresholds:
-        threshold_start = time.perf_counter()
-        subblocks, telemetry = make_subblocks_with_telemetry(
-            all_signature_ids,
-            dataset,
-            maximum_size=int(threshold),
-            use_orcid_subblocking=False,
-        )
-        signature_to_subblock = _signature_to_subblock(subblocks)
-        preservation_metrics = _orcid_preservation_metrics(repeated_orcid_groups, signature_to_subblock)
-        subblock_metrics = _subblock_size_metrics(subblocks)
-        final_specter_signature_ids = _specter_signature_ids(subblocks)
-        retrieval_target_signature_ids = single_letter_ids.union(final_specter_signature_ids)
-        row = {
-            "threshold": int(threshold),
-            **telemetry,
-            **preservation_metrics,
-            **subblock_metrics,
-            "single_letter_first_name_signature_count": int(len(single_letter_ids)),
-            "final_specter_signature_fraction": float(len(final_specter_signature_ids) / len(all_signature_ids)),
-            "retrieval_target_signature_count": int(len(retrieval_target_signature_ids)),
-            "retrieval_target_signature_fraction": float(len(retrieval_target_signature_ids) / len(all_signature_ids)),
-            "retrieval_target_specter_only_signature_count": int(len(final_specter_signature_ids - single_letter_ids)),
-            "elapsed_seconds": round(time.perf_counter() - threshold_start, 3),
-        }
-        rows.append(row)
-        print(
-            f"threshold={threshold} preserved={row['orcid_group_preservation_rate']:.4f} "
-            f"specter_invocations={row['specter_invocation_count']} "
-            f"target_sigs={row['retrieval_target_signature_count']} "
-            f"elapsed_s={row['elapsed_seconds']:.3f}"
-        )
+    with ArrowDataset.open(args.arrow_dataset, require_specter=True) as arrow_dataset:
+        signatures = load_block_signatures(arrow_dataset, args.block)
+        all_signature_ids = sorted(signatures)
+        repeated_orcid_groups = _build_repeated_orcid_groups(signatures)
+        rows: list[dict[str, Any]] = []
+        for threshold in thresholds:
+            rows.append(
+                _threshold_row(
+                    arrow_dataset,
+                    signatures,
+                    all_signature_ids,
+                    repeated_orcid_groups,
+                    threshold=threshold,
+                    random_seed=int(args.random_seed),
+                )
+            )
 
     summary_df = pd.DataFrame(rows).sort_values("threshold").reset_index(drop=True)
     summary_csv_path = output_dir / "threshold_summary.csv"
@@ -361,24 +411,18 @@ def main() -> None:
     summary_md_path.write_text(_render_markdown_table(summary_df.to_dict(orient="records")), encoding="utf-8")
     _write_overview_plot(summary_df, plot_path)
 
-    specter_embeddings = dataset.specter_embeddings
-    embedding_count = len(specter_embeddings) if isinstance(specter_embeddings, dict) else 0
-
     metadata = {
-        "dataset_root": str(args.dataset_root),
+        "arrow_dataset": str(args.arrow_dataset),
+        "block": args.block,
         "signature_count": int(len(all_signature_ids)),
-        "paper_count": int(len(dataset.papers)),
-        "embedding_count": int(embedding_count),
-        "single_letter_first_name_signature_count": int(len(single_letter_ids)),
-        "orcid_signature_count": int(
-            sum(1 for signature in dataset.signatures.values() if signature.author_info_orcid)
-        ),
+        "paper_count": int(len({signature.paper_id for signature in signatures.values()})),
+        "orcid_signature_count": int(sum(1 for signature in signatures.values() if signature.author_info_orcid)),
         "normalized_orcid_count": int(
             len(
                 {
                     normalized_orcid
                     for normalized_orcid in (
-                        _normalize_orcid(signature.author_info_orcid) for signature in dataset.signatures.values()
+                        _normalize_orcid(signature.author_info_orcid) for signature in signatures.values()
                     )
                     if normalized_orcid is not None
                 }

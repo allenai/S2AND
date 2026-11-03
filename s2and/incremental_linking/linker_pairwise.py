@@ -10,31 +10,17 @@ from typing import Any
 
 import numpy as np
 
-from s2and import feature_port, memory_budget, rust_calls
+from s2and import feature_port, memory_budget
 from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo
+from s2and.featurizer import DEFAULT_FEATURE_GROUPS, FeaturizationInfo
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d, as_uint32_1d
 from s2and.thread_config import resolve_n_jobs
 
-PROD_PAIRWISE_FEATURE_GROUPS: tuple[str, ...] = (
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-)
-PAIRWISE_INFO = FeaturizationInfo(features_to_use=list(PROD_PAIRWISE_FEATURE_GROUPS))
+PAIRWISE_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
 PROD_PAIRWISE_FEATURE_NAMES: tuple[str, ...] = tuple(PAIRWISE_INFO.get_feature_names())
 PROD_PAIRWISE_FEATURE_INDICES: tuple[int, ...] = tuple(
     feature_index
-    for feature_group in PROD_PAIRWISE_FEATURE_GROUPS
+    for feature_group in DEFAULT_FEATURE_GROUPS
     for feature_index in PAIRWISE_INFO.feature_group_to_index[feature_group]
 )
 PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS: tuple[str, ...] = tuple(
@@ -100,6 +86,8 @@ class LinkerPairFeatureChunk:
     maxs: np.ndarray
     valid_counts: np.ndarray | None = None
     feature_seconds: float = 0.0
+    # Set by the fused native pass, which scores the pairs instead of returning features.
+    model_distances: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -249,54 +237,6 @@ def _as_uint32_1d(name: str, values: Sequence[Any] | np.ndarray) -> np.ndarray:
     return as_uint32_1d(name, values)
 
 
-def build_candidate_batch_from_members(
-    query_signature_indices: Sequence[int] | np.ndarray,
-    candidate_member_signature_indices: Sequence[Sequence[int] | np.ndarray],
-    *,
-    row_component_keys: Sequence[Any] | None = None,
-    labels: Sequence[Any] | np.ndarray | None = None,
-    retrieval_scores: Sequence[float] | np.ndarray | None = None,
-    retrieval_ranks: Sequence[int] | np.ndarray | None = None,
-) -> LinkerCandidateBatch:
-    """Build a `LinkerCandidateBatch` from per-candidate member signature indices."""
-
-    row_query_indices = _as_uint32_1d("query_signature_indices", query_signature_indices)
-    row_count = int(len(row_query_indices))
-    if len(candidate_member_signature_indices) != row_count:
-        raise ValueError(
-            "candidate_member_signature_indices must have one member-list per row: "
-            f"{len(candidate_member_signature_indices)} != {row_count}"
-        )
-    member_arrays = [
-        _as_uint32_1d(f"candidate_member_signature_indices[{row_index}]", members)
-        for row_index, members in enumerate(candidate_member_signature_indices)
-    ]
-    pair_count = sum(len(members) for members in member_arrays)
-    left = np.empty(pair_count, dtype=np.uint32)
-    right = np.empty(pair_count, dtype=np.uint32)
-    rows = np.empty(pair_count, dtype=np.uint32)
-    offset = 0
-    for row_index, members in enumerate(member_arrays):
-        stop = offset + len(members)
-        left[offset:stop] = row_query_indices[row_index]
-        right[offset:stop] = members
-        rows[offset:stop] = row_index
-        offset = stop
-    return LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=left,
-        right_signature_indices=right,
-        pair_row_indices=rows,
-        row_query_signature_indices=row_query_indices,
-        row_component_keys=None if row_component_keys is None else tuple(row_component_keys),
-        labels=None if labels is None else np.asarray(labels),
-        retrieval_scores=None if retrieval_scores is None else np.asarray(retrieval_scores, dtype=np.float32),
-        retrieval_ranks=None
-        if retrieval_ranks is None
-        else as_retrieval_rank_uint16_1d("retrieval_ranks", retrieval_ranks),
-    )
-
-
 def _ordered_union(left: Sequence[int], right: Sequence[int]) -> tuple[int, ...]:
     return tuple(dict.fromkeys([int(value) for value in (*left, *right)]))
 
@@ -336,6 +276,7 @@ def compute_linker_pair_chunk_plan(
         total_pairs=int(total_pairs),
         total_rows=int(row_count),
         total_ram_bytes=total_ram_bytes,
+        index_remap_bytes_per_pair=memory_budget.BORROWED_SIGNATURE_INDEX_REMAP_BYTES_PER_PAIR,
     )
 
 
@@ -351,7 +292,11 @@ def resolve_linker_pairwise_featurizer(
 ) -> Any:
     """Return the Rust featurizer used for linker pairwise array APIs."""
 
-    return rust_calls._resolve_featurizer(dataset, featurizer, runtime_context)  # noqa: SLF001
+    if featurizer is not None:
+        return featurizer
+    if dataset is None:
+        raise ValueError("dataset is required when featurizer is not provided")
+    return feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
 
 
 def iter_candidate_batch_pair_feature_chunks_rust(
@@ -397,18 +342,16 @@ def iter_candidate_batch_pair_feature_chunks_rust(
         feature_start = time.perf_counter()
         pair_features, counts, valid_counts, sums, mins, maxs = (
             feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-                dataset,
                 candidate_batch.left_signature_indices[start:stop],
                 candidate_batch.right_signature_indices[start:stop],
                 local_row_indices,
                 len(global_rows),
+                featurizer=featurizer,
                 matrix_indices=list(resolved_matrix_indices),
                 aggregate_indices=list(resolved_aggregate_indices),
                 num_threads=resolve_n_jobs(n_jobs),
                 nan_value=float(nan_value),
                 aggregate_nan_value=aggregate_nan_value,
-                runtime_context=runtime_context,
-                featurizer=featurizer,
             )
         )
         feature_seconds = time.perf_counter() - feature_start
@@ -429,6 +372,73 @@ def iter_candidate_batch_pair_feature_chunks_rust(
         )
 
 
+def iter_candidate_batch_scored_chunks_rust(
+    candidate_batch: LinkerCandidateBatch,
+    *,
+    featurizer: Any,
+    chunk_plan: memory_budget.RustBatchChunkPlan,
+    main_indices: Sequence[int],
+    main_booster: Any,
+    nameless_indices: Sequence[int] | None,
+    nameless_booster: Any | None,
+    aggregate_indices: Sequence[int],
+    pair_labels: np.ndarray,
+    n_jobs: int = 1,
+    nan_value: float = math.nan,
+    aggregate_nan_value: float | None = None,
+) -> Iterator[LinkerPairFeatureChunk]:
+    """Yield each chunk's aggregates and model distances from one fused Rust pass.
+
+    Chunks follow ``chunk_plan`` as :func:`iter_candidate_batch_pair_feature_chunks_rust`
+    does, so the aggregates sum in the same order. Each chunk carries
+    ``model_distances`` instead of pair features: the native boosters score the
+    unlabeled pairs tile by tile, without the chunk's feature matrix.
+    """
+
+    if candidate_batch.pair_count == 0:
+        return
+    resolved_aggregate_indices = tuple(int(index) for index in aggregate_indices)
+    chunk_pairs = _chunk_plan_pairs(chunk_plan)
+    for start in range(0, candidate_batch.pair_count, chunk_pairs):
+        stop = min(candidate_batch.pair_count, start + chunk_pairs)
+        global_rows, local_row_indices = _localize_row_indices(candidate_batch.pair_row_indices[start:stop])
+        chunk_start = time.perf_counter()
+        distances, counts, valid_counts, sums, mins, maxs = (
+            feature_port.score_linker_pair_features_and_aggregate_stats_rust(
+                candidate_batch.left_signature_indices[start:stop],
+                candidate_batch.right_signature_indices[start:stop],
+                local_row_indices,
+                len(global_rows),
+                featurizer=featurizer,
+                main_indices=main_indices,
+                main_booster=main_booster,
+                nameless_indices=nameless_indices,
+                nameless_booster=nameless_booster,
+                aggregate_indices=resolved_aggregate_indices,
+                pair_labels=pair_labels[start:stop],
+                num_threads=resolve_n_jobs(n_jobs),
+                nan_value=float(nan_value),
+                aggregate_nan_value=aggregate_nan_value,
+            )
+        )
+        yield LinkerPairFeatureChunk(
+            start=int(start),
+            stop=int(stop),
+            pair_features=np.empty((stop - start, 0), dtype=np.float64),
+            matrix_indices=(),
+            aggregate_indices=resolved_aggregate_indices,
+            global_row_indices=global_rows,
+            local_row_indices=local_row_indices,
+            counts=counts,
+            sums=sums,
+            mins=mins,
+            maxs=maxs,
+            valid_counts=valid_counts,
+            feature_seconds=float(time.perf_counter() - chunk_start),
+            model_distances=distances,
+        )
+
+
 def compute_candidate_batch_pairwise_aggregate_stats_rust(
     dataset: ANDData | None,
     candidate_batch: LinkerCandidateBatch,
@@ -437,6 +447,7 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
     n_jobs: int = 1,
     total_ram_bytes: int | None = None,
     nan_value: float = math.nan,
+    aggregate_nan_value: float | None = None,
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
 ) -> PairwiseAggregateStats:
@@ -475,16 +486,15 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
         global_rows, local_row_indices = _localize_row_indices(row_chunk)
         chunk_counts, chunk_valid_counts, chunk_sums, chunk_mins, chunk_maxs = (
             feature_port.build_linker_pair_aggregate_stats_arrays_rust(
-                dataset,
                 candidate_batch.left_signature_indices[start:stop],
                 candidate_batch.right_signature_indices[start:stop],
                 local_row_indices,
                 len(global_rows),
+                featurizer=featurizer,
                 aggregate_indices=list(aggregate_indices),
                 num_threads=resolve_n_jobs(n_jobs),
                 nan_value=float(nan_value),
-                runtime_context=runtime_context,
-                featurizer=featurizer,
+                aggregate_nan_value=aggregate_nan_value,
             )
         )
         chunk_count += 1

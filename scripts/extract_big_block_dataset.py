@@ -99,7 +99,6 @@ class JsonStream:
         self._infile.close()
 
     def __enter__(self) -> JsonStream:
-        """Enter the stream context."""
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -130,7 +129,6 @@ class JsonStream:
             self._fill()
 
     def _skip_whitespace(self) -> None:
-        """Advance past JSON whitespace."""
         while True:
             self._ensure_available()
             while self._position < len(self._buffer) and self._buffer[self._position].isspace():
@@ -417,7 +415,7 @@ def _prepare_output_dir(output_dir: Path, *, overwrite: bool) -> dict[str, Path]
     if existing and not overwrite:
         existing_names = ", ".join(path.name for path in existing)
         raise FileExistsError(
-            f"Output directory already contains target files ({existing_names}). " "Use --overwrite to replace them."
+            f"Output directory already contains target files ({existing_names}). Use --overwrite to replace them."
         )
     return targets
 
@@ -428,8 +426,6 @@ def _write_mapping_entry(outfile, *, key: str, payload: dict[str, Any], first_en
         outfile.write(",\n")
     outfile.write(json.dumps(key))
     outfile.write(":")
-    # ANDData opens JSON paths without an explicit UTF-8 encoding on Windows, so
-    # emit ASCII-escaped JSON for compatibility with the existing loader contract.
     json.dump(payload, outfile, ensure_ascii=True, separators=(",", ":"))
 
 

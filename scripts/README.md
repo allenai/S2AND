@@ -1,92 +1,75 @@
 # Scripts
 
+This catalog describes implemented entry points in the current worktree. It
+does not authorize expensive production work or imply that the
+v1.3 release work is complete. Release operators must follow
+[../docs/release.md](../docs/release.md).
+
 ## Quick reference
-
-### Rust profiling & parity
-
-| Script | What it does | Key output |
-|---|---|---|
-| `rust_suite.py compare` | Featurize random pairs on one dataset, compare Python vs Rust outputs | Feature parity report, runtime speedup, RSS reduction |
-| `rust_suite.py transfer-mini` | Smoke-scale KISTI transfer run by default; pass the full preset for the historical 3-dataset reduced-scale run | Per-stage timing, peak RSS, clustering quality (python vs rust) |
-| `rust_suite.py prod-inference` | Run Arrow `predict_from_arrow_paths` inference with the pre-trained prod model + cProfile; legacy JSON/ANDData baselines are opt-in | Function-level hotspots, latency, RSS, clustering metrics |
-| `rust_suite.py featurizer-reuse` | Repeated production-model predictions through Arrow by default; `--input-format json` keeps the legacy same-object vs re-instantiated `ANDData` cache check | Per-iteration timing, RSS, Arrow telemetry or legacy featurizer cache counts |
-| `rust_suite.py largest-block` | Profile one large block; `--mode single --backend rust --input-format arrow` uses Arrow `predict_from_arrow_paths`, while compare/constraint parity remain JSON reference workflows | Partition diff (digest + per-signature), latency, RSS; optional `--quality-check` + JSON-only `--constraint-sample` |
-| `rust_suite.py promoted-incremental-arrow-profile` | Arrow-only promoted Rust `predict_incremental` profiling against the canonical `s2and_and_big_blocks_linker_dataset_20260525` bundle | Per-run wall time, p50 latency, peak RSS, promoted incremental telemetry, Arrow planner/summary timings |
-| `rust_suite.py stress-rebuild` | Repeat Rust featurizer construction (`from_arrow_paths` by default; `from_dataset` explicit for classic `ANDData`) to stress lifecycle stability | Per-iteration elapsed + RSS peaks, RSS growth fraction, failure payloads |
-| `rust_suite.py measure-counter-data` | Measure CounterData memory contribution to Rust featurizer | Build-time RSS delta with vs without CounterData fields |
-| `rust_suite.py calibrate-phase-a` | Calibrate memory estimates for phase-A accumulator from memory telemetry JSONL | Per-entry byte overhead percentiles |
-| `rust_suite.py calibrate-rust-batch` | Calibrate memory estimates for Rust batch persistent overhead from memory telemetry JSONL | Per-row byte overhead percentiles |
 
 ### Production artifacts
 
 | Script | What it does |
 |---|---|
-| `production/model/train_pairwise.py` | Train the pairwise half of a native `production_model_vX.Y/` bundle |
-| `production/model/train_linker_and_finalize.py` | Train the promoted incremental linker and finalize the production model bundle |
-| `production/model/linker_train_calibrate_eval.py` | Low-level promoted linker replay implementation used by the finalization wrapper |
-| `production/counts/generate_name_counts.py` | Documentation for how production name-count metadata was collected (internal data) |
-| `production/counts/generate_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |
+| `production/model/train_pairwise.py` | Release-only training of the pairwise half of a native `production_model_vX.Y/` bundle |
+| `production/data/package_corrected_datasets.py` | Package the final corrected records, pairwise populations, and complete incremental tasks with one common index |
+| `production/data/write_release_bundles.py` | Write the published `inference`, `dataset`, and `source` bundles from the prepared snapshot |
+| `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
+| `production/model/release_pairwise.py` | Validation-only EPS calibration (`calibrate-eps`) and outer-test evaluation (`evaluate-heldout`) |
+| `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](production/data/README.md) |
+| `production/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
+| `production/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](production/counts/README.md) |
+| `production/counts/generate_orcid_name_prefix_counts.py` | Convert one reviewed, guardrailed CSV export into canonical ORCID prefix-count JSON bound to the packaged tuple artifact; invoke with `python -m` |
 
-### Paper experiments & tutorials
+### Tutorials
 
 | Script | What it does |
 |---|---|
-| `transfer_experiment_seed_paper.py` | Main script to reproduce all paper experiments |
-| `tutorial_for_predicting_with_the_prod_model.py` | Guide to using the released production model with Arrow input by default; JSON fixtures remain opt-in |
-| `tutorial.ipynb` | Notebook walkthrough of the S2AND pipeline |
+| `tutorial_for_predicting_with_the_prod_model.py` | Predict clusters for every block of one Arrow or JSON dataset with a complete production model, or link one block's newer signatures to profiles seeded from its older labeled signatures; prints a summary and can write the clusters to JSON |
+
+The script needs the `inference` bundle and an Arrow dataset, such as a benchmark from the `dataset` bundle.
+Use [the data guide](../docs/data.md) to download them.
 
 ### Dataset creation & preprocessing
 
 | Script | What it does |
 |---|---|
-| `make_inventors_s2and_subset.py` | Create inventors S2AND subset (defaults to a local ignored output path) |
-| `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults to a local ignored output path) |
-| `make_inventors_hf_specter_embeddings.py` | Generate SPECTER embeddings for inventors dataset (defaults to a local ignored output path) |
-| `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files; supports both pretty-printed and minified JSON exports |
-| `convert_to_arrow.py` | Convert service JSON, benchmark datasets, linker replay raw inputs, and shared name-counts into bounded Arrow runtime artifacts with current raw-planner batch-index sidecars (`S2ABI002`); subcommands are `service-json`, `benchmark`, `linker-replay`, `name-counts-index`, and `validate` |
-| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables |
+| `extract_big_block_dataset.py` | Stream a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, `specter.pickle`, `cluster_seeds.json`, `altered_cluster_signatures.txt`, and `meta.json`; supports both pretty-printed and minified JSON exports |
+| `convert_to_arrow.py` | Convert service JSON, benchmarks, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch indexes; validate name counts/datasets and write checksum-bound collection manifests |
+| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on a giant Arrow block and write preservation metrics, plots, and tables. Runs the native subblocker that `Clusterer.predict_from_arrow` uses, with the packaged ORCID prefix counts. |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 
-### Testing
+### Evaluation and verification
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate production models (SPECTER1 vs SPECTER2) on full, inventors_s2and, or mini datasets; non-training evals use Arrow automatically when complete Arrow artifacts exist |
+| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on the full (default) or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Owner-only: non-training evaluation needs the internal pre-cut `pairwise/arrow/release` root and scores the bundle's inner test blocks. Public outer-test evaluation is `release_pairwise.py evaluate-heldout` ([reproduction](../docs/reproduce.md) step 4). Non-training evaluation rejects `--seed` and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
+| `eps_sweep/sweep_eps_on_linking_gold.py` | Giant-block release EPS curves with hidden-ORCID identity B3 or safe-action diagnostics; reuse native distances and linkage trees |
+| `eps_sweep/build_linking_eps_gold.py` | Expand active dev candidate labels into diagnostic pairs; exclude test queries and initial-query origins |
+| `eps_sweep/plot_b3_eps_sweeps.py` | Plot completed giant-block B3 curves for manual EPS review |
+| `eps_sweep/plot_q_class_eps_sweeps.py` | Plot the original recall/separation diagnostic for manual EPS review |
+| `eps_sweep/apply_reviewed_eps.py` | Apply the explicit reviewed EPS to a fresh complete model and preserve all trained weights |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
-| `verification/compare_full_predict_arrow_parity.py` | Build a bounded Arrow parity artifact, including current raw-planner batch-index sidecars, and compare incumbent full predict against direct Arrow/Rust full predict |
-| `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |
+| `verification/verify_production_model_distributions.py` | Verify wheel/sdist bytes, require canonical tuple/ORCID assets and an exact `s2and` package inventory, and reject packaged default/model paths |
+| `verification/smoke_installed_incremental_arrow.py` | Installed-wheel synthetic canonical Arrow/linker smoke; the release runbook additionally requires one smoke with the real v1.3 bundle |
+| `verification/evaluate_incremental_gold.py` | Freeze bounded gold identity cases before scores; test positive and author-absent profiles through the complete model's public Arrow API |
+| `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
+| `verification/profile_promoted_incremental_arrow.py` | Produce the release performance report from a bounded promoted incremental Arrow workload |
+| `verification/compare_graph_subblocking_arrow_quality.py` | Produce the release subblocking-quality report by comparing Python and Rust graph subblocking on the frozen Arrow and component inputs |
+| `verification/smoke_installed_rust_api.py` | CI smoke that checks the installed `s2and-rust` extension exposes the expected API |
+| `verification/verify_rust_distribution_licenses.py` | Release CI check that Rust wheels and source distributions keep their license notices |
 
 ### CI & release
 
 | Script | What it does |
 |---|---|
-| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync check, lint job, `py-only` + `rust-enabled` matrix lanes, Rust parity tests, ty, pytest |
-| `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
+| `run_ci_locally.py` | Shared hosted/local CI policy. With no argument it runs both jobs; pass `lint` or `typecheck-and-test` to run one job. |
+| `sync_version.py` | Sync `VERSION` into Python/Rust manifests and lockfiles |
+| `run_bounded.py` | Run one long model job with RAM, deadline, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
+| `sync_feature_schema.py` | Regenerate the Rust feature-column constants from `s2and/feature_schema.py`; CI runs it with `--check` |
 
-### Archived
+### Retired historical scripts
 
-Scripts in `archive/` are historical and generally not intended to be rerun.
-
-| Script | What it does |
-|---|---|
-| `archive/transfer_experiment_internal.py` | Full-scale transfer experiment with unreleased datasets (supports Rust backend) |
-| `archive/make_augmentation_dataset_a.py` | Create augmentation dataset step 1 (unreleased data) |
-| `archive/make_augmentation_dataset_b.py` | Create augmentation dataset step 2 (unreleased data) |
-| `archive/test_s2aff.py` | Test S2 affiliation matching (internal) |
-| `archive/sota.py` | Historical state-of-the-art results table script from the paper |
-| `archive/make_s2and_mini_dataset.py` | Historical mini-dataset creation utility |
-| `archive/make_s2and_name_tuples.py` | Historical name tuples creation (superseded; don't rerun) |
-| `archive/LLM_based_filtering_of_name_tuples.py` | Historical Gemini-based name-tuple filtering helper (costs money to re-run) |
-| `archive/paper_experiments.sh` | Historical paper-era command set; reproduce from the `s2and_paper` branch instead of current `main` |
-| `archive/find_largest_block.py` | Scan dataset signature files and find the single largest block |
-| `archive/blog_post_eval.py` | Min edit distance numbers for blog post (Python-only legacy) |
-| `archive/claims_cluster_eval.py` | Evaluate on S2 corrections data (Python-only legacy) |
-| `archive/transform_all_datasets.py` | Transform old dataset format to final |
-| `archive/make_claims_dataset.py` | Create S2 corrections evaluation dataset (internal data) |
-| `archive/test_specter2.ipynb` | Historical notebook comparing SPECTER1 and SPECTER2 embeddings |
-
-## Notes
-
-**`transfer_experiment_seed_paper.py`**: Uses `main_data_dir` from `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). For one-shot large runs, leave `--use_cache` off unless you expect to rerun the same workload and reuse cached pair features. With `--use_cache`, S2AND writes the SQLite-backed pair-feature cache, and a loaded pair-feature cache is also kept in process memory, so it can add IO and RAM pressure when the cache will not be reused.
-
-**`production/model/linker_train_calibrate_eval.py`**: Defaults to safe smoke/materialization behavior unless `--run-full` is passed. Full runs can be expensive; use `--limit-rows`, `--tables`, or `--datasets` with `--materialize-only` for bounded checks.
+The `archive/` folder held provenance records for the name-tuple curation, the augmented training data,
+the claims datasets, the mini datasets, and the post-paper SOTA runs.
+Read the records at commit `f31301f`; they do not run against current APIs.

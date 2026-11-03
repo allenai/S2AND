@@ -376,9 +376,7 @@ def test_detect_language_fasttext_with_numpy2(tmp_path, monkeypatch, uppercase):
 
     training = tmp_path / "language.txt"
     training.write_text("__label__en This is a paper about scientific research\n" * 5)
-    model = text_module.fasttext.train_supervised(
-        input=str(training), minCount=1, epoch=1, thread=1, verbose=0
-    )
+    model = text_module.fasttext.train_supervised(input=str(training), minCount=1, epoch=1, thread=1, verbose=0)
     monkeypatch.setattr(text_module, "_get_fasttext_model", lambda: model)
     title = "This is a paper about scientific research and experimental methods"
     if uppercase:

@@ -363,12 +363,13 @@ def detect_language(text: str):
         return (False, False, "un")
     ft_model = _get_fasttext_model()
     if ft_model is not None:
+        # fastText's scalar path uses np.array(copy=False), incompatible with NumPy 2.
         if sum(isuppers) / len(isuppers) > 0.9:
-            fasttext_pred = ft_model.predict(text.lower().replace("\n", " "))
-            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+            fasttext_pred = ft_model.predict([text.lower().replace("\n", " ")])
+            predicted_language_ft = fasttext_pred[0][0][0].split("__")[-1]
         else:
-            fasttext_pred = ft_model.predict(text.replace("\n", " "))
-            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+            fasttext_pred = ft_model.predict([text.replace("\n", " ")])
+            predicted_language_ft = fasttext_pred[0][0][0].split("__")[-1]
     else:
         predicted_language_ft = "un_ft"
 

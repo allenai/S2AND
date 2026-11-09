@@ -1,53 +1,90 @@
 name: release artifacts (build, test, publish)
 
 on:
+  # A merge to main that changes VERSION releases it; the pypi environment's reviewers still
+  # approve the upload. A manual run builds any branch and publishes only from main.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   validate:
     name: validate exact commit
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
     steps:
       - uses: actions/checkout@v5
-
-      # A pre-release (for example 1.0.0b1) builds and smoke-tests on any branch.
-      # Only main publishes; docs/release.md describes the manual beta upload.
-      - name: Require main for final releases
-        run: |
-          if grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+$' VERSION; then exit 0; fi
-          test "$GITHUB_REF" = "refs/heads/main"
+        with:
+          # The push's previous commit holds the VERSION to compare with.
+          fetch-depth: 0
 
       # PyPI adds new files to an existing release, so reusing a version would mix two builds.
-      # The beta upload in docs/release.md repeats this check.
-      - name: Require an unpublished PyPI version
+      # A push that keeps VERSION, or whose version PyPI already has, releases nothing.
+      # A manual run fails on a published version. The beta upload in docs/release.md repeats this check.
+      - name: Decide whether to release
+        id: decide
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          version="$(cat VERSION)"
+          version="$(tr -d '[:space:]' < VERSION)"
           status="$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/s2and/${version}/json")"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            before=""
+            if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+              before="$(git show "${BEFORE_SHA}:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+            fi
+            if [ "$before" = "$version" ]; then
+              echo "::notice::VERSION is still ${version}; nothing to release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$status" = "200" ]; then
+              echo "::notice::PyPI already has s2and ${version}; nothing to release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           if [ "$status" != "404" ]; then
             echo "::error::PyPI returned HTTP ${status} for s2and ${version}; set a new VERSION first"
             exit 1
           fi
+          echo "Releasing s2and ${version}"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+      # A pre-release (for example 1.0.0b1) builds and smoke-tests on any branch.
+      # Only main publishes; docs/release.md describes the manual beta upload.
+      - name: Require main for final releases
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          if grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+$' VERSION; then exit 0; fi
+          test "$GITHUB_REF" = "refs/heads/main"
 
       - name: Setup uv
+        if: steps.decide.outputs.release == 'true'
         uses: astral-sh/setup-uv@v7
 
       - uses: actions/setup-python@v6
+        if: steps.decide.outputs.release == 'true'
         with:
           python-version: "3.11"
 
       - name: Setup Rust
+        if: steps.decide.outputs.release == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       # The script checks versions, runs Ruff, ty, and the Rust checks, syncs the locked environment, and runs pytest.
       - name: Run the full CI policy
+        if: steps.decide.outputs.release == 'true'
         run: uv run --no-project python scripts/run_ci_locally.py
 
   source-distributions:
     name: source distributions
     runs-on: ubuntu-latest
     needs: [validate]
+    if: needs.validate.outputs.release == 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -93,6 +130,7 @@ jobs:
     name: wheels (windows, py${{ matrix.py }})
     runs-on: windows-latest
     needs: [validate]
+    if: needs.validate.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -140,6 +178,7 @@ jobs:
     name: wheels (macos universal2, py${{ matrix.py }})
     runs-on: macos-latest
     needs: [validate]
+    if: needs.validate.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -193,6 +232,7 @@ jobs:
     name: wheels (linux ${{ matrix.platform.name }})
     runs-on: ubuntu-latest
     needs: [validate]
+    if: needs.validate.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:

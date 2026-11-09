@@ -210,12 +210,13 @@ Run bulk and incremental prediction with the real complete model and combined da
 The workflow's synthetic smoke does not replace this check.
 See [installed release smoke](../scripts/production/README.md#installed-release-smoke).
 
-Publish through `.github/workflows/release-rust.yml` from the reviewed `main` commit.
+Publish through `.github/workflows/release-rust.yml`.
+A push to `main` that changes `VERSION` starts it; a manual dispatch from the reviewed `main` commit does too.
 Its validate job runs `scripts/run_ci_locally.py`, the same checks as pull-request CI.
+A push whose version PyPI already has releases nothing; a manual run fails on that version.
 Verify the workflow commit before approval of its protected PyPI environment.
-The validate job fails when PyPI already has the `s2and` version.
 The workflow publishes one source archive and 15 platform/interpreter wheels.
-Do not dispatch publication before model and data acceptance are complete.
+Hold that approval until model and data acceptance are complete.
 
 ### Beta pre-releases
 

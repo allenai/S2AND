@@ -258,8 +258,8 @@ anchor's cluster, and within its subblock it can still join any other cluster.
 
 ### Name-conflict repair
 
-One mention with a wrong or misparsed name can keep a person's cluster away from
-the rest of their work, because the name rules forbid every pair it is in.
+One or two mentions with a wrong or misparsed name can keep a person's cluster away from
+the rest of their work, because the name rules forbid every pair they are in.
 Name-conflict repair handles this case. It is on by default, with
 `Clusterer.name_conflict_repair_max_distance` set to `0.2`. Set it to `None` to turn
 the repair off.
@@ -277,13 +277,13 @@ join them there. An EPS sweep that cuts cached linkage trees skips the repair.
 
 After a block or subblock is clustered, two clusters merge when all of these hold:
 
-- One mention takes part in every forbidden pair between the two clusters.
-- Without that mention, each cluster has at least five mentions and a full first name.
-- Without that mention, the average model distance between the clusters is below the value given.
+- At most two mentions take part in every forbidden pair between the two clusters. These are the odd mentions.
+- Without them, each cluster has at least five mentions and a full first name.
+- Without them, the average model distance between the clusters is below the value given.
 - The clusters do not carry different majority ORCIDs.
 - No pair across the clusters is a seed disallow or a profile exclusion.
 
-The odd mention stays in the merged cluster. A cluster takes part in at most one
+The odd mentions stay in the merged cluster. A cluster takes part in at most one
 merge per block. The repair keeps a one-byte-per-pair copy of each block's
 distances while the block clusters, about one eighth of the matrix.
 

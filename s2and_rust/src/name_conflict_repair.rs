@@ -69,11 +69,78 @@ fn pair_code(codes: &[u8], n: usize, i: usize, j: usize) -> u8 {
     codes[row_start(n, low) + high - low - 1]
 }
 
-/// Cluster pairs that one odd mention keeps apart.
+/// A cluster pair, the odd mentions between them, and the sum of codes without those mentions.
+type Candidate = (usize, usize, Vec<usize>, u64);
+
+/// Smallest sets of at most `max_odd` mentions that take part in every impossible pair.
 ///
-/// Returns `(a, b, odd, code_sum)`: every impossible pair between clusters
-/// `a` and `b` holds mention `odd` of `a`, and `code_sum` is the sum of codes
-/// between `a` without `odd` and `b`.
+/// `conflicting_a` and `conflicting_b` hold the mentions of each cluster that have an
+/// impossible pair with the other cluster. Returns every such set of the smallest size.
+fn odd_mention_sets(
+    codes: &[u8],
+    n: usize,
+    conflicting_a: &[usize],
+    conflicting_b: &[usize],
+    max_odd: usize,
+) -> Vec<Vec<usize>> {
+    let mut sets = Vec::new();
+    // The only conflicting mention of a cluster is in every impossible pair.
+    if let [only] = conflicting_a {
+        sets.push(vec![*only]);
+    }
+    if let [only] = conflicting_b {
+        sets.push(vec![*only]);
+    }
+    if !sets.is_empty() || max_odd < 2 {
+        return sets;
+    }
+    if conflicting_a.len() == 2 {
+        sets.push(conflicting_a.to_vec());
+    }
+    if conflicting_b.len() == 2 {
+        sets.push(conflicting_b.to_vec());
+    }
+    // One mention from each cluster: every other conflicting mention of the first
+    // cluster must conflict with that one mention of the second cluster only.
+    let partners: Vec<(usize, usize)> = conflicting_a
+        .iter()
+        .map(|&mention| {
+            let mut count = 0;
+            let mut last = usize::MAX;
+            for &other in conflicting_b {
+                if pair_code(codes, n, mention, other) == HARD {
+                    count += 1;
+                    last = other;
+                }
+            }
+            (count, last)
+        })
+        .collect();
+    let several = partners.iter().filter(|(count, _)| *count > 1).count();
+    for (position, &mention) in conflicting_a.iter().enumerate() {
+        if several > usize::from(partners[position].0 > 1) {
+            continue;
+        }
+        let mut others = partners
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != position)
+            .map(|(_, (_, partner))| *partner);
+        let Some(partner) = others.next() else {
+            continue;
+        };
+        if others.all(|other| other == partner) {
+            sets.push(vec![mention, partner]);
+        }
+    }
+    sets
+}
+
+/// Cluster pairs that at most `max_odd` odd mentions keep apart.
+///
+/// Returns `(a, b, odd, code_sum)` with `a < b`: every impossible pair between
+/// clusters `a` and `b` holds a mention of `odd`, and `code_sum` is the sum of
+/// codes between the two clusters without those mentions.
 ///
 /// One front-to-back pass over the matrix collects, per cluster pair, the sum
 /// of codes and the count of impossible pairs, and per mention and cluster,
@@ -86,7 +153,8 @@ fn find_candidates(
     cluster_count: usize,
     min_side: usize,
     max_mean_code: f64,
-) -> Vec<(usize, usize, usize, u64)> {
+    max_odd: usize,
+) -> Vec<Candidate> {
     let n = cluster.len();
     let k = cluster_count;
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); k];
@@ -141,37 +209,55 @@ fn find_candidates(
         }
     }
 
-    let has_conflict = |mention: usize, other: usize| {
-        (conflicts[other * words + mention / 64] >> (mention % 64)) & 1 == 1
+    let conflicting = |own: usize, other: usize| -> Vec<usize> {
+        members[own]
+            .iter()
+            .copied()
+            .filter(|&mention| (conflicts[other * words + mention / 64] >> (mention % 64)) & 1 == 1)
+            .collect()
     };
     let mut found = Vec::new();
-    for first in 0..k {
-        for second in first + 1..k {
-            let index = pair_index(first, second);
-            if hard_counts[index] == 0 {
+    for a in 0..k {
+        for b in a + 1..k {
+            let index = pair_index(a, b);
+            let hard = hard_counts[index] as usize;
+            let (size_a, size_b) = (members[a].len(), members[b].len());
+            // One mention covers at most as many impossible pairs as the other cluster has mentions.
+            if hard == 0 || hard > max_odd * size_a.max(size_b) {
                 continue;
             }
-            // The odd mention may sit on either side.
-            for (a, b) in [(first, second), (second, first)] {
-                if members[a].len() - 1 < min_side || members[b].len() < min_side {
+            if size_a < min_side || size_b < min_side || size_a + size_b <= 2 * min_side {
+                continue;
+            }
+            let (conflicting_a, conflicting_b) = (conflicting(a, b), conflicting(b, a));
+            for odd in odd_mention_sets(codes, n, &conflicting_a, &conflicting_b, max_odd) {
+                let odd_in_a = odd.iter().filter(|&&m| cluster[m] as usize == a).count();
+                let odd_in_b = odd.len() - odd_in_a;
+                if size_a - odd_in_a < min_side || size_b - odd_in_b < min_side {
                     continue;
                 }
-                // One mention covers at most as many impossible pairs as the other cluster has mentions.
-                if hard_counts[index] as usize > members[b].len() {
-                    continue;
-                }
-                let mut conflicting = members[a]
+                let mut removed: u64 = odd
                     .iter()
-                    .filter(|&&mention| has_conflict(mention, b));
-                let (Some(&odd), None) = (conflicting.next(), conflicting.next()) else {
-                    continue;
-                };
-                let odd_line: u64 = members[b]
-                    .iter()
-                    .map(|&other| pair_code(codes, n, odd, other) as u64)
+                    .map(|&mention| {
+                        let across = if cluster[mention] as usize == a {
+                            &members[b]
+                        } else {
+                            &members[a]
+                        };
+                        across
+                            .iter()
+                            .map(|&other| pair_code(codes, n, mention, other) as u64)
+                            .sum::<u64>()
+                    })
                     .sum();
-                let code_sum = code_sums[index] - odd_line;
-                let rest = ((members[a].len() - 1) * members[b].len()) as f64;
+                // The pair of two odd mentions from different clusters was counted twice.
+                if let [first, second] = odd[..] {
+                    if cluster[first] != cluster[second] {
+                        removed -= pair_code(codes, n, first, second) as u64;
+                    }
+                }
+                let code_sum = code_sums[index] - removed;
+                let rest = ((size_a - odd_in_a) * (size_b - odd_in_b)) as f64;
                 if (code_sum as f64) < max_mean_code * rest {
                     found.push((a, b, odd, code_sum));
                 }
@@ -182,13 +268,14 @@ fn find_candidates(
     found
 }
 
-/// Find cluster pairs that one odd mention keeps apart.
+/// Find cluster pairs that at most `max_odd` (1 or 2) odd mentions keep apart.
 ///
 /// `cluster` holds each mention's cluster index in `0..cluster_count`, or -1
 /// for a mention outside every eligible cluster. Each result is
-/// `(a, b, odd, code_sum)`: mention `odd` of cluster `a` is in every impossible
-/// pair between `a` and `b`, both clusters keep `min_side` mentions without
-/// it, and the mean code between them without it is below `max_mean_code`.
+/// `(a, b, odd, code_sum)` with `a < b`: every impossible pair between `a` and
+/// `b` holds a mention of `odd`, both clusters keep `min_side` mentions without
+/// them, and the mean code between the clusters without them is below
+/// `max_mean_code`. No smaller set of mentions is in every impossible pair.
 #[pyfunction]
 pub(crate) fn name_conflict_candidates<'py>(
     py: Python<'py>,
@@ -197,7 +284,8 @@ pub(crate) fn name_conflict_candidates<'py>(
     cluster_count: usize,
     min_side: usize,
     max_mean_code: f64,
-) -> PyResult<Vec<(usize, usize, usize, u64)>> {
+    max_odd: usize,
+) -> PyResult<Vec<Candidate>> {
     let codes = codes.as_slice()?;
     let cluster = cluster.as_slice()?;
     let n = cluster.len();
@@ -211,11 +299,19 @@ pub(crate) fn name_conflict_candidates<'py>(
             "cluster holds an index outside cluster_count",
         ));
     }
-    Ok(
-        py.allow_threads(|| {
-            find_candidates(codes, cluster, cluster_count, min_side, max_mean_code)
-        }),
-    )
+    if !(1..=2).contains(&max_odd) {
+        return Err(PyValueError::new_err("max_odd must be 1 or 2"));
+    }
+    Ok(py.allow_threads(|| {
+        find_candidates(
+            codes,
+            cluster,
+            cluster_count,
+            min_side,
+            max_mean_code,
+            max_odd,
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -242,41 +338,63 @@ mod tests {
         assert!(!quantize(&[0.2, 1.0], &mut codes));
     }
 
-    #[test]
-    fn finds_the_odd_mention_on_either_side() {
-        // Mentions 0..6 are cluster 0, 6..11 are cluster 1. Mention 5 conflicts with all of cluster 1.
-        let cluster: Vec<i64> = (0..11).map(|i| if i < 6 { 0 } else { 1 }).collect();
-        let codes = condensed(11, |i, j| {
-            if (i < 6) == (j < 6) {
+    /// Mentions 0..7 are cluster 0 and 7..14 are cluster 1; `hard` marks impossible pairs.
+    fn two_clusters(hard: impl Fn(usize, usize) -> bool) -> (Vec<u8>, Vec<i64>) {
+        let cluster: Vec<i64> = (0..14).map(|i| if i < 7 { 0 } else { 1 }).collect();
+        let codes = condensed(14, |i, j| {
+            if (i < 7) == (j < 7) {
                 10
-            } else if i == 5 {
+            } else if hard(i, j) {
                 HARD
             } else {
                 20
             }
         });
+        (codes, cluster)
+    }
+
+    #[test]
+    fn finds_one_odd_mention_in_either_cluster() {
+        let (codes, cluster) = two_clusters(|i, _| i == 6);
         assert_eq!(
-            find_candidates(&codes, &cluster, 2, 5, 60.0),
-            vec![(0, 1, 5, 20 * 25)]
+            find_candidates(&codes, &cluster, 2, 5, 60.0, 2),
+            vec![(0, 1, vec![6], 20 * 6 * 7)]
         );
         // The same block with the cluster indexes swapped.
         let swapped: Vec<i64> = cluster.iter().map(|label| 1 - label).collect();
         assert_eq!(
-            find_candidates(&codes, &swapped, 2, 5, 60.0),
-            vec![(1, 0, 5, 20 * 25)]
+            find_candidates(&codes, &swapped, 2, 5, 60.0, 2),
+            vec![(0, 1, vec![6], 20 * 6 * 7)]
         );
-        // A second conflicting mention, a higher mean, or too few mentions: no candidate.
-        let two = condensed(11, |i, j| {
-            if (i < 6) == (j < 6) {
-                10
-            } else if i == 5 || (i == 0 && j == 7) {
-                HARD
-            } else {
-                20
-            }
-        });
-        assert!(find_candidates(&two, &cluster, 2, 5, 60.0).is_empty());
-        assert!(find_candidates(&codes, &cluster, 2, 5, 20.0).is_empty());
-        assert!(find_candidates(&codes, &cluster, 2, 6, 60.0).is_empty());
+        // A higher mean or too few mentions: no candidate.
+        assert!(find_candidates(&codes, &cluster, 2, 5, 20.0, 2).is_empty());
+        assert!(find_candidates(&codes, &cluster, 2, 7, 60.0, 2).is_empty());
+    }
+
+    #[test]
+    fn finds_two_odd_mentions_only_when_allowed() {
+        // Both in one cluster.
+        let (codes, cluster) = two_clusters(|i, _| i == 5 || i == 6);
+        assert!(find_candidates(&codes, &cluster, 2, 5, 60.0, 1).is_empty());
+        assert_eq!(
+            find_candidates(&codes, &cluster, 2, 5, 60.0, 2),
+            vec![(0, 1, vec![5, 6], 20 * 5 * 7)]
+        );
+        // One in each cluster: mention 6 against all of cluster 1, mention 7 against all of cluster 0.
+        let (codes, cluster) = two_clusters(|i, j| i == 6 || j == 7);
+        assert_eq!(
+            find_candidates(&codes, &cluster, 2, 5, 60.0, 2),
+            vec![(0, 1, vec![6, 7], 20 * 6 * 6)]
+        );
+        // Two separate impossible pairs: one mention from each pair works.
+        let (codes, cluster) = two_clusters(|i, j| (i, j) == (5, 8) || (i, j) == (6, 9));
+        let odd: Vec<Vec<usize>> = find_candidates(&codes, &cluster, 2, 5, 60.0, 2)
+            .into_iter()
+            .map(|(_, _, odd, _)| odd)
+            .collect();
+        assert_eq!(odd, vec![vec![5, 6], vec![5, 9], vec![6, 8], vec![8, 9]]);
+        // Three mentions behind the impossible pairs: no candidate.
+        let (codes, cluster) = two_clusters(|i, _| i >= 4);
+        assert!(find_candidates(&codes, &cluster, 2, 4, 60.0, 2).is_empty());
     }
 }

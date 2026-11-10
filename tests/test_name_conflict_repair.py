@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -129,15 +130,37 @@ def test_quantize_returns_none_without_impossible_pairs() -> None:
     assert codes.tolist() == [0, 127, 254, 255]
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_repair_accepts_two_odd_mentions_but_not_three() -> None:
+    # Seven and seven mentions of one person, close to each other.
+    signatures = [f"a{i}" for i in range(7)] + [f"b{i}" for i in range(7)]
+    labels = [0] * 7 + [1] * 7
+    repair = NameConflictRepair(0.2, frozenset(signatures))
+
+    def run(impossible: list[tuple[int, int]]) -> list[int]:
+        square = np.full((14, 14), 0.1)
+        for i, j in impossible:
+            square[i, j] = square[j, i] = LARGE_DISTANCE
+        np.fill_diagonal(square, 0.0)
+        codes = quantize_distances(squareform(square))
+        assert codes is not None
+        return [int(x) for x in repair_name_conflicts_in_block(signatures, labels, codes, repair)]
+
+    merged = [0] * 14
+    # Two odd mentions in one cluster, then one in each cluster.
+    assert run([(i, j) for i in (5, 6) for j in range(7, 14)]) == merged
+    assert run([(6, j) for j in range(7, 14)] + [(i, 7) for i in range(7)]) == merged
+    assert run([(i, j) for i in (4, 5, 6) for j in range(7, 14)]) == labels
+
+
+@pytest.mark.parametrize("seed", range(8))
 def test_repair_matches_a_direct_search(seed: int) -> None:
     # Random clusters and impossible pairs, checked against a plain search over cluster pairs.
     rng = np.random.default_rng(seed)
-    n = 60
+    n = 72
     labels = rng.integers(0, 6, size=n)
     square = rng.uniform(0.0, 0.3, size=(n, n))
     square = (square + square.T) / 2
-    for odd in rng.choice(n, size=4, replace=False):
+    for odd in rng.choice(n, size=6, replace=False):
         other = rng.choice([c for c in range(6) if c != labels[odd]])
         for j in np.flatnonzero(labels == other):
             square[odd, j] = square[j, odd] = LARGE_DISTANCE
@@ -150,17 +173,24 @@ def test_repair_matches_a_direct_search(seed: int) -> None:
     expected: list[tuple[float, int, int]] = []
     hard = square >= LARGE_DISTANCE
     for a in range(6):
-        for b in range(6):
+        for b in range(a + 1, 6):
             members_a, members_b = np.flatnonzero(labels == a), np.flatnonzero(labels == b)
-            block = hard[np.ix_(members_a, members_b)]
-            if a == b or not block.any() or block.any(axis=1).sum() != 1:
+            edges = [(i, j) for i in members_a for j in members_b if hard[i, j]]
+            if not edges:
                 continue
-            kept = members_a[~block.any(axis=1)]
-            if len(kept) < 5 or len(members_b) < 5:
-                continue
-            average = (np.floor(square[np.ix_(kept, members_b)] * 254.999).mean() + 0.5) / 254.999
-            if average < 0.2:
-                expected.append((float(average), a, b))
+            nodes = sorted({node for edge in edges for node in edge})
+            # The smallest sets of one or two mentions that are in every impossible pair.
+            covers = [{x} for x in nodes if all(x in edge for edge in edges)]
+            if not covers:
+                covers = [{x, y} for x, y in itertools.combinations(nodes, 2) if all(x in e or y in e for e in edges)]
+            for cover in covers:
+                kept_a = [i for i in members_a if i not in cover]
+                kept_b = [j for j in members_b if j not in cover]
+                if len(kept_a) < 5 or len(kept_b) < 5:
+                    continue
+                average = (np.floor(square[np.ix_(kept_a, kept_b)] * 254.999).mean() + 0.5) / 254.999
+                if average < 0.2:
+                    expected.append((float(average), a, b))
     want = labels.copy()
     used: set[int] = set()
     for _average, a, b in sorted(expected):

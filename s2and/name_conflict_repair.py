@@ -1,4 +1,4 @@
-"""Name-conflict repair: merge two clusters that one odd mention keeps apart.
+"""Name-conflict repair: merge two clusters that one or two odd mentions keep apart.
 
 The name rules mark a pair of mentions as impossible when their names conflict,
 and average linkage never merges two clusters across such a pair. One mention
@@ -7,16 +7,18 @@ cluster away from the rest of the person's work.
 
 After a block is clustered, this module merges two clusters when all of these hold:
 
-- one mention takes part in every impossible pair between the two clusters;
-- without that mention, each cluster keeps at least ``MIN_SIDE`` mentions;
-- without that mention, each cluster has a mention with a full first name;
-- the average model distance between the clusters, without that mention, is
-  below ``max_average_distance``;
+- at most ``MAX_ODD_MENTIONS`` mentions take part in every impossible pair between
+  the two clusters; these are the odd mentions;
+- without them, each cluster keeps at least ``MIN_SIDE`` mentions;
+- without them, each cluster has a mention with a full first name;
+- the average model distance between the clusters, without them, is below
+  ``max_average_distance``;
 - the two clusters do not carry different majority ORCIDs;
 - no pair across the two clusters is a seed disallow or a profile exclusion.
 
-The odd mention stays in the merged cluster. Blind judging of 28 such merges on
-seven large blocks found it belonged to the merged person in most of them.
+The odd mentions stay in the merged cluster. Blind judging on seven large blocks
+called all 28 sampled merges with one odd mention and all 13 with two correct, and
+found most odd mentions belonged to the merged person.
 
 ``Clusterer.name_conflict_repair_max_distance`` sets the distance for every route
 that clusters blocks; ``None`` turns the repair off.
@@ -42,7 +44,8 @@ logger = logging.getLogger("s2and")
 # Blind judging found 28 of 28 merges below this average distance correct.
 DEFAULT_MAX_AVERAGE_DISTANCE = 0.2
 MIN_SIDE = 5
-# A block needs two sides and the odd mention.
+MAX_ODD_MENTIONS = 2
+# A block needs two sides and an odd mention.
 MIN_BLOCK_SIZE = 2 * MIN_SIDE + 1
 # A code is the distance times the scale, rounded down: [0, 1] maps to 0..254,
 # and 255 marks an impossible pair. The Rust kernels use the same scale.
@@ -101,7 +104,7 @@ def repair_name_conflicts_in_block(
     forbidden: Mapping[str, Set[str]] | None = None,
     block_key: str = "",
 ) -> np.ndarray | Sequence[int]:
-    """Merge cluster pairs that one odd mention keeps apart.
+    """Merge cluster pairs that one or two odd mentions keep apart.
 
     Args:
         block_signatures: Signature ids in matrix order.
@@ -127,34 +130,37 @@ def repair_name_conflicts_in_block(
     # The kernel applies the size and distance tests; the bound it gets is
     # half a code step loose, and the exact test follows below.
     candidates = load_s2and_rust_extension().name_conflict_candidates(
-        codes, cluster, len(big), MIN_SIDE, repair.max_average_distance * _SCALE
+        codes, cluster, len(big), MIN_SIDE, repair.max_average_distance * _SCALE, MAX_ODD_MENTIONS
     )
     if not candidates:
         return labels
 
     members = {index: np.flatnonzero(cluster == index) for index in {c for a, b, _, _ in candidates for c in (a, b)}}
     full_names = repair.full_first_names
-    accepted: list[tuple[float, int, int, int]] = []
+    accepted: list[tuple[float, int, int, list[int]]] = []
     for a, b, odd, code_sum in candidates:
+        odd_ids = {block_signatures[m] for m in odd}
+        all_a = [block_signatures[m] for m in members[a]]
+        all_b = [block_signatures[m] for m in members[b]]
+        ids_a = [s for s in all_a if s not in odd_ids]
+        ids_b = [s for s in all_b if s not in odd_ids]
         # Codes round down, so half a step is added back.
-        average = (code_sum / ((len(members[a]) - 1) * len(members[b])) + 0.5) / _SCALE
+        average = (code_sum / (len(ids_a) * len(ids_b)) + 0.5) / _SCALE
         if average >= repair.max_average_distance:
             continue
-        odd_id = block_signatures[odd]
-        ids_a = [block_signatures[m] for m in members[a]]
-        ids_b = [block_signatures[m] for m in members[b]]
-        if not any(s in full_names for s in ids_a if s != odd_id) or not any(s in full_names for s in ids_b):
+        if not any(s in full_names for s in ids_a) or not any(s in full_names for s in ids_b):
             continue
         if repair.orcids:
-            orcid_a = _majority_orcid([s for s in ids_a if s != odd_id], repair.orcids)
+            orcid_a = _majority_orcid(ids_a, repair.orcids)
             orcid_b = _majority_orcid(ids_b, repair.orcids)
             if orcid_a is not None and orcid_b is not None and orcid_a != orcid_b:
                 continue
         if forbidden:
-            set_a, set_b = set(ids_a), set(ids_b)
-            if any(not set_b.isdisjoint(forbidden.get(s, ())) for s in ids_a):
+            # The odd mentions stay in the merged cluster, so their forbidden pairs count too.
+            set_a, set_b = set(all_a), set(all_b)
+            if any(not set_b.isdisjoint(forbidden.get(s, ())) for s in all_a):
                 continue
-            if any(not set_a.isdisjoint(forbidden.get(s, ())) for s in ids_b):
+            if any(not set_a.isdisjoint(forbidden.get(s, ())) for s in all_b):
                 continue
         accepted.append((average, a, b, odd))
     if not accepted:
@@ -171,11 +177,11 @@ def repair_name_conflicts_in_block(
         merged[members[b]] = unique[big[a]]
         logger.info(
             "Name-conflict repair: block %s merges clusters of %d and %d mentions, "
-            "average distance %.3f, odd mention %s",
+            "average distance %.3f, odd mentions %s",
             block_key,
             int(sizes[big[a]]),
             int(sizes[big[b]]),
             average,
-            block_signatures[odd],
+            ", ".join(block_signatures[m] for m in odd),
         )
     return merged

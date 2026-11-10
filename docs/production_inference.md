@@ -210,6 +210,43 @@ the clusters of an earlier run. For a runnable example on released data, the
 seeds profiles from one block's labeled signatures on papers before a chosen year
 and links the block's other signatures; see the [README quick start](../README.md#quick-start).
 
+### Profile exclusions
+
+A disallow pair is a hard negative in average linkage. When the excluded paper
+sits inside the body of work of the person who excluded it, that one pair blocks
+the placed papers from merging with the rest of the person's work, and the
+profile keeps only its placed papers.
+
+For "this paper must not be on this claimed profile", pass profile exclusions
+instead of disallow pairs on full-block prediction:
+
+```python
+clusters, _ = clusterer.predict_from_arrow(
+    block_dict,
+    arrow_dataset,
+    cluster_seeds_require=read_cluster_seeds_arrow(seeds_path),
+    profile_exclusions=read_profile_exclusions_arrow(exclusions_path),
+    name_tuples=None,
+)
+```
+
+Each row is `(anchor_signature_id, excluded_signature_id)`. The anchor is any one
+signature the user placed on the profile. S2AND clusters the block, evicts each
+excluded signature found in its anchor's cluster, and clusters again with that
+signature barred from the profile. The excluded signature never ends in its
+anchor's cluster, and it can still join any other cluster.
+
+- The Arrow table is `profile_exclusions.arrow` with string columns
+  `anchor_signature_id` and `excluded_signature_id`. It is optional.
+- `Clusterer.predict` takes the same `profile_exclusions` argument.
+- `convert_to_arrow.py service-json` reads a top-level `profile_exclusions` key:
+  a list of `[anchor, excluded]` pairs, or an object from anchor to excluded IDs.
+- A row that excludes a signature required together with its anchor raises `ValueError`.
+- `cluster_seeds_disallow` keeps its meaning. Incremental prediction does not take
+  profile exclusions; send its exclusions as disallow pairs, as before.
+- Eviction honors exclusions. It does not remove another person's papers that
+  the user did not exclude.
+
 ### Reunite-only memory and time
 
 Each pass of the [reunite-only step](subblocking.md#reunite-only-step) attaches

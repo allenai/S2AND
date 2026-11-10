@@ -2,6 +2,11 @@
 
 ## Unreleased runtime changes
 
+- Add profile exclusions to full-block prediction (`predict_from_arrow` and `predict`): the optional
+  `profile_exclusions.arrow` table and `profile_exclusions` argument. An excluded signature is evicted from
+  its anchor's cluster instead of vetoing that cluster's merges, which had left claimed profiles with only
+  their placed papers. Disallow pairs and incremental prediction are unchanged.
+  See "Profile exclusions" in `docs/production_inference.md`.
 - Bundle the native extension in the `s2and` wheel as `s2and._s2and_rust`.
   Installs upgraded from the split `1.0.0b5` packages can uninstall `s2and-rust`; nothing imports it.
 - Retire `Clusterer.predict_incremental` and classic `predict(batching_threshold=...)`.

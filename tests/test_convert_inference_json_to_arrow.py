@@ -180,6 +180,53 @@ def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
     assert not (_manifest_path(manifest, dataset_dir, "signatures").parent / "signatures.json").exists()
 
 
+def _three_signature_payload() -> dict[str, Any]:
+    payload = _minimal_service_payload()
+    first_signature = payload["signatures"][0]
+    first_paper = payload["papers"][0]
+    payload["signatures"] = [
+        first_signature,
+        {**first_signature, "signature_id": "s2", "paper_id": 2},
+        {**first_signature, "signature_id": "q", "paper_id": 3},
+    ]
+    payload["papers"] = [first_paper, {**first_paper, "paper_id": 2}, {**first_paper, "paper_id": 3}]
+    payload["cluster_seeds"] = {"s1": {"s2": "require"}}
+    return payload
+
+
+@pytest.mark.parametrize("profile_exclusions", [[["s1", "q"]], {"s1": ["q"]}])
+def test_convert_service_json_to_arrow_writes_profile_exclusions(tmp_path: Path, profile_exclusions: Any) -> None:
+    payload = _three_signature_payload()
+    payload["profile_exclusions"] = profile_exclusions
+
+    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
+
+    rows = _read_table(str(_manifest_path(manifest, dataset_dir, "profile_exclusions"))).to_pydict()
+    assert rows == {"anchor_signature_id": ["s1"], "excluded_signature_id": ["q"]}
+    assert manifest["validation"]["profile_exclusion_count"] == 1
+
+
+def test_convert_service_json_to_arrow_omits_profile_exclusions_when_absent(tmp_path: Path) -> None:
+    manifest, dataset_dir = _convert_service_payload(tmp_path, _three_signature_payload())
+
+    assert "profile_exclusions" not in manifest["paths"]
+    assert not (dataset_dir / "profile_exclusions.arrow").exists()
+
+
+@pytest.mark.parametrize(
+    ("profile_exclusions", "message"),
+    [([["s1", "missing"]], "unknown signature ids"), ([["s1", "s2"]], "contradicts a placement")],
+)
+def test_convert_service_json_to_arrow_rejects_bad_profile_exclusions(
+    tmp_path: Path, profile_exclusions: Any, message: str
+) -> None:
+    payload = _three_signature_payload()
+    payload["profile_exclusions"] = profile_exclusions
+
+    with pytest.raises(ValueError, match=message):
+        _convert_service_payload(tmp_path, payload)
+
+
 def test_convert_service_json_to_arrow_falls_back_from_explicit_null_paper_embeddings(tmp_path: Path) -> None:
     payload = _minimal_service_payload()
     payload["paper_embeddings"] = None

@@ -73,6 +73,12 @@ from s2and.model_pairwise import (
 )
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.prediction_state import PredictionState
+from s2and.profile_exclusions import (
+    enforce_profile_exclusions_in_block,
+    evict_profile_exclusion_violations,
+    normalize_profile_exclusions,
+    validate_profile_exclusions,
+)
 from s2and.runtime import (
     RuntimeContext,
     build_runtime_context,
@@ -709,6 +715,13 @@ def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -
     if set(map(type, cluster_seeds_require)) <= {str} and set(map(type, cluster_seeds_require.values())) <= {str}:
         return dict(cluster_seeds_require)
     return {str(signature_id): str(cluster_id) for signature_id, cluster_id in cluster_seeds_require.items()}
+
+
+def _profile_exclusion_kwargs(prediction_state: PredictionState | None) -> dict[str, Any]:
+    """Return the clustering keyword for profile exclusions, empty when there are none."""
+    if prediction_state is None or not prediction_state.profile_exclusions:
+        return {}
+    return {"profile_exclusions": prediction_state.profile_exclusions}
 
 
 def _prediction_state_from_dataset(dataset: ANDData) -> PredictionState:
@@ -1928,6 +1941,7 @@ class Clusterer:
             block_key=block_key,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
+            **_profile_exclusion_kwargs(prediction_state),
         )
         for signature, label in zip(block_dict[block_key], labels, strict=True):
             pred_clusters[block_key + "_" + str(label)].append(signature)
@@ -3160,6 +3174,7 @@ class Clusterer:
                     disallow_adjacency,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    **_profile_exclusion_kwargs(prediction_state),
                 )
                 return labels, time.perf_counter() - start
 
@@ -3857,6 +3872,7 @@ class Clusterer:
         cluster_seeds_require: Mapping[Any, Any] | None = None,
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
         altered_cluster_signatures: Sequence[Any] | None = None,
+        profile_exclusions: Iterable[tuple[Any, Any]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict blocks through one open Arrow dataset.
 
@@ -3872,13 +3888,26 @@ class Clusterer:
             altered_cluster_signatures: Accepted but ignored in bulk prediction.
                 Temporary altered-profile splits apply only to incremental linking;
                 bulk prediction uses the supplied required seed groups unchanged.
+            profile_exclusions: ``(anchor_signature_id, excluded_signature_id)``
+                pairs. The excluded mention never ends in the anchor's cluster;
+                it is evicted from that cluster rather than vetoing its merges.
 
         Returns:
             Predicted clusters and optional precomputed distance matrices."""
 
         block_dict = {key: [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
         partial_supervision = normalize_partial_supervision(partial_supervision, stringify_ids=True)
-        return Clusterer._predict_from_arrow_request(
+        exclusions = normalize_profile_exclusions(profile_exclusions)
+        prediction_state: PredictionState | None = None
+        if exclusions:
+            if dists is not None:
+                raise ValueError("profile_exclusions cannot be used with precomputed dists")
+            validate_profile_exclusions(
+                exclusions,
+                {} if cluster_seeds_require is None else _normalize_cluster_seeds_require(cluster_seeds_require),
+            )
+            prediction_state = PredictionState(profile_exclusions=exclusions)
+        clusters, matrices = Clusterer._predict_from_arrow_request(
             self,
             block_dict=block_dict,
             arrow_dataset=arrow_dataset,
@@ -3893,7 +3922,13 @@ class Clusterer:
             name_tuples=name_tuples,
             cluster_seeds_require=cluster_seeds_require,
             cluster_seeds_disallow=cluster_seeds_disallow,
+            prediction_state=prediction_state,
         )
+        if not exclusions:
+            return clusters, matrices
+        # Attachment and reunite steps run after block clustering; recheck the rule.
+        clusters, _moved = evict_profile_exclusion_violations(clusters, exclusions)
+        return clusters, matrices
 
     def _predict_from_arrow_request(
         self,
@@ -4427,6 +4462,7 @@ class Clusterer:
         batching_threshold: int | None = None,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
+        profile_exclusions: Iterable[tuple[Any, Any]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """
         Predicts clusters
@@ -4453,6 +4489,9 @@ class Clusterer:
             Optional explicit RAM budget for exact/non-incremental predict paths. When set, predict_helper
             uses it for pair-batch sizing and fails fast before allocating a block distance matrix that
             would exceed the usable budget.
+        profile_exclusions: Iterable[tuple[Any, Any]] | None
+            ``(anchor_signature_id, excluded_signature_id)`` pairs. The excluded mention never ends
+            in the anchor's cluster; it is evicted from that cluster rather than vetoing its merges.
 
         Returns
         -------
@@ -4472,6 +4511,12 @@ class Clusterer:
             raise ValueError("Clusterer.predict operates on ANDData through Python; use predict_from_arrow for Rust")
 
         prediction_state = _prediction_state_from_dataset(dataset)
+        exclusions = normalize_profile_exclusions(profile_exclusions)
+        if exclusions:
+            if dists is not None or use_s2_clusters:
+                raise ValueError("profile_exclusions cannot be used with precomputed dists or use_s2_clusters")
+            validate_profile_exclusions(exclusions, prediction_state.cluster_seeds_require)
+            prediction_state.profile_exclusions = exclusions
 
         # normal mode - everything goes through full block clustering
         logger.info("Running predict on full blocks - no subblocking")
@@ -4495,6 +4540,8 @@ class Clusterer:
         total_predict_time = end - start
         logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
 
+        if exclusions:
+            pred_clusters, _moved = evict_profile_exclusion_violations(pred_clusters, exclusions)
         return dict(pred_clusters), dists
 
     def _cluster_one_block(
@@ -4507,8 +4554,14 @@ class Clusterer:
         *,
         incremental_dont_use_cluster_seeds: bool = False,
         prediction_state: PredictionState | None = None,
+        profile_exclusions: Mapping[str, frozenset[str]] | None = None,
+        block_key: str = "",
     ) -> np.ndarray | list[int]:
-        """Cluster one block from a distance matrix and return labels."""
+        """Cluster one block from a distance matrix and return labels.
+
+        Profile exclusions, when the block holds one of their anchors, evict
+        excluded mentions from the anchor's cluster and relink the block.
+        """
         if len(block_signatures) == 0:
             return []
         if len(block_signatures) == 1:
@@ -4517,17 +4570,39 @@ class Clusterer:
         if dist_matrix is None:
             raise ValueError("Distance matrix is required for blocks with more than one signature.")
 
-        cluster_model = clone_cluster_model(self.cluster_model)
-        params = {k: intify(v) for k, v in (cluster_model_params or {}).items()}
-        cluster_model.set_params(**params)
-        cluster_model.fit(dist_matrix)
-        return self._finish_block_labels(
+        block_signature_set = set(block_signatures) if profile_exclusions else set()
+        block_exclusions = {
+            anchor: excluded for anchor, excluded in (profile_exclusions or {}).items() if anchor in block_signature_set
+        }
+        if block_exclusions and not isinstance(self.cluster_model, FastCluster):
+            raise ValueError("profile exclusions require the FastCluster cluster model")
+        # FastCluster may overwrite its input; keep the model distances for relinking.
+        original_distances = np.array(dist_matrix, dtype=np.float64, copy=True) if block_exclusions else None
+
+        def relabel(matrix: np.ndarray) -> np.ndarray | list[int]:
+            cluster_model = clone_cluster_model(self.cluster_model)
+            params = {k: intify(v) for k, v in (cluster_model_params or {}).items()}
+            cluster_model.set_params(**params)
+            cluster_model.fit(matrix)
+            return self._finish_block_labels(
+                block_signatures,
+                cluster_model.labels_,
+                dataset,
+                disallow_adjacency,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                prediction_state=prediction_state,
+            )
+
+        labels = relabel(dist_matrix)
+        if original_distances is None:
+            return labels
+        return enforce_profile_exclusions_in_block(
             block_signatures,
-            cluster_model.labels_,
-            dataset,
-            disallow_adjacency,
-            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            prediction_state=prediction_state,
+            labels,
+            original_distances,
+            block_exclusions,
+            relabel,
+            block_key=block_key,
         )
 
     def _finish_block_labels(
@@ -4646,6 +4721,7 @@ class Clusterer:
         block_key: str,
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
+        profile_exclusions: Mapping[str, frozenset[str]] | None = None,
     ) -> np.ndarray | list[int]:
         """Cluster one block and emit explicit entry/exit logs around the cluster-model fit."""
         cluster_model_name = type(self.cluster_model).__name__
@@ -4664,6 +4740,8 @@ class Clusterer:
             disallow_adjacency,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
+            profile_exclusions=profile_exclusions,
+            block_key=block_key,
         )
         logger.info(
             "Finished cluster_model.fit for block %s using %s in %.3fs (clusters=%d)",
@@ -4805,6 +4883,7 @@ class Clusterer:
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,
+                    **_profile_exclusion_kwargs(prediction_state),
                 )
                 for signature, label in zip(block_dict[block_key], labels, strict=True):
                     pred_clusters[block_key + "_" + str(label)].append(signature)

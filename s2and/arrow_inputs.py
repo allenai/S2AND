@@ -83,11 +83,13 @@ _REQUIRED_RUNTIME_KEYS = frozenset(
     }
 )
 _NATIVE_HANDLE_KEYS = _REQUIRED_RUNTIME_KEYS | frozenset({"specter", "specter_batch_index"})
-# Path keys that 0.51 read as request inputs, mapped to the prediction argument that replaces each.
+# Request-local path keys, mapped to the prediction argument that carries each.
+# 0.51 read the first three from the path mapping; no version reads profile_exclusions from it.
 _REQUEST_LOCAL_PATH_ARGUMENTS = {
     "cluster_seeds": "cluster_seeds_require (see read_cluster_seeds_arrow)",
     "cluster_seed_disallows": "cluster_seeds_disallow (see read_cluster_seed_disallows_arrow)",
     "altered_cluster_signatures": "altered_cluster_signatures (see read_altered_cluster_signatures_arrow)",
+    "profile_exclusions": "profile_exclusions (see read_profile_exclusions_arrow)",
 }
 
 

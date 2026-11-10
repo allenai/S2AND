@@ -316,6 +316,59 @@ def read_cluster_seed_disallows_arrow(path: Path) -> tuple[tuple[str, str], ...]
     return tuple(rows)
 
 
+def write_profile_exclusions_arrow(path: Path, pairs: Iterable[tuple[Any, Any]]) -> None:
+    """Write the canonical Arrow profile-exclusion table.
+
+    Rows are ``(anchor_signature_id, excluded_signature_id)``, sorted and unique.
+    """
+
+    import pyarrow as pa
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = sorted({(str(anchor), str(excluded)) for anchor, excluded in pairs})
+    table = pa.table(
+        {
+            "anchor_signature_id": arrow_string_array([anchor for anchor, _excluded in rows]),
+            "excluded_signature_id": arrow_string_array([excluded for _anchor, excluded in rows]),
+        }
+    )
+    with pa.OSFile(str(path), "wb") as sink:
+        with pa.ipc.new_file(sink, table.schema) as writer:
+            writer.write_table(table)
+
+
+def read_profile_exclusions_arrow(path: Path) -> tuple[tuple[str, str], ...]:
+    """Read and validate a canonical Arrow profile-exclusion table.
+
+    Raises:
+        ValueError: The table has a null id, a duplicate row, or a row that
+            excludes its own anchor.
+    """
+
+    import pyarrow as pa
+
+    with pa.memory_map(str(path), "r") as source:
+        table = pa.ipc.open_file(source).read_all()
+    validate_arrow_schema(table.schema, table_name="profile_exclusions")
+    rows: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for anchor, excluded in zip(
+        table["anchor_signature_id"].to_pylist(),
+        table["excluded_signature_id"].to_pylist(),
+        strict=True,
+    ):
+        if anchor is None or excluded is None:
+            raise ValueError("profile exclusions Arrow cannot contain null signature ids")
+        if anchor == excluded:
+            raise ValueError(f"profile exclusions Arrow excludes its own anchor: {anchor!r}")
+        row = (str(anchor), str(excluded))
+        if row in seen:
+            raise ValueError(f"profile exclusions Arrow contains duplicate row: {row!r}")
+        seen.add(row)
+        rows.append(row)
+    return tuple(rows)
+
+
 def write_altered_cluster_signatures_arrow(path: Path, signature_ids: Iterable[Any]) -> None:
     """Write the canonical Arrow altered-cluster-signature table."""
 

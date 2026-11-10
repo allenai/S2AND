@@ -17,6 +17,7 @@ from s2and.incremental_linking.feature_block_arrow import (
     read_cluster_seed_disallows_arrow,
     read_cluster_seeds_arrow,
     read_incremental_query_signatures_arrow,
+    read_profile_exclusions_arrow,
     temporary_cluster_seed_sidecars,
     validate_arrow_batch_lookup_index,
     write_altered_cluster_signatures_arrow,
@@ -26,6 +27,7 @@ from s2and.incremental_linking.feature_block_arrow import (
     write_cluster_seeds_arrow,
     write_incremental_query_signatures_arrow,
     write_name_counts_index,
+    write_profile_exclusions_arrow,
     write_raw_arrow_batch_lookup_indexes,
     write_raw_planner_arrow_tables,
 )
@@ -48,6 +50,7 @@ __all__ = [
     "read_cluster_seed_disallows_arrow",
     "read_cluster_seeds_arrow",
     "read_incremental_query_signatures_arrow",
+    "read_profile_exclusions_arrow",
     "temporary_cluster_seed_sidecars",
     "validate_arrow_batch_lookup_index",
     "write_altered_cluster_signatures_arrow",
@@ -57,6 +60,7 @@ __all__ = [
     "write_cluster_seeds_arrow",
     "write_incremental_query_signatures_arrow",
     "write_name_counts_index",
+    "write_profile_exclusions_arrow",
     "write_raw_planner_arrow_tables",
     "write_raw_arrow_batch_lookup_indexes",
 ]

@@ -16,7 +16,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -291,6 +291,36 @@ def _altered_values(payload: Mapping[str, Any]) -> list[str]:
     if isinstance(values, str | bytes) or not isinstance(values, Sequence):
         raise TypeError("altered_cluster_signatures must be a list when present")
     return [str(value) for value in values]
+
+
+def _profile_exclusion_pairs(
+    payload: Mapping[str, Any], signature_ids: Collection[str]
+) -> list[tuple[str, str]] | None:
+    """Return ``(anchor, excluded)`` pairs from the request, or None when the request has none.
+
+    ``profile_exclusions`` is a list of ``[anchor_signature_id, excluded_signature_id]`` pairs,
+    or an object that maps each anchor to its excluded signature ids.
+    """
+    value = payload.get("profile_exclusions")
+    if value is None:
+        return None
+    pairs: list[tuple[str, str]] = []
+    if isinstance(value, Mapping):
+        for anchor, excluded in value.items():
+            if isinstance(excluded, str | bytes) or not isinstance(excluded, Sequence):
+                raise TypeError("profile_exclusions object values must be signature-id lists")
+            pairs.extend((str(anchor), str(signature_id)) for signature_id in excluded)
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        for entry in value:
+            if isinstance(entry, str | bytes) or not isinstance(entry, Sequence) or len(entry) != 2:
+                raise TypeError("profile_exclusions list entries must be [anchor, excluded] pairs")
+            pairs.append((str(entry[0]), str(entry[1])))
+    else:
+        raise TypeError("profile_exclusions must be an object or list")
+    unknown = sorted({signature_id for pair in pairs for signature_id in pair if signature_id not in signature_ids})
+    if unknown:
+        raise ValueError(f"profile_exclusions references unknown signature ids: {unknown[:10]}")
+    return pairs
 
 
 def _require_groups_from_service_payload(value: Any) -> list[list[str]]:
@@ -646,8 +676,10 @@ def convert_service_json_to_arrow(
     from s2and.data import ANDData
     from s2and.incremental_linking.feature_block import (
         write_arrow_ipc_table,
+        write_profile_exclusions_arrow,
         write_raw_arrow_batch_lookup_indexes,
     )
+    from s2and.profile_exclusions import normalize_profile_exclusions, validate_profile_exclusions
     from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     output_dir = output_root / dataset_name
@@ -717,6 +749,15 @@ def convert_service_json_to_arrow(
         table = pa.table({"signature_id": pa.array(altered, type=pa.string())})
         write_arrow_ipc_table(table, altered_arrow_path)
     paths["altered_cluster_signatures"] = str(altered_arrow_path)
+
+    # Written only when the request carries the key, so older requests convert to the same files as before.
+    exclusion_pairs = _profile_exclusion_pairs(payload, dataset.signatures.keys())
+    if exclusion_pairs is not None:
+        validate_profile_exclusions(normalize_profile_exclusions(exclusion_pairs), dataset.cluster_seeds_require)
+        exclusions_arrow_path = output_dir / "profile_exclusions.arrow"
+        if overwrite or not exclusions_arrow_path.exists():
+            write_profile_exclusions_arrow(exclusions_arrow_path, exclusion_pairs)
+        paths["profile_exclusions"] = str(exclusions_arrow_path)
 
     if copy_source_json:
         source_paths = {
@@ -1115,6 +1156,18 @@ def validate_arrow_dataset_manifest(
                 label="altered_cluster_signatures.signature_id",
             )
         metrics["altered_cluster_signature_count"] = int(altered.num_rows)
+
+    exclusions_path = paths.get("profile_exclusions")
+    if exclusions_path is not None and Path(exclusions_path).exists():
+        from s2and.incremental_linking.feature_block import read_profile_exclusions_arrow
+
+        exclusion_rows = read_profile_exclusions_arrow(Path(exclusions_path))
+        _ensure_subset(
+            [signature_id for row in exclusion_rows for signature_id in row],
+            signature_id_set,
+            label="profile_exclusions signature ids",
+        )
+        metrics["profile_exclusion_count"] = len(exclusion_rows)
 
     if require_name_counts_index:
         require_name_counts_index_artifact(

@@ -32,6 +32,10 @@
       {"name": "is_reliable", "datatype": "bool", "required": false},
       {"name": "language_reliability", "datatype": "float64", "required": false}
     ],
+    "profile_exclusions": [
+      {"name": "anchor_signature_id", "datatype": "string", "required": true},
+      {"name": "excluded_signature_id", "datatype": "string", "required": true}
+    ],
     "signatures": [
       {"name": "signature_id", "datatype": "string", "required": true},
       {"name": "paper_id", "datatype": "string", "required": true},

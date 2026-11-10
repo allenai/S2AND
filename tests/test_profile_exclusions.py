@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from scipy.spatial.distance import squareform
 
+import s2and.model as model_module
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import read_profile_exclusions_arrow, write_profile_exclusions_arrow
@@ -133,8 +134,10 @@ def test_arrow_round_trip(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("route", ["python", "arrow"])
-def test_predict_routes_evict_excluded_mention(route: str, tmp_path: Path) -> None:
+def test_predict_routes_evict_excluded_mention(route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Every pair is closer than eps, so the whole block merges unless the exclusion is honored.
+    # The final pass is switched off, so only the block-level relink can produce the result.
+    monkeypatch.setattr(model_module, "evict_profile_exclusion_violations", lambda clusters, *_args: (clusters, 0))
     dataset = build_dummy_dataset("profile_exclusions")
     model = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
@@ -160,3 +163,84 @@ def test_predict_routes_evict_excluded_mention(route: str, tmp_path: Path) -> No
 
     assert run(None) == {frozenset({"0", "1", "2", "3"})}
     assert run([("0", "1")]) == {frozenset({"0", "2", "3"}), frozenset({"1"})}
+
+
+def test_excluded_mention_leaves_with_its_required_group() -> None:
+    # Mention 1 is excluded from the profile of 0 and is required together with 2.
+    # The pair {1, 2} must leave together; a hard negative inside it would split it.
+    dataset = build_dummy_dataset("profile_exclusions_groups")
+    dataset.cluster_seeds_require = {"1": "other_profile", "2": "other_profile"}
+    dataset.cluster_seeds_disallow = set()
+    model = Clusterer(
+        featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
+        classifier=ConstantDistanceClassifier(0.4),
+        cluster_model=FastCluster(eps=0.5),
+        n_jobs=1,
+        use_default_constraints_as_supervision=True,
+    )
+
+    clusters, _ = model.predict({"a": ["0", "1", "2", "3"]}, dataset, profile_exclusions=[("0", "1")])
+
+    partition = {frozenset(members) for members in clusters.values()}
+    assert frozenset({"1", "2"}) in partition
+    assert not any({"0", "1"} <= members for members in partition)
+    assert sorted(s for members in partition for s in members) == ["0", "1", "2", "3"]
+
+
+def test_final_pass_keeps_required_groups_and_every_signature() -> None:
+    # The generated key for x would equal an existing cluster key; nothing may be overwritten.
+    clusters = {"a_1": ["p", "x", "g", "w"], "a_1_excluded_x": ["y"]}
+    exclusions = normalize_profile_exclusions([("p", "x")])
+
+    repaired, moved = evict_profile_exclusion_violations(clusters, exclusions, {"x": "other", "g": "other"})
+
+    assert moved == 2
+    partition = {frozenset(members) for members in repaired.values()}
+    assert partition == {frozenset({"p", "w"}), frozenset({"x", "g"}), frozenset({"y"})}
+    assert len(repaired) == 3
+
+
+def test_mutual_exclusions_separate_the_two_mentions() -> None:
+    # p0 and x exclude each other, so both are anchors. One relink must separate them
+    # and leave every other mention in a cluster with one of the two.
+    condensed = squareform(_square())
+    exclusions = normalize_profile_exclusions([("p0", "x"), ("x", "p0")])
+    first = _labels(condensed.copy())
+    assert first[0] == first[6]
+    calls: list[int] = []
+
+    def counting(matrix: np.ndarray) -> list[int]:
+        calls.append(1)
+        return _labels(matrix)
+
+    labels = enforce_profile_exclusions_in_block(SIGNATURES, first, condensed, exclusions, counting)
+
+    assert labels[0] != labels[6]
+    assert len(calls) == 1
+    assert all(label in (labels[0], labels[6]) for label in labels)
+
+
+def test_final_pass_drops_emptied_clusters() -> None:
+    repaired, moved = evict_profile_exclusion_violations(
+        {"a": ["p", "x"]}, normalize_profile_exclusions([("p", "x"), ("x", "p")])
+    )
+    assert moved == 2
+    assert sorted(repaired.values()) == [["p"], ["x"]]
+
+
+def test_relink_reuses_the_scratch_buffer() -> None:
+    condensed = squareform(_square())
+    scratch = np.zeros_like(condensed)
+    seen: list[bool] = []
+
+    def recording(matrix: np.ndarray) -> list[int]:
+        seen.append(matrix is scratch)
+        return _labels(matrix)
+
+    first = _labels(condensed.copy())
+    labels = enforce_profile_exclusions_in_block(
+        SIGNATURES, first, condensed, normalize_profile_exclusions([("p0", "x")]), recording, scratch=scratch
+    )
+
+    assert seen == [True]
+    assert labels[6] != labels[0]

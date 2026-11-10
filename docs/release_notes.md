@@ -6,6 +6,8 @@
   `profile_exclusions.arrow` table and `profile_exclusions` argument. An excluded signature is evicted from
   its anchor's cluster instead of vetoing that cluster's merges, which had left claimed profiles with only
   their placed papers. Disallow pairs and incremental prediction are unchanged.
+  `ArrowDataset.open_trusted` rejects a `profile_exclusions` path key, as it does the other request-local
+  tables; pass the rows to the prediction call.
   See "Profile exclusions" in `docs/production_inference.md`.
 - Bundle the native extension in the `s2and` wheel as `s2and._s2and_rust`.
   Installs upgraded from the split `1.0.0b5` packages can uninstall `s2and-rust`; nothing imports it.

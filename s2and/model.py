@@ -3927,7 +3927,11 @@ class Clusterer:
         if not exclusions:
             return clusters, matrices
         # Attachment and reunite steps run after block clustering; recheck the rule.
-        clusters, _moved = evict_profile_exclusion_violations(clusters, exclusions)
+        clusters, _moved = evict_profile_exclusion_violations(
+            clusters,
+            exclusions,
+            None if cluster_seeds_require is None else _normalize_cluster_seeds_require(cluster_seeds_require),
+        )
         return clusters, matrices
 
     def _predict_from_arrow_request(
@@ -4541,7 +4545,9 @@ class Clusterer:
         logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
 
         if exclusions:
-            pred_clusters, _moved = evict_profile_exclusion_violations(pred_clusters, exclusions)
+            pred_clusters, _moved = evict_profile_exclusion_violations(
+                pred_clusters, exclusions, prediction_state.cluster_seeds_require
+            )
         return dict(pred_clusters), dists
 
     def _cluster_one_block(
@@ -4577,7 +4583,13 @@ class Clusterer:
         if block_exclusions and not isinstance(self.cluster_model, FastCluster):
             raise ValueError("profile exclusions require the FastCluster cluster model")
         # FastCluster may overwrite its input; keep the model distances for relinking.
-        original_distances = np.array(dist_matrix, dtype=np.float64, copy=True) if block_exclusions else None
+        original_distances = np.array(dist_matrix, copy=True) if block_exclusions else None
+        # When clustering consumes its input, the caller's matrix is spent after
+        # the first fit. Relinks reuse it, so a block peaks at two matrices.
+        preserve_input = (cluster_model_params or {}).get(
+            "preserve_input", getattr(self.cluster_model, "preserve_input", True)
+        )
+        scratch = dist_matrix if block_exclusions and not preserve_input and dist_matrix.flags.writeable else None
 
         def relabel(matrix: np.ndarray) -> np.ndarray | list[int]:
             cluster_model = clone_cluster_model(self.cluster_model)
@@ -4602,6 +4614,10 @@ class Clusterer:
             original_distances,
             block_exclusions,
             relabel,
+            cluster_seeds_require=self._enforced_cluster_seeds_require(
+                dataset, prediction_state, incremental_dont_use_cluster_seeds
+            ),
+            scratch=scratch,
             block_key=block_key,
         )
 
@@ -4622,12 +4638,23 @@ class Clusterer:
         negative_one_label_locations = np.where(labels == -1)[0]
         for i, loc in enumerate(negative_one_label_locations):
             labels[loc] = max_label + 1 + i
-        if self.use_default_constraints_as_supervision and not incremental_dont_use_cluster_seeds:
-            cluster_seeds_require = (
-                dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require
-            )
+        cluster_seeds_require = self._enforced_cluster_seeds_require(
+            dataset, prediction_state, incremental_dont_use_cluster_seeds
+        )
+        if cluster_seeds_require is not None:
             return merge_seed_labels(block_signatures, labels, cluster_seeds_require, disallow_adjacency)
         return labels
+
+    def _enforced_cluster_seeds_require(
+        self,
+        dataset: ANDData,
+        prediction_state: PredictionState | None,
+        incremental_dont_use_cluster_seeds: bool,
+    ) -> Mapping[str, Any] | None:
+        """Return the required seed groups that block labels must keep, or None when seeds are off."""
+        if not self.use_default_constraints_as_supervision or incremental_dont_use_cluster_seeds:
+            return None
+        return dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require
 
     def predict_eps_grid(
         self,

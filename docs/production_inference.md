@@ -234,7 +234,16 @@ Each row is `(anchor_signature_id, excluded_signature_id)`. The anchor is any on
 signature the user placed on the profile. S2AND clusters the block, evicts each
 excluded signature found in its anchor's cluster, and clusters again with that
 signature barred from the profile. The excluded signature never ends in its
-anchor's cluster, and it can still join any other cluster.
+anchor's cluster, and within its subblock it can still join any other cluster.
+
+- With `batching_threshold`, the anchor and the excluded signature can land in
+  different subblocks, and attachment or reunite can then join them. A final pass
+  moves such a signature to a cluster of its own.
+- An excluded signature that is required together with other signatures leaves
+  with that group.
+- Rows that name a signature outside the request are ignored.
+- A block that holds an anchor keeps a second copy of its distance matrix while it
+  clusters. The RAM guard counts one, so leave headroom for one more matrix.
 
 - The Arrow table is `profile_exclusions.arrow` with string columns
   `anchor_signature_id` and `excluded_signature_id`. It is optional.

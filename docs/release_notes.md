@@ -52,7 +52,7 @@ production model and public-data version is `1.3`, on a separate version axis.
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
   PyPI has the `1.0.0b8` beta for integration testing; the final `1.0.0` release is pending.
-  Pin `s2and==1.0.0b8`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
+  Pin `s2and==1.0.0b9`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.

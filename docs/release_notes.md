@@ -9,6 +9,12 @@
   `ArrowDataset.open_trusted` rejects a `profile_exclusions` path key, as it does the other request-local
   tables; pass the rows to the prediction call.
   See "Profile exclusions" in `docs/production_inference.md`.
+- Add name-conflict repair, on by default: after a block is clustered, two clusters merge when one odd
+  mention is behind every name-rule conflict between them, each side has five other mentions and a full
+  first name, and their average model distance is below `Clusterer.name_conflict_repair_max_distance`
+  (`0.2`). Clusters change for every caller; set the attribute to `None` for the earlier output.
+  Benchmark outer-test B3 F1 rises from 0.964372 to 0.965110. Models from older pickles get the default.
+  See "Name-conflict repair" in `docs/production_inference.md`.
 - Bundle the native extension in the `s2and` wheel as `s2and._s2and_rust`.
   Installs upgraded from the split `1.0.0b5` packages can uninstall `s2and-rust`; nothing imports it.
 - Retire `Clusterer.predict_incremental` and classic `predict(batching_threshold=...)`.

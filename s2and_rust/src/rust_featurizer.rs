@@ -2596,6 +2596,30 @@ impl RustFeaturizer {
             .collect()
     }
 
+    /// First-name and ORCID facts for name-conflict repair.
+    ///
+    /// Returns the ids of signatures whose normalized first name is longer than
+    /// one character, and `(signature_id, orcid)` for signatures with an ORCID.
+    fn name_conflict_facts(&self) -> (Vec<String>, Vec<(String, String)>) {
+        let mut full_first_names = Vec::new();
+        let mut orcids = Vec::new();
+        for signature_id in self.signature_id_order() {
+            let Some(signature) = self.signatures.get(signature_id) else {
+                continue;
+            };
+            if signature
+                .first_normalized()
+                .is_some_and(|first| first.chars().nth(1).is_some())
+            {
+                full_first_names.push(signature_id.clone());
+            }
+            if let Some(orcid) = &signature.orcid {
+                orcids.push((signature_id.clone(), orcid.clone()));
+            }
+        }
+        (full_first_names, orcids)
+    }
+
     fn cluster_seeds_require(&self) -> Vec<(String, String)> {
         let mut pairs: Vec<(String, String)> = self
             .cluster_seeds_require

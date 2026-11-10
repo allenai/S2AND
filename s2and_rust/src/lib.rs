@@ -32,6 +32,7 @@ mod ingest_dataset;
 mod language_detection;
 mod lightgbm_booster;
 mod matrix_ops;
+mod name_conflict_repair;
 mod name_counts;
 pub mod name_normalization;
 mod orcid;
@@ -894,6 +895,14 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_ops::take_feature_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        name_conflict_repair::quantize_block_distances,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        name_conflict_repair::name_conflict_candidates,
+        m
+    )?)?;
     artifact_hash::add_to_module(m)?;
     name_normalization::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;

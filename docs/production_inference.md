@@ -256,6 +256,37 @@ anchor's cluster, and within its subblock it can still join any other cluster.
 - Eviction honors exclusions. It does not remove another person's papers that
   the user did not exclude.
 
+### Name-conflict repair
+
+One mention with a wrong or misparsed name can keep a person's cluster away from
+the rest of their work, because the name rules forbid every pair it is in.
+Name-conflict repair handles this case. It is on by default, with
+`Clusterer.name_conflict_repair_max_distance` set to `0.2`. Set it to `None` to turn
+the repair off.
+
+```python
+clusterer.name_conflict_repair_max_distance = None
+clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
+```
+
+The setting applies wherever blocks are clustered: `predict_from_arrow`, `predict`,
+`predict_from_rust_featurizer`, and the two clustering steps of incremental prediction
+(new mentions that attach to no profile, and the pre-split of altered profiles).
+Incremental prediction never merges two existing profiles, so the repair does not
+join them there. An EPS sweep that cuts cached linkage trees skips the repair.
+
+After a block or subblock is clustered, two clusters merge when all of these hold:
+
+- One mention takes part in every forbidden pair between the two clusters.
+- Without that mention, each cluster has at least five mentions and a full first name.
+- Without that mention, the average model distance between the clusters is below the value given.
+- The clusters do not carry different majority ORCIDs.
+- No pair across the clusters is a seed disallow or a profile exclusion.
+
+The odd mention stays in the merged cluster. A cluster takes part in at most one
+merge per block. The repair keeps a one-byte-per-pair copy of each block's
+distances while the block clusters, about one eighth of the matrix.
+
 ### Reunite-only memory and time
 
 Each pass of the [reunite-only step](subblocking.md#reunite-only-step) attaches

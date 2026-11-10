@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence, Set
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -72,6 +72,14 @@ from s2and.model_pairwise import (
     predict_pairwise_class0,
 )
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
+from s2and.name_conflict_repair import (
+    DEFAULT_MAX_AVERAGE_DISTANCE,
+    MIN_BLOCK_SIZE,
+    NameConflictRepair,
+    has_full_first_name,
+    quantize_distances,
+    repair_name_conflicts_in_block,
+)
 from s2and.prediction_state import PredictionState
 from s2and.profile_exclusions import (
     enforce_profile_exclusions_in_block,
@@ -112,6 +120,7 @@ from s2and.supervision import (
 )
 from s2and.text import (
     canonicalize_name_parts,
+    normalize_orcid,
     normalize_orcid_compact,
 )
 from s2and.thread_config import resolve_n_jobs
@@ -340,6 +349,7 @@ def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
         bool(getattr(clusterer, "use_default_constraints_as_supervision", True)),
         bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         bool(getattr(clusterer, "suppress_orcid", False)),
+        getattr(clusterer, "name_conflict_repair_max_distance", None),
     )
 
 
@@ -722,6 +732,47 @@ def _profile_exclusion_kwargs(prediction_state: PredictionState | None) -> dict[
     if prediction_state is None or not prediction_state.profile_exclusions:
         return {}
     return {"profile_exclusions": prediction_state.profile_exclusions}
+
+
+def _wants_name_conflict_repair(clusterer: Any, block_dict: Mapping[str, Sequence[str]]) -> float | None:
+    """Return the clusterer's repair distance when a block is large enough to repair."""
+    max_average_distance = getattr(clusterer, "name_conflict_repair_max_distance", None)
+    if max_average_distance is None or all(len(members) < MIN_BLOCK_SIZE for members in block_dict.values()):
+        return None
+    return float(max_average_distance)
+
+
+def _name_conflict_repair_from_rust_featurizer(
+    clusterer: Any, block_dict: Mapping[str, Sequence[str]], rust_featurizer: object
+) -> NameConflictRepair | None:
+    """Read the first-name and ORCID facts that name-conflict repair needs."""
+    max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
+    if max_average_distance is None:
+        return None
+    full_first_names, orcids = cast(Any, rust_featurizer).name_conflict_facts()
+    return NameConflictRepair(max_average_distance, frozenset(full_first_names), dict(orcids))
+
+
+def _name_conflict_repair_from_dataset(
+    clusterer: Any, block_dict: Mapping[str, Sequence[str]], dataset: ANDData
+) -> NameConflictRepair | None:
+    """Read the same facts from ``ANDData`` signatures."""
+    max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
+    if max_average_distance is None:
+        return None
+    full_first_names: set[str] = set()
+    orcids: dict[str, str] = {}
+    use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
+    for members in block_dict.values():
+        for signature_id in members:
+            signature = dataset.signatures[signature_id]
+            first = signature.author_info_first_normalized
+            if has_full_first_name(signature.author_info_first if first is None else first):
+                full_first_names.add(signature_id)
+            orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
+            if orcid is not None:
+                orcids[signature_id] = orcid
+    return NameConflictRepair(max_average_distance, frozenset(full_first_names), orcids)
 
 
 def _prediction_state_from_dataset(dataset: ANDData) -> PredictionState:
@@ -1803,6 +1854,11 @@ class Clusterer:
             Whether default constraint resolution should ignore same-ORCID must-link constraints.
     """
 
+    # Average model distance below which name-conflict repair merges two
+    # clusters; None turns the repair off. A class attribute, so models loaded
+    # from older pickles get it too. See s2and.name_conflict_repair.
+    name_conflict_repair_max_distance: float | None = DEFAULT_MAX_AVERAGE_DISTANCE
+
     def __init__(
         self,
         featurizer_info: FeaturizationInfo,
@@ -1926,6 +1982,7 @@ class Clusterer:
         pred_clusters: defaultdict[str, list[str]],
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
+        name_conflict_repair: NameConflictRepair | None = None,
     ) -> None:
         if block_key == "" or pairwise_proba is None:
             return
@@ -1941,6 +1998,7 @@ class Clusterer:
             block_key=block_key,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
+            name_conflict_repair=name_conflict_repair,
             **_profile_exclusion_kwargs(prediction_state),
         )
         for signature, label in zip(block_dict[block_key], labels, strict=True):
@@ -3137,6 +3195,10 @@ class Clusterer:
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
             disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
+            name_conflict_repair = _name_conflict_repair_from_rust_featurizer(self, block_dict, rust_featurizer)
+            repair_kwargs: dict[str, Any] = (
+                {} if name_conflict_repair is None else {"name_conflict_repair": name_conflict_repair}
+            )
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
                 fastcluster_params: dict[str, Any] = dict(cluster_model_params or {})
@@ -3174,6 +3236,7 @@ class Clusterer:
                     disallow_adjacency,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    **repair_kwargs,
                     **_profile_exclusion_kwargs(prediction_state),
                 )
                 return labels, time.perf_counter() - start
@@ -4561,12 +4624,14 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool = False,
         prediction_state: PredictionState | None = None,
         profile_exclusions: Mapping[str, frozenset[str]] | None = None,
+        name_conflict_repair: NameConflictRepair | None = None,
         block_key: str = "",
     ) -> np.ndarray | list[int]:
         """Cluster one block from a distance matrix and return labels.
 
         Profile exclusions, when the block holds one of their anchors, evict
         excluded mentions from the anchor's cluster and relink the block.
+        Name-conflict repair then merges clusters that one odd mention keeps apart.
         """
         if len(block_signatures) == 0:
             return []
@@ -4605,20 +4670,48 @@ class Clusterer:
                 prediction_state=prediction_state,
             )
 
+        # Linkage may overwrite the matrix, so the repair keeps a one-byte-per-pair copy.
+        repair_codes = (
+            quantize_distances(dist_matrix, num_threads=resolve_n_jobs(self.n_jobs))
+            if name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
+            else None
+        )
+
         labels = relabel(dist_matrix)
-        if original_distances is None:
+        if original_distances is not None:
+            labels = enforce_profile_exclusions_in_block(
+                block_signatures,
+                labels,
+                original_distances,
+                block_exclusions,
+                relabel,
+                cluster_seeds_require=self._enforced_cluster_seeds_require(
+                    dataset, prediction_state, incremental_dont_use_cluster_seeds
+                ),
+                scratch=scratch,
+                block_key=block_key,
+            )
+        if repair_codes is None or name_conflict_repair is None:
             return labels
-        return enforce_profile_exclusions_in_block(
-            block_signatures,
-            labels,
-            original_distances,
-            block_exclusions,
-            relabel,
-            cluster_seeds_require=self._enforced_cluster_seeds_require(
-                dataset, prediction_state, incremental_dont_use_cluster_seeds
+        forbidden: Mapping[str, Set[str]] = disallow_adjacency
+        if block_exclusions:
+            # A repair may not bring an excluded mention back to its anchor.
+            both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
+            for anchor, excluded in block_exclusions.items():
+                both_ways.setdefault(anchor, set()).update(excluded)
+                for signature_id in excluded:
+                    both_ways.setdefault(signature_id, set()).add(anchor)
+            forbidden = both_ways
+        return cast(
+            "np.ndarray | list[int]",
+            repair_name_conflicts_in_block(
+                block_signatures,
+                labels,
+                repair_codes,
+                name_conflict_repair,
+                forbidden=forbidden,
+                block_key=block_key,
             ),
-            scratch=scratch,
-            block_key=block_key,
         )
 
     def _finish_block_labels(
@@ -4749,6 +4842,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
         profile_exclusions: Mapping[str, frozenset[str]] | None = None,
+        name_conflict_repair: NameConflictRepair | None = None,
     ) -> np.ndarray | list[int]:
         """Cluster one block and emit explicit entry/exit logs around the cluster-model fit."""
         cluster_model_name = type(self.cluster_model).__name__
@@ -4768,6 +4862,7 @@ class Clusterer:
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
             profile_exclusions=profile_exclusions,
+            name_conflict_repair=name_conflict_repair,
             block_key=block_key,
         )
         logger.info(
@@ -4884,6 +4979,7 @@ class Clusterer:
             dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
         )
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
+        name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16
@@ -4910,6 +5006,7 @@ class Clusterer:
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,
+                    name_conflict_repair=name_conflict_repair,
                     **_profile_exclusion_kwargs(prediction_state),
                 )
                 for signature, label in zip(block_dict[block_key], labels, strict=True):
@@ -4983,6 +5080,7 @@ class Clusterer:
                         pred_clusters=pred_clusters,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                         prediction_state=prediction_state,
+                        name_conflict_repair=name_conflict_repair,
                     )
                     pairwise_proba = None
 
@@ -5026,6 +5124,7 @@ class Clusterer:
                 pred_clusters=pred_clusters,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 prediction_state=prediction_state,
+                name_conflict_repair=name_conflict_repair,
             )
         else:
             block_pair_index = 0
@@ -5076,6 +5175,7 @@ class Clusterer:
                     pred_clusters=pred_clusters,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,
+                    name_conflict_repair=name_conflict_repair,
                 )
 
             model_predict_seconds += self._featurize_predict_write_batches(

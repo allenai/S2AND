@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and._atomic_io import fsync_directory  # noqa: E402
+from s2and._sha256 import is_lowercase_sha256  # noqa: E402
 from s2and._sha256 import sha256_file as _sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
@@ -37,6 +38,7 @@ from s2and.production_training_contract import (  # noqa: E402
     ModelDataset,
     ModelPlan,
     ProductionArtifactAuthority,
+    block_membership_sha256,
     load_model_plan,
     load_packaged_artifact_authority,
     require_recorded_population,
@@ -500,12 +502,50 @@ def _recorded_populations(bundle_dir: Path) -> Mapping[str, Any]:
     return splits
 
 
+POPULATION_CORRECTIONS_NAME = "population_corrections.json"
+_POPULATION_CORRECTION_FIELDS = {"original_block_membership_sha256", "corrected_block_membership_sha256"}
+
+
+def _population_corrections(model_plan_path: Path) -> dict[str, dict[str, str]]:
+    """Read the population corrections that a dataset bundle publishes beside its model plan.
+
+    A released model records the population it was fit on. When records are later removed from
+    the published data, the bundle pairs each dataset's original population with the one it
+    now holds. The file is optional.
+    """
+
+    path = model_plan_path.parent / POPULATION_CORRECTIONS_NAME
+    if not path.is_file():
+        return {}
+    payload = _read_json(path)
+    if not isinstance(payload, dict) or any(
+        not isinstance(entry, dict)
+        or set(entry) != _POPULATION_CORRECTION_FIELDS
+        or not all(is_lowercase_sha256(value) for value in entry.values())
+        for entry in payload.values()
+    ):
+        raise ValueError(f"Invalid population corrections: {path}")
+    return payload
+
+
+def _is_corrected_population(record: Any, blocks: Mapping[str, Sequence[str]], correction: Any) -> bool:
+    """Return whether the model recorded the original population and ``blocks`` are its corrected form."""
+
+    return (
+        isinstance(correction, Mapping)
+        and isinstance(record, Mapping)
+        and record.get("block_membership_sha256") == correction["original_block_membership_sha256"]
+        and block_membership_sha256(blocks) == correction["corrected_block_membership_sha256"]
+    )
+
+
 def _heldout_dataset(
     name: str,
     dataset: ModelDataset,
     arrow_dataset: ArrowDataset,
     *,
     recorded: Mapping[str, Any],
+    corrections: Mapping[str, Any],
     random_seed: int,
     name_tuples: frozenset[tuple[str, str]],
     n_jobs: int,
@@ -518,8 +558,13 @@ def _heldout_dataset(
     if dataset.split_mode == "fixed_pairs":
         # Fixed-pair datasets score only their frozen held-out pairs.
         return development, None
-    require_recorded_population(recorded.get(name), development.get_blocks(), name=name)
-    del development
+    development_blocks = development.get_blocks()
+    if _is_corrected_population(recorded.get(name), development_blocks, corrections.get(name)):
+        # The published data lost records after the fit, so its scores are not the original ones.
+        print(json.dumps({"event": "population_correction_applied", "dataset": name}), flush=True)
+    else:
+        require_recorded_population(recorded.get(name), development_blocks, name=name)
+    del development, development_blocks
     heldout = load_heldout_dataset(name, dataset, arrow_dataset, name_tuples=name_tuples, n_jobs=n_jobs)
     blocks = heldout_blocks(dataset)
     if {key: sorted(members) for key, members in blocks.items()} != {
@@ -540,6 +585,7 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     model_dir = Path(args.model).resolve()
     config = _training_config(model_dir)
     recorded = _recorded_populations(model_dir)
+    corrections = _population_corrections(Path(args.model_plan).resolve())
     _check_plan_leakage(plan, _plan_populations(plan))
     artifacts, clusterer = _evaluation_model(args)
     if clusterer.production_model_release_version != plan.release_version:
@@ -567,6 +613,7 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
                 dataset_spec,
                 arrow_dataset,
                 recorded=recorded,
+                corrections=corrections,
                 random_seed=int(config["data_random_seed"]),
                 name_tuples=name_tuples,
                 n_jobs=int(args.n_jobs),

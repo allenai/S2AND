@@ -20,7 +20,8 @@ The correction removed papers absent from production S2AG and their dependent re
 The released boosters and linker were fit before it.
 A reproduction therefore trains on slightly smaller populations.
 Its counts and scores are close to the reference results below, not equal to them.
-The released model records its original training population, so step 4 refuses to score it on the published data.
+The released model records its original training population.
+The dataset bundle's `pairwise/population_corrections.json` pairs that population with the published one for each benchmark, so step 4 scores the released model on the published held-out blocks.
 
 The `1.3` reports also came from an earlier scorer.
 Scores are no longer rounded per dataset, prediction applies name-conflict repair, and calibration also scores the close-pair bonus.
@@ -140,24 +141,24 @@ uv run --no-sync python scripts/verification/evaluate_incremental_gold.py evalua
   --total-ram-bytes 34359738368
 ```
 
-Pass `"$ROOT/production_model_v1.3.1"` as the model in step 5 to score the released model.
-Step 4 scores only a model that was trained on the published data.
+Pass `"$ROOT/production_model_v1.3.1"` as the model in steps 4 and 5 to score the released model.
 
 ## Reference results for 1.3.1
 
-These values come from the `1.3` data before its distribution correction, which AI2 holds.
+The middle column comes from the `1.3` data before its distribution correction, which AI2 holds.
+The last column is the released model on the published data, where steps 4 and 5 can score it.
 
-| Measurement | Released `1.3.1` value |
-| --- | --- |
-| Pairwise training and validation pairs | 804,716 and 60,064 |
-| Main head validation ROC AUC | 0.994227 (search trial 26) |
-| Nameless head validation ROC AUC | 0.974620 (H13) |
-| Validation selection | EPS 0.40 with close-pair bonus 8 under 0.05: B3 precision 0.971954, recall 0.951028, F1 0.961184 on 72,649 signatures. The best F1 on the grid is 0.962106, at EPS 0.49 with the bonus |
-| Outer-test signature-weighted B3 | Precision 0.978019, recall 0.959062, F1 0.968204 on 72,853 signatures |
-| The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals |
-| Outer-test pairwise AUROC | 0.989391 |
-| Linker test accuracy | 96.715% on 10,837 queries, from the `1.3` fit; `1.3.1` keeps that linker |
-| Identity-gold cases | 134 of 152 correct, the same as `1.3`. The published data keeps 141 of the cases; the released model gets 125 of them correct |
+| Measurement | Released `1.3.1` value | Released model on the published data |
+| --- | --- | --- |
+| Pairwise training and validation pairs | 804,716 and 60,064 | n/a |
+| Main head validation ROC AUC | 0.994227 (search trial 26) | n/a |
+| Nameless head validation ROC AUC | 0.974620 (H13) | n/a |
+| Validation selection | EPS 0.40 with close-pair bonus 8 under 0.05: B3 precision 0.971954, recall 0.951028, F1 0.961184 on 72,649 signatures. The best F1 on the grid is 0.962106, at EPS 0.49 with the bonus | n/a |
+| Outer-test signature-weighted B3 | Precision 0.978019, recall 0.959062, F1 0.968204 on 72,853 signatures | Precision 0.977285, recall 0.962248, F1 0.969488 on 68,289 signatures |
+| The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals | n/a |
+| Outer-test pairwise AUROC | 0.989391 | 0.989664 |
+| Linker test accuracy | 96.715% on 10,837 queries, from the `1.3` fit; `1.3.1` keeps that linker | n/a |
+| Identity-gold cases | 134 of 152 correct, the same as `1.3` | 125 of 141 correct |
 
 Steps 1-5 end at the released settings.
 Calibration selects EPS `0.40` with the close-pair bonus, and the giant-block review kept that choice.

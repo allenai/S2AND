@@ -316,6 +316,58 @@ def test_heldout_rejects_a_model_trained_on_other_blocks(heldout_fixture: argpar
     assert not fixture.output_report.exists()
 
 
+def _development_digest(fixture: argparse.Namespace) -> str:
+    plan = load_model_plan(fixture.model_plan)
+    with open_plan_arrow(plan.datasets["qian"]) as arrow_dataset:
+        blocks = load_development_dataset(
+            "qian",
+            plan.datasets["qian"],
+            arrow_dataset,
+            name_tuples=fixture.authority.name_tuples.pairs,
+            random_seed=1111,
+            n_jobs=1,
+        ).get_blocks()
+    return block_membership_sha256(blocks)
+
+
+def test_heldout_accepts_a_published_population_correction(
+    heldout_fixture: argparse.Namespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The published data lost one development signature after the model was fit.
+    fixture = heldout_fixture
+    original = _development_digest(fixture)
+    excluded = _write(fixture.model_plan.parent / "excluded_signatures.json", [fixture.development[0]])
+    payload = json.loads(fixture.model_plan.read_text(encoding="utf-8"))
+    payload["datasets"]["qian"]["excluded_signatures"] = {"path": excluded.name, "sha256": sha256_file(excluded)}
+    _write(fixture.model_plan, payload)
+    corrected = _development_digest(fixture)
+    assert corrected != original
+    corrections = fixture.model_plan.parent / release_pairwise.POPULATION_CORRECTIONS_NAME
+
+    def write(original_digest: str, corrected_digest: str) -> None:
+        entry = {
+            "original_block_membership_sha256": original_digest,
+            "corrected_block_membership_sha256": corrected_digest,
+        }
+        _write(corrections, {"qian": entry})
+
+    # A correction for another original or another corrected population does not apply.
+    for original_digest, corrected_digest in (("0" * 64, corrected), (original, "0" * 64)):
+        write(original_digest, corrected_digest)
+        with pytest.raises(ValueError, match="differ from the model's training population for 'qian'"):
+            release_pairwise.evaluate_heldout(fixture)
+    _write(corrections, {"qian": {"original_block_membership_sha256": original}})
+    with pytest.raises(ValueError, match="Invalid population corrections"):
+        release_pairwise.evaluate_heldout(fixture)
+    assert not fixture.output_report.exists()
+
+    write(original, corrected)
+    report = release_pairwise.evaluate_heldout(fixture)
+
+    assert report["pairwise"]["aggregate"]["rows"] == 4
+    assert '"population_correction_applied"' in capsys.readouterr().out
+
+
 def test_heldout_accepts_a_relocated_dataset_root(heldout_fixture: argparse.Namespace, tmp_path: Path) -> None:
     fixture = heldout_fixture
     moved = tmp_path / "moved"

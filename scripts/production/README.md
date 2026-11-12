@@ -319,7 +319,9 @@ uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-he
 
 The command verifies plan file digests, Arrow manifests, and common artifacts.
 It binds the model to the plan by the development blocks that the model recorded at training time.
-That binding does not depend on the plan layout, so the published `1.3` model passes it.
+That binding does not depend on the plan layout.
+The published data lost records after the released models were fit, so its development blocks differ.
+`pairwise/population_corrections.json`, beside the model plan, pairs each benchmark's original population fingerprint with the published one; the command then accepts the released model and prints `population_correction_applied`.
 Held-out pairs must stay inside the held-out blocks.
 The command rejects augmented train and validation copies of held-out signatures.
 It also rejects augmented held-out copies of development signatures.

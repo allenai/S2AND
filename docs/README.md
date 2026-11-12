@@ -38,6 +38,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 - [Native package overview](../s2and_rust/README.md)
 - [Script catalog](../scripts/README.md)
 - [Release notes](release_notes.md)
+- [Experiments that did not help](negative_results.md)
 
 ## Historical notes
 

@@ -21,7 +21,7 @@ Release preparation needs all three bundles.
 
 Model release `1.3.1` uses the `1.3` data and changes only the model's linkage settings.
 Its `inference/` and `dataset/` bundles are under `s2and/1.3.1/`.
-That `dataset/` bundle differs from the `1.3` one only in `pairwise/model_plan.json`.
+That `dataset/` bundle differs from the `1.3` one in `pairwise/model_plan.json` and adds `pairwise/population_corrections.json`.
 The `source/` bundle is unchanged and stays under `s2and/1.3/`.
 The `1.3` model remains at `s2and/1.3/inference/`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
@@ -83,6 +83,7 @@ s2and/data/
   benchmarks/<source>/        # dataset: Arrow tables, <source>_clusters.json, unknown-signature list
   pairwise/
     model_plan.json           # dataset: training populations, held-out tests, EPS policy
+    population_corrections.json   # dataset: original and published population of each benchmark
     heldout/<source>/         # dataset: test_blocks.json and test_pairs.json
     augmented/                # dataset: augmented Arrow tables and fixed pairs
   replay_manifest.json        # dataset: incremental Arrow catalog
@@ -103,6 +104,9 @@ The trainer selects pairs and computes features from the same Arrow data.
 The original `1.3` data reproduced the `1.3` training and validation matrices exactly.
 The distribution correction removes papers absent from production S2AG and their dependent records.
 The corrected populations do not reproduce the original model fit.
+A released model records the population it was fit on, and `evaluate-heldout` refuses other data.
+`pairwise/population_corrections.json` pairs each benchmark's original population fingerprint with its corrected one, so the command scores a released model on the corrected held-out blocks.
+Every corrected block is a subset of the same original block.
 Dataset manifests use portable paths to the one common index.
 
 The release owner writes the bundles from an internal snapshot with

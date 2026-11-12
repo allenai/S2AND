@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,10 +16,11 @@ from s2and.metrics import b3_precision_recall_fscore
 from s2and.production_bundle import finalize_production_bundle
 from s2and.production_model import canonical_artifact_hashes, load_production_model
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust
+from scripts.eps_sweep import apply_reviewed_eps as apply_reviewed_eps_module
 from scripts.eps_sweep import build_linking_eps_gold, orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
 from scripts.eps_sweep.apply_reviewed_eps import apply_reviewed_eps
 from scripts.eps_sweep.build_linking_eps_gold import _build_dataset_constraints, parse_args
-from scripts.eps_sweep.common import arrow_dataset_dir, read_sweep_curve, write_json
+from scripts.eps_sweep.common import CLUSTERING_SOURCE, arrow_dataset_dir, read_sweep_curve, write_json
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
@@ -66,6 +68,7 @@ def _curve(
         "model_manifest_sha256": model_hash,
         "score_mode": mode,
         "limited_run": limited,
+        "clustering_source": CLUSTERING_SOURCE,
         "eps_values": [0.55, 0.65],
         "use_orcid_subblocking": False,
         "suppress_orcid_constraints": True,
@@ -285,6 +288,23 @@ def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path, mode: str, 
         _apply(tmp_path, source)
 
 
+def test_review_rejects_a_sweep_from_before_production_block_clustering(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    # An older sweep cut its own linkage trees and recorded no clustering source.
+    plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
+    del plan["clustering_source"]
+    write_json(dataset / "plan.json", plan)
+    summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
+    summary["plan_sha256"] = sha256_file(dataset / "plan.json")
+    write_json(dataset / "summary.json", summary)
+
+    with pytest.raises(ValueError, match="production block clustering"):
+        _apply(tmp_path, source)
+
+
 @pytest.mark.parametrize(
     "change", ["partial-datasets", "old-policy", "test-overlap", "stale-diagnostic", "no-diagnostic"]
 )
@@ -422,6 +442,178 @@ def test_owner_eps_from_internal_review_preserves_real_complete_artifacts(tmp_pa
     assert report["sweep_plans"] is None
     assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
     assert load_production_model(output).cluster_model.eps == 0.53
+
+
+def test_owner_review_can_set_the_close_pair_bonus_and_release_version(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    output = tmp_path / "output"
+    report = apply_reviewed_eps(
+        source,
+        output,
+        None,
+        [],
+        0.41,
+        "Internal review",
+        tmp_path / "review.json",
+        close_pair=(8.0, 0.05),
+        release_version="9.9.1",
+    )
+    assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
+    model = load_production_model(output)
+    assert (model.cluster_model.eps, model.cluster_model.close_pair_bonus, model.cluster_model.close_pair_distance) == (
+        0.41,
+        8.0,
+        0.05,
+    )
+    assert model.production_model_release_version == "9.9.1" == report["release_version"]
+    assert load_production_model(source).cluster_model.close_pair_bonus == 0.0
+
+
+def test_snapshot_sweep_review_cannot_change_the_close_pair_bonus(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="before the sweep"):
+        apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            tmp_path / "curves",
+            ["unit"],
+            0.41,
+            "Review",
+            tmp_path / "review.json",
+            close_pair=(8.0, 0.05),
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def _uneven_curve(tmp_path: Path, source: Path) -> None:
+    """A sweep whose F1 is 2/3 at EPS 0.55 and 8/9 at 0.65."""
+    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    pd.DataFrame(
+        {"eps": [0.55, 0.65], "precision": [1, 0.8], "recall": [0.5, 1], "f1": [2 / 3, 8 / 9], "reference_coverage": 1}
+    ).to_csv(dataset / "eps_b3.tsv", sep="\t", index=False)
+    summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
+    write_json(dataset / "summary.json", summary | {"score_sha256": sha256_file(dataset / "eps_b3.tsv")})
+
+
+@pytest.mark.parametrize(("eps", "accepted"), [(0.65, True), (0.55, False)])
+def test_giant_f1_tolerance_rejects_an_eps_far_below_the_best_swept_f1(
+    tmp_path: Path, eps: float, accepted: bool
+) -> None:
+    source = _complete_model(tmp_path)
+    _uneven_curve(tmp_path, source)
+
+    def review() -> dict:
+        return apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            tmp_path / "curves",
+            ["unit"],
+            eps,
+            "Fixture review",
+            tmp_path / "review.json",
+            release_datasets=("unit",),
+            test_identities=lambda _root, _dataset, _sources: frozenset(),
+            precision_f1_tolerance=0.01,
+        )
+
+    if not accepted:
+        with pytest.raises(ValueError, match="below the best swept F1"):
+            review()
+        assert not (tmp_path / "output").exists()
+        return
+    record = review()["giant_f1_tolerance"]
+    assert (record["best_eps"], record["tolerance"]) == (0.65, 0.01)
+    assert record["selected_f1"] == pytest.approx(8 / 9)
+
+
+def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path) -> None:
+    # The owner review writes a bundle with the bonus; its sweep review may not skip the F1 check.
+    plain = _complete_model(tmp_path)
+    bonus = tmp_path / "bonus"
+    apply_reviewed_eps(
+        plain, bonus, None, [], 0.65, "Internal review", tmp_path / "bonus_review.json", close_pair=(8.0, 0.05)
+    )
+    _uneven_curve(tmp_path, bonus)
+
+    def review(tolerance: float | None) -> dict:
+        return apply_reviewed_eps(
+            bonus,
+            tmp_path / "output",
+            tmp_path / "curves",
+            ["unit"],
+            0.65,
+            "Fixture review",
+            tmp_path / "review.json",
+            release_datasets=("unit",),
+            test_identities=lambda _root, _dataset, _sources: frozenset(),
+            precision_f1_tolerance=tolerance,
+        )
+
+    with pytest.raises(ValueError, match="needs --precision-f1-tolerance"):
+        review(None)
+    assert not (tmp_path / "output").exists()
+    assert review(0.01)["giant_f1_tolerance"]["best_eps"] == 0.65
+
+
+def _second_block(tmp_path: Path, *, eps: list[float], recall: list[float], references: int) -> None:
+    """Add block "other" to the fixture sweep, with its own EPS grid, recall and reference count."""
+    source, dataset = tmp_path / "curves" / "unit", tmp_path / "curves" / "other"
+    shutil.copytree(source, dataset)
+    pd.DataFrame({"signature_id": [f"r{i}" for i in range(references)], "orcid": "o", "repeated": True}).to_parquet(
+        dataset / "orcid_reference.parquet", index=False
+    )
+    rows = {"eps": eps, "precision": [1.0] * len(eps), "recall": recall, "f1": [0.5] * len(eps)}
+    pd.DataFrame(rows | {"reference_coverage": 1}).to_csv(dataset / "eps_b3.tsv", sep="\t", index=False)
+    plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
+    plan["eps_values"] = eps
+    plan["reference"]["sha256"] = sha256_file(dataset / "orcid_reference.parquet")
+    write_json(dataset / "plan.json", plan)
+    summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
+    write_json(
+        dataset / "summary.json",
+        summary
+        | {"plan_sha256": sha256_file(dataset / "plan.json"), "score_sha256": sha256_file(dataset / "eps_b3.tsv")},
+    )
+
+
+def test_pooled_curve_weights_each_scored_reference_equally(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    # "unit" has 2 references with recall 0.8 and 1.0; "other" has 6 with recall 0.4 and 0.6.
+    _second_block(tmp_path, eps=[0.55, 0.65], recall=[0.4, 0.6], references=6)
+
+    pooled = apply_reviewed_eps_module._pooled_curve(tmp_path / "curves", ["unit", "other"])
+
+    assert pooled["recall"].tolist() == pytest.approx([(2 * 0.8 + 6 * 0.4) / 8, (2 * 1.0 + 6 * 0.6) / 8])
+    assert pooled["precision"].tolist() == pytest.approx([1.0, (2 * 0.8 + 6 * 1.0) / 8])
+
+
+def test_pooled_curve_rejects_blocks_swept_on_different_eps_grids(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    _second_block(tmp_path, eps=[0.65, 0.75], recall=[0.4, 0.6], references=6)
+
+    with pytest.raises(ValueError, match="different EPS values"):
+        apply_reviewed_eps_module._pooled_curve(tmp_path / "curves", ["unit", "other"])
+
+
+def test_giant_f1_tolerance_needs_a_snapshot_sweep(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="needs a snapshot sweep"):
+        apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            None,
+            [],
+            0.53,
+            "Review",
+            tmp_path / "review.json",
+            precision_f1_tolerance=0.001,
+        )
 
 
 @pytest.mark.parametrize(("sweep_root", "datasets"), [("curves", []), (None, ["unit"])])

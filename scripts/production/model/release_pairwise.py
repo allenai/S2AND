@@ -278,17 +278,23 @@ def _b3_report(
             }
             for partition in (true_clusters, predicted_clusters)
         )
-    precision, recall, f1, per_signature, _, _ = b3_precision_recall_fscore(
+    _, _, _, per_signature, _, _ = b3_precision_recall_fscore(
         dict(true_clusters),
         dict(predicted_clusters),
     )
     if unknown_signature_ids and not per_signature:
         raise ValueError("B3 requires at least one known signature")
+    # The library function rounds its totals to three decimals. One such step moves a weighted
+    # mean by the dataset's share, so the totals are summed again here at full precision.
+    count = len(per_signature)
+    precision = math.fsum(scores[0] for scores in per_signature.values()) / count if count else 0.0
+    recall = math.fsum(scores[1] for scores in per_signature.values()) / count if count else 0.0
+    f1 = 0.0 if precision == 0 or recall == 0 else 2 * precision * recall / (precision + recall)
     report = {
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1),
-        "signature_count": len(per_signature),
+        "signature_count": count,
     }
     _validated_unit_interval_metrics(report, label="B3 metric")
     return report
@@ -297,9 +303,9 @@ def _b3_report(
 class _B3Scorer:
     """`_b3_report` of many predicted partitions of the same signatures.
 
-    The true partition and unknown-signature mask are prepared once. Each
-    report sums per-signature ratios with ``math.fsum``; `_b3_report` sums them
-    in set order, and both round to three decimals.
+    The true partition and unknown-signature mask are prepared once. Both sum
+    per-signature ratios with ``math.fsum`` and neither rounds: EPS selection
+    compares settings that differ by less than a three-decimal step.
     """
 
     def __init__(
@@ -346,9 +352,9 @@ class _B3Scorer:
             recall = math.fsum((intersections / self.true_sizes).tolist()) / count
             f1 = 0.0 if precision == 0 or recall == 0 else 2 * precision * recall / (precision + recall)
         report = {
-            "precision": float(np.round(precision, 3)),
-            "recall": float(np.round(recall, 3)),
-            "f1": float(np.round(f1, 3)),
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1": float(f1),
             "signature_count": count,
         }
         _validated_unit_interval_metrics(report, label="B3 metric")
@@ -647,8 +653,17 @@ def _calibration_preflight(
     return source_bundle, output_bundle, output_report, plan, config, manifest_sha256
 
 
+# Close-pair (bonus, distance) settings that calibration compares; (0, 0) is plain average linkage.
+# Validation B3 is nearly flat across bonus sizes, so the list stays short to avoid fitting noise.
+CLOSE_PAIR_CANDIDATES: tuple[tuple[float, float], ...] = ((0.0, 0.0), (8.0, 0.05))
+
+
 def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
-    """Select EPS using each random-block validation population once."""
+    """Select EPS and the close-pair bonus using each random-block validation population once.
+
+    With a positive ``precision_f1_tolerance`` in the plan, the most precise setting wins among
+    those within that tolerance of the best signature-weighted F1. Otherwise the best F1 wins.
+    """
 
     source_bundle, output_bundle, output_report, plan, config, manifest_sha256 = _calibration_preflight(args)
     recorded = _recorded_populations(source_bundle)
@@ -666,8 +681,11 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("EPS calibration found no random-block validation datasets")
 
     identities: dict[str, Any] = {}
-    metrics_by_eps: dict[float, dict[str, Any]] = {eps: {} for eps in plan.eps.grid}
+    metrics_by_setting: dict[tuple[tuple[float, float], float], dict[str, Any]] = {
+        (close_pair, eps): {} for close_pair in CLOSE_PAIR_CANDIDATES for eps in plan.eps.grid
+    }
     original_eps = _unit_float(clusterer.cluster_model.eps, label="Source EPS")
+    original_close_pair = (clusterer.cluster_model.close_pair_bonus, clusterer.cluster_model.close_pair_distance)
     try:
         for name, dataset_spec in datasets:
             unknown_source = plan_unknown_signatures(dataset_spec)
@@ -708,18 +726,29 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
                     "signature_count": sum(len(signatures) for signatures in val_blocks.values()),
                 }
                 # Prediction can read the Arrow-backed dataset, so it stays inside the open handle.
-                # Each block is linked once and cut at every EPS, as predict would cut it.
-                signatures, ids_by_eps = clusterer.predict_eps_grid(val_blocks, dataset, distances, plan.eps.grid)
-                scorer = _B3Scorer(true_clusters, signatures, unknown_source.ids)
-                for eps in plan.eps.grid:
-                    metrics_by_eps[eps][name] = scorer.report(ids_by_eps[float(eps)])
+                # Each block is linked once per close-pair setting and cut at every EPS, as predict would cut it.
+                scorer = None
+                for close_pair in CLOSE_PAIR_CANDIDATES:
+                    clusterer.cluster_model.close_pair_bonus, clusterer.cluster_model.close_pair_distance = close_pair
+                    signatures, ids_by_eps = clusterer.predict_eps_grid(val_blocks, dataset, distances, plan.eps.grid)
+                    scorer = scorer or _B3Scorer(true_clusters, signatures, unknown_source.ids)
+                    for eps in plan.eps.grid:
+                        metrics_by_setting[(close_pair, eps)][name] = scorer.report(ids_by_eps[float(eps)])
                 del distances, dataset, val_blocks, true_clusters
             gc.collect()
     finally:
         clusterer.cluster_model.eps = original_eps
+        clusterer.cluster_model.close_pair_bonus, clusterer.cluster_model.close_pair_distance = original_close_pair
 
     trials: list[dict[str, Any]] = [
-        {"eps": eps, "datasets": metrics_by_eps[eps], **_aggregate_b3(metrics_by_eps[eps])} for eps in plan.eps.grid
+        {
+            "eps": eps,
+            "close_pair_bonus": close_pair[0],
+            "close_pair_distance": close_pair[1],
+            "datasets": metrics,
+            **_aggregate_b3(metrics),
+        }
+        for (close_pair, eps), metrics in metrics_by_setting.items()
     ]
     eligible = [
         trial
@@ -729,18 +758,47 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if not eligible:
         raise RuntimeError("No EPS calibration trial met all quality floors")
-    selected = max(eligible, key=lambda trial: (trial["signature_weighted"]["f1"], -trial["eps"]))
+    if plan.eps.precision_f1_tolerance > 0:
+        best_f1 = max(trial["signature_weighted"]["f1"] for trial in eligible)
+        # A small F1 loss buys precision: with the close-pair bonus, F1 is flat near its best.
+        selected = max(
+            (
+                trial
+                for trial in eligible
+                if trial["signature_weighted"]["f1"] >= best_f1 - plan.eps.precision_f1_tolerance
+            ),
+            key=lambda trial: (
+                trial["signature_weighted"]["precision"],
+                trial["signature_weighted"]["f1"],
+                -trial["close_pair_bonus"],
+                -trial["eps"],
+            ),
+        )
+        selection_rule = f"highest precision within {plan.eps.precision_f1_tolerance:g} of the best F1 ({best_f1:.6f})"
+    else:
+        # Ties go to the smaller bonus, then the smaller EPS.
+        selected = max(
+            eligible,
+            key=lambda trial: (trial["signature_weighted"]["f1"], -trial["close_pair_bonus"], -trial["eps"]),
+        )
+        selection_rule = "highest signature-weighted F1"
     selected_eps = float(selected["eps"])
     finalize_pairwise_eps(
         source_bundle_dir=source_bundle,
         output_bundle_dir=output_bundle,
         expected_manifest_sha256=manifest_sha256,
         new_eps=selected_eps,
+        close_pair_bonus=float(selected["close_pair_bonus"]),
+        close_pair_distance=float(selected["close_pair_distance"]),
         expected_artifact_hashes=artifacts.hashes,
     )
     report = {
         "source_eps": original_eps,
         "selected_eps": selected_eps,
+        "selected_close_pair_bonus": float(selected["close_pair_bonus"]),
+        "selected_close_pair_distance": float(selected["close_pair_distance"]),
+        "selection_rule": selection_rule,
+        "precision_f1_tolerance": plan.eps.precision_f1_tolerance,
         "validation_identities": identities,
         "trials": trials,
     }

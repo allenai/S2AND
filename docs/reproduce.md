@@ -1,11 +1,13 @@
-# Reproduce the 1.3 model from public data
+# Reproduce the 1.3.1 model from public data
 
 This guide runs the production training process on the published `1.3` data.
-The result is approximately the released `1.3` model.
+The result is approximately the released `1.3.1` model.
+`1.3.1` is the `1.3` fit with new linkage settings: close-pair bonus `8` for pairs under `0.05`, and EPS `0.40`.
+Its boosters and linker are the `1.3` files, so steps 1 and 3 reproduce the `1.3` fit.
 Three steps stay outside public reproduction:
 
 - **Name counts.** Only AI2 staff can rebuild the name-count index from internal data. Use the released index.
-- **Final EPS review.** The release owner reviews giant-block EPS curves on internal production exports. Public calibration reproduces the validation EPS choice, `0.57`. The released model uses the owner's choice, `0.53`; see [giant-block EPS review](eps_calibration.md).
+- **Final EPS review.** The release owner checks the calibrated EPS against giant-block EPS curves on internal production exports. For `1.3.1` that check kept the validation choice, `0.40`; see [giant-block EPS review](eps_calibration.md).
 - **LightGBM fits.** Multithreaded LightGBM sums leaf statistics in an order that depends on thread scheduling.
   A rebuilt pairwise booster can differ from the released file in the last digits of some leaf values, even
   between two runs on one machine with the same thread count. Splits, the selected hyperparameters, and every
@@ -14,7 +16,9 @@ Three steps stay outside public reproduction:
   Files written on Windows also end in CRLF line breaks, so their bytes differ from files written elsewhere.
 
 The published data reproduces the `1.3` training and validation matrices exactly.
-It also reproduces the `1.3` EPS calibration report and outer-test report exactly with the released model.
+This version of the code does not reproduce the `1.3` calibration and outer-test reports digit for digit.
+Its scores are no longer rounded per dataset, prediction applies name-conflict repair, and calibration also scores the close-pair bonus.
+On the `1.3` model plan, which sets no `precision_f1_tolerance`, step 2 selects EPS `0.49` with the bonus, not `0.57`.
 
 ## Set up
 
@@ -35,18 +39,18 @@ The [install guide](install.md) lists platform requirements.
 ## Run inference: one sync
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/inference/ s2and/data/
 ```
 
-`s2and/data/`, the default data folder, now holds `production_model_v1.3/` and `name_counts_index/`.
+`s2and/data/`, the default data folder, now holds `production_model_v1.3.1/` and `name_counts_index/`.
 [Load a production model](production_inference.md#load-a-production-model) for bulk and incremental prediction.
 
 ## Train and evaluate: a second sync
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/dataset/ s2and/data/
 ROOT=$PWD/s2and/data
-RUN=$PWD/runs/1.3
+RUN=$PWD/runs/1.3.1
 mkdir -p "$RUN/matrix-work"
 ```
 
@@ -61,7 +65,7 @@ uv run --no-sync python scripts/production/model/train_pairwise.py \
   --model-plan "$ROOT/pairwise/model_plan.json" \
   --name-counts-index-root "$ROOT/name_counts_index" \
   --incumbent-parameters scripts/production/model/pairwise_incumbent_h13.json \
-  --output-dir "$RUN/pairwise/production_model_v1.3" \
+  --output-dir "$RUN/pairwise/production_model_v1.3.1" \
   --matrix-work-dir "$RUN/matrix-work" \
   --n-jobs 12 \
   --run-full
@@ -76,16 +80,19 @@ The output is a pairwise-only model with pending EPS.
 
 ```bash
 uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps \
-  --source-bundle "$RUN/pairwise/production_model_v1.3" \
+  --source-bundle "$RUN/pairwise/production_model_v1.3.1" \
   --model-plan "$ROOT/pairwise/model_plan.json" \
-  --output-bundle "$RUN/calibrated/production_model_v1.3" \
+  --output-bundle "$RUN/calibrated/production_model_v1.3.1" \
   --output-report "$RUN/eps_calibration_report.json" \
   --name-counts-index-root "$ROOT/name_counts_index" \
   --n-jobs 12
 ```
 
-Calibration clusters each source's validation blocks at every EPS in the plan's grid.
-It selects the EPS with the best signature-weighted B3 F1.
+Calibration clusters each source's validation blocks at every EPS in the plan's grid, once with plain
+average linkage and once with the close-pair bonus.
+It selects the setting with the best signature-weighted B3 F1.
+When the plan sets `precision_f1_tolerance`, it selects the most precise setting within that tolerance of the best F1.
+The `1.3.1` plan sets it to `0.001`.
 Test blocks never select EPS.
 
 ### 3. Incremental linker training and the complete model
@@ -94,7 +101,7 @@ Test blocks never select EPS.
 uv run --no-sync python scripts/production/model/train_linker_and_finalize.py \
   --source-bundle-root "$ROOT" \
   --target-json tests/fixtures/incremental_linker_training_target.json \
-  --pairwise-model-path "$RUN/calibrated/production_model_v1.3" \
+  --pairwise-model-path "$RUN/calibrated/production_model_v1.3.1" \
   --name-counts-index-root "$ROOT/name_counts_index" \
   --output-dir "$RUN/complete" \
   --n-jobs 12
@@ -108,7 +115,7 @@ It writes the complete model, reloads it, and evaluates the declared linker test
 ```bash
 uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-heldout \
   --model-plan "$ROOT/pairwise/model_plan.json" \
-  --model "$RUN/complete/production_model_v1.3" \
+  --model "$RUN/complete/production_model_v1.3.1" \
   --name-counts-index-root "$ROOT/name_counts_index" \
   --output-report "$RUN/heldout_metrics.json" \
   --n-jobs 12
@@ -122,38 +129,39 @@ The report contains pairwise metrics on the frozen held-out pairs and B3 on the 
 uv run --no-sync python scripts/verification/evaluate_incremental_gold.py evaluate \
   --snapshot "$ROOT" \
   --cases "$ROOT/evaluation_inputs/gold_identity_cases_seed13.json" \
-  --model-dir "$RUN/complete/production_model_v1.3" \
+  --model-dir "$RUN/complete/production_model_v1.3.1" \
   --output-dir "$RUN/gold" \
   --n-jobs 12 \
   --total-ram-bytes 34359738368
 ```
 
-Pass `"$ROOT/production_model_v1.3"` as the model in steps 4 and 5 to score the released model.
+Pass `"$ROOT/production_model_v1.3.1"` as the model in steps 4 and 5 to score the released model.
 
-## Reference results for 1.3
+## Reference results for 1.3.1
 
-| Measurement | Released `1.3` value |
+| Measurement | Released `1.3.1` value |
 | --- | --- |
 | Pairwise training and validation pairs | 804,716 and 60,064 |
 | Main head validation ROC AUC | 0.994227 (search trial 26) |
 | Nameless head validation ROC AUC | 0.974620 (H13) |
-| Validation EPS and B3 F1 | 0.57 and 0.959781 on 72,649 signatures |
-| Released EPS and its validation B3 F1 | 0.53 and 0.959287 |
-| Outer-test signature-weighted B3 F1 | 0.964372 at EPS 0.53 and 0.963514 at EPS 0.57, on 72,853 signatures, with name-conflict repair off; 0.965110 at EPS 0.53 with it on, the default |
+| Validation selection | EPS 0.40 with close-pair bonus 8 under 0.05: B3 precision 0.971954, recall 0.951028, F1 0.961184 on 72,649 signatures. The best F1 on the grid is 0.962106, at EPS 0.49 with the bonus |
+| Outer-test signature-weighted B3 | Precision 0.978019, recall 0.959062, F1 0.968204 on 72,853 signatures |
+| The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals |
 | Outer-test pairwise AUROC | 0.989391 |
-| Linker test accuracy | 96.715% on 10,837 queries; EPS does not change it |
-| Identity-gold cases | 134 of 152 correct at EPS 0.53 and 0.57 |
+| Linker test accuracy | 96.715% on 10,837 queries, from the `1.3` fit; `1.3.1` keeps that linker |
+| Identity-gold cases | 134 of 152 correct, the same as `1.3` |
 
-Steps 1-5 end at the validation EPS, `0.57`.
-The released model uses EPS `0.53` from the final giant-block review.
-To compare with the released model, apply that EPS to your complete model:
+Steps 1-5 end at the released settings.
+Calibration selects EPS `0.40` with the close-pair bonus, and the giant-block review kept that choice.
+
+A reviewed EPS can differ from the calibrated one, as it did for `1.3`.
+`apply_reviewed_eps.py` then writes the reviewed EPS into a fresh complete model:
 
 ```bash
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py   --source-model "$RUN/complete/production_model_v1.3"   --output-model "$RUN/released-eps/production_model_v1.3"   --eps 0.53   --review-note "Released 1.3 EPS from the final giant-block review"   --output-report "$RUN/released_eps.json"
+uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py   --source-model "$RUN/complete/production_model_v1.3.1"   --output-model "$RUN/released-eps/production_model_v1.3.1"   --eps <reviewed-eps>   --review-note "<the review and its evidence>"   --output-report "$RUN/released_eps.json"
 ```
 
 The command changes only `clusterer.json` and the manifest; the boosters stay the same.
-Score the result with steps 4 and 5.
 
 On 12 threads of a 12-core workstation, step 1 takes about 70 minutes and step 3 about 9 minutes.
 Steps 2, 4, and 5 take about a minute each or less.

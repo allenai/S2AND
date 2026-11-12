@@ -12,6 +12,8 @@ def test_get_and_set_params_follow_the_scikit_learn_contract() -> None:
     model = FastCluster(linkage="single", eps=0.3)
 
     assert model.get_params() == {
+        "close_pair_bonus": 0.0,
+        "close_pair_distance": 0.0,
         "eps": 0.3,
         "input_as_observation_matrix": False,
         "linkage": "single",

@@ -9,7 +9,7 @@ Historical correction archives are not required.
 
 ## Choose the required data
 
-| Bundle | Use | Contents | Release `1.3` size |
+| Bundle | Use | Contents | Size |
 | --- | --- | --- | --- |
 | `inference/` | Run the production model | Complete production model and binary name-count index | 2.4 GB |
 | `dataset/` | Train, tune, and evaluate models | Benchmark Arrow data with labels, held-out test blocks and pairs, augmented pairs, the model plan, and incremental linker tasks | 9.1 GB |
@@ -18,6 +18,12 @@ Historical correction archives are not required.
 Inference needs `inference/` only.
 Training and evaluation need `inference/` and `dataset/`.
 Release preparation needs all three bundles.
+
+Model release `1.3.1` uses the `1.3` data and changes only the model's linkage settings.
+Its `inference/` and `dataset/` bundles are under `s2and/1.3.1/`.
+That `dataset/` bundle differs from the `1.3` one only in `pairwise/model_plan.json`.
+The `source/` bundle is unchanged and stays under `s2and/1.3/`.
+The `1.3` model remains at `s2and/1.3/inference/`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
 The complete model contains both pairwise boosters, the reviewed EPS, the incremental linker, and required prediction fixtures.
 See [the inference contract](production_inference.md#complete-model-bundles).
@@ -30,8 +36,8 @@ Sync the bundles into `s2and/data/`, the default data folder of a source checkou
 The commands use the AWS CLI and need no AWS account.
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/ s2and/data/
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/dataset/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/inference/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/dataset/ s2and/data/
 # Release preparation only:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2and/data/
 ```
@@ -48,7 +54,7 @@ The model and the index bind their files through these manifests:
 
 | Manifest | SHA-256 |
 | --- | --- |
-| `production_model_v1.3/manifest.json` | `1d21148553bac71b4c3561857c2d415586a215b3084c963798326699d7bee232` |
+| `production_model_v1.3.1/manifest.json` | `f688ee5b5945c40754601e109f2d490f54abec1d687e368e45efea17c15693b3` |
 | `name_counts_index/manifest.json` | `87459dc14e41fd676730f56b0857d3eb61015cdc42bd73ec9b8b01e2f2b8f4b3` |
 
 The [reproduction guide](reproduce.md) runs the full training process on the synced folder.
@@ -72,7 +78,7 @@ Each future refresh of the index is a staff step.
 s2and/data/
   path_config.json  s2and_name_tuples_*.txt  first_k_letter_counts_from_orcid*.json   # tracked files
   name_counts_index/          # inference: binary name-count index
-  production_model_v1.3/      # inference: complete model
+  production_model_v1.3.1/    # inference: complete model
   manifest.json               # dataset: public-data manifest
   benchmarks/<source>/        # dataset: Arrow tables, <source>_clusters.json, unknown-signature list
   pairwise/
@@ -153,7 +159,7 @@ The `dataset` bundle supports giant-block EPS review on its seven giant Arrow da
 Their profile memberships, dev labels, and initial-query source map need no second S3 copy.
 Calibration reference files and review outputs are derived sidecars.
 Keep them distinct from untouched final test data.
-See [giant-block EPS review](eps_calibration.md) for the commands and the `1.3` EPS decision.
+See [giant-block EPS review](eps_calibration.md) for the commands and the `1.3` and `1.3.1` EPS decisions.
 
 Runtime records and vectors use Arrow IPC.
 Public giant-block email fields contain separate hashes of the normalized local part and domain.

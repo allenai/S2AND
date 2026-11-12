@@ -2,6 +2,13 @@
 
 ## Unreleased runtime changes
 
+- Publish model release `1.3.1`: the `1.3` boosters and linker with the close-pair bonus (`8` for pairs
+  under `0.05`) and EPS `0.40`. On the benchmark outer test, signature-weighted B3 precision rises from
+  0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204, with both
+  bundles scored by `1.0.0b10`. The bundle is at `s3://ai2-s2-research-public/s2and/1.3.1/inference/`
+  and needs `s2and` `1.0.0b10` or later. The `1.3` bundle stays at `s2and/1.3/inference/` and still loads.
+  The data is unchanged: `s2and/1.3.1/dataset/` differs from the `1.3` bundle only in the model plan.
+  See "The 1.3.1 decision" in `docs/eps_calibration.md`.
 - Add profile exclusions to full-block prediction (`predict_from_arrow` and `predict`): the optional
   `profile_exclusions.arrow` table and `profile_exclusions` argument. An excluded signature is evicted from
   its anchor's cluster instead of vetoing that cluster's merges, which had left claimed profiles with only
@@ -13,8 +20,39 @@
   odd mentions are behind every name-rule conflict between them, each side has five other mentions and a
   full first name, and their average model distance is below `Clusterer.name_conflict_repair_max_distance`
   (`0.2`). Clusters change for every caller; set the attribute to `None` for the earlier output.
-  Benchmark outer-test B3 F1 rises from 0.964372 to 0.965110. Models from older pickles get the default.
+  Benchmark outer-test B3 F1 of the `1.3` bundle rises from 0.964476 to 0.964702. Models from older pickles get the default.
+  With `dont_merge_cluster_seeds` on, the repair never joins two cluster seeds. `predict_eps_grid`, and
+  so `calibrate-eps`, applies the repair at every EPS.
+  The repair merges only across pairs whose names conflict; it asks the featurizer or dataset that
+  built the distances, so seeds and disallows held there block it. A prediction call with precomputed
+  distances (`dists=`) skips the repair, because such a matrix can hold the caller's own impossible pairs.
+  Bundle export refuses a clusterer whose repair setting is not the default, because a bundle does not
+  record it.
   See "Name-conflict repair" in `docs/production_inference.md`.
+- Add the close-pair bonus to average linkage, off unless the model bundle sets it: the height at which
+  two clusters merge is their average model distance minus `close_pair_bonus` times their share of pairs
+  under `close_pair_distance`. `FastCluster` takes both as parameters, and a bundle stores them under
+  `cluster_model` in `clusterer.json`. The `1.3` bundle does not set them, so its clusters are unchanged.
+  Earlier library versions refuse a bundle that sets them. `calibrate-eps` selects the bonus with EPS,
+  EPS sweeps build their trees with it, and `apply_reviewed_eps.py` takes `--close-pair` and
+  `--release-version`. See "Close-pair bonus" in `docs/production_inference.md`.
+- Add the optional `precision_f1_tolerance` field to the model plan's `eps` section: calibration selects
+  the most precise setting within that tolerance of the best F1, and `apply_reviewed_eps.py
+  --precision-f1-tolerance` checks the reviewed EPS against giant-block sweeps. Plans without the field
+  load as before and select the best F1.
+- `calibrate-eps` and `evaluate-heldout` no longer round each dataset's B3 to three decimals. With INSPIRE
+  at about 72% of the signatures, one rounding step moved the weighted F1 by 0.0007. Both reports now hold
+  unrounded values, so they differ from `1.3`'s reports after the third decimal.
+  `s2and.metrics.b3_precision_recall_fscore` still rounds its totals.
+- Average linkage now works in the block's distance matrix when the caller hands it over, as production
+  does. `fastcluster.linkage` copies its input under NumPy 2, so a block peaked at two matrices; it now
+  peaks at one. Trees are unchanged. No code in the library or its scripts calls `fastcluster.linkage` any
+  more, and a test keeps it so. The block memory guard also counts name-conflict repair's
+  one-byte-per-pair copy.
+- The giant-block EPS sweep clusters cached distances with `Clusterer.predict_eps_grid_from_rust_featurizer`,
+  new in this version, instead of its own linkage code. Swept clusters now include name-conflict repair.
+  A sweep plan records `clustering_source`, and `apply_reviewed_eps.py` rejects sweeps without it; rerun
+  earlier sweeps.
 - Bundle the native extension in the `s2and` wheel as `s2and._s2and_rust`.
   Installs upgraded from the split `1.0.0b5` packages can uninstall `s2and-rust`; nothing imports it.
 - Retire `Clusterer.predict_incremental` and classic `predict(batching_threshold=...)`.
@@ -52,13 +90,15 @@
 ## Unreleased 1.0.0 simplification
 
 The `s2and` package version is `1.0.0`; its wheel bundles the native extension. The
-production model and public-data version is `1.3`, on a separate version axis.
+production model version is `1.3.1` and the public-data version is `1.3`, on a separate version axis.
 
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles are on S3 (see [data](data.md)).
-  PyPI has the `1.0.0b9` beta for integration testing; the final `1.0.0` release is pending.
-  Pin `s2and==1.0.0b9`; its wheel bundles the native extension, so no `s2and-rust` pin is needed.
+  Model `1.3.1` is at `s2and/1.3.1/inference/`.
+  PyPI has the `1.0.0b10` beta for integration testing; the final `1.0.0` release is pending.
+  Pin `s2and==1.0.0b10`, the first version that loads model `1.3.1`; its wheel bundles the native
+  extension, so no `s2and-rust` pin is needed.
   The corrected source snapshot supports the next update cycle without historical correction archives.
   Release `1.3` excludes patent data.
   Pairwise inputs contain eight sources: seven non-patent benchmarks and existing non-patent augmentation.

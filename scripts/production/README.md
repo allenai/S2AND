@@ -77,7 +77,7 @@ Set the release root and separate output paths before the fit:
 ```powershell
 $Root = '<synced-inference-and-dataset>'
 $RunRoot = '<fresh-fit-output>'
-$PairwiseModel = "$RunRoot/pairwise/production_model_v1.3"
+$PairwiseModel = "$RunRoot/pairwise/production_model_v1.3.1"
 
 uv run --no-sync python scripts/production/model/train_pairwise.py `
   --model-plan "$Root/pairwise/model_plan.json" `
@@ -124,7 +124,7 @@ Unversioned stages require an explicit rebuild or export.
 Select EPS from validation data with the same model plan:
 
 ```powershell
-$CalibratedModel = "$RunRoot/calibrated/production_model_v1.3"
+$CalibratedModel = "$RunRoot/calibrated/production_model_v1.3.1"
 uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps `
   --source-bundle $PairwiseModel `
   --model-plan "$Root/pairwise/model_plan.json" `
@@ -310,7 +310,7 @@ Evaluate the complete model on the model plan's held-out blocks and fixed held-o
 ```powershell
 uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-heldout `
   --model-plan "$Root/pairwise/model_plan.json" `
-  --model "$RunRoot/complete/production_model_v1.3" `
+  --model "$RunRoot/complete/production_model_v1.3.1" `
   --name-counts-index-root "$Root/name_counts_index" `
   --output-report "$RunRoot/reports/heldout_metrics.json" `
   --n-jobs 12 `
@@ -365,7 +365,7 @@ uv run python scripts/verification/compare_full_predict_arrow_parity.py `
   --output-dir path/to/fresh/parity_work `
   --output-json "$RunRoot/reports/parity_evaluation_report.json" `
   --name-counts-index "$Root/name_counts_index" `
-  --model-path "$RunRoot/complete/production_model_v1.3" `
+  --model-path "$RunRoot/complete/production_model_v1.3.1" `
   --block-size REVIEWED_BLOCK_SIZE `
   --n-jobs 12 `
   --total-ram-bytes 137438953472
@@ -396,7 +396,7 @@ Run a bounded profile first:
 
 ```powershell
 uv run --with psutil python scripts/verification/profile_promoted_incremental_arrow.py `
-  --model-path "$RunRoot/complete/production_model_v1.3" `
+  --model-path "$RunRoot/complete/production_model_v1.3.1" `
   --arrow-root path/to/reviewed_arrow_collection_root `
   --dataset REVIEWED_DATASET `
   --query-limit 400 `
@@ -443,7 +443,7 @@ Push-Location $RunRoot
 uv run --no-project --python $SmokePython python `
   "$Repo\scripts\verification\smoke_installed_incremental_arrow.py" `
   release-candidate `
-  --model-dir "$RunRoot/complete/production_model_v1.3" `
+  --model-dir "$RunRoot/complete/production_model_v1.3.1" `
   --data-root $PublicDataRoot `
   --dataset REVIEWED_DATASET `
   --signature-ids REVIEWED_SEED_1 REVIEWED_SEED_2 REVIEWED_QUERY

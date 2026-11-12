@@ -130,8 +130,9 @@ DEFAULT_CHUNK_SIZE = 100
 LARGE_DISTANCE = 1e4
 LARGE_INTEGER = 10 * LARGE_DISTANCE
 CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
-# Average linkage dilutes a LARGE_DISTANCE pair below EPS once two clusters
-# exceed about LARGE_DISTANCE / EPS pairs. At this value, that needs a block
-# of about two million signatures, which no condensed matrix can hold.
+# Average linkage dilutes a hard pair below EPS once two clusters exceed about
+# this value / (EPS + close-pair bonus) pairs. That needs a block of about two
+# million signatures, or about 700 thousand with a bonus of 8. No condensed
+# matrix can hold either.
 HARD_LINKAGE_DISTANCE = 1e12
 SPECTER_DIM = 768

@@ -19,6 +19,8 @@ COMPLETE_BUNDLE_KIND: BundleKind = "complete"
 PENDING_EPS_CALIBRATION: EpsCalibration = "pending"
 CALIBRATED_EPS_CALIBRATION: EpsCalibration = "calibrated"
 PENDING_PAIRWISE_EPS = 0.5
+# Optional cluster_model fields, written as a pair by bundles calibrated with the close-pair bonus.
+CLOSE_PAIR_FIELDS = ("close_pair_bonus", "close_pair_distance")
 
 VALID_BUNDLE_STATES: frozenset[tuple[BundleKind, EpsCalibration]] = frozenset(
     {

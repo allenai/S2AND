@@ -200,13 +200,13 @@ def test_nested_precomputed_prediction_retains_explicit_input_policy(
     distances = np.array([0.2, 0.7, 0.8, 0.5, 0.9, 0.6], dtype=np.float64)
     before = distances.copy()
     observed: list[bool] = []
-    linkage = pairwise_module.linkage
+    constrained_linkage = pairwise_module.constrained_linkage
 
     def checked_linkage(*args: Any, **kwargs: Any) -> np.ndarray:
         observed.append(kwargs["preserve_input"])
-        return linkage(*args, **kwargs)
+        return constrained_linkage(*args, **kwargs)
 
-    monkeypatch.setattr(pairwise_module, "linkage", checked_linkage)
+    monkeypatch.setattr(pairwise_module, "constrained_linkage", checked_linkage)
     model.predict_helper({"block": ["0", "1", "2", "3"]}, dataset, dists={"block": distances})
     assert observed == [True if preserve_input is None else preserve_input]
     if preserve_input is not False:

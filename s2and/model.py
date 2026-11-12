@@ -742,6 +742,73 @@ def _wants_name_conflict_repair(clusterer: Any, block_dict: Mapping[str, Sequenc
     return float(max_average_distance)
 
 
+# A name-rule conflict gets this value in the repair's own constraint calls. An explicit seed
+# disallow keeps its own value and takes precedence, so this value marks a conflict of the name
+# rules on a pair that no disallow holds.
+_NAME_RULE_CONFLICT = 2 * LARGE_DISTANCE
+
+
+def _in_two_required_groups(require: Mapping[str, Any], left: str, right: str) -> bool:
+    return left in require and right in require and require[left] != require[right]
+
+
+def _rust_name_rules_alone_forbid(rust_featurizer: object) -> Callable[[Sequence[tuple[str, str]]], list[bool]]:
+    """Return the repair's name-rule test, answered by the featurizer and the seeds it holds.
+
+    A pair passes when its names conflict, no disallow the featurizer holds covers it, and its
+    signatures are not in two different required groups. Two signatures of one required group
+    pass: prediction may ignore the groups, and one group never keeps its own signatures apart.
+    """
+    index_by_id: dict[str, int] = {}
+    require: dict[str, Any] = {}
+
+    def forbid(pairs: Sequence[tuple[str, str]]) -> list[bool]:
+        if not pairs:
+            return []
+        if not index_by_id:
+            index_by_id.update(_build_signature_index_by_id(rust_featurizer))
+            require.update(_cluster_seeds_require_from_rust_featurizer(rust_featurizer))
+        values = get_constraints_matrix_indexed_rust(
+            [(index_by_id[left], index_by_id[right]) for left, right in pairs],
+            featurizer=rust_featurizer,
+            high_value=_NAME_RULE_CONFLICT,
+            dont_merge_cluster_seeds=True,
+            # Required groups are left out of the call, which still applies explicit disallows.
+            incremental_dont_use_cluster_seeds=True,
+            # One thread: its pool is apart from the scoring pool unless scoring also runs on one thread.
+            num_threads=1,
+            # The question is about names; an equal ORCID must not hide a conflict.
+            suppress_orcid=True,
+        )
+        return [
+            value == _NAME_RULE_CONFLICT and not _in_two_required_groups(require, left, right)
+            for value, (left, right) in zip(values, pairs, strict=True)
+        ]
+
+    return forbid
+
+
+def _dataset_name_rules_alone_forbid(dataset: ANDData) -> Callable[[Sequence[tuple[str, str]]], list[bool]]:
+    """Return the same test, answered by ``ANDData`` and its cluster seeds."""
+
+    def forbid(pairs: Sequence[tuple[str, str]]) -> list[bool]:
+        return [
+            dataset.get_constraint(
+                left,
+                right,
+                high_value=_NAME_RULE_CONFLICT,
+                dont_merge_cluster_seeds=True,
+                incremental_dont_use_cluster_seeds=True,
+                suppress_orcid=True,
+            )
+            == _NAME_RULE_CONFLICT
+            and not _in_two_required_groups(dataset.cluster_seeds_require, left, right)
+            for left, right in pairs
+        ]
+
+    return forbid
+
+
 def _name_conflict_repair_from_rust_featurizer(
     clusterer: Any, block_dict: Mapping[str, Sequence[str]], rust_featurizer: object
 ) -> NameConflictRepair | None:
@@ -750,13 +817,23 @@ def _name_conflict_repair_from_rust_featurizer(
     if max_average_distance is None:
         return None
     full_first_names, orcids = cast(Any, rust_featurizer).name_conflict_facts()
-    return NameConflictRepair(max_average_distance, frozenset(full_first_names), dict(orcids))
+    # A clusterer that hides ORCIDs from its constraints hides them from the repair too.
+    use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
+    return NameConflictRepair(
+        max_average_distance,
+        frozenset(full_first_names),
+        dict(orcids) if use_orcid else {},
+        _rust_name_rules_alone_forbid(rust_featurizer),
+    )
 
 
 def _name_conflict_repair_from_dataset(
     clusterer: Any, block_dict: Mapping[str, Sequence[str]], dataset: ANDData
 ) -> NameConflictRepair | None:
-    """Read the same facts from ``ANDData`` signatures."""
+    """Read the same facts from ``ANDData`` signatures, or from a stand-in dataset's featurizer."""
+    rust_featurizer = getattr(dataset, "rust_featurizer", None)
+    if rust_featurizer is not None:
+        return _name_conflict_repair_from_rust_featurizer(clusterer, block_dict, rust_featurizer)
     max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
     if max_average_distance is None:
         return None
@@ -767,12 +844,20 @@ def _name_conflict_repair_from_dataset(
         for signature_id in members:
             signature = dataset.signatures[signature_id]
             first = signature.author_info_first_normalized
-            if has_full_first_name(signature.author_info_first if first is None else first):
+            if first is None:
+                # An Arrow-backed dataset leaves normalized names to Rust; parse as the name rules do,
+                # so "J. D." is the initial "j" here as it is in production.
+                first = canonicalize_name_parts(
+                    signature.author_info_first, signature.author_info_middle, signature.author_info_last
+                ).first
+            if has_full_first_name(first):
                 full_first_names.add(signature_id)
             orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
             if orcid is not None:
                 orcids[signature_id] = orcid
-    return NameConflictRepair(max_average_distance, frozenset(full_first_names), orcids)
+    return NameConflictRepair(
+        max_average_distance, frozenset(full_first_names), orcids, _dataset_name_rules_alone_forbid(dataset)
+    )
 
 
 def _prediction_state_from_dataset(dataset: ANDData) -> PredictionState:
@@ -1067,8 +1152,14 @@ def _guard_predict_block_matrix_allocation(
     uses_fastcluster: bool,
     fastcluster_fused_dtype: Any,
     total_ram_bytes: int | None,
+    repairs_name_conflicts: bool = False,
 ) -> None:
-    """Fail fast before exact prediction allocates a block matrix above the RAM budget."""
+    """Fail fast before exact prediction allocates a block matrix above the RAM budget.
+
+    Linkage works in the matrix, so the matrix is the block's peak. Name-conflict repair
+    adds its one-byte-per-pair copy. A block with profile exclusions also keeps a second
+    matrix for relinking, which this guard does not count.
+    """
     if total_ram_bytes is None or block_size <= 1:
         return
     snapshot = memory_budget.memory_snapshot_for_stage(
@@ -1082,6 +1173,8 @@ def _guard_predict_block_matrix_allocation(
         uses_fastcluster=uses_fastcluster,
         fastcluster_fused_dtype=fastcluster_fused_dtype,
     )
+    if repairs_name_conflicts and uses_fastcluster and block_size >= MIN_BLOCK_SIZE:
+        matrix_bytes += int(block_size * (block_size - 1) // 2)
     if matrix_bytes <= int(snapshot.available_bytes):
         return
     raise MemoryError(
@@ -1713,6 +1806,8 @@ class _RustFeaturizerPredictDataset:
     cluster_seeds_disallow: set[tuple[str, str]]
     signatures: Mapping[str, Any] = field(default_factory=dict)
     name: str = "rust_featurizer_predict"
+    # The stand-in has no signatures; name-conflict repair reads its facts from the featurizer.
+    rust_featurizer: Any = None
 
 
 def _cluster_seeds_require_from_rust_featurizer(rust_featurizer: Any) -> dict[str, int | str]:
@@ -2592,6 +2687,7 @@ class Clusterer:
                 uses_fastcluster=isinstance(self.cluster_model, FastCluster),
                 fastcluster_fused_dtype=fastcluster_dtype,
                 total_ram_bytes=total_ram_bytes,
+                repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
             )
             if isinstance(self.cluster_model, FastCluster):
                 # flattened pdist style
@@ -2814,6 +2910,7 @@ class Clusterer:
                 uses_fastcluster=uses_fastcluster,
                 fastcluster_fused_dtype=fastcluster_dtype,
                 total_ram_bytes=total_ram_bytes,
+                repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
             )
             if uses_fastcluster:
                 pairwise_proba = np.zeros(block_pair_count, dtype=fastcluster_dtype)
@@ -3144,6 +3241,7 @@ class Clusterer:
             cluster_seeds_require=effective_cluster_seeds_require,
             cluster_seeds_disallow=resolved_cluster_seeds_disallow,
             signatures={},
+            rust_featurizer=rust_featurizer,
         )
         return Clusterer._predict_from_prepared_rust_featurizer(
             self,
@@ -4671,8 +4769,10 @@ class Clusterer:
             )
 
         # Linkage may overwrite the matrix, so the repair keeps a one-byte-per-pair copy.
+        # One thread: the copy then runs on this thread. A pool job would wait behind the
+        # next block's scoring, which measured 270 times slower on a giant block.
         repair_codes = (
-            quantize_distances(dist_matrix, num_threads=resolve_n_jobs(self.n_jobs))
+            quantize_distances(dist_matrix, num_threads=1)
             if name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
             else None
         )
@@ -4710,6 +4810,7 @@ class Clusterer:
                 repair_codes,
                 name_conflict_repair,
                 forbidden=forbidden,
+                seed_groups=self._repair_seed_groups(dataset, prediction_state),
                 block_key=block_key,
             ),
         )
@@ -4749,24 +4850,89 @@ class Clusterer:
             return None
         return dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require
 
+    def _repair_seed_groups(
+        self,
+        dataset: ANDData,
+        prediction_state: PredictionState | None,
+    ) -> Mapping[str, Any] | None:
+        """Return the required seed groups that name-conflict repair may not join, or None.
+
+        Reads every seed in sight, whether or not block labels enforce it. Explicit seeds stay
+        in the distances when default constraints are off, and a needless veto only skips a repair.
+        """
+        if not self.dont_merge_cluster_seeds:
+            return None
+        groups: dict[str, Any] = dict(dataset.cluster_seeds_require)
+        if prediction_state is not None:
+            groups.update(prediction_state.cluster_seeds_require)
+        return groups or None
+
+    def predict_eps_grid_from_rust_featurizer(
+        self,
+        block_dict: dict[str, list[str]],
+        rust_featurizer: object,
+        dists: Mapping[str, np.ndarray],
+        eps_grid: Sequence[float],
+    ) -> tuple[list[str], dict[float, np.ndarray]]:
+        """Cluster every block at each EPS from precomputed distances and a Rust featurizer.
+
+        The clusters at an EPS equal those of
+        ``predict_from_rust_featurizer(block_dict, rust_featurizer)`` with
+        ``cluster_model.eps`` set to it, when ``dists`` are the distances that call
+        builds. See ``predict_eps_grid``.
+
+        Args:
+            block_dict: Blocks to cluster.
+            rust_featurizer: Featurizer that holds every signature of the blocks. Name-conflict
+                repair reads its first-name and ORCID facts.
+            dists: Condensed distance matrix of every block with two or more signatures. A
+                mapping may load each matrix on first access.
+            eps_grid: EPS values to cut at.
+
+        Returns:
+            The signatures in block order, and per EPS one cluster id per signature.
+
+        Raises:
+            ValueError: If the featurizer carries required cluster seeds. Precomputed
+                distances do not hold them, as in ``predict_from_rust_featurizer``.
+        """
+        if _cluster_seeds_require_from_rust_featurizer(rust_featurizer):
+            raise ValueError(
+                "cluster_seeds_require cannot be used with precomputed dists because require pairs "
+                "would not be injected into the distance matrix"
+            )
+        proxy_dataset = _RustFeaturizerPredictDataset(
+            cluster_seeds_require={},
+            cluster_seeds_disallow=set(),
+            signatures={},
+            rust_featurizer=rust_featurizer,
+        )
+        return self.predict_eps_grid(block_dict, cast(ANDData, proxy_dataset), dists, eps_grid)
+
     def predict_eps_grid(
         self,
         block_dict: dict[str, list[str]],
         dataset: ANDData,
-        dists: dict[str, np.ndarray],
+        dists: Mapping[str, np.ndarray],
         eps_grid: Sequence[float],
     ) -> tuple[list[str], dict[float, np.ndarray]]:
         """Cluster every block at each EPS from one linkage per block.
 
         Only the FastCluster cut depends on EPS, so each block is linked once and
         cut at every EPS. The clusters at an EPS equal those of
-        ``predict(block_dict, dataset, dists=dists)`` with ``cluster_model.eps``
-        set to it.
+        ``predict(block_dict, dataset)`` with ``cluster_model.eps`` set to it, when
+        ``dists`` are the distances that call builds.
+
+        Name-conflict repair runs here, unlike in ``predict(..., dists=dists)``. Pass only
+        matrices built from this dataset's rules and seeds. An impossible pair that comes
+        from supervision of the caller's own is read as a name conflict when the names
+        also conflict.
 
         Args:
             block_dict: Blocks to cluster.
             dataset: Dataset whose cluster seeds constrain the clusters.
             dists: Condensed distance matrix of every block with two or more signatures.
+                Each block's matrix is read once, so a mapping may load it on access.
             eps_grid: EPS values to cut at.
 
         Returns:
@@ -4792,6 +4958,8 @@ class Clusterer:
         disallow_adjacency = seed_disallow_adjacency(
             prediction_state.cluster_seeds_disallow, normalize_partial_supervision(None)
         )
+        name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
+        seed_groups = self._repair_seed_groups(dataset, prediction_state)
         signatures: list[str] = []
         ids_by_eps: dict[float, list[np.ndarray]] = {float(eps): [] for eps in eps_grid}
         next_id = 0
@@ -4808,8 +4976,16 @@ class Clusterer:
             cluster_model = clone_cluster_model(self.cluster_model)
             # predict clusters reused matrices with preserve_input=True; so does this.
             cluster_model.set_params(preserve_input=True)
-            linkage_matrix = np.ascontiguousarray(cluster_model.linkage_matrix(dists[block_key]), dtype=np.float64)
+            block_distances = dists[block_key]
+            linkage_matrix = np.ascontiguousarray(cluster_model.linkage_matrix(block_distances), dtype=np.float64)
             block_width = len(block_signatures)
+            # The matrix is preserved, so one copy of its codes serves the repair at every EPS.
+            repair_codes = (
+                quantize_distances(np.asarray(block_distances), num_threads=resolve_n_jobs(self.n_jobs))
+                if name_conflict_repair is not None and block_width >= MIN_BLOCK_SIZE
+                else None
+            )
+            del block_distances
             for eps_index, (eps, ids) in enumerate(ids_by_eps.items()):
                 if eps_index == 0 or cluster_dist is None:
                     cut = fcluster(linkage_matrix, t=eps, criterion="distance")
@@ -4823,6 +4999,16 @@ class Clusterer:
                     disallow_adjacency,
                     prediction_state=prediction_state,
                 )
+                if repair_codes is not None and name_conflict_repair is not None:
+                    labels = repair_name_conflicts_in_block(
+                        block_signatures,
+                        labels,
+                        repair_codes,
+                        name_conflict_repair,
+                        forbidden=disallow_adjacency,
+                        seed_groups=seed_groups,
+                        block_key=block_key,
+                    )
                 _, block_ids = np.unique(np.asarray(labels), return_inverse=True)
                 ids.append(next_id + block_ids.astype(np.int64))
             next_id += block_width
@@ -4979,7 +5165,11 @@ class Clusterer:
             dataset.cluster_seeds_disallow if prediction_state is None else prediction_state.cluster_seeds_disallow
         )
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
-        name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
+        # A precomputed matrix can hold impossible pairs from the caller's own supervision, and
+        # nothing here can tell those from name conflicts. Only distances built in this call are repaired.
+        name_conflict_repair = (
+            None if dists is not None else _name_conflict_repair_from_dataset(self, block_dict, dataset)
+        )
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16
@@ -5091,6 +5281,7 @@ class Clusterer:
                         uses_fastcluster=isinstance(self.cluster_model, FastCluster),
                         fastcluster_fused_dtype=fastcluster_fused_dtype,
                         total_ram_bytes=total_ram_bytes,
+                        repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
                     )
                     if isinstance(self.cluster_model, FastCluster):
                         pairwise_proba = np.zeros(
@@ -5140,6 +5331,7 @@ class Clusterer:
                     uses_fastcluster=isinstance(self.cluster_model, FastCluster),
                     fastcluster_fused_dtype=fastcluster_fused_dtype,
                     total_ram_bytes=total_ram_bytes,
+                    repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
                 )
                 if isinstance(self.cluster_model, FastCluster):
                     pairwise_proba = np.zeros(

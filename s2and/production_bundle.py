@@ -19,8 +19,10 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.model import Clusterer, _selected_feature_indices
 from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
+from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
+    CLOSE_PAIR_FIELDS,
     COMPLETE_BUNDLE_KIND,
     PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_ONLY_BUNDLE_KIND,
@@ -97,10 +99,14 @@ def _featurization_info_payload(featurizer_info: FeaturizationInfo) -> dict[str,
 
 def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
     cluster_model = clusterer.cluster_model
-    return {
+    payload: dict[str, Any] = {
         "eps": float(cluster_model.eps),
         "linkage": str(cluster_model.linkage),
     }
+    # Written only when on, so bundles without the bonus keep their exact bytes.
+    if float(getattr(cluster_model, "close_pair_bonus", 0.0)) > 0:
+        payload.update({field: float(getattr(cluster_model, field)) for field in CLOSE_PAIR_FIELDS})
+    return payload
 
 
 def _clusterer_config_payload(
@@ -112,6 +118,14 @@ def _clusterer_config_payload(
     raw_feature_contract = getattr(clusterer, "feature_contract", None)
     if not isinstance(raw_feature_contract, Mapping):
         raise ValueError("Production bundle export requires an explicit source feature_contract")
+    repair_distance = getattr(clusterer, "name_conflict_repair_max_distance", DEFAULT_MAX_AVERAGE_DISTANCE)
+    if repair_distance != DEFAULT_MAX_AVERAGE_DISTANCE:
+        # A bundle has no field for the setting, so a loaded model would silently get the default.
+        raise ValueError(
+            "Production bundle export cannot record name_conflict_repair_max_distance="
+            f"{repair_distance!r}; a loaded model uses {DEFAULT_MAX_AVERAGE_DISTANCE}. "
+            "Restore the default before export and set the attribute after loading."
+        )
     feature_contract = dict(raw_feature_contract)
     if expected_artifact_hashes is None:
         require_canonical_artifact_hashes(feature_contract, context="Production bundle export feature_contract")
@@ -336,9 +350,14 @@ def finalize_pairwise_eps(
     output_bundle_dir: Path,
     expected_manifest_sha256: str,
     new_eps: float,
+    close_pair_bonus: float = 0.0,
+    close_pair_distance: float = 0.0,
     expected_artifact_hashes: Mapping[str, Any] | None = None,
 ) -> ProductionBundleSummary:
-    """Write a fresh pairwise stage whose only semantic change is clustering EPS."""
+    """Write a fresh pairwise stage whose only semantic change is the linkage cut.
+
+    The cut is EPS and, when ``close_pair_bonus`` is positive, the close-pair bonus selected with it.
+    """
 
     source_bundle_dir = Path(source_bundle_dir)
     output_bundle_dir = Path(output_bundle_dir)
@@ -369,6 +388,12 @@ def finalize_pairwise_eps(
     with _staged_production_bundle(output_bundle_dir) as staging_dir:
         _copy_path(source_bundle_dir, staging_dir)
         config["cluster_model"]["eps"] = float(new_eps)
+        # The selected linkage replaces the source's: plain linkage drops a bonus the source carried.
+        for name in CLOSE_PAIR_FIELDS:
+            config["cluster_model"].pop(name, None)
+        if float(close_pair_bonus) > 0:
+            config["cluster_model"]["close_pair_bonus"] = float(close_pair_bonus)
+            config["cluster_model"]["close_pair_distance"] = float(close_pair_distance)
         _write_json(staging_dir / "clusterer.json", config)
         staged_summary = write_production_manifest(
             staging_dir,

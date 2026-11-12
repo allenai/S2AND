@@ -21,6 +21,9 @@ DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_sweeps_arrow"
 RELEASE_GIANT_DATASETS = ("a_khan", "a_silva", "h_wang", "j_smith", "s_gupta", "s_lee", "s_park")
 # Diagnostic B3 curve that keeps one-record ORCID groups and their merge penalties.
 SINGLETON_INCLUSIVE_CURVE = "eps_b3_with_singletons.tsv"
+# How a sweep clustered its cached distances. Sweeps from before this value cut their own
+# linkage trees and skipped later production steps such as name-conflict repair.
+CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 
 
 def write_json(path: Path, payload: Any) -> None:

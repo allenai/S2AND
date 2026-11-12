@@ -54,6 +54,31 @@ def test_relative_model_plan_survives_source_removal(tmp_path: Path) -> None:
     assert all(path.is_relative_to(relocated) for path in plan.datasets["inventors_s2and"].files.values())
 
 
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [({}, 0.0), ({"precision_f1_tolerance": 0.001}, 0.001)],
+    ids=["field-omitted", "field-set"],
+)
+def test_precision_f1_tolerance_is_an_optional_eps_field(tmp_path: Path, extra: dict, expected: float) -> None:
+    plan_path = _write_plan(tmp_path)
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["eps"] |= extra
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_model_plan(plan_path).eps.precision_f1_tolerance == expected
+
+
+@pytest.mark.parametrize("extra", [{"precision_f1_tolerance": 1.5}, {"precision_f1_tolerance": True}, {"other": 0.1}])
+def test_invalid_eps_policy_fields_are_rejected(tmp_path: Path, extra: dict) -> None:
+    plan_path = _write_plan(tmp_path)
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["eps"] |= extra
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_model_plan(plan_path)
+
+
 def test_relative_model_plan_rejects_changed_source(tmp_path: Path) -> None:
     plan = _write_plan(tmp_path)
     (tmp_path / "corrected_sources" / "inventors_s2and" / "signatures").write_text("changed", encoding="utf-8")

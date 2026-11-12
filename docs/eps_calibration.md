@@ -28,6 +28,34 @@ EPS `0.53` gives the best S of the tested values: 90.09%, against 88.99% at `0.5
 The same ORCID references select and assess EPS, so this review is not an independent test.
 On the benchmark outer test, signature-weighted B3 F1 rises from 0.963514 at `0.57` to 0.964372 at `0.53`.
 
+## Close-pair bonus
+
+A candidate model can carry a close-pair bonus, selected with EPS in benchmark calibration.
+The sweep builds each cached tree with the candidate's bonus, so the curves review EPS for that linkage.
+`apply_reviewed_eps.py` then changes EPS only.
+To change the bonus itself, rerun the sweep on a candidate that carries the new value.
+Without snapshot curves, `--close-pair BONUS DISTANCE` sets a reviewed bonus, and the review note cites the evidence.
+`--release-version` names a model that differs from its source only in these linkage settings.
+
+With the bonus, a score that weights precision above recall has no peak on giant blocks: recall falls slowly as EPS falls, so the score keeps rising.
+The 1.3 review score, (2 x precision + recall) / 3, therefore cannot select EPS for a bundle that uses the bonus.
+Use the model plan's `precision_f1_tolerance` instead, in benchmark calibration and in this review.
+
+Pass the plan's tolerance to `apply_reviewed_eps.py` as `--precision-f1-tolerance`.
+The command then rejects an EPS whose pooled giant-block F1 is more than the tolerance below the best swept F1.
+Benchmark calibration picks the most precise EPS within the tolerance on validation; this check keeps that choice within the same tolerance on giant blocks.
+If it rejects the EPS, review the next higher value on the grid.
+Sweep enough EPS values around the candidate for the best swept F1 to be meaningful.
+
+### The 1.3.1 decision
+
+`1.3.1` keeps both `1.3` boosters and the linker, and changes only the linkage: close-pair bonus `8` for pairs under `0.05`, EPS `0.40`.
+Calibration with `precision_f1_tolerance` `0.001` selects that setting on the validation blocks.
+On the benchmark outer test, with both bundles scored by this version of the code, signature-weighted B3 precision rises from 0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204.
+The validation blocks selected the setting, but outer-test curves over EPS were inspected during development, so this is not an untouched test.
+On the seven giant blocks, pooled ORCID-B3 F1 over ten EPS values from `0.30` to `0.53` peaks at `0.40` (0.9317), so the giant-block tolerance check passes.
+The choice of `0.40` over its neighbors is not sharp: validation F1 varies by less than 0.001 from EPS `0.40` to `0.53`.
+
 ## Freeze populations
 
 Treat EPS reference labels as development data.
@@ -50,7 +78,8 @@ ORCID IDs remain hidden from native features, constraints, and subblocking repai
 Unknown identities remain in inference context; B3 scores only known references.
 
 The default `--route production` scores what `predict_from_arrow` returns at each EPS.
-It cuts cached distance trees for the full-name subblocks, as production's bulk step does.
+It clusters the full-name subblocks from cached distances with the production block-clustering code, so the clusters include name-conflict repair.
+`plan.json` records this as `clustering_source`; the release review rejects a sweep without it.
 Production code then reunites no-middle records that the size cap split, and attaches initial-only groups through the linker.
 Those steps run on `orcid_free_arrow/` in the output directory, a dataset copy without ORCIDs.
 `eps_b3_bulk_only.tsv` keeps the curve before the linker steps as a diagnostic.
@@ -152,7 +181,7 @@ Record the reason for that choice.
 
 ```powershell
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
-  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3" `
+  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `
   --review-note '<human decision and tradeoff>' --output-report "$EpsRun/eps_review.json"
 ```
@@ -170,7 +199,7 @@ Release `1.3` used this form:
 
 ```powershell
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
-  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3" `
+  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --eps 0.53 --review-note '<decision, tradeoff, and internal evidence location>' `
   --output-report "$EpsRun/eps_review.json"
 ```

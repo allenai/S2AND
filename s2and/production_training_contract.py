@@ -135,11 +135,17 @@ def require_recorded_population(record: Any, blocks: Mapping[str, Sequence[str]]
 
 @dataclass(frozen=True, slots=True)
 class EpsPolicy:
-    """EPS candidates and minimum accepted calibration scores."""
+    """EPS candidates, minimum accepted calibration scores, and the precision lean.
+
+    ``precision_f1_tolerance`` is the F1 that selection may give up to gain precision:
+    the most precise setting wins among those within it of the best F1. Zero selects the
+    best F1. A plan may omit the field; it then reads as zero.
+    """
 
     grid: tuple[float, ...]
     minimum_dataset_f1: float
     minimum_signature_weighted_f1: float
+    precision_f1_tolerance: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +251,8 @@ def load_model_plan(path: Path) -> ModelPlan:
         raise ValueError("invalid release version")
 
     raw_eps = payload["eps"]
-    if not isinstance(raw_eps, dict) or set(raw_eps) != {
+    # precision_f1_tolerance is optional, so plans written before it existed keep their bytes and identity.
+    if not isinstance(raw_eps, dict) or set(raw_eps) - {"precision_f1_tolerance"} != {
         "grid",
         "minimum_dataset_f1",
         "minimum_signature_weighted_f1",
@@ -261,6 +268,7 @@ def load_model_plan(path: Path) -> ModelPlan:
         grid=grid,
         minimum_dataset_f1=_unit_float(raw_eps["minimum_dataset_f1"]),
         minimum_signature_weighted_f1=_unit_float(raw_eps["minimum_signature_weighted_f1"]),
+        precision_f1_tolerance=_unit_float(raw_eps.get("precision_f1_tolerance", 0.0)),
     )
 
     raw_datasets = payload["datasets"]

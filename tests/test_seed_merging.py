@@ -286,8 +286,9 @@ def test_missing_seed_restoration_checks_unseeded_cluster_occupants(disallowed: 
     assert clusters == {"existing": ["a", "occupant"], "collision": ["other"]}
 
 
+@pytest.mark.parametrize("close_pair", [(0.0, 0.0), (2.0, 0.3)], ids=["plain", "close-pair-bonus"])
 @pytest.mark.parametrize("draw", range(8))
-def test_predict_eps_grid_matches_predict_at_each_eps(draw: int) -> None:
+def test_predict_eps_grid_matches_predict_at_each_eps(draw: int, close_pair: tuple[float, float]) -> None:
     """One linkage per block, cut at each EPS, gives predict's clusters, seed joins included."""
 
     raw = json.loads(Path("tests/dummy/signatures.json").read_text())
@@ -305,7 +306,7 @@ def test_predict_eps_grid_matches_predict_at_each_eps(draw: int) -> None:
     clusterer = Clusterer(
         FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         ConstantDistanceClassifier(0.9),
-        cluster_model=FastCluster(linkage="average"),
+        cluster_model=FastCluster(linkage="average", close_pair_bonus=close_pair[0], close_pair_distance=close_pair[1]),
         n_jobs=1,
     )
     grid = [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 1.0]

@@ -90,7 +90,7 @@ assert orcid.name_tuples_sha256 == aliases.data_sha256
 Download the common count index only when you need global name frequencies:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/inference/name_counts_index/ s2and/data/name_counts_index/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/inference/name_counts_index/ s2and/data/name_counts_index/
 ```
 
 Use the canonical keys with the validated index:

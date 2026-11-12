@@ -275,7 +275,7 @@ def test_unknown_signature_retains_its_effect_on_cluster_predictions(release_inp
         predictions,
         frozenset({unknown}),
     )
-    assert score == {"precision": 0.5, "recall": 1.0, "f1": 0.667, "signature_count": 2}
+    assert score == {"precision": 0.5, "recall": 1.0, "f1": pytest.approx(2 / 3, abs=1e-12), "signature_count": 2}
     without_unknown, _ = clusterer.predict(
         {"block": [first, second]},
         dataset,

@@ -2,8 +2,8 @@
 
 This runner consumes Arrow linker-replay datasets, plans target-bearing blocks
 from Arrow signature metadata, computes pairwise distances through the
-Arrow/Rust featurizer path, and sweeps FastCluster EPS values by reusing one
-linkage tree per subblock. ``--score-mode orcid-b3`` scores ORCID-masked
+Arrow/Rust featurizer path, and sweeps FastCluster EPS values. Production code
+clusters each subblock at every EPS from one linkage. ``--score-mode orcid-b3`` scores ORCID-masked
 identity B3; the release EPS review uses that mode.
 """
 
@@ -41,6 +41,7 @@ from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
+    CLUSTERING_SOURCE,
     DEFAULT_GOLD_ROOT,
     DEFAULT_OUTPUT_ROOT,
     SINGLETON_INCLUSIVE_CURVE,
@@ -59,12 +60,12 @@ WEIGHT_COLUMNS = [
 
 
 @dataclass(frozen=True)
-class CachedLinkageBlock:
-    """One selected subblock with a reusable FastCluster linkage tree."""
+class CachedBlockClusters:
+    """One subblock with the production cluster label of each signature at every swept EPS."""
 
     block_key: str
     signature_ids: list[str]
-    linkage_matrix: Any | None
+    labels_by_eps: dict[float, list[int]]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -739,147 +740,129 @@ def _ensure_distance_caches(
     return cache_rows
 
 
-def _normalize_cluster_labels(labels: Any, expected_count: int) -> list[int]:
-    """Return FastCluster labels as stable Python ints."""
+class _CachedDistances(Mapping[str, Any]):
+    """Cached distance vectors by subblock key, with one in memory at a time.
 
-    import numpy as np
+    Production clusters the subblocks in order and reads each matrix once, so loading on access
+    keeps peak memory at one matrix. ``rows`` records what was loaded and how long each subblock took.
+    """
 
-    normalized = np.asarray(labels).copy()
-    if len(normalized) != expected_count:
-        raise ValueError(f"Cluster model returned {len(normalized)} labels for {expected_count} signatures")
-    if len(normalized) > 0:
-        max_label = int(normalized.max())
-        outlier_locations = np.where(normalized == -1)[0]
-        for offset, location in enumerate(outlier_locations):
-            normalized[location] = max_label + 1 + offset
-    return [int(label) for label in normalized]
+    def __init__(self, loaders: Mapping[str, tuple[Path, Mapping[str, Any], int]]) -> None:
+        self._loaders = loaders
+        self._key: str | None = None
+        self._dist: Any = None
+        self._started = 0.0
+        self.rows: dict[str, dict[str, Any]] = {}
 
+    def close_row(self) -> None:
+        """Record the time since the current subblock was loaded: its load, linkage, cuts and repair."""
+        if self._key is not None and "seconds" not in self.rows[self._key]:
+            self.rows[self._key]["seconds"] = round(time.perf_counter() - self._started, 3)
 
-def _linkage_from_cached_distance(
-    *,
-    clusterer: Any,
-    block_key: str,
-    signature_ids: Sequence[str],
-    dist: Any,
-) -> Any | None:
-    """Build the FastCluster linkage tree once for a cached distance vector."""
+    def __getitem__(self, key: str) -> Any:
+        if key == self._key:
+            return self._dist
+        self.close_row()
+        cache_path, metadata, signature_count = self._loaders[key]
+        # Drop the previous matrix before the next one loads.
+        self._dist = None
+        self._started = time.perf_counter()
+        dist = _load_cached_distance(cache_path, metadata)
+        pair_count = signature_count * (signature_count - 1) // 2
+        if getattr(dist, "ndim", None) != 1 or len(dist) != pair_count:
+            raise ValueError(
+                f"Cached distance vector for block {key} must be 1-D with {pair_count} pairs, "
+                f"got shape={getattr(dist, 'shape', None)}"
+            )
+        logging.info("Clustering block %s from cached distances (signatures=%d)", key, signature_count)
+        self._key, self._dist = key, dist
+        self.rows[key] = {"signature_count": signature_count, "pair_count": pair_count}
+        return dist
 
-    import numpy as np
+    def __iter__(self) -> Any:
+        return iter(self._loaders)
 
-    from s2and.model_pairwise import FastCluster, constrained_linkage
-
-    if len(signature_ids) <= 1:
-        return None
-
-    cluster_model = clusterer.cluster_model
-    if not isinstance(cluster_model, FastCluster):
-        raise ValueError(f"Cached linkage EPS sweep requires FastCluster, got {type(cluster_model).__name__}")
-    if bool(getattr(cluster_model, "input_as_observation_matrix", False)):
-        raise ValueError("EPS sweep expects cached condensed distance vectors, not observation matrices")
-    dist_array = np.asarray(dist)
-    expected_pair_count = len(signature_ids) * (len(signature_ids) - 1) // 2
-    if dist_array.ndim != 1 or len(dist_array) != expected_pair_count:
-        raise ValueError(
-            f"Cached distance vector for block {block_key} must be 1-D with {expected_pair_count} pairs, "
-            f"got shape={dist_array.shape}"
-        )
-    linkage_method = str(cluster_model.linkage)
-    cluster_model_name = type(cluster_model).__name__
-    logging.info(
-        "Starting linkage build for block %s using %s (signatures=%d)",
-        block_key,
-        cluster_model_name,
-        len(signature_ids),
-    )
-    started = time.perf_counter()
-    linkage_matrix = constrained_linkage(dist_array, linkage_method, preserve_input=True)
-    logging.info(
-        "Finished linkage build for block %s using %s in %.3fs",
-        block_key,
-        cluster_model_name,
-        time.perf_counter() - started,
-    )
-    return linkage_matrix
+    def __len__(self) -> int:
+        return len(self._loaders)
 
 
-def _labels_from_cached_linkage(
-    *,
-    linkage_matrix: Any | None,
-    signature_ids: Sequence[str],
-    eps: float,
-) -> list[int]:
-    """Cut a cached FastCluster linkage tree at one EPS value."""
-
-    from scipy.cluster.hierarchy import fcluster
-
-    if len(signature_ids) <= 1:
-        return [0]
-    if linkage_matrix is None:
-        raise ValueError("Missing linkage matrix for multi-signature subblock")
-    labels = fcluster(linkage_matrix, t=float(eps), criterion="distance")
-    return _normalize_cluster_labels(labels, len(signature_ids))
-
-
-def _build_linkage_blocks(
+def _cluster_cached_blocks(
     *,
     args: argparse.Namespace,
     clusterer: Any,
     selected_subblocks: dict[str, list[str]],
     cache_dir: Path,
     arrow_dataset: ArrowDataset,
-) -> tuple[dict[str, CachedLinkageBlock], list[dict[str, Any]]]:
-    """Load cached distances once and build reusable linkage trees."""
+    eps_values: Sequence[float],
+) -> tuple[dict[str, CachedBlockClusters], list[dict[str, Any]]]:
+    """Cluster every subblock at every EPS with production code, from cached distances.
 
-    linkage_blocks: dict[str, CachedLinkageBlock] = {}
-    linkage_rows: list[dict[str, Any]] = []
+    ``Clusterer.predict_eps_grid_from_rust_featurizer`` links each subblock once, cuts it at each
+    EPS and applies every later production step of block clustering, such as name-conflict repair.
+    """
+
+    eps_grid = [float(eps) for eps in eps_values]
     arrow_generation_id = arrow_dataset.generation_id
-    for index, (block_key, signature_ids) in enumerate(selected_subblocks.items()):
-        started = time.perf_counter()
-        signature_ids = [str(signature_id) for signature_id in signature_ids]
-        pair_count = len(signature_ids) * (len(signature_ids) - 1) // 2
-        linkage_matrix = None
-        metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
-        if len(signature_ids) > 1:
-            cache_path = _distance_cache_path(cache_dir, args.dataset, index, block_key)
-            dist = _load_cached_distance(cache_path, metadata)
-            linkage_matrix = _linkage_from_cached_distance(
-                clusterer=clusterer,
-                block_key=block_key,
-                signature_ids=signature_ids,
-                dist=dist,
-            )
-        linkage_blocks[block_key] = CachedLinkageBlock(
-            block_key=block_key,
-            signature_ids=signature_ids,
-            linkage_matrix=linkage_matrix,
+    subblocks = {key: [str(signature_id) for signature_id in members] for key, members in selected_subblocks.items()}
+    # A subblock of one signature has no cached matrix; it is its own cluster at every EPS.
+    labels: dict[str, dict[float, list[int]]] = {
+        key: {eps: [0] * len(members) for eps in eps_grid} for key, members in subblocks.items() if len(members) <= 1
+    }
+    loaders = {
+        key: (
+            _distance_cache_path(cache_dir, args.dataset, index, key),
+            _cache_metadata(args, key, members, arrow_generation_id),
+            len(members),
         )
-        linkage_rows.append(
-            {
-                "block_key": block_key,
-                "signature_count": len(signature_ids),
-                "pair_count": pair_count,
-                "linkage_computed": len(signature_ids) > 1,
-                "seconds": round(time.perf_counter() - started, 3),
+        for index, (key, members) in enumerate(subblocks.items())
+        if len(members) > 1
+    }
+    distances = _CachedDistances(loaders)
+    if loaders:
+        clustered = {key: subblocks[key] for key in loaders}
+        # Name-conflict repair reads first-name and ORCID facts from the featurizer.
+        rust_featurizer = _build_arrow_featurizer(
+            clusterer,
+            arrow_dataset,
+            list(dict.fromkeys(signature_id for members in clustered.values() for signature_id in members)),
+        )
+        signature_ids, ids_by_eps = clusterer.predict_eps_grid_from_rust_featurizer(
+            clustered, rust_featurizer, distances, eps_grid
+        )
+        distances.close_row()
+        del rust_featurizer
+        offset = 0
+        for key, members in clustered.items():
+            if signature_ids[offset : offset + len(members)] != members:
+                raise ValueError(f"Production clustering reordered the signatures of block {key}")
+            labels[key] = {
+                eps: [int(label) for label in ids_by_eps[eps][offset : offset + len(members)]] for eps in eps_grid
             }
-        )
-    return linkage_blocks, linkage_rows
+            offset += len(members)
+    blocks = {key: CachedBlockClusters(key, members, labels[key]) for key, members in subblocks.items()}
+    rows = [
+        {
+            "block_key": key,
+            "signature_count": len(members),
+            "pair_count": len(members) * (len(members) - 1) // 2,
+            "clustered": key in loaders,
+            "seconds": distances.rows.get(key, {}).get("seconds", 0.0),
+        }
+        for key, members in subblocks.items()
+    ]
+    return blocks, rows
 
 
 def _cluster_assignments_for_eps(
     *,
     eps: float,
-    linkage_blocks: Mapping[str, CachedLinkageBlock],
+    cluster_blocks: Mapping[str, CachedBlockClusters],
 ) -> dict[str, str]:
-    """Cluster selected subblocks by cutting cached linkage trees at one EPS value."""
+    """Return the bulk cluster of every signature in the given subblocks at one EPS."""
 
     assignments: dict[str, str] = {}
-    for block_key, linkage_block in sorted(linkage_blocks.items()):
-        labels = _labels_from_cached_linkage(
-            linkage_matrix=linkage_block.linkage_matrix,
-            signature_ids=linkage_block.signature_ids,
-            eps=eps,
-        )
-        for signature_id, label in zip(linkage_block.signature_ids, labels, strict=True):
+    for block_key, block in sorted(cluster_blocks.items()):
+        for signature_id, label in zip(block.signature_ids, block.labels_by_eps[float(eps)], strict=True):
             assignments[str(signature_id)] = f"{block_key}_{label}"
     return assignments
 
@@ -954,31 +937,26 @@ def _production_assignments_for_eps(
     eps: float,
     clusterer: Any,
     block_dict: Mapping[str, list[str]],
-    linkage_blocks: Mapping[str, CachedLinkageBlock],
+    cluster_blocks: Mapping[str, CachedBlockClusters],
     arrow_dataset: ArrowDataset,
     args: argparse.Namespace,
 ) -> dict[str, str]:
-    """Run production prediction at one EPS, cutting cached linkage trees for bulk clustering.
+    """Run production prediction at one EPS, with bulk clusters from the cached distances.
 
     Production subblocks each block, clusters the full-name subblocks in bulk, reunites no-middle
-    records that the size cap split, and attaches initial-only groups through the linker. Only the
-    bulk step reads the cache; the later steps run production code at this EPS.
+    records that the size cap split, and attaches initial-only groups through the linker. The bulk
+    clusters were computed once for every EPS; the later steps run production code at this EPS.
     """
 
     def bulk_clusters(groups: Mapping[str, list[str]]) -> dict[str, list[str]]:
         clusters: dict[str, list[str]] = defaultdict(list)
         for subblock_key in sorted(groups):
             members = [str(signature_id) for signature_id in groups[subblock_key]]
-            linkage_block = linkage_blocks.get(subblock_key)
-            # Exact reuse needs the cached tree to cover the same members in the same order.
-            if linkage_block is None or linkage_block.signature_ids != members:
-                raise ValueError(f"No cached linkage matches production subblock {subblock_key!r}")
-            labels = _labels_from_cached_linkage(
-                linkage_matrix=linkage_block.linkage_matrix,
-                signature_ids=members,
-                eps=eps,
-            )
-            for signature_id, label in zip(members, labels, strict=True):
+            block = cluster_blocks.get(subblock_key)
+            # Exact reuse needs the cached clusters to cover the same members in the same order.
+            if block is None or block.signature_ids != members:
+                raise ValueError(f"No cached clusters match production subblock {subblock_key!r}")
+            for signature_id, label in zip(members, block.labels_by_eps[float(eps)], strict=True):
                 clusters[f"{subblock_key}_{label}"].append(signature_id)
         return dict(clusters)
 
@@ -1264,6 +1242,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["arrow_generation_id"] = arrow_dataset.generation_id
         plan["distance_source"] = "arrow-rust"
         plan["planning_source"] = "Arrow signatures with production native graph subblocking"
+        plan["clustering_source"] = CLUSTERING_SOURCE
         plan["route"] = args.route
         write_json(output_dir / "plan.json", plan)
         pd.DataFrame(plan["subblocks"]).to_csv(output_dir / "target_subblocks.tsv", sep="\t", index=False)
@@ -1276,15 +1255,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         cache_subblocks = _cache_order(selected_subblocks, all_subblocks if args.route == "production" else None)
         cache_rows = _ensure_distance_caches(args, clusterer, cache_subblocks, cache_dir, arrow_dataset)
         pd.DataFrame(cache_rows).to_csv(output_dir / "distance_caches.tsv", sep="\t", index=False)
-        linkage_blocks, linkage_rows = _build_linkage_blocks(
+        cluster_blocks, linkage_rows = _cluster_cached_blocks(
             args=args,
             clusterer=clusterer,
             selected_subblocks=cache_subblocks,
             cache_dir=cache_dir,
             arrow_dataset=arrow_dataset,
+            eps_values=_eps_values(args, model_eps),
         )
     pd.DataFrame(linkage_rows).to_csv(output_dir / "linkage_builds.tsv", sep="\t", index=False)
-    selected_linkage_blocks = {key: linkage_blocks[key] for key in selected_subblocks}
+    selected_cluster_blocks = {key: cluster_blocks[key] for key in selected_subblocks}
     production_root = None
     if args.route == "production":
         production_root = (
@@ -1315,7 +1295,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             started = time.perf_counter()
             bulk_assignments = _cluster_assignments_for_eps(
                 eps=eps,
-                linkage_blocks=selected_linkage_blocks,
+                cluster_blocks=selected_cluster_blocks,
             )
             assignments = (
                 bulk_assignments
@@ -1324,7 +1304,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     eps=eps,
                     clusterer=clusterer,
                     block_dict=block_dict,
-                    linkage_blocks=linkage_blocks,
+                    cluster_blocks=cluster_blocks,
                     arrow_dataset=production_dataset,
                     args=args,
                 )

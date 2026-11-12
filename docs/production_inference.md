@@ -15,7 +15,7 @@ bundle.
 ```python
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model("/path/to/production_model_v1.3", n_jobs=8)
+clusterer = load_production_model("/path/to/production_model_v1.3.1", n_jobs=8)
 ```
 
 Without `n_jobs`, a loaded bundle keeps its stored `n_jobs=1` and scores
@@ -262,30 +262,78 @@ One or two mentions with a wrong or misparsed name can keep a person's cluster a
 the rest of their work, because the name rules forbid every pair they are in.
 Name-conflict repair handles this case. It is on by default, with
 `Clusterer.name_conflict_repair_max_distance` set to `0.2`. Set it to `None` to turn
-the repair off.
+the repair off. A model bundle does not record the setting: a loaded model starts at
+`0.2`, and bundle export refuses a clusterer that holds another value.
 
 ```python
 clusterer.name_conflict_repair_max_distance = None
 clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
 ```
 
-The setting applies wherever blocks are clustered: `predict_from_arrow`, `predict`,
-`predict_from_rust_featurizer`, and the two clustering steps of incremental prediction
-(new mentions that attach to no profile, and the pre-split of altered profiles).
-Incremental prediction never merges two existing profiles, so the repair does not
-join them there. An EPS sweep that cuts cached linkage trees skips the repair.
+The setting applies wherever a call builds a block's distances and clusters them:
+`predict_from_arrow`, `predict`, `predict_from_rust_featurizer`, and the two clustering
+steps of incremental prediction (new mentions that attach to no profile, and the
+pre-split of altered profiles). Incremental prediction never merges two existing
+profiles, so the repair does not join them there.
+
+A prediction call that takes precomputed distances (`dists=`) skips the repair. Such a
+matrix can hold impossible pairs from the caller's own supervision, which nothing can
+tell from name conflicts when the names conflict too. Classic `Clusterer.fit` scores
+its EPS search on such matrices, so it does not see the repair.
+`predict_eps_grid` and `predict_eps_grid_from_rust_featurizer`, which EPS calibration and
+the giant-block sweep use, do apply the repair at every EPS. Pass them only matrices
+built from the same dataset or featurizer, with no supervision of your own.
 
 After a block or subblock is clustered, two clusters merge when all of these hold:
 
-- At most two mentions take part in every forbidden pair between the two clusters. These are the odd mentions.
-- Without them, each cluster has at least five mentions and a full first name.
-- Without them, the average model distance between the clusters is below the value given.
-- The clusters do not carry different majority ORCIDs.
+- At most two mentions take part in every forbidden pair between the two clusters. The
+  smallest such set is the odd mentions; a larger set is not tried when the smallest
+  fails a later test.
+- Without them, each cluster has at least five mentions and a full first name:
+  a first name with a word longer than one letter. "J.-P." is two initials.
+- Without them, the average model distance between the clusters is certainly below the
+  value given. The repair knows the average to within 0.004 and merges only when the
+  upper end of that range is under the limit.
+- Every forbidden pair between the two clusters has conflicting names, is not a seed
+  disallow, and does not join two different required seed groups. A pair that is
+  forbidden while its names agree, such as a seed disallow held by the featurizer,
+  blocks the merge.
+- The clusters do not carry different majority ORCIDs. The odd mentions count toward
+  the majority. A clusterer that suppresses ORCIDs skips this test.
 - No pair across the clusters is a seed disallow or a profile exclusion.
+- With `dont_merge_cluster_seeds` on, the two clusters do not hold mentions of two
+  different cluster seeds, such as two claimed profiles.
 
 The odd mentions stay in the merged cluster. A cluster takes part in at most one
 merge per block. The repair keeps a one-byte-per-pair copy of each block's
 distances while the block clusters, about one eighth of the matrix.
+
+The repair reads a pair as forbidden only at the exact impossible-pair distance.
+A block is not repaired when its distances hold any other value above one, such as
+a caller's own soft "keep apart" distance. It is also not repaired when the matrix
+is not a contiguous float64 condensed matrix, or when the cluster model is not `FastCluster`.
+
+### Close-pair bonus
+
+The pair model scores a pair with shared evidence near zero and a pair without
+evidence above EPS. A plain average lets the many pairs without evidence outvote the
+few near-certain ones, so one person's papers from two periods or topics can stay in
+two clusters.
+
+With the close-pair bonus, the height at which two clusters merge is their average
+model distance minus `close_pair_bonus` times their share of close pairs, floored at
+zero. A close pair has a model distance under `close_pair_distance`. Impossible pairs
+still keep clusters apart, and heights stay comparable with EPS.
+
+The bonus is a property of the model bundle, not a library default, because EPS is
+selected together with it. `clusterer.json` carries both values under `cluster_model`
+when the bundle uses the bonus. A bundle without them clusters by plain average
+linkage, as before. Libraries older than `1.0.0b10` refuse a bundle that carries them.
+
+The bonus applies wherever a block is clustered from a distance matrix: full-block
+prediction, subblocks, and the clustering steps of incremental prediction. Name-conflict
+repair reads the model distances, not the lowered heights. The incremental linker is
+unchanged.
 
 ### Reunite-only memory and time
 
@@ -489,7 +537,8 @@ round trips revalidate and reload it from the recorded bundle path.
 
 `clusterer.json` is inference-only. It contains the pairwise feature contracts,
 runtime controls, and only the clustering algorithm fields consumed by
-prediction (`eps` and `linkage`). Stage 3 records placeholder EPS `0.5`; the
+prediction (`eps` and `linkage`, plus `close_pair_bonus` and `close_pair_distance`
+when the bundle uses the [close-pair bonus](#close-pair-bonus)). Stage 3 records placeholder EPS `0.5`; the
 manifest marks that value as pending until validation-only calibration writes
 a calibrated sibling bundle.
 

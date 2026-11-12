@@ -5,8 +5,10 @@ from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from fastcluster import linkage
+from _fastcluster import linkage_wrap as _fastcluster_linkage_wrap
+from fastcluster import mthidx as _FASTCLUSTER_METHOD_INDEX
 from scipy.cluster.hierarchy import fcluster
+from scipy.spatial.distance import pdist
 
 from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
 
@@ -15,6 +17,10 @@ from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
 if TYPE_CHECKING:
     from hyperopt import Trials
     from lightgbm import Booster
+
+# The bonus is subtracted from every merge height, the hard-negative barrier included.
+# Under this cap the barrier keeps two clusters apart up to about ten billion cross pairs.
+MAX_CLOSE_PAIR_BONUS = 100.0
 
 # Giant blocks can hold hard negatives in most pairs; scan in bounded chunks so
 # the temporary mask stays small, not one byte or index per pair.
@@ -28,7 +34,39 @@ def _hard_negative_chunks(distances: np.ndarray) -> Iterator[tuple[np.ndarray, n
         yield chunk, chunk == LARGE_DISTANCE
 
 
-def constrained_linkage(distances: np.ndarray, method: str, *, preserve_input: bool) -> np.ndarray:
+def _linkage_in_place(condensed: np.ndarray, method: str) -> np.ndarray:
+    """Build a fastcluster linkage tree with ``condensed`` as its working memory.
+
+    ``fastcluster.linkage`` copies a condensed matrix under NumPy 2 even with
+    ``preserve_input=False``, so a block peaked at two matrices. This runs the same
+    C routine on the array itself and returns the same tree.
+
+    Args:
+        condensed: Writable, aligned, C-contiguous float64 condensed distances. The
+            routine overwrites it.
+        method: fastcluster linkage method.
+
+    Returns:
+        The fastcluster linkage matrix.
+    """
+    pair_count = len(condensed)
+    count = int(np.ceil(np.sqrt(pair_count * 2)))
+    if count * (count - 1) // 2 != pair_count:
+        raise ValueError(r"The length of the condensed distance matrix must be (k \choose 2) for k data points!")
+    tree = np.empty((count - 1, 4))
+    if count > 1:
+        _fastcluster_linkage_wrap(count, condensed, tree, _FASTCLUSTER_METHOD_INDEX[method])
+    return tree
+
+
+def constrained_linkage(
+    distances: np.ndarray,
+    method: str,
+    *,
+    preserve_input: bool,
+    close_pair_bonus: float = 0.0,
+    close_pair_distance: float = 0.0,
+) -> np.ndarray:
     """Build a linkage tree in which hard negatives never share a cluster below EPS.
 
     Every pair at exactly ``LARGE_DISTANCE`` is a hard negative. Linkage gets
@@ -36,26 +74,47 @@ def constrained_linkage(distances: np.ndarray, method: str, *, preserve_input: b
     dilute a finite sentinel below EPS inside a large merge. Other distances,
     including soft distances above ``LARGE_DISTANCE``, pass through unchanged.
 
+    With a positive ``close_pair_bonus``, a merge height is the average model
+    distance of the two clusters minus the bonus times their share of close
+    pairs, floored at zero. A close pair is a model distance under
+    ``close_pair_distance``. Heights stay comparable with EPS, so every cut of
+    the returned tree works unchanged. The model scores a pair with shared
+    evidence near zero and a pair without evidence above EPS; a plain average
+    lets the many pairs without evidence outvote the few near-certain ones.
+
     Args:
         distances: Condensed distance matrix.
         method: fastcluster linkage method.
         preserve_input: Keep the caller's array unchanged. When False, the
-            caller gives up the array, and a writable float64 array is
-            modified in place.
+            caller gives up the array: linkage overwrites a writable, aligned,
+            C-contiguous float64 array, so the block needs no second matrix.
+        close_pair_bonus: Amount a close pair lowers the average. Zero turns
+            the bonus off.
+        close_pair_distance: Model distances under this value are close pairs.
 
     Returns:
         The fastcluster linkage matrix.
     """
-    condensed = np.asarray(distances, dtype=np.float64)
-    if not any(mask.any() for _, mask in _hard_negative_chunks(condensed)):
-        return linkage(condensed, method, preserve_input=preserve_input)
+    # The C routine reads the buffer directly, so it must be aligned C-contiguous float64.
+    condensed = np.require(distances, dtype=np.float64, requirements=["C", "A"])
     shared = isinstance(distances, np.ndarray) and np.may_share_memory(condensed, distances)
-    if shared and (preserve_input or not condensed.flags.writeable):
+    if (shared and preserve_input) or not condensed.flags.writeable:
         condensed = condensed.copy()
     for chunk, mask in _hard_negative_chunks(condensed):
+        if close_pair_bonus > 0:
+            # Raising every other distance equals lowering the close pairs, and keeps distances
+            # non-negative. Soft values above one rise too, so the later shift of heights leaves
+            # them where the caller put them; hard negatives get their barrier on the next line.
+            chunk[chunk >= close_pair_distance] += close_pair_bonus
         chunk[mask] = HARD_LINKAGE_DISTANCE
     # condensed is now owned by this call, or released by the caller.
-    return linkage(condensed, method, preserve_input=False)
+    tree = _linkage_in_place(condensed, method)
+    if close_pair_bonus > 0:
+        heights = tree[:, 2]
+        heights -= close_pair_bonus
+        # A height under zero means close pairs dominate; such clusters merge at every EPS.
+        np.maximum(heights, 0.0, out=heights)
+    return tree
 
 
 def lightgbm_booster(model: Any) -> Booster:
@@ -332,6 +391,12 @@ class FastCluster:
             Cutoff used to determine number of clusters.
         preserve_input: bool (default=True)
             Whether to preserve the X input or modify in place.
+        close_pair_bonus: float (default=0.0)
+            Amount each close pair lowers the average distance of two clusters.
+            Zero keeps plain linkage. Requires average linkage over condensed
+            distances. See ``constrained_linkage``.
+        close_pair_distance: float (default=0.0)
+            Model distances under this value are close pairs.
         input_as_observation_matrix: bool (default=False)
             If True, the input to fit/transform must be a 2-D array
             of observation vectors (N by d). If False input to fit/transform
@@ -345,12 +410,18 @@ class FastCluster:
     https://cran.r-project.org/web/packages/fastcluster/vignettes/fastcluster.pdf
     """
 
+    # Class defaults keep objects pickled before these parameters existed usable.
+    close_pair_bonus: float = 0.0
+    close_pair_distance: float = 0.0
+
     def __init__(
         self,
         linkage: str = "average",
         eps: float = 0.5,
         preserve_input: bool = True,
         input_as_observation_matrix: bool = False,
+        close_pair_bonus: float = 0.0,
+        close_pair_distance: float = 0.0,
     ):
         if linkage not in {
             "complete",
@@ -370,6 +441,8 @@ class FastCluster:
         self.eps = eps
         self.preserve_input = preserve_input
         self.input_as_observation_matrix = input_as_observation_matrix
+        self.close_pair_bonus = close_pair_bonus
+        self.close_pair_distance = close_pair_distance
         self.labels_ = None
 
     @classmethod
@@ -454,9 +527,26 @@ class FastCluster:
             )
         elif len(X.shape) > 2:
             raise ValueError("The input to fit can only be one-dimensional or two-dimensional.")
+        bonus, close = float(self.close_pair_bonus), float(self.close_pair_distance)
+        if not 0.0 <= bonus <= MAX_CLOSE_PAIR_BONUS or not 0.0 <= close <= 1.0 or (bonus > 0 and close <= 0):
+            raise ValueError(
+                f"close_pair_bonus must be within [0, {MAX_CLOSE_PAIR_BONUS:g}] and close_pair_distance within "
+                f"[0, 1], and positive with a bonus; got {bonus!r}, {close!r}"
+            )
+        if bonus > 0 and (self.linkage != "average" or self.input_as_observation_matrix):
+            # The bonus is defined on an average of pair distances.
+            raise ValueError("close_pair_bonus requires average linkage over condensed distances")
         if self.input_as_observation_matrix:
-            return linkage(X, self.linkage, preserve_input=self.preserve_input)
-        return constrained_linkage(X, self.linkage, preserve_input=self.preserve_input)
+            # The pairwise distances are this call's own array, so linkage works in them.
+            # fastcluster.linkage derives the same Euclidean distances and then copies them.
+            return _linkage_in_place(pdist(X, metric="euclidean"), self.linkage)
+        return constrained_linkage(
+            X,
+            self.linkage,
+            preserve_input=self.preserve_input,
+            close_pair_bonus=bonus,
+            close_pair_distance=close,
+        )
 
     def fit_transform(
         self,

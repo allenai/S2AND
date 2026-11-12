@@ -788,6 +788,26 @@ def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
         (lambda payload: payload["cluster_model"].update({"eps": True}), "must be numeric"),
         (lambda payload: payload.update({"incremental_mean_min_hybrid_weight": False}), "must be numeric"),
         (lambda payload: payload["cluster_model"].update({"family": "Other"}), "exact FastCluster"),
+        # The close-pair fields come as a pair, with the bonus on.
+        (lambda payload: payload["cluster_model"].update({"close_pair_bonus": 8.0}), "exact FastCluster"),
+        (
+            lambda payload: payload["cluster_model"].update({"close_pair_bonus": 0.0, "close_pair_distance": 0.05}),
+            "close-pair bonus needs",
+        ),
+        (
+            lambda payload: payload["cluster_model"].update({"close_pair_bonus": 8.0, "close_pair_distance": 0.0}),
+            "close-pair bonus needs",
+        ),
+        (
+            lambda payload: payload["cluster_model"].update({"close_pair_bonus": 1e12, "close_pair_distance": 0.05}),
+            "close-pair bonus needs",
+        ),
+        (
+            lambda payload: payload["cluster_model"].update(
+                {"linkage": "single", "close_pair_bonus": 8.0, "close_pair_distance": 0.05}
+            ),
+            "close-pair bonus needs",
+        ),
         (lambda payload: payload.update({"unknown_runtime_field": 1}), "field mismatch"),
         (lambda payload: payload.update({"incremental_seed_score_mode": "unsupported"}), "incremental_seed_score_mode"),
         (
@@ -990,6 +1010,89 @@ def test_eps_finalization_failures_clean_stage_and_are_retry_safe(
             output_bundle_dir=tmp_path / "double-calibrated" / "production_model_v9.9",
             expected_manifest_sha256=hashlib.sha256((output_bundle / "manifest.json").read_bytes()).hexdigest(),
             new_eps=0.41,
+        )
+
+
+def test_eps_finalization_writes_the_close_pair_bonus_and_the_loader_applies_it(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_bundle = tmp_path / "pending" / "production_model_v9.9"
+    write_pairwise_production_bundle(
+        source_clusterer, source_bundle, release_version="9.9", eps_calibration=PENDING_EPS_CALIBRATION
+    )
+    manifest_sha256 = hashlib.sha256((source_bundle / "manifest.json").read_bytes()).hexdigest()
+    plain_bundle = tmp_path / "plain" / "production_model_v9.9"
+    bonus_bundle = tmp_path / "bonus" / "production_model_v9.9"
+
+    finalize_pairwise_eps(
+        source_bundle_dir=source_bundle,
+        output_bundle_dir=plain_bundle,
+        expected_manifest_sha256=manifest_sha256,
+        new_eps=0.41,
+    )
+    finalize_pairwise_eps(
+        source_bundle_dir=source_bundle,
+        output_bundle_dir=bonus_bundle,
+        expected_manifest_sha256=manifest_sha256,
+        new_eps=0.41,
+        close_pair_bonus=8.0,
+        close_pair_distance=0.05,
+    )
+
+    # Without the bonus the bundle keeps the two-field shape that older libraries read.
+    plain_config = json.loads((plain_bundle / "clusterer.json").read_text(encoding="utf-8"))
+    assert plain_config["cluster_model"] == {"eps": 0.41, "linkage": "average"}
+    bonus_config = json.loads((bonus_bundle / "clusterer.json").read_text(encoding="utf-8"))
+    assert bonus_config["cluster_model"] == {
+        "close_pair_bonus": 8.0,
+        "close_pair_distance": 0.05,
+        "eps": 0.41,
+        "linkage": "average",
+    }
+    plain, bonus = _load_pairwise_staging_model(plain_bundle), _load_pairwise_staging_model(bonus_bundle)
+    assert (plain.cluster_model.close_pair_bonus, plain.cluster_model.close_pair_distance) == (0.0, 0.0)
+    assert (bonus.cluster_model.close_pair_bonus, bonus.cluster_model.close_pair_distance) == (8.0, 0.05)
+    assert bonus.best_params == bonus_config["cluster_model"]
+    # Plain linkage replaces a bonus that the source bundle already carried.
+    source_config_path = source_bundle / "clusterer.json"
+    source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
+    source_config["cluster_model"] |= {"close_pair_bonus": 8.0, "close_pair_distance": 0.05}
+    source_config_path.write_text(json.dumps(source_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(source_bundle, "clusterer.json")
+    cleared_bundle = tmp_path / "cleared" / "production_model_v9.9"
+    finalize_pairwise_eps(
+        source_bundle_dir=source_bundle,
+        output_bundle_dir=cleared_bundle,
+        expected_manifest_sha256=hashlib.sha256((source_bundle / "manifest.json").read_bytes()).hexdigest(),
+        new_eps=0.41,
+    )
+    assert json.loads((cleared_bundle / "clusterer.json").read_text(encoding="utf-8"))["cluster_model"] == {
+        "eps": 0.41,
+        "linkage": "average",
+    }
+    assert _load_pairwise_staging_model(cleared_bundle).cluster_model.close_pair_bonus == 0.0
+    # A bundle written from the loaded model carries the same linkage settings.
+    rewritten = tmp_path / "rewritten" / "production_model_v9.9"
+    write_pairwise_production_bundle(bonus, rewritten, release_version="9.9")
+    assert (
+        json.loads((rewritten / "clusterer.json").read_text(encoding="utf-8"))["cluster_model"]
+        == (bonus_config["cluster_model"])
+    )
+
+
+def test_bundle_export_rejects_a_changed_name_conflict_repair_setting(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    # A bundle has no field for the setting, so a loaded model would silently get the default back.
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.name_conflict_repair_max_distance = None
+
+    with pytest.raises(ValueError, match="cannot record name_conflict_repair_max_distance"):
+        write_pairwise_production_bundle(
+            source_clusterer, tmp_path / "repair-off" / "production_model_v9.9", release_version="9.9"
         )
 
 

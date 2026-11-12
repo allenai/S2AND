@@ -253,6 +253,38 @@ def test_rust_featurizer_distance_matrix_guards_allocation_before_matrix_build()
         )
 
 
+@pytest.mark.parametrize(("repairs", "block_size"), [(False, 100), (True, 100), (True, 10)])
+def test_matrix_guard_budgets_the_repair_codes(monkeypatch, repairs, block_size):
+    pairs = block_size * (block_size - 1) // 2
+    # A block of ten is too small to repair, so it has no codes.
+    needed = pairs * 8 + (pairs if repairs and block_size >= 11 else 0)
+
+    def guard(available: int) -> None:
+        monkeypatch.setattr(
+            model_module.memory_budget,
+            "memory_snapshot_for_stage",
+            lambda **_kwargs: SimpleNamespace(
+                available_bytes=available,
+                total_ram_bytes=available,
+                current_rss_bytes=0,
+                total_ram_source="test",
+                current_rss_source="test",
+            ),
+        )
+        model_module._guard_predict_block_matrix_allocation(
+            block_key="block",
+            block_size=block_size,
+            uses_fastcluster=True,
+            fastcluster_fused_dtype=np.float64,
+            total_ram_bytes=available,
+            repairs_name_conflicts=repairs,
+        )
+
+    guard(needed)
+    with pytest.raises(MemoryError, match="Predict exact block exceeds memory budget"):
+        guard(needed - 1)
+
+
 def test_make_distance_matrices_guards_allocation_before_pair_featurization(monkeypatch):
     dataset = _as_anddata(SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set()))
     clusterer = Clusterer(

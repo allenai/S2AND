@@ -207,6 +207,7 @@ def package_corrected_datasets(
     eps_grid: Sequence[float] = DEFAULT_EPS_GRID,
     minimum_dataset_f1: float = 0.0,
     minimum_signature_weighted_f1: float = 0.0,
+    precision_f1_tolerance: float = 0.0,
 ) -> dict[str, Any]:
     """Copy final records and prepared populations into a fresh dataset snapshot."""
 
@@ -245,6 +246,7 @@ def package_corrected_datasets(
         raise ValueError("Require a nonempty EPS grid without duplicates")
     minimum_dataset_f1 = _unit_float(minimum_dataset_f1)
     minimum_signature_weighted_f1 = _unit_float(minimum_signature_weighted_f1)
+    precision_f1_tolerance = _unit_float(precision_f1_tolerance)
     require_name_counts_index_artifact(
         index, context="corrected dataset package", producer_hint="pass the common index", verify=True
     )
@@ -317,6 +319,8 @@ def package_corrected_datasets(
             "grid": grid,
             "minimum_dataset_f1": minimum_dataset_f1,
             "minimum_signature_weighted_f1": minimum_signature_weighted_f1,
+            # Written only when set, so a plan without a precision lean keeps its earlier bytes.
+            **({"precision_f1_tolerance": precision_f1_tolerance} if precision_f1_tolerance > 0 else {}),
         },
     }
     (destination_pairwise / "model_plan.json").write_text(json.dumps(model_plan, indent=2) + "\n", encoding="utf-8")
@@ -351,6 +355,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--eps-grid", type=float, nargs="+", default=DEFAULT_EPS_GRID)
     parser.add_argument("--minimum-dataset-f1", type=float, default=0.0)
     parser.add_argument("--minimum-signature-weighted-f1", type=float, default=0.0)
+    parser.add_argument(
+        "--precision-f1-tolerance",
+        type=float,
+        default=0.0,
+        help="F1 that EPS selection may give up to gain precision; 0 selects the best F1",
+    )
     print(json.dumps(package_corrected_datasets(**vars(parser.parse_args(argv))), indent=2))
     return 0
 

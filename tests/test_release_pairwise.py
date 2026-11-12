@@ -34,9 +34,10 @@ def _write_json(path: Path, value: Any) -> Path:
 
 class _StubCalibrationClusterer:
     def __init__(self) -> None:
-        self.cluster_model = argparse.Namespace(eps=0.5)
+        self.cluster_model = argparse.Namespace(eps=0.5, close_pair_bonus=0.0, close_pair_distance=0.0)
         self.n_jobs = 1
         self.events: list[tuple[Any, ...]] = []
+        self.close_pairs: list[tuple[float, float]] = []
         self.distance_ram: list[int | None] = []
 
     @staticmethod
@@ -62,9 +63,12 @@ class _StubCalibrationClusterer:
         eps_grid: list[float],
     ) -> tuple[list[str], dict[float, np.ndarray]]:
         assert dists is not None
+        bonus = float(self.cluster_model.close_pair_bonus)
         self.events.append(("predict_eps_grid", dataset.name, tuple(float(eps) for eps in eps_grid)))
-        # One cluster holds both signatures; its id encodes the EPS for the stub scorer.
-        return ["s1", "s2"], {float(eps): np.full(2, round(eps * 1000), dtype=np.int64) for eps in eps_grid}
+        self.close_pairs.append((bonus, float(self.cluster_model.close_pair_distance)))
+        # One cluster holds both signatures; its id encodes the EPS and the bonus for the stub scorer.
+        offset = 10_000 if bonus > 0 else 0
+        return ["s1", "s2"], {float(eps): np.full(2, offset + round(eps * 1000), dtype=np.int64) for eps in eps_grid}
 
 
 class _FakeRustFeaturizer:
@@ -95,6 +99,7 @@ def _arrow_model_plan(
     minimum_dataset_f1: float = 0.0,
     minimum_signature_weighted_f1: float = 0.0,
     unknown: list[str] | None = None,
+    precision_f1_tolerance: float | None = None,
 ) -> Path:
     """Write a one-dataset Arrow plan; calibration stubs replace the Arrow data itself."""
 
@@ -118,6 +123,7 @@ def _arrow_model_plan(
                 "grid": eps_grid or [0.3, 0.6],
                 "minimum_dataset_f1": minimum_dataset_f1,
                 "minimum_signature_weighted_f1": minimum_signature_weighted_f1,
+                **({} if precision_f1_tolerance is None else {"precision_f1_tolerance": precision_f1_tolerance}),
             },
         },
     )
@@ -181,7 +187,12 @@ def _patch_calibration(
 
         @staticmethod
         def report(ids: np.ndarray) -> dict[str, Any]:
-            return {"precision": 1.0, "recall": 1.0, "f1": scores[int(ids[0]) / 1000], "signature_count": 2}
+            bonus_on, eps = int(ids[0]) >= 10_000, (int(ids[0]) % 10_000) / 1000
+            # Scores keyed by EPS apply to both linkage settings; a (bonus_on, EPS) key overrides.
+            score = scores.get((bonus_on, eps), scores.get(eps))
+            # A bare number is F1 at full precision and recall; a triple gives all three.
+            precision, recall, f1 = score if isinstance(score, tuple) else (1.0, 1.0, score)
+            return {"precision": precision, "recall": recall, "f1": f1, "signature_count": 2}
 
     monkeypatch.setattr(release_pairwise, "_B3Scorer", StubScorer)
 
@@ -230,17 +241,83 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     # "b2" has one signature and is dropped.
     assert featurizer_calls[0]["signature_ids"] == {"s1", "s2"}
     assert [event for event in clusterer.events if event[0] == "build"] == [("build", "random")]
-    # One call cuts the shared matrices at every EPS.
+    # One call per close-pair setting cuts the shared matrices at every EPS.
     assert [event for event in clusterer.events if event[0] == "predict_eps_grid"] == [
         ("predict_eps_grid", "random", (0.2, 0.4, 0.6))
-    ]
+    ] * len(release_pairwise.CLOSE_PAIR_CANDIDATES)
+    assert clusterer.close_pairs == list(release_pairwise.CLOSE_PAIR_CANDIDATES)
     assert clusterer.distance_ram == [2048]
     assert clusterer.cluster_model.eps == pytest.approx(0.5)
+    # The source model's linkage settings are restored, and a tie keeps plain linkage.
+    assert (clusterer.cluster_model.close_pair_bonus, clusterer.cluster_model.close_pair_distance) == (0.0, 0.0)
+    assert report["selected_close_pair_bonus"] == 0.0
+    assert finalizations[0]["close_pair_bonus"] == 0.0
     assert clusterer.n_jobs == 5
     assert report["selected_eps"] == pytest.approx(0.2)
     assert finalizations[0]["new_eps"] == pytest.approx(0.2)
     assert "expected_old_eps" not in finalizations[0]
     assert args.output_bundle.is_dir() and args.output_report.is_file()
+
+
+def test_calibrate_eps_selects_the_close_pair_bonus_when_it_scores_higher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_plan = _arrow_model_plan(tmp_path, eps_grid=[0.6, 0.4, 0.2])
+    bundle = _calibration_bundle(tmp_path)
+    clusterer = _StubCalibrationClusterer()
+    scores = {0.2: 0.7, 0.4: 0.8, 0.6: 0.75, (True, 0.4): 0.9}
+    finalizations, _ = _patch_calibration(monkeypatch, clusterer, scores)
+
+    report = release_pairwise.calibrate_eps(_calibration_args(tmp_path, bundle, model_plan))
+
+    bonus, distance = release_pairwise.CLOSE_PAIR_CANDIDATES[1]
+    assert (report["selected_eps"], report["selected_close_pair_bonus"], report["selected_close_pair_distance"]) == (
+        pytest.approx(0.4),
+        bonus,
+        distance,
+    )
+    assert (finalizations[0]["close_pair_bonus"], finalizations[0]["close_pair_distance"]) == (bonus, distance)
+    assert len(report["trials"]) == 3 * len(release_pairwise.CLOSE_PAIR_CANDIDATES)
+    assert {(trial["close_pair_bonus"], trial["eps"]) for trial in report["trials"]} == {
+        (candidate[0], eps) for candidate in release_pairwise.CLOSE_PAIR_CANDIDATES for eps in (0.2, 0.4, 0.6)
+    }
+
+
+_FLOOR_SCORES = {
+    # Plain linkage.
+    0.2: (0.99, 0.50, 0.66),
+    0.4: (0.93, 0.70, 0.80),
+    0.6: (0.90, 0.80, 0.85),
+    # With the bonus: precision falls and F1 rises as EPS rises.
+    (True, 0.2): (0.97, 0.78, 0.86),
+    (True, 0.4): (0.95, 0.81, 0.875),
+    (True, 0.6): (0.92, 0.85, 0.884),
+}
+
+
+@pytest.mark.parametrize(
+    ("tolerance", "expected_eps"),
+    # Bonus F1 is 0.86, 0.875 and 0.884 at EPS 0.2, 0.4 and 0.6, with precision falling as EPS rises.
+    [(None, 0.6), (0.0, 0.6), (0.01, 0.4), (0.03, 0.2)],
+)
+def test_precision_f1_tolerance_selects_the_most_precise_setting_near_the_best_f1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tolerance: float | None,
+    expected_eps: float,
+) -> None:
+    model_plan = _arrow_model_plan(tmp_path, eps_grid=[0.6, 0.4, 0.2], precision_f1_tolerance=tolerance)
+    finalizations, _ = _patch_calibration(monkeypatch, _StubCalibrationClusterer(), _FLOOR_SCORES)
+
+    report = release_pairwise.calibrate_eps(_calibration_args(tmp_path, _calibration_bundle(tmp_path), model_plan))
+
+    assert (report["selected_eps"], report["selected_close_pair_bonus"]) == (pytest.approx(expected_eps), 8.0)
+    assert finalizations[0]["new_eps"] == pytest.approx(expected_eps)
+    assert report["precision_f1_tolerance"] == (tolerance or 0.0)
+    assert report["selection_rule"].startswith(
+        "highest precision within" if tolerance else "highest signature-weighted F1"
+    )
 
 
 @pytest.mark.parametrize("sidecar_change", [None, "relocated", "changed", "removed", "unbound"])
@@ -292,12 +369,14 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
         assert trial["datasets"]["random"]["signature_count"] == 1
         assert trial["signature_count"] == 1
         assert trial["signature_weighted"]["f1"] == 1.0
-    assert [event[2] for event in clusterer.events if event[0] == "predict_eps_grid"] == [(0.3, 0.6)]
+    assert [event[2] for event in clusterer.events if event[0] == "predict_eps_grid"] == [(0.3, 0.6)] * len(
+        release_pairwise.CLOSE_PAIR_CANDIDATES
+    )
 
 
 @pytest.mark.parametrize("unknown", [frozenset(), frozenset({"s3", "s7", "s20"})], ids=["all-known", "unknowns"])
 def test_b3_scorer_matches_b3_report(unknown: frozenset[str]) -> None:
-    """Calibration scores each EPS with the scorer; it must report what _b3_report reports."""
+    """Calibration scores each EPS with the scorer; it reports exactly what _b3_report reports."""
 
     rng = np.random.default_rng(11)
     signatures = [f"s{index}" for index in range(40)]
@@ -314,6 +393,11 @@ def test_b3_scorer_matches_b3_report(unknown: frozenset[str]) -> None:
         predicted_ids = rng.integers(0, cluster_count, len(signatures))
         expected = release_pairwise._b3_report(true_clusters, partition(predicted_ids, "p"), unknown)
         assert scorer.report(predicted_ids) == expected
+    # One of three signatures sits alone: precision 1, recall (1 + 1/2 + 1/2) / 3, kept at full precision.
+    exact = release_pairwise._B3Scorer({"t": ["a", "b"], "u": ["c"]}, ["a", "b", "c"]).report(np.array([0, 1, 2]))
+    assert exact["precision"] == 1.0
+    assert exact["recall"] == pytest.approx(2 / 3, abs=1e-12)
+    assert exact["f1"] == pytest.approx(0.8, abs=1e-12)
     everyone = frozenset(signatures)
     with pytest.raises(ValueError, match="at least one known signature"):
         release_pairwise._B3Scorer(true_clusters, signatures, everyone).report(np.zeros(len(signatures)))

@@ -181,13 +181,14 @@ def test_python_and_rust_paths_give_linkage_identical_hard_negatives(
     block = {"mixed": ["3", "4", "5", "6"]}
     partial_supervision = {("6", "3"): LARGE_DISTANCE}
     linkage_inputs: list[NDArray[np.float64]] = []
-    real_linkage = model_pairwise.linkage
+    real_linkage = model_pairwise._linkage_in_place
 
-    def record_linkage(distances: NDArray[np.float64], method: str, *, preserve_input: bool) -> Any:
+    def record_linkage(distances: NDArray[np.float64], method: str) -> Any:
+        # The routine overwrites its input, so the record is a copy taken first.
         linkage_inputs.append(np.array(distances, copy=True))
-        return real_linkage(distances, method, preserve_input=preserve_input)
+        return real_linkage(distances, method)
 
-    monkeypatch.setattr(model_pairwise, "linkage", record_linkage)
+    monkeypatch.setattr(model_pairwise, "_linkage_in_place", record_linkage)
     clusterer = _clusterer(fastcluster=True, batch_size=6, use_default_constraints_as_supervision=True)
     clusterer.classifier = ConstantDistanceClassifier(0.2)
     rust_featurizer = _get_rust_featurizer(rust_dataset)

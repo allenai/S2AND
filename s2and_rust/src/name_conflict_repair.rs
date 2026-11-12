@@ -13,29 +13,47 @@ use crate::rayon_pool::install_with_optional_rayon_pool;
 const HARD: u8 = 255;
 /// A code is the distance times the scale, rounded down: [0, 1] maps to 0..=254.
 const SCALE: f64 = 254.999;
-const HARD_CAP: f64 = (HARD as f64 + 0.5) / SCALE;
 /// Pairs per parallel task.
 const QUANTIZE_CHUNK: usize = 1 << 16;
+/// The matrix holds an impossible pair.
+const SAW_HARD: u8 = 1;
+/// The matrix holds a value that is neither a model distance nor `hard_distance`.
+const SAW_OTHER: u8 = 2;
 
-/// Write one code per distance and report whether any pair is impossible.
-fn quantize(condensed: &[f64], codes: &mut [u8]) -> bool {
+/// Write one code per distance and report which kinds of value the matrix holds.
+///
+/// Only `hard_distance` itself is an impossible pair. Any other value above one, or
+/// NaN, is a caller's own distance: linkage treats it as soft, and a code cannot
+/// carry it, so the caller must not repair from these codes.
+fn quantize(condensed: &[f64], hard_distance: f64, codes: &mut [u8]) -> u8 {
     codes
         .par_chunks_mut(QUANTIZE_CHUNK)
         .zip(condensed.par_chunks(QUANTIZE_CHUNK))
-        .map(|(codes, distances)| {
-            let mut any_hard = false;
-            for (code, distance) in codes.iter_mut().zip(distances) {
-                *code = (distance.min(HARD_CAP) * SCALE) as u8;
-                any_hard |= *code == HARD;
-            }
-            any_hard
-        })
-        .reduce(|| false, |left, right| left | right)
+        .map(|(codes, distances)| quantize_chunk(distances, hard_distance, codes))
+        .reduce(|| 0, |left, right| left | right)
 }
 
-/// A one-byte-per-pair copy of condensed distances, or None without an impossible pair.
+/// `quantize` for one run of pairs, on the calling thread.
+fn quantize_chunk(distances: &[f64], hard_distance: f64, codes: &mut [u8]) -> u8 {
+    let mut saw = 0u8;
+    for (code, &distance) in codes.iter_mut().zip(distances) {
+        let hard = distance == hard_distance;
+        // NaN is neither above nor at most one, and is not a model distance.
+        let other = !hard && (distance > 1.0 || distance.is_nan());
+        *code = if hard {
+            HARD
+        } else {
+            (distance.min(1.0) * SCALE) as u8
+        };
+        saw |= ((hard as u8) * SAW_HARD) | ((other as u8) * SAW_OTHER);
+    }
+    saw
+}
+
+/// A one-byte-per-pair copy of condensed distances, or None when no repair can apply.
 ///
-/// Distances lie in [0, 1]; an impossible pair holds `hard_distance` or more.
+/// Model distances lie in [0, 1] and an impossible pair holds exactly `hard_distance`.
+/// None means the matrix has no impossible pair or holds some other value.
 #[pyfunction]
 #[pyo3(signature = (condensed, hard_distance, num_threads = None))]
 pub(crate) fn quantize_block_distances<'py>(
@@ -44,18 +62,26 @@ pub(crate) fn quantize_block_distances<'py>(
     hard_distance: f64,
     num_threads: Option<usize>,
 ) -> PyResult<Option<Bound<'py, PyArray1<u8>>>> {
-    if hard_distance < HARD_CAP {
+    if hard_distance.is_nan() || hard_distance <= 1.0 {
         return Err(PyValueError::new_err(
             "hard_distance must exceed every model distance",
         ));
     }
     let distances = condensed.as_slice()?;
     let mut codes = vec![0u8; distances.len()];
-    // Linkage has not started, so nothing writes the matrix while the pool reads it.
-    let any_hard = py.allow_threads(|| {
-        install_with_optional_rayon_pool(num_threads, || quantize(distances, &mut codes))
+    // Linkage has not started, so nothing writes the matrix while it is read.
+    let saw = py.allow_threads(|| {
+        if num_threads == Some(1) {
+            // No pool: a pool of any size may be busy scoring the next block, and this
+            // call would wait for that scoring to finish.
+            quantize_chunk(distances, hard_distance, &mut codes)
+        } else {
+            install_with_optional_rayon_pool(num_threads, || {
+                quantize(distances, hard_distance, &mut codes)
+            })
+        }
     });
-    Ok(any_hard.then(|| codes.into_pyarray(py)))
+    Ok((saw == SAW_HARD).then(|| codes.into_pyarray(py)))
 }
 
 /// Start of row `i` in a condensed matrix of `n` items: the pair (i, i + 1).
@@ -332,10 +358,32 @@ mod tests {
     #[test]
     fn quantize_rounds_down_and_marks_impossible_pairs() {
         let mut codes = vec![0u8; 4];
-        assert!(quantize(&[0.0, 0.5, 1.0, 1e4], &mut codes));
+        assert_eq!(quantize(&[0.0, 0.5, 1.0, 1e4], 1e4, &mut codes), SAW_HARD);
         assert_eq!(codes, vec![0, 127, 254, 255]);
         let mut codes = vec![0u8; 2];
-        assert!(!quantize(&[0.2, 1.0], &mut codes));
+        assert_eq!(quantize(&[0.2, 1.0], 1e4, &mut codes), 0);
+    }
+
+    #[test]
+    fn quantize_chunk_matches_the_pooled_quantize() {
+        let distances = [0.0, 0.5, 1.0, 1e4, 0.25, 0.999];
+        let (mut pooled, mut serial) = (vec![0u8; 6], vec![0u8; 6]);
+        assert_eq!(
+            quantize(&distances, 1e4, &mut pooled),
+            quantize_chunk(&distances, 1e4, &mut serial)
+        );
+        assert_eq!(pooled, serial);
+    }
+
+    #[test]
+    fn quantize_reports_values_that_are_neither_model_nor_hard() {
+        for other in [1.0001, 5.0, 1e12, f64::NAN, f64::INFINITY] {
+            let mut codes = vec![0u8; 3];
+            let saw = quantize(&[0.5, other, 1e4], 1e4, &mut codes);
+            assert_eq!(saw, SAW_HARD | SAW_OTHER, "{other}");
+            // The value never reads as an impossible pair.
+            assert_eq!(codes, vec![127, 254, 255], "{other}");
+        }
     }
 
     /// Mentions 0..7 are cluster 0 and 7..14 are cluster 1; `hard` marks impossible pairs.

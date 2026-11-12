@@ -2598,8 +2598,9 @@ impl RustFeaturizer {
 
     /// First-name and ORCID facts for name-conflict repair.
     ///
-    /// Returns the ids of signatures whose normalized first name is longer than
-    /// one character, and `(signature_id, orcid)` for signatures with an ORCID.
+    /// Returns the ids of signatures whose normalized first name holds a word longer
+    /// than one character, and `(signature_id, orcid)` for signatures with an ORCID.
+    /// "j p", from "J.-P.", is two initials and not a full first name.
     fn name_conflict_facts(&self) -> (Vec<String>, Vec<(String, String)>) {
         let mut full_first_names = Vec::new();
         let mut orcids = Vec::new();
@@ -2607,10 +2608,11 @@ impl RustFeaturizer {
             let Some(signature) = self.signatures.get(signature_id) else {
                 continue;
             };
-            if signature
-                .first_normalized()
-                .is_some_and(|first| first.chars().nth(1).is_some())
-            {
+            if signature.first_normalized().is_some_and(|first| {
+                first
+                    .split_whitespace()
+                    .any(|word| word.chars().nth(1).is_some())
+            }) {
                 full_first_names.push(signature_id.clone());
             }
             if let Some(orcid) = &signature.orcid {

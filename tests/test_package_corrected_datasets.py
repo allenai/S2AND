@@ -69,6 +69,7 @@ def _package(
     eps_grid: Sequence[float] = DEFAULT_EPS_GRID,
     corrected_replay_root: Path | None = None,
     corrected_replay_embeddings_root: Path | None = None,
+    precision_f1_tolerance: float = 0.0,
 ) -> dict[str, Any]:
     return package_corrected_datasets(
         public_data_root=inputs["public_data_root"],
@@ -80,7 +81,21 @@ def _package(
         eps_grid=eps_grid,
         corrected_replay_root=corrected_replay_root,
         corrected_replay_embeddings_root=corrected_replay_embeddings_root,
+        precision_f1_tolerance=precision_f1_tolerance,
     )
+
+
+@pytest.mark.parametrize("tolerance", [0.0, 0.001])
+def test_model_plan_carries_the_precision_tolerance_only_when_set(
+    package_inputs: dict[str, Path], tolerance: float
+) -> None:
+    _package(package_inputs, precision_f1_tolerance=tolerance)
+
+    plan_path = package_inputs["output_root"] / "pairwise" / "model_plan.json"
+    eps = json.loads(plan_path.read_text(encoding="utf-8"))["eps"]
+    # A plan without a precision lean keeps the three fields that earlier releases wrote.
+    assert ("precision_f1_tolerance" in eps) == (tolerance > 0)
+    assert load_model_plan(plan_path).eps.precision_f1_tolerance == tolerance
 
 
 def test_complete_snapshot_preserves_current_sources_and_uses_one_index(

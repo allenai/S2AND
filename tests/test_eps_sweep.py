@@ -321,13 +321,14 @@ def test_cache_order_appends_non_target_subblocks_after_target_subblocks() -> No
     ]
 
 
-def test_production_assignments_cut_cached_trees_for_the_bulk_step() -> None:
-    from scipy.cluster.hierarchy import linkage
-
-    tree = linkage([0.1, 0.9, 0.9], method="average")
-    linkage_blocks = {
-        "b|subblock=full": sweep_eps_on_linking_gold.CachedLinkageBlock("b|subblock=full", ["1", "2", "3"], tree),
-        "b|subblock=solo": sweep_eps_on_linking_gold.CachedLinkageBlock("b|subblock=solo", ["4"], None),
+def test_production_assignments_take_cached_clusters_for_the_bulk_step() -> None:
+    cluster_blocks = {
+        "b|subblock=full": sweep_eps_on_linking_gold.CachedBlockClusters(
+            "b|subblock=full", ["1", "2", "3"], {0.5: [1, 1, 2], 0.95: [1, 1, 1]}
+        ),
+        "b|subblock=solo": sweep_eps_on_linking_gold.CachedBlockClusters(
+            "b|subblock=solo", ["4"], {0.5: [0], 0.95: [0]}
+        ),
     }
     calls: list[dict[str, Any]] = []
 
@@ -345,7 +346,7 @@ def test_production_assignments_cut_cached_trees_for_the_bulk_step() -> None:
         eps=0.5,
         clusterer=Model(),
         block_dict={"b": ["1", "2", "3", "4", "5"]},
-        linkage_blocks=linkage_blocks,
+        cluster_blocks=cluster_blocks,
         arrow_dataset=cast(Any, None),
         args=args,
     )
@@ -364,12 +365,12 @@ def test_production_assignments_cut_cached_trees_for_the_bulk_step() -> None:
         def _predict_from_arrow_request(self, block_dict, arrow_dataset, **options):
             return options["bulk_clusters"]({"b|subblock=full": ["2", "1", "3"]}), None
 
-    with pytest.raises(ValueError, match="No cached linkage matches"):
+    with pytest.raises(ValueError, match="No cached clusters match"):
         sweep_eps_on_linking_gold._production_assignments_for_eps(  # noqa: SLF001
             eps=0.5,
             clusterer=ReorderedPlan(),
             block_dict={"b": ["1", "2", "3"]},
-            linkage_blocks=linkage_blocks,
+            cluster_blocks=cluster_blocks,
             arrow_dataset=cast(Any, None),
             args=args,
         )

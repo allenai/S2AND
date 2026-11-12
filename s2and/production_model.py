@@ -28,9 +28,11 @@ from s2and.model import (
     FastCluster,
     _selected_feature_indices,
 )
+from s2and.model_pairwise import MAX_CLOSE_PAIR_BONUS
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
+    CLOSE_PAIR_FIELDS,
     COMPLETE_BUNDLE_KIND,
     COMPLETE_MANIFEST_FILES,
     PAIRWISE_FEATURE_CONTRACT_VERSION,
@@ -463,11 +465,24 @@ def _validate_clusterer_config(
             f"extra={sorted(set(payload) - _CLUSTERER_CONFIG_FIELDS)}"
         )
     cluster_model = payload.get("cluster_model")
-    if not isinstance(cluster_model, dict) or set(cluster_model) != {"eps", "linkage"}:
+    # The close-pair fields come as a pair, and only in bundles calibrated with the bonus.
+    if not isinstance(cluster_model, dict) or set(cluster_model) not in (
+        {"eps", "linkage"},
+        {"eps", "linkage", *CLOSE_PAIR_FIELDS},
+    ):
         raise ValueError("Production cluster_model must contain the exact FastCluster runtime configuration")
     eps = _require_finite_number(cluster_model["eps"], field="cluster_model.eps")
     if not 0.0 <= eps <= 1.0:
         raise ValueError(f"Production cluster_model.eps must be in [0, 1], got {eps!r}")
+    if "close_pair_bonus" in cluster_model:
+        bonus = _require_finite_number(cluster_model["close_pair_bonus"], field="cluster_model.close_pair_bonus")
+        close = _require_finite_number(cluster_model["close_pair_distance"], field="cluster_model.close_pair_distance")
+        if not 0.0 < bonus <= MAX_CLOSE_PAIR_BONUS or not 0.0 < close <= 1.0 or cluster_model["linkage"] != "average":
+            raise ValueError(
+                "Production cluster_model close-pair bonus needs average linkage, a close_pair_bonus in "
+                f"(0, {MAX_CLOSE_PAIR_BONUS:g}], and close_pair_distance in (0, 1], "
+                f"got {bonus!r}, {close!r}, {cluster_model['linkage']!r}"
+            )
     if cluster_model["linkage"] not in {
         "average",
         "centroid",
@@ -688,9 +703,14 @@ def _load_bundle_clusterer(
 
     cluster_model_config = clusterer_config["cluster_model"]
     effective_eps = float(cluster_model_config["eps"])
+    close_pair = {
+        field: float(cluster_model_config[field]) for field in CLOSE_PAIR_FIELDS if field in cluster_model_config
+    }
     cluster_model = FastCluster(
         linkage=str(cluster_model_config["linkage"]),
         eps=effective_eps,
+        close_pair_bonus=close_pair.get("close_pair_bonus", 0.0),
+        close_pair_distance=close_pair.get("close_pair_distance", 0.0),
     )
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
@@ -711,6 +731,7 @@ def _load_bundle_clusterer(
         {
             "eps": effective_eps,
             "linkage": str(cluster_model_config["linkage"]),
+            **close_pair,
         }
         if manifest["eps_calibration"] == CALIBRATED_EPS_CALIBRATION
         else None

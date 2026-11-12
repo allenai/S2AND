@@ -2,7 +2,7 @@
 
 This guide defines the production release process.
 The Python and Rust package version is `1.0.0`.
-The next model and research snapshot version is `1.3`.
+The current model version is `1.3.1`, on research snapshot `1.3`.
 Public Arrow and name-count data use format `1`.
 
 The [data guide](data.md#download) lists the release `1.3` populations.
@@ -158,6 +158,16 @@ Do not silently change the scientific search space to satisfy this check.
 ## Stage 4: select EPS and freeze linker inputs
 
 Calibrate EPS from validation data with `release_pairwise.py calibrate-eps`.
+Calibration also decides whether the bundle uses the close-pair bonus.
+It scores every EPS for each entry of `CLOSE_PAIR_CANDIDATES` and keeps the best pair; ties go to plain linkage.
+Calibration and held-out B3 scores are not rounded.
+By default the best signature-weighted F1 wins.
+
+Set `precision_f1_tolerance` in the model plan's `eps` section to lean toward precision.
+Calibration then selects the most precise setting whose F1 is within that tolerance of the best.
+With the close-pair bonus, F1 is nearly flat over a wide range of EPS, so a small tolerance buys a clear gain in precision.
+`package_corrected_datasets.py --precision-f1-tolerance` writes the field; a plan without it selects the best F1.
+The rule needs no earlier model, so a dataset update or a new pairwise fit does not change how it works.
 Calibration writes a fresh calibrated sibling and preserves both boosters.
 Verify that only clusterer configuration and bundle metadata change.
 This benchmark selection supplies the initial EPS for giant-block review.
@@ -241,6 +251,8 @@ Set `VERSION` back to the final version before Stage 6.
 
 Write the bundles again with the accepted model, then publish each bundle to its immutable S3 prefix.
 Release `1.3` uses `s3://ai2-s2-research-public/s2and/1.3/` with `inference/`, `dataset/`, and `source/`.
+Model release `1.3.1` changes only linkage settings, so it publishes `inference/` and `dataset/` under `s2and/1.3.1/` and reuses the `1.3` `source/` bundle.
+Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan.
 Sync `inference` and `dataset` into one fresh local root.
 Verify hashes and repeat installed bulk and incremental smoke checks.
 Run one public step from the [reproduction guide](reproduce.md) on that root.

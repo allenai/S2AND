@@ -15,10 +15,15 @@ Three steps stay outside public reproduction:
   Compare a rebuilt model by those metrics, not by file hashes.
   Files written on Windows also end in CRLF line breaks, so their bytes differ from files written elsewhere.
 
-The published data reproduces the `1.3` training and validation matrices exactly.
-This version of the code does not reproduce the `1.3` calibration and outer-test reports digit for digit.
-Its scores are no longer rounded per dataset, prediction applies name-conflict repair, and calibration also scores the close-pair bonus.
-On the `1.3` model plan, which sets no `precision_f1_tolerance`, step 2 selects EPS `0.49` with the bonus, not `0.57`.
+The published data is the `1.3` data after its distribution correction of 2026-10-22.
+The correction removed papers absent from production S2AG and their dependent records; see [data](data.md).
+The released boosters and linker were fit before it.
+A reproduction therefore trains on slightly smaller populations.
+Its counts and scores are close to the reference results below, not equal to them.
+The released model records its original training population, so step 4 refuses to score it on the published data.
+
+The `1.3` reports also came from an earlier scorer.
+Scores are no longer rounded per dataset, prediction applies name-conflict repair, and calibration also scores the close-pair bonus.
 
 ## Set up
 
@@ -135,9 +140,12 @@ uv run --no-sync python scripts/verification/evaluate_incremental_gold.py evalua
   --total-ram-bytes 34359738368
 ```
 
-Pass `"$ROOT/production_model_v1.3.1"` as the model in steps 4 and 5 to score the released model.
+Pass `"$ROOT/production_model_v1.3.1"` as the model in step 5 to score the released model.
+Step 4 scores only a model that was trained on the published data.
 
 ## Reference results for 1.3.1
+
+These values come from the `1.3` data before its distribution correction, which AI2 holds.
 
 | Measurement | Released `1.3.1` value |
 | --- | --- |
@@ -149,7 +157,7 @@ Pass `"$ROOT/production_model_v1.3.1"` as the model in steps 4 and 5 to score th
 | The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals |
 | Outer-test pairwise AUROC | 0.989391 |
 | Linker test accuracy | 96.715% on 10,837 queries, from the `1.3` fit; `1.3.1` keeps that linker |
-| Identity-gold cases | 134 of 152 correct, the same as `1.3` |
+| Identity-gold cases | 134 of 152 correct, the same as `1.3`. The published data keeps 141 of the cases; the released model gets 125 of them correct |
 
 Steps 1-5 end at the released settings.
 Calibration selects EPS `0.40` with the close-pair bonus, and the giant-block review kept that choice.

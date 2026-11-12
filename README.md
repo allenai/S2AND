@@ -65,7 +65,7 @@ Historical Arrow prefixes do not satisfy the current format-1 contract.
 ## Quick start
 
 After you [download](#download-data) `inference` and `dataset`, cluster every block of a released benchmark.
-For `qian` the model puts 6,542 signatures into 1,264 clusters:
+For `qian` the model puts 6,312 signatures into 1,251 clusters:
 
 ```bash
 uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
@@ -74,8 +74,8 @@ uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
 ```
 
 Incremental prediction links new signatures to existing author profiles.
-In this example, labeled `j wang` signatures on papers before 2015 seed 481 profiles.
-The block's 308 other signatures arrive as new papers; 245 of them join a profile:
+In this example, labeled `j wang` signatures on papers before 2015 seed 478 profiles.
+The block's 303 other signatures arrive as new papers; 242 of them join a profile:
 
 ```bash
 uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \

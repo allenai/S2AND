@@ -21,7 +21,7 @@ Release preparation needs all three bundles.
 
 Model release `1.3.1` uses the `1.3` data and changes only the model's linkage settings.
 Its `inference/` and `dataset/` bundles are under `s2and/1.3.1/`.
-That `dataset/` bundle differs from the `1.3` one in `pairwise/model_plan.json` and adds `pairwise/population_corrections.json`.
+That `dataset/` bundle differs from the `1.3` one only in `pairwise/model_plan.json`.
 The `source/` bundle is unchanged and stays under `s2and/1.3/`.
 The `1.3` model remains at `s2and/1.3/inference/`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.

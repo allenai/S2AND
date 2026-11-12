@@ -155,7 +155,7 @@ The last column is the released model on the published data, where steps 4 and 5
 | Nameless head validation ROC AUC | 0.974620 (H13) | n/a |
 | Validation selection | EPS 0.40 with close-pair bonus 8 under 0.05: B3 precision 0.971954, recall 0.951028, F1 0.961184 on 72,649 signatures. The best F1 on the grid is 0.962106, at EPS 0.49 with the bonus | n/a |
 | Outer-test signature-weighted B3 | Precision 0.978019, recall 0.959062, F1 0.968204 on 72,853 signatures | Precision 0.977285, recall 0.962248, F1 0.969488 on 68,289 signatures |
-| The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals | n/a |
+| The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals | F1 0.967302, with the `1.3` dataset bundle |
 | Outer-test pairwise AUROC | 0.989391 | 0.989664 |
 | Linker test accuracy | 96.715% on 10,837 queries, from the `1.3` fit; `1.3.1` keeps that linker | n/a |
 | Identity-gold cases | 134 of 152 correct, the same as `1.3` | 125 of 141 correct |

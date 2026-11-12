@@ -7,8 +7,7 @@
   0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204, with both
   bundles scored by `1.0.0b10`. The bundle is at `s3://ai2-s2-research-public/s2and/1.3.1/inference/`
   and needs `s2and` `1.0.0b10` or later. The `1.3` bundle stays at `s2and/1.3/inference/` and still loads.
-  The data is unchanged: `s2and/1.3.1/dataset/` differs from the `1.3` bundle in the model plan and adds
-  `pairwise/population_corrections.json`.
+  The data is unchanged: `s2and/1.3.1/dataset/` differs from the `1.3` bundle only in the model plan.
   See "The 1.3.1 decision" in `docs/eps_calibration.md`.
 - Add profile exclusions to full-block prediction (`predict_from_arrow` and `predict`): the optional
   `profile_exclusions.arrow` table and `profile_exclusions` argument. An excluded signature is evicted from
@@ -45,8 +44,9 @@
   correction of 2026-10-22 removed records from the public benchmarks, the command refused the released
   models there, because they record the population they were fit on. A dataset bundle can now publish
   `pairwise/population_corrections.json` beside the model plan, which pairs each benchmark's original
-  population fingerprint with its corrected one. Model `1.3.1` gets B3 F1 0.969488 on the published
-  held-out blocks (68,289 signatures). `calibrate-eps` still requires the model's own population.
+  population fingerprint with its corrected one. Both dataset prefixes, `s2and/1.3/` and `s2and/1.3.1/`,
+  carry the file. On the published held-out blocks (68,289 signatures) model `1.3.1` gets B3 F1 0.969488
+  and model `1.3` gets 0.967302. `calibrate-eps` still requires the model's own population.
 - `calibrate-eps` and `evaluate-heldout` no longer round each dataset's B3 to three decimals. With INSPIRE
   at about 72% of the signatures, one rounding step moved the weighted F1 by 0.0007. Both reports now hold
   unrounded values, so they differ from `1.3`'s reports after the third decimal.

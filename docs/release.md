@@ -255,7 +255,7 @@ Set `VERSION` back to the final version before Stage 6.
 Write the bundles again with the accepted model, then publish each bundle to its immutable S3 prefix.
 Release `1.3` uses `s3://ai2-s2-research-public/s2and/1.3/` with `inference/`, `dataset/`, and `source/`.
 Model release `1.3.1` changes only linkage settings, so it publishes `inference/` and `dataset/` under `s2and/1.3.1/` and reuses the `1.3` `source/` bundle.
-Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan and `pairwise/population_corrections.json`.
+Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan.
 Sync `inference` and `dataset` into one fresh local root.
 Verify hashes and repeat installed bulk and incremental smoke checks.
 Run one public step from the [reproduction guide](reproduce.md) on that root.

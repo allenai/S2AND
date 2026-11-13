@@ -1,21 +1,28 @@
 # Subblocking
 
-Subblocking is used by full-block `Clusterer.predict(...)` to keep pairwise distance construction bounded for large
-blocks. The core boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)` returns only the final
-subblock dictionary.
+Subblocking keeps pairwise distance construction bounded for large blocks. It is
+used by `Clusterer.predict_from_arrow(..., batching_threshold=N)` on the
+Rust Arrow route (see [Python and Rust routing](#python-and-rust-routing)). The
+Python reference boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)`
+returns only the reference subblock dictionary. Production and EPS sweeps use the native planner.
 
-For `Clusterer.predict(..., batching_threshold=N)`, `N` becomes the maximum subblock size. Every emitted subblock is
-expected to have at most `N` signatures.
+`N` becomes the maximum subblock size. Every emitted subblock is expected to
+have at most `N` signatures.
 
-## Current Default
+Both routes use the packaged ORCID prefix counts under the [ORCID policy](#orcid-policy).
+The committed producer excludes the 14 reviewed groups and preserves the shared-surname rule.
+The wheel contains the count JSON and its tuple-dependency manifest.
 
-Subblocking uses graph fallback for oversized groups that cannot be split by names:
+## Default fallback
 
-- Prefix and middle-name splitting still define the main subblock structure.
-- Oversized groups that cannot be split by names call the graph fallback instead of the old SPECTER fallback.
-- For Python/`ANDData` graph fallback, graph preparation or fallback-call IO failures run the old Python
-  `cluster_with_specter(...)` path for that fallback group. Arrow-backed Rust production graph failures raise instead
-  of falling back to `ANDData`.
+Oversized groups that cannot be split by names go to a fallback cluster function:
+
+- Prefix and middle-name splitting define the main subblock structure.
+- `Clusterer.predict(...)` and the Arrow route use the graph fallback.
+- Direct callers of `make_subblocks(...)` or `make_subblocks_with_telemetry(...)`
+  that do not pass a cluster function get the SPECTER fallback,
+  `cluster_with_specter(...)`.
+- Graph preparation and clustering failures propagate; the selected algorithm does not change at runtime.
 
 The graph configuration is available on `Clusterer`:
 
@@ -27,47 +34,152 @@ clusterer.subblocking_graph_config = GraphSubblockingConfig()
 
 Subblocking proceeds in this order:
 
-1. Split signatures by first-name prefix.
-2. For first-name groups that remain too large, split by middle-name prefix.
-3. For groups that are still too large, call the fallback cluster function. By default this is the graph fallback.
-4. Merge compatible small subblocks back up to the maximum size.
-5. Run the optional same-ORCID repair pass.
+1. Give each compound first name one key token (see [compound first names](#compound-first-names)).
+2. Split signatures by first-name prefix.
+3. For first-name groups that remain too large, split by middle-name prefix.
+4. For groups that are still too large, call the fallback cluster function (graph for `Clusterer`; see above).
+5. Merge compatible small subblocks back up to the maximum size.
+6. Run the optional same-ORCID repair pass.
 
-The single-letter first-name path is handled later in bulk prediction. Multi-letter subblocks are predicted first,
+All steps use the key names from step 1. Signatures whose key first name has at most one character form the
+single-letter group, which is handled later in bulk prediction. Multi-letter subblocks are predicted first,
 their resulting clusters become temporary cluster seeds, and single-letter subblocks run through a synthetic
-incremental pass so initial-only signatures can attach back to established clusters.
+incremental pass so initial-only signatures can attach back to established clusters. Prediction classifies each
+subblock by the key first name of its first member. Between these two passes, the
+[reunite-only step](#reunite-only-step) reattaches no-middle records that step 4 cut across subblocks.
 
-## Dash compatibility repair
+Average linkage does not put a pair at exactly `LARGE_DISTANCE` in one cluster.
+Other linkage methods give no such guarantee. The synthetic attachment pass
+preserves the computed clusters and omits any internal hard negatives only from
+its local request. Cross-group and fresh-signature exclusions remain active.
+Caller-supplied incremental seed groups with internal disallows still raise.
 
-Subblocking currently has a localized legacy repair for dash-like given names. Canonical first/middle normalization
-keeps all dash-like given-name compounds together, but the subblocking key layer then preserves different behavior for
-ASCII hyphen versus Unicode dash-like characters:
+Required profiles spanning several subblocks are kept together. When a profile
+has a member in a full-name subblock, both Python and Arrow place it there,
+preferring the first such subblock in sorted order. Members native to that
+subblock stay first so an imported initial does not change its classification.
+This keeps compatible full-name neighbours available during bulk clustering.
+Packing still respects the subblock capacity; separate full-name groups can
+remain separate when they do not fit. The threshold does not cap the size of a
+final cluster after initial-only attachment.
 
-- ASCII-hyphen compounds stay together for subblocking, for example `Sang-Min` -> `first="sang min", middle=""`.
-- Non-ASCII dash compounds spill to first + middle for subblocking, for example `Sang<U+2010>Min` ->
-  `first="sang", middle="min"`.
+## Reunite-only step
 
-This is not intended as permanent semantic policy. It is a measured compatibility repair for current artifacts: uniform
-single-key alternatives regressed real subblocking quality on the active `s_lee`, `s_park`, and `h_wang` checks. Keep
-the repair scoped to subblocking keys; do not copy it into generic `normalize_text(...)`, title/venue normalization,
-ORCID parsing, or pairwise feature normalization. The Python implementation uses precomputed normalized first/middle
-fields when present and only inspects the raw first name to detect the dash form. The Rust Arrow path reads
-`author_first`/`author_middle`, normalizes them internally, and applies the same subblocking-only repair.
+A key first name with more than `maximum_size` records in a block is a first-name dead end. Prefix
+subdivision cannot split it, so step 3 splits it by middle name. Its records without a key middle name share one
+bucket. When that bucket is over the cap, the fallback in step 4 cuts it into pieces of at most the cap. Bulk
+prediction runs on each subblock alone, so records of one person in different pieces never meet. For example, on
+the `w wang` block at a cap of 15,000, the fallback cut 63,948 "wei" records into five pieces.
 
-Any replacement must meet the current quality gates on full artifacts before landing. The migration notes in
-[normalization_migration_blocked.md](normalization_migration_blocked.md) track the tested alternatives and the path to a
-cleaner canonical policy.
+A record is marked when all of these conditions are true:
+
+- Its original block has more than `maximum_size` records.
+- Its key first name has two or more characters and more than `maximum_size` records in that block.
+- Its key middle name is empty.
+- It is not a member of an active caller-required seed group.
+
+The planners report the records that meet the first three conditions, as one bucket for each dead end. The native
+Arrow planner returns the buckets from its dead ends. On the Python route, `no_middle_dead_end_buckets(...)` applies
+the same rule to the canonical names, and a parity test compares the two. The piece of a record is the subblock that
+bulk prediction ran on. This is the final subblock after the packing of required seed groups.
+
+After bulk prediction, the step does these operations for each bucket of each original block:
+
+1. Find the bulk clusters that hold only marked records of the bucket. When they occupy fewer than two pieces, the
+   bucket does not change.
+2. Keep the clusters of the piece with the most of these records as seeds. On a tie, use the first of these pieces
+   in key order. The attachment pass needs at least one seed. A merged piece that holds only the small leftover of
+   the cut can sort first, so the largest piece keeps the most bulk clusters.
+3. Detach the clusters of the other pieces. Send the records of each piece, in key order, to the sequential
+   attachment of the route as one group.
+4. Then run the initial-only groups with all clusters visible.
+
+A group in step 3 sees only the seeds and the clusters that earlier groups of its bucket made. It never sees a
+cluster of another bucket or a cluster that holds an unmarked record. A measurement showed that most attachments
+of marked records to clusters with unmarked records were wrong. A bulk cluster with marked records of two buckets
+stays as it is. Members of required seed groups are never marked, so their groups do not split or merge
+differently. Explicit disallows and caller supervision apply as in initial-only attachment.
+
+On the Arrow route, each group also gets the attach name checks of initial-only attachment (see
+[incremental decision semantics](production_inference.md#incremental-decision-semantics)). No required member is
+visible, so the set of exempt members is empty. Each route uses its own attachment. The promoted Arrow linker
+decides each query alone. By default, classic attachment first clusters the queries of a group and then decides for
+each of these clusters as a unit. Thus disallows can give different clusters on the two routes.
+
+When no bucket has marked-only clusters in two or more pieces, the step changes nothing and the clusters are
+identical to the clusters without the step. The Python route with `use_s2_clusters=True` skips the step. The
+request telemetry `subblocked_reunite` counts the marked records, the reunited buckets, the detached and seed
+clusters, the query groups and their records.
+See [production_inference.md](production_inference.md#reunite-only-memory-and-time) for memory and time.
+
+## Dash normalization
+
+Current normalization handles every dash-like given-name separator uniformly. Dash-bound compounds stay together in the
+canonical first name regardless of the dash code point: both `Sang-Min` and `Sang<U+2010>Min` normalize to
+`first="sang min", middle=""`. Subblock keys then apply the [compound first-name rule](#compound-first-names).
+
+The Python implementation uses precomputed canonical first/middle fields when available and reconstructs them with the
+same canonicalizer when Rust preprocessing deferred those fields. The Rust Arrow path applies the same
+normalization while reading raw name columns.
+
+## Compound first names
+
+A canonical first name with two or more tokens is a compound, for example `hui min` from `Hui-Min` or `j d` from
+`J.-D.`. A compound keys as one token, so it does not make a prefix bucket of its own. The rule changes only the
+first and middle names that form subblock keys. Canonical names, features, name counts and constraints do not
+change. `s2and.subblocking.subblocking_name_parts(...)` and the Rust Arrow planner apply the same rule to the
+whole request before the partition flow starts.
+
+1. If every token has one character, the key first is the first token. The other tokens go before the canonical
+   middle: `j d` with middle `t` keys as first `j`, middle `d t`, in the single-letter group.
+2. Else the planner counts two forms in the request. `n_join` counts records with the joined canonical first
+   (`huimin`). `n_split` counts records with canonical first `hui` and a middle whose first token is `min`.
+3. The compound keys as the joined form with its canonical middle when `n_join <= maximum_size` and
+   `(n_join + 1) / (n_split + 1) > 8`.
+4. Else the key first is the first token (`hui`), and the key middle is the other tokens before the canonical
+   middle (`min`).
+
+A compound with three or more tokens joins all of its tokens (`xiaoyuting`) or keeps only its first token
+(`xiao` with middle `yu ting`). The split-form count uses the first two tokens. The ratio keeps distinct names
+apart on weak evidence, for example `qi an` and `qian`. A joined first name with more than `maximum_size` records
+is already a dead end of prefix subdivision, and a few joined records would only change its middle-name and
+fallback groups.
+
+The counts depend on the whole original block. Thus the Arrow route reads the names of every member of an
+oversized block to classify its subblocks. A block at or below the threshold is not subblocked, so its
+classification uses canonical first names.
 
 ## ORCID policy
+
+The default merge-prior mapping is loaded lazily from the packaged
+`first_k_letter_counts_from_orcid.json` and its required adjacent
+`.manifest.json`, then resolved at subblocking entry. The loader validates the
+canonical prefix-pair keys and positive integer counts directly; the minimal
+manifest records the canonical name-tuple data hash used to generate them.
+Missing or malformed files fail closed before partitioning, and production
+contracts bind their computed hashes. These learned prefix-pair
+counts are considered
+only after exact-name and `same_prefix_tokens` merge candidates, so they do not
+override stronger compatibility evidence. A caller may supply an explicit
+mapping for a controlled experiment.
 
 `make_subblocks(...)` and `make_subblocks_with_telemetry(...)` have a `use_orcid_subblocking` flag. When enabled, the
 final repair pass can merge whole subblocks that contain the same ORCID, but it never extracts only ORCID signatures
 from an existing subblock. The merge runs only when the combined whole subblocks fit within `maximum_size`; otherwise
 the split is preserved and telemetry records the capacity skip.
 
-The ORCID key is canonicalized to match Rust Arrow ingestion: keep digits and `X`/`x`, require exactly 16 ORCID
-characters, uppercase the check digit, and format as `0000-0000-0000-0000`. Blank or invalid values are ignored.
+The ORCID key is canonicalized to match Rust Arrow ingestion: extract the first
+structured token containing 15 ASCII digits followed by an ASCII digit or
+`X`/`x`, with optional supported dash separators between four-character groups.
+The token cannot be immediately adjacent to another ASCII digit or `X`/`x`.
+URL and label prefixes are accepted; arbitrary punctuation inside the token is
+not stripped. The result uses ASCII hyphens and an uppercase final `X`, for
+example `ORCID: 000000021825009x` becomes `0000-0002-1825-009X`.
+This validates the token's structure, not its checksum. Values with no matching
+token are ignored.
 This subblocking policy is independent from same-ORCID hard-link distance constraints.
+The `use_orcid_subblocking` flag controls only that final same-ORCID repair; it
+does not disable the prefix-pair merge priors described above.
 
 ## Graph fallback
 
@@ -84,44 +196,62 @@ Default `GraphSubblockingConfig` behavior:
 - Sparse coauthor evidence is enabled by default with `sparse_evidence_max_posting_size=8`,
   `sparse_evidence_neighbors=1`, `sparse_evidence_min_weight=0.40`, and affiliations excluded. This adds only
   bounded coauthor-posting edges after projection edges have been scored.
-- Adaptive projection, aggregate packing, and local moves are still experimental knobs and are off by default.
+- Adaptive projection, aggregate packing, and local moves are experimental knobs and are off by default.
 
-When Arrow paths are available, the graph fallback is Arrow-backed. Before fallback calls, `prepare(...)` receives the
-actual fallback-signature groups and loads the union of required `signatures`, `paper_authors`, and selected embedding rows
-into memory through the raw-planner batch lookup indexes. Each fallback call then slices that in-memory evidence for
-its group. Arrow graph subblocking refuses filtered full scans: `signatures_batch_index`,
-`paper_authors_batch_index`, and the selected embedding index (`specter_batch_index` or `specter2_batch_index`) must be
-present, and malformed Arrow schemas or declared missing artifacts raise before graph clustering starts. Without Arrow
-paths, the graph fallback uses the active `ANDData` object.
+The internal Arrow graph helper loads the union of required `signatures`,
+`paper_authors`, and selected embedding rows through raw-planner batch lookup
+indexes, then slices that in-memory evidence for each fallback group. It
+refuses filtered full scans: `signatures_batch_index`,
+`paper_authors_batch_index`, and the selected embedding index (`specter_batch_index`) must be
+present, and malformed Arrow schemas or declared missing artifacts raise before
+graph clustering starts. This helper is not selected by the public
+Python/`ANDData` `Clusterer.predict(...)` route.
 
-For Python/`ANDData` fallback, graph fallback is intentionally wrapped with the old Python SPECTER fallback. Graph
-failures are not swallowed: warnings are logged, telemetry records the failure, and then
-`cluster_with_specter(...)` runs for the affected group. Arrow-backed Rust production graph fallback does not use this
-legacy recovery path; Arrow graph read/prepare/call failures propagate.
+`Clusterer.predict(...)` selects the graph implementation directly, and graph
+read/prepare/call failures propagate. Direct callers of `make_subblocks(...)`
+that do not supply a cluster function retain the explicitly selected legacy
+`cluster_with_specter(...)` behavior.
 
 ## Python and Rust routing
 
-Subblocking has two supported routes:
+The public routes are method-based:
 
-- **Pure Python.** Direct calls to `make_subblocks(...)` and `make_subblocks_with_telemetry(...)` use the original
-  Python implementation.
-- **Arrow-native Rust.** `Clusterer.predict(...)` can route oversized blocks to Rust when
-  the call's resolved backend is Rust and indexed Arrow signature rows are available.
+- **Rust Arrow prediction.** Call
+  `Clusterer.predict_from_arrow(blocks, arrow_dataset,
+  batching_threshold=N, total_ram_bytes=...)`. This validates the indexed Arrow
+  handle, partitions oversized blocks with the native Rust graph
+  subblocker, and reuses one Rust featurizer across the emitted subblocks.
 
-For `Clusterer.predict(...)` with Arrow paths and a Rust-resolved backend, Rust Arrow subblocking is strict and always
-uses the native graph fallback. It is used only when all of these are true:
+The retained Python reference and native graph implementations have a quality-equivalence contract, not an identical-partition
+contract. In the default projection mode, Python and Rust use separate deterministic
+random-number generators and seed derivations, so the projection edges and resulting
+subblocks may differ for the same signatures. Verification requires both routes to
+cover the same signatures, honor the size cap, and preserve required components; it
+does not require matching unlabeled partitions. For a fixed candidate edge set,
+score ties are resolved deterministically within each route.
 
-- `Clusterer.predict(..., backend="rust")` is used, or its `runtime_context` resolves to Rust.
-- `arrow_paths["signatures"]` is present.
-- `arrow_paths["signatures_batch_index"]` is present.
+`batching_threshold=None` retains full-block prediction. A positive threshold
+is the maximum native subblock size; blocks at or below it are unchanged.
+Multi-letter subblocks are predicted first, then initial-only groups attach to
+those clusters through the promoted Rust incremental linker. `total_ram_bytes`
+controls pair-batch sizing and allocation checks; it is not a block
+partitioning knob. Missing required Arrow tables, embedding evidence, batch
+indexes, or the incremental artifact raise instead of falling back to Python or
+`ANDData`.
 
-That path calls `_make_subblocks_with_telemetry_arrow_rust(...)`, so Rust loads the name and ORCID rows needed for subblocking from
-Arrow. If an Arrow-backed Rust production prediction is missing either artifact, prediction raises a structured
-missing-artifact error instead of silently using `ANDData` partitioning. Python subblocking orchestration remains
-available through explicit Python/compatibility routes and direct `make_subblocks(...)` calls.
+Both prediction routes keep active required seed components together within
+each original input block. A component larger than `batching_threshold` in one
+block raises `ValueError` before subblocking; the size of a profile across
+different blocks does not trigger this check. Disabling required-seed supervision
+also disables this packing and size check.
 
-In Python orchestration, oversized fallback groups call the Python graph fallback callable. In Arrow-native Rust
-orchestration, oversized fallback groups are handled inside Rust; Rust does not call back into Python.
+Initial-only groups can attach only to predictions from their original input
+block. A block containing only initials uses bulk prediction, even when other
+blocks contain full names. Restoring a profile spanning several input blocks
+does not join their output clusters. With constraint supervision enabled,
+explicit disallows remain effective during sequential attachment, including
+pairs whose other endpoint is processed later. Ignoring required seeds with
+`incremental_dont_use_cluster_seeds` does not disable these disallows.
 
 ## Telemetry
 
@@ -132,36 +262,19 @@ orchestration, oversized fallback groups are handled inside Rust; Rust does not 
 - fallback candidate and invocation counts
 - pre-merge and final subblock counts
 - ORCID repair capacity skips
-- final SPECTER-labeled subblock counts
+- `*_specter_labeled_*` subblock and signature counts, which count every
+  fallback-produced subblock (keys containing `|specter=`), whichever fallback
+  ran
 
-`Clusterer.predict(...)` also records graph hook telemetry on `_last_graph_subblocking_telemetry` and
-`_last_arrow_graph_subblocking_telemetry`:
+## Incremental prediction
 
-- `enabled`, `mode`, `source`, and `candidate_signature_count`
-- `arrow_load_seconds` and `arrow_load_metrics`
-- `fallback_invocation_count` and per-group `fallback_stats`
-- `legacy_fallback_invocation_count`
-- `graph_prepare_failed`, `graph_prepare_error`, and `graph_fallback_errors`
+Subblocking applies to full-block prediction. On
+`Clusterer.predict_incremental_from_arrow`, `batching_threshold` has a different
+meaning: it caps the number of unassigned query signatures per linker batch.
+The classic `Clusterer.predict_incremental` API is retired. See
+[production_inference.md](production_inference.md#incremental-decision-semantics)
+for the incremental contract.
 
-`fallback_stats` includes per-group graph details such as candidate edge count, raw and packed component counts,
-maximum component size, edge-build seconds, and total fallback seconds.
-
-## Incremental routing
-
-Incremental prediction has two supported routes:
-
-- **Promoted Rust linker.** Used when the resolved backend is Rust, the Rust extension exposes the required
-  promoted-incremental capabilities, and seed inputs are available, either as an `ANDData` seed map or a
-  `cluster_seeds` entry in `dataset.arrow_paths`. When complete Arrow artifacts are also available, retrieval and
-  scoring run directly against the Arrow tables. Otherwise the runtime builds the Rust featurizer from Python state.
-- **Python fallback helper.** Used when the backend resolves to Python, the Rust extension lacks the required
-  capabilities, or no seed inputs are provided. This path covers partition coverage but does not implement batched
-  incremental routing.
-
-`batching_threshold` controls two things. For full-block prediction it caps subblock size. For promoted Rust
-incremental prediction it caps the number of unassigned query signatures per linker batch. The standalone Python
-incremental fallback rejects `batching_threshold` with a `ValueError`; pass `batching_threshold=None` on that path or
-use the Rust backend with seed inputs.
-
-See [production_inference.md](production_inference.md#large-blocks-and-incremental-inference) for the full
-caller-facing contract.
+The EPS sweep uses the same native graph planner as production. ORCID-B3 evaluation
+keeps ORCID evidence hidden in subblocking and distance constraints to prevent label leakage.
+Historical Python-graph sweep partitions must not be treated as native production partitions.

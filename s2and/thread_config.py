@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
 
-def resolve_n_jobs(n_jobs: Any, *, default: int = 1) -> int:
+def resolve_n_jobs(n_jobs: int | None) -> int:
     """Return a positive worker count, honoring sklearn negative `n_jobs` semantics.
 
     `n_jobs=-1` means all available CPUs; `-2` means all but one, and so on. A
-    value of `0` is not valid in sklearn, but legacy S2AND callers used it as a
-    single-thread fallback, so preserve that behavior.
+    value of `None` means one worker. Zero and non-integer values are invalid.
     """
 
-    value = default if n_jobs is None else n_jobs
-    parsed = int(value)
-    if parsed == 0:
+    if n_jobs is None:
         return 1
-    if parsed < 0:
+    if isinstance(n_jobs, bool) or not isinstance(n_jobs, int):
+        raise TypeError(f"n_jobs must be an int or None, got {type(n_jobs).__name__}")
+    if n_jobs == 0:
+        raise ValueError("n_jobs must not be zero")
+    if n_jobs < 0:
         cpu_count = os.cpu_count() or 1
-        return max(1, cpu_count + 1 + parsed)
-    return parsed
+        return max(1, cpu_count + 1 + n_jobs)
+    return n_jobs

@@ -1,0 +1,28 @@
+{
+  "description": "Compare-time surname forms shared by s2and.text.canonical_surname_family and the Rust surname_family.",
+  "cases": [
+    {"last": "muller", "family": "muller"},
+    {"last": "mueller", "family": "muller"},
+    {"last": "baumgaertner", "family": "baumgartner"},
+    {"last": "ou yang", "family": "ouyang"},
+    {"last": "mu eller", "family": "muller"},
+    {"last": "tartakov sky", "family": "tartakovskii"},
+    {"last": "van der berg", "family": "vanderberg"},
+    {"last": "tartakovskiy", "family": "tartakovskii"},
+    {"last": "tartakovsky", "family": "tartakovskii"},
+    {"last": "tartakovskii", "family": "tartakovskii"},
+    {"last": "tartakovskyi", "family": "tartakovskii"},
+    {"last": "tartakovskyy", "family": "tartakovskii"},
+    {"last": "tartakovskij", "family": "tartakovskii"},
+    {"last": "tartakovskyj", "family": "tartakovskii"},
+    {"last": "kowalski", "family": "kowalski"},
+    {"last": "dostoevskaya", "family": "dostoevskaya"},
+    {"last": "sky", "family": "sky"},
+    {"last": "asky", "family": "asky"},
+    {"last": "osky", "family": "osky"},
+    {"last": "brosky", "family": "broskii"},
+    {"last": "xue", "family": "xue"},
+    {"last": "xu", "family": "xu"},
+    {"last": "", "family": ""}
+  ]
+}

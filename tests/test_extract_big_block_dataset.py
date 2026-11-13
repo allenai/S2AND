@@ -3,10 +3,8 @@ import pickle
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from scripts.extract_big_block_dataset import (
-    census_monolith,
     extract_monolith_dataset,
     iter_monolith_records,
 )
@@ -84,18 +82,13 @@ def _minify_fixture(pretty_fixture: str) -> str:
     return json.dumps(json.loads(pretty_fixture), separators=(",", ":"))
 
 
-@pytest.fixture(params=[MONOLITH_FIXTURE, _minify_fixture(MONOLITH_FIXTURE)], ids=["pretty", "minified"])
-def monolith_fixture_text(request) -> str:
-    return request.param
-
-
 def _write_fixture(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def test_iter_monolith_records_yields_expected_sequence(tmp_path, monolith_fixture_text):
+def test_iter_monolith_records_yields_expected_sequence(tmp_path):
     input_path = tmp_path / "big_block_fixture.json"
-    _write_fixture(input_path, monolith_fixture_text)
+    _write_fixture(input_path, MONOLITH_FIXTURE)
 
     records = list(iter_monolith_records(input_path))
 
@@ -129,24 +122,10 @@ def test_iter_monolith_records_handles_minified_chunk_boundaries(tmp_path):
     ]
 
 
-def test_census_monolith_respects_limit_signatures(tmp_path, monolith_fixture_text):
-    input_path = tmp_path / "big_block_fixture.json"
-    _write_fixture(input_path, monolith_fixture_text)
-
-    census = census_monolith(input_path, limit_signatures=1)
-
-    assert census.signature_count == 1
-    assert census.paper_count == 1
-    assert census.embedding_count == 1
-    assert census.embedding_dim == 3
-    assert census.needed_paper_ids == {"101"}
-    assert census.block_counts == {"h wang": 1}
-
-
-def test_extract_monolith_dataset_writes_anddata_friendly_outputs(tmp_path, monolith_fixture_text):
+def test_extract_monolith_dataset_writes_anddata_friendly_outputs(tmp_path):
     input_path = tmp_path / "big_block_fixture.json"
     output_dir = tmp_path / "h_wang"
-    _write_fixture(input_path, monolith_fixture_text)
+    _write_fixture(input_path, MONOLITH_FIXTURE)
 
     meta = extract_monolith_dataset(input_path, output_dir, limit_signatures=1)
 

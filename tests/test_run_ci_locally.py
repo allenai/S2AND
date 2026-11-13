@@ -1,84 +1,113 @@
 from __future__ import annotations
 
-import importlib.util
+import subprocess
 from pathlib import Path
-from types import ModuleType
 
+import pytest
 
-def _load_run_ci_locally() -> ModuleType:
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_ci_locally.py"
-    spec = importlib.util.spec_from_file_location("run_ci_locally", script_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_py_only_lane_reports_expected_rust_skips(monkeypatch, capsys) -> None:
-    run_ci = _load_run_ci_locally()
-    calls: list[tuple[list[str], dict[str, str] | None]] = []
-
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present, lane: None)
-    monkeypatch.setattr(run_ci, "run_ty_checks", lambda: None)
-    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
-
-    run_ci.run_typecheck_and_test_lane(lane="py-only", lock_present=True)
-
-    assert len(calls) == 1
-    assert calls[0][0] == [
-        "run",
-        "pytest",
-        "-ra",
-        "tests/",
-        "--cov=s2and",
-        "--cov-report=term-missing",
-        "--cov-fail-under=40",
-    ]
-    assert calls[0][1] is not None
-    assert calls[0][1]["S2AND_BACKEND"] == "python"
-    assert "Rust-only tests are expected to report skips in the py-only lane" in capsys.readouterr().out
+from scripts import run_ci_locally as run_ci
 
 
 def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
-    run_ci = _load_run_ci_locally()
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present, lane: None)
-    monkeypatch.setattr(run_ci, "top_level_script_files", lambda: ["scripts/run_ci_locally.py"])
+    monkeypatch.setattr(
+        run_ci,
+        "sync_deps",
+        lambda *, lock_present: (_ for _ in ()).throw(AssertionError("lint must not sync project dependencies")),
+    )
     monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append(args))
 
-    run_ci.run_lint_job(lock_present=True)
+    run_ci.run_lint_job()
 
-    assert calls[0] == ["run", "python", "scripts/sync_version.py", "--check"]
-    assert ["run", "ruff", "check", "s2and", "scripts", "tests"] in calls
+    ruff_requirement = run_ci.exact_dev_tool_requirement("ruff")
+    assert calls == [
+        ["run", "--no-project", "python", "scripts/sync_version.py", "--check"],
+        ["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"],
+        ["tool", "run", "--isolated", ruff_requirement, "check", "s2and", "scripts", "tests"],
+        ["tool", "run", "--isolated", ruff_requirement, "format", "--check", "s2and", "scripts", "tests"],
+    ]
 
 
-def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch) -> None:
-    run_ci = _load_run_ci_locally()
+def test_ensure_rust_on_path_rejects_rustc_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rustc_path = tmp_path / "rustc"
+
+    monkeypatch.setattr(
+        run_ci.shutil,
+        "which",
+        lambda command: str(rustc_path) if command == "rustc" else None,
+    )
+    monkeypatch.setenv("USERPROFILE" if run_ci.os.name == "nt" else "HOME", str(tmp_path))
+
+    with pytest.raises(FileNotFoundError, match="cargo is required"):
+        run_ci.ensure_rust_on_path()
+
+
+@pytest.mark.parametrize(
+    ("workers", "max_processes", "smoke_fails"),
+    [
+        ("auto", ["--maxprocesses", "8"], False),
+        ("logical", ["--maxprocesses", "8"], False),
+        ("12", [], False),
+        ("0", [], False),
+        ("auto", ["--maxprocesses", "8"], True),
+    ],
+    ids=["auto", "logical", "12", "0", "smoke-fails"],
+)
+def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(
+    monkeypatch, workers, max_processes, smoke_fails
+) -> None:
     calls: list[tuple[list[str], dict[str, str] | None]] = []
+    lifecycle: list[str] = []
 
-    monkeypatch.delenv("S2AND_BACKEND", raising=False)
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present, lane: None)
-    monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: None)
-    monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: None)
-    monkeypatch.setattr(run_ci, "run_ty_checks", lambda: None)
-    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
+    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: lifecycle.append("sync-and-build-rust"))
+    monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: lifecycle.append("ensure-rust"))
+    monkeypatch.setattr(run_ci, "run_native_rust_checks", lambda: lifecycle.append("check-rust"))
+    monkeypatch.setattr(run_ci, "run_ty_checks", lambda: lifecycle.append("typecheck"))
+    failure = subprocess.CalledProcessError(7, "native smoke")
 
-    run_ci.run_typecheck_and_test_lane(lane="rust-enabled", lock_present=True)
+    def run_uv(args, *, env=None):
+        calls.append((args, env))
+        if smoke_fails:
+            raise failure
 
-    pytest_calls = [args for args, _env in calls if args[:2] == ["run", "pytest"]]
-    assert len(pytest_calls) == len(run_ci.RUST_PARITY_TESTS) + 1
+    monkeypatch.setattr(run_ci, "run_uv", run_uv)
+    if smoke_fails:
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers=workers)
+        assert caught.value is failure
+        assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust"]
+        assert len(calls) == 1
+        return
+    run_ci.run_typecheck_and_test_job(lock_present=True, pytest_workers=workers)
+
+    pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
+    assert len(pytest_calls) == 1
+    assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust", "typecheck"]
+    assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
+    assert calls[0][1] is None
     assert all("-ra" in args for args in pytest_calls)
-    assert pytest_calls[0] == ["run", "pytest", "-q", "-ra", run_ci.RUST_PARITY_TESTS[0]]
-    assert pytest_calls[-1] == [
+    assert pytest_calls[0] == [
         "run",
+        "--no-sync",
         "pytest",
         "-ra",
         "tests/",
+        "-n",
+        workers,
+        *max_processes,
         "--cov=s2and",
         "--cov-report=term-missing",
-        "--cov-fail-under=40",
     ]
-    assert calls[-1][1] is not None
-    assert "S2AND_BACKEND" not in calls[-1][1]
+    assert calls[1][1] is None
+
+
+@pytest.mark.parametrize(("lock_present", "frozen"), [(True, ["--frozen"]), (False, [])])
+def test_sync_deps_installs_the_rust_extension(monkeypatch, lock_present: bool, frozen: list[str]) -> None:
+    """The typecheck job imports the extension that the locked sync builds."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append(args))
+
+    run_ci.sync_deps(lock_present=lock_present)
+
+    assert calls == [["sync", "--extra", "dev", *frozen]]

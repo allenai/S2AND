@@ -39,8 +39,6 @@
 #![deny(missing_docs)]
 
 extern crate cld2_sys as ffi;
-#[macro_use]
-extern crate lazy_static;
 extern crate libc;
 
 pub use types::*;

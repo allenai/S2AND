@@ -7,6 +7,17 @@ import pytest
 
 from s2and.mp import UniversalPool
 
+_INITIALIZED_TEST_VALUE: str | None = None
+
+
+def _initialize_test_worker(value: str) -> None:
+    global _INITIALIZED_TEST_VALUE
+    _INITIALIZED_TEST_VALUE = value
+
+
+def _read_initialized_test_value(_item: int) -> str | None:
+    return _INITIALIZED_TEST_VALUE
+
 
 def test_streaming_imap_cancels_pending_futures_on_exception():
     started: list[int] = []
@@ -57,3 +68,19 @@ def test_streaming_imap_rejects_non_positive_max_prefetch():
     with UniversalPool(processes=1, use_threads=True) as pool:
         with pytest.raises(ValueError, match="max_prefetch must be >= 1"):
             list(pool.imap(lambda item: item, [1, 2, 3], chunksize=1, max_prefetch=0))
+
+
+@pytest.mark.parametrize("use_threads", (True, False), ids=("threads", "processes"))
+def test_universal_pool_forwards_worker_initializer(use_threads: bool) -> None:
+    global _INITIALIZED_TEST_VALUE
+    _INITIALIZED_TEST_VALUE = None
+
+    with UniversalPool(
+        processes=1,
+        use_threads=use_threads,
+        initializer=_initialize_test_worker,
+        initargs=("initialized",),
+    ) as pool:
+        results = list(pool.imap(_read_initialized_test_value, range(2)))
+
+    assert results == ["initialized", "initialized"]

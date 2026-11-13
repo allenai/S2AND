@@ -1,0 +1,55 @@
+diff --git a/cld2/internal/compact_lang_det_impl.cc b/cld2/internal/compact_lang_det_impl.cc
+index eafbdfc..8037b24 100644
+--- a/cld2/internal/compact_lang_det_impl.cc
++++ b/cld2/internal/compact_lang_det_impl.cc
+@@ -477,8 +477,13 @@ void PrintText(FILE* f, Language cur_lang, const string& temp) {
+ //------------------------------------------------------------------------------
+ // For --cld_html debugging output. Not thread safe
+ //------------------------------------------------------------------------------
+-static Language prior_lang = UNKNOWN_LANGUAGE;
+-static bool prior_unreliable = false;
++#if defined(_MSC_VER)
++static __declspec(thread) Language prior_lang = UNKNOWN_LANGUAGE;
++static __declspec(thread) bool prior_unreliable = false;
++#else
++static __thread Language prior_lang = UNKNOWN_LANGUAGE;
++static __thread bool prior_unreliable = false;
++#endif
+ 
+ //------------------------------------------------------------------------------
+ // End For --cld_html debugging output
+@@ -1831,7 +1836,8 @@ Language DetectLanguageSummaryV2(
+   // int spantooshortlimit = advance_by * FLAGS_cld_smoothwidth;
+   int spantooshortlimit = kShortSpanThresh;
+ 
+-  // For debugging only. Not thread-safe
++
++  // Reset request-local debug state without writing another thread's state.
+   prior_lang = UNKNOWN_LANGUAGE;
+   prior_unreliable = false;
+ 
+diff --git a/cld2/internal/getonescriptspan.cc b/cld2/internal/getonescriptspan.cc
+index 73b9ee4..62bd14d 100644
+--- a/cld2/internal/getonescriptspan.cc
++++ b/cld2/internal/getonescriptspan.cc
+@@ -207,8 +207,12 @@ enum
+   Runemax       = 0x10FFFF,     // maximum rune value
+ };
+ 
+-// Debugging. Not thread safe.
+-static char gDisplayPiece[32];
++// Debugging only. Thread-local so concurrent detections do not share the buffer.
++#if defined(_MSC_VER)
++static __declspec(thread) char gDisplayPiece[32];
++#else
++static __thread char gDisplayPiece[32];
++#endif
+ const uint8 gCharlen[16] = {1,1,1,1, 1,1,1,1, 1,1,1,1, 2,2,3,4};
+ char* DisplayPiece(const char* next_byte_, int byte_length_) {
+   // Copy up to 8 UTF-8 chars to buffer
+@@ -1090,5 +1094,3 @@ int GetUTF8LetterScriptNum(const char* src) {
+ }
+ 
+ }  // namespace CLD2
+-
+-

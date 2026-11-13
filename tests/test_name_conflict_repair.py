@@ -65,9 +65,9 @@ def _repair(square: np.ndarray, repair: NameConflictRepair, **kwargs: Any) -> li
     return [int(x) for x in repair_name_conflicts_in_block(SIGNATURES, _labels(square), codes, repair, **kwargs)]
 
 
-def _partition(labels: list[int]) -> set[frozenset[str]]:
+def _partition(labels: list[int], signatures: list[str] = SIGNATURES) -> set[frozenset[str]]:
     groups: dict[int, set[str]] = {}
-    for signature, label in zip(SIGNATURES, labels, strict=True):
+    for signature, label in zip(signatures, labels, strict=True):
         groups.setdefault(label, set()).add(signature)
     return {frozenset(group) for group in groups.values()}
 
@@ -275,7 +275,7 @@ def test_repair_accepts_two_odd_mentions_but_not_three() -> None:
 
 
 @pytest.mark.parametrize("seed", range(8))
-def test_repair_matches_a_direct_search(seed: int) -> None:
+def test_repair_preserves_direct_pair_search_and_bounds_extensions(seed: int) -> None:
     # Random clusters and impossible pairs, checked against a plain search over cluster pairs.
     rng = np.random.default_rng(seed)
     n = 72
@@ -322,7 +322,148 @@ def test_repair_matches_a_direct_search(seed: int) -> None:
         want[labels == b] = a
 
     got = repair_name_conflicts_in_block(signatures, labels, codes, repair)
-    assert list(got) == list(want)
+    for group in _partition(want.tolist(), signatures):
+        assert len({int(got[int(signature)]) for signature in group}) == 1
+    baseline_groups = _partition(want.tolist(), signatures)
+    for group in _partition(list(got), signatures):
+        original = sorted({int(labels[int(signature)]) for signature in group})
+        assert len(original) <= 3
+        if len(original) <= 2:
+            assert group in baseline_groups
+            continue
+        # Check new triples directly against the full matrix, without the kernel's sums.
+        sides = [np.flatnonzero(labels == label).tolist() for label in original]
+        edges = [(i, j) for a, b in itertools.combinations(sides, 2) for i in a for j in b if hard[i, j]]
+        nodes = sorted({i for edge in edges for i in edge})
+        covers = [set(cover) for size in (1, 2) for cover in itertools.combinations(nodes, size)]
+        assert any(
+            all(i in cover or j in cover for i, j in edges)
+            and all(len(set(side) - cover) >= 5 for side in sides)
+            and all(
+                (
+                    np.floor(
+                        square[np.ix_([i for i in a if i not in cover], [j for j in b if j not in cover])] * 254.999
+                    ).mean()
+                    + 1
+                )
+                / 254.999
+                <= 0.2
+                for a, b in itertools.combinations(sides, 2)
+            )
+            for cover in covers
+        )
+
+
+def _three_clusters() -> tuple[np.ndarray, list[int], list[str]]:
+    """Keep three close groups apart with the two Vallati-style name errors."""
+    square = np.full((18, 18), 0.01)
+    for a, b, distance in ((0, 1, 0.15), (0, 2, 0.19), (1, 2, 0.09)):
+        square[a * 6 : (a + 1) * 6, b * 6 : (b + 1) * 6] = distance
+        square[b * 6 : (b + 1) * 6, a * 6 : (a + 1) * 6] = distance
+    square[0, 6:] = square[6:, 0] = LARGE_DISTANCE
+    square[6:12, 12] = square[12, 6:12] = LARGE_DISTANCE
+    np.fill_diagonal(square, 0.0)
+    return square, [0] * 6 + [1] * 6 + [2] * 6, [str(i) for i in range(18)]
+
+
+def _repair_three(square: np.ndarray, **kwargs: Any) -> list[int]:
+    _, labels, signatures = _three_clusters()
+    codes = quantize_distances(squareform(square), num_threads=1)
+    assert codes is not None
+    repair = kwargs.pop("repair", NameConflictRepair(0.2, frozenset(signatures)))
+    return [int(label) for label in repair_name_conflicts_in_block(signatures, labels, codes, repair, **kwargs)]
+
+
+def test_repaired_pair_absorbs_a_third_cluster_when_every_original_pair_passes() -> None:
+    square, _, _ = _three_clusters()
+    assert _repair_three(square) == [1] * 18
+
+
+def test_extension_considers_other_accepted_covers_of_the_selected_pair() -> None:
+    square = np.full((18, 18), 0.01)
+    square[:6, 6:12] = square[6:12, :6] = 0.05
+    square[:6, 12:] = square[12:, :6] = 0.10
+    square[6:12, 12:] = square[12:, 6:12] = 0.15
+    # The pair merge scores without 0, but the shared cover is 6 and 12.
+    square[0, 6] = square[6, 0] = LARGE_DISTANCE
+    square[:12, 12] = square[12, :12] = LARGE_DISTANCE
+    square[6, 12:] = square[12:, 6] = LARGE_DISTANCE
+    np.fill_diagonal(square, 0.0)
+    assert _repair_three(square) == [0] * 18
+
+
+def test_extension_requires_a_direct_eligible_pair_between_every_original_cluster() -> None:
+    square, _, _ = _three_clusters()
+    square[:6, 12:] = square[12:, :6] = 0.8
+    assert _repair_three(square) == [0] * 6 + [1] * 12
+
+
+def test_extension_limits_the_shared_exceptions_to_two_mentions() -> None:
+    square, _, _ = _three_clusters()
+    square[0, 12:] = square[12:, 0] = 0.19
+    square[1, 12:] = square[12:, 1] = LARGE_DISTANCE
+    assert _repair_three(square) == [0] * 6 + [1] * 12
+
+
+@pytest.mark.parametrize("clean_distance", [0.21, 0.1999], ids=["above-limit", "quantization-uncertainty"])
+def test_extension_rechecks_each_pair_after_removing_the_same_exceptions(clean_distance: float) -> None:
+    square, _, _ = _three_clusters()
+    # Removing the second exception loses a cheap column and raises the first/third mean.
+    square[1:6, 12] = square[12, 1:6] = 0.0
+    square[1:6, 13:] = square[13:, 1:6] = clean_distance
+    assert _repair_three(square) == [0] * 6 + [1] * 12
+
+
+@pytest.mark.parametrize("veto", ["orcid", "seed", "exclusion", "name-rule-provenance"])
+def test_extension_keeps_every_original_pair_veto(veto: str) -> None:
+    square, _, signatures = _three_clusters()
+    kwargs: dict[str, Any] = {}
+    repair = NameConflictRepair(
+        0.2,
+        frozenset(signatures),
+        {"1": "X", "13": "Y"} if veto == "orcid" else {},
+        (lambda pairs: [not (a == "0" and int(b) >= 12) for a, b in pairs]) if veto == "name-rule-provenance" else None,
+    )
+    if veto == "seed":
+        kwargs["seed_groups"] = {"1": "X", "13": "Y"}
+    if veto == "exclusion":
+        kwargs["forbidden"] = {"13": {"1"}}
+    assert _repair_three(square, repair=repair, **kwargs) == [0] * 6 + [1] * 12
+
+
+def test_extension_preserves_another_selected_pair() -> None:
+    square = np.full((24, 24), 0.1)
+    square[:6, 6:12] = square[6:12, :6] = 0.05
+    square[12:18, 18:] = square[18:, 12:18] = 0.06
+    # Every original pair qualifies, but the two existing pair merges retain their members.
+    for start in (0, 6, 12):
+        square[start, start + 6 :] = square[start + 6 :, start] = LARGE_DISTANCE
+    np.fill_diagonal(square, 0.0)
+    codes = quantize_distances(squareform(square), num_threads=1)
+    assert codes is not None
+    signatures = [str(i) for i in range(24)]
+    labels = repair_name_conflicts_in_block(
+        signatures, np.repeat(np.arange(4), 6), codes, NameConflictRepair(0.2, frozenset(signatures))
+    )
+    assert list(labels) == [0] * 12 + [2] * 12
+
+
+def test_extension_stops_at_three_original_clusters() -> None:
+    square, _, _ = _three_clusters()
+    four = np.full((24, 24), 0.8)
+    four[:18, :18] = square
+    four[18:, 18:] = 0.01
+    four[6:12, 18:] = four[18:, 6:12] = 0.19
+    four[12:18, 18:] = four[18:, 12:18] = 0.195
+    four[18, 6:18] = four[6:18, 18] = LARGE_DISTANCE
+    np.fill_diagonal(four, 0.0)
+    codes = quantize_distances(squareform(four), num_threads=1)
+    assert codes is not None
+    signatures = [str(i) for i in range(24)]
+    labels = repair_name_conflicts_in_block(
+        signatures, np.repeat(np.arange(4), 6), codes, NameConflictRepair(0.2, frozenset(signatures))
+    )
+    assert list(labels) == [1] * 18 + [3] * 6
 
 
 def _model() -> Clusterer:

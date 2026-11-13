@@ -35,6 +35,13 @@ The odd mentions stay in the merged cluster. Blind judging on seven large blocks
 called all 28 sampled merges with one odd mention and all 13 with two correct, and
 found most odd mentions belonged to the merged person.
 
+After the pair merges, a repaired pair can absorb one untouched original cluster.
+Every original pair must pass these checks. One shared set of at most two odd
+mentions must explain their conflicts, and every clean pair must remain below
+the distance limit after removing that same set. Each original cluster must keep
+five mentions and a full first name. An extension never grows beyond three
+original clusters or changes another pair merge.
+
 ``Clusterer.name_conflict_repair_max_distance`` sets the distance for every route
 that clusters blocks; ``None`` turns the repair off.
 
@@ -48,6 +55,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
+from itertools import product
 
 import numpy as np
 
@@ -65,6 +73,48 @@ MIN_BLOCK_SIZE = 2 * MIN_SIDE + 1
 # A code is the distance times the scale, rounded down: [0, 1] maps to 0..254,
 # and 255 marks an impossible pair. The Rust kernels use the same scale.
 _SCALE = 254.999
+
+
+@dataclass(frozen=True)
+class _RepairCandidate:
+    """Keep the original pair evidence for a possible three-cluster repair."""
+
+    average: float
+    a: int
+    b: int
+    odd: tuple[int, ...]
+    code_sum: int
+
+
+def _common_odd_average_bound(
+    candidate: _RepairCandidate,
+    odd: tuple[int, ...],
+    members: Mapping[int, np.ndarray],
+    codes: np.ndarray,
+    block_width: int,
+) -> float:
+    """Recompute a pair's bound after excluding the shared scoring exceptions."""
+    side_a, side_b = members[candidate.a], members[candidate.b]
+    original_a = side_a[~np.isin(side_a, candidate.odd)]
+    original_b = side_b[~np.isin(side_b, candidate.odd)]
+    extra_a = original_a[np.isin(original_a, odd)]
+    extra_b = original_b[np.isin(original_b, odd)]
+    code_sum = candidate.code_sum
+
+    def row_sum(mention: int, others: np.ndarray) -> int:
+        low, high = np.minimum(mention, others), np.maximum(mention, others)
+        indices = block_width * low - low * (low + 1) // 2 + high - low - 1
+        return int(codes[indices].sum(dtype=np.uint64))
+
+    # Read only the extra rows; the kernel already summed the original clean pair.
+    for mention in extra_a:
+        code_sum -= row_sum(int(mention), original_b)
+    for mention in extra_b:
+        code_sum -= row_sum(int(mention), original_a)
+    for mention in extra_a:
+        code_sum += row_sum(int(mention), extra_b)
+    count = (len(original_a) - len(extra_a)) * (len(original_b) - len(extra_b))
+    return (code_sum / count + 1) / _SCALE
 
 
 @dataclass(frozen=True)
@@ -187,7 +237,7 @@ def repair_name_conflicts_in_block(
 
     members = {index: np.flatnonzero(cluster == index) for index in {c for a, b, _, _ in candidates for c in (a, b)}}
     full_names = repair.full_first_names
-    accepted: list[tuple[float, int, int, list[int]]] = []
+    accepted: list[_RepairCandidate] = []
     for a, b, odd, code_sum in candidates:
         odd_ids = {block_signatures[m] for m in odd}
         all_a = [block_signatures[m] for m in members[a]]
@@ -230,7 +280,7 @@ def repair_name_conflicts_in_block(
             )
             if not all(verdicts):
                 continue
-        accepted.append((average, a, b, odd))
+        accepted.append(_RepairCandidate(average, a, b, tuple(odd), code_sum))
     if not accepted:
         return labels
 
@@ -238,10 +288,13 @@ def repair_name_conflicts_in_block(
     # merge rests on a cluster that an earlier merge changed.
     merged = label_array.copy()
     used: set[int] = set()
-    for average, a, b, odd in sorted(accepted):
+    selected: list[_RepairCandidate] = []
+    for candidate in sorted(accepted, key=lambda item: (item.average, item.a, item.b, item.odd)):
+        average, a, b, odd = candidate.average, candidate.a, candidate.b, candidate.odd
         if a in used or b in used:
             continue
         used.update((a, b))
+        selected.append(candidate)
         merged[members[b]] = unique[big[a]]
         logger.info(
             "Name-conflict repair: block %s merges clusters of %d and %d mentions, "
@@ -250,6 +303,50 @@ def repair_name_conflicts_in_block(
             int(sizes[big[a]]),
             int(sizes[big[b]]),
             average,
+            ", ".join(block_signatures[m] for m in odd),
+        )
+
+    # Keep every pair decision. Extend only when all three original pairs agree.
+    by_pair: dict[tuple[int, int], list[_RepairCandidate]] = {}
+    neighbors: dict[int, set[int]] = {}
+    for candidate in accepted:
+        by_pair.setdefault((candidate.a, candidate.b), []).append(candidate)
+        neighbors.setdefault(candidate.a, set()).add(candidate.b)
+        neighbors.setdefault(candidate.b, set()).add(candidate.a)
+    extensions: list[tuple[float, int, int, int, tuple[int, ...]]] = []
+    for pair in selected:
+        a, b = pair.a, pair.b
+        for c in sorted((neighbors[a] & neighbors[b]) - used):
+            for ab, ac, bc in product(by_pair[a, b], by_pair[min(a, c), max(a, c)], by_pair[min(b, c), max(b, c)]):
+                odd = tuple(sorted(set(ab.odd) | set(ac.odd) | set(bc.odd)))
+                if len(odd) > MAX_ODD_MENTIONS:
+                    continue
+                # A shared exception can remove another side's only full name.
+                kept = [members[index][~np.isin(members[index], odd)] for index in (a, b, c)]
+                if any(len(side) < MIN_SIDE for side in kept):
+                    continue
+                if any(not any(block_signatures[m] in full_names for m in side) for side in kept):
+                    continue
+                bound = max(
+                    _common_odd_average_bound(item, odd, members, codes, len(block_signatures)) for item in (ab, ac, bc)
+                )
+                if bound <= repair.max_average_distance:
+                    extensions.append((bound, a, b, c, odd))
+    extended: set[tuple[int, int]] = set()
+    for bound, a, b, c, odd in sorted(extensions):
+        if c in used or (a, b) in extended:
+            continue
+        used.add(c)
+        extended.add((a, b))
+        merged[members[c]] = unique[big[a]]
+        logger.info(
+            "Name-conflict repair: block %s extends clusters of %d, %d and %d mentions, "
+            "maximum distance bound %.3f, odd mentions %s",
+            block_key,
+            int(sizes[big[a]]),
+            int(sizes[big[b]]),
+            int(sizes[big[c]]),
+            bound,
             ", ".join(block_signatures[m] for m in odd),
         )
     return merged

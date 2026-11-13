@@ -304,9 +304,18 @@ After a block or subblock is clustered, two clusters merge when all of these hol
 - With `dont_merge_cluster_seeds` on, the two clusters do not hold mentions of two
   different cluster seeds, such as two claimed profiles.
 
-The odd mentions stay in the merged cluster. A cluster takes part in at most one
-merge per block. The repair keeps a one-byte-per-pair copy of each block's
-distances while the block clusters, about one eighth of the matrix.
+The odd mentions stay in the merged cluster. The repair first selects disjoint
+pair merges, closest first. A selected pair can then absorb one untouched
+original cluster when every original pair passes the checks above. One shared
+set of at most two odd mentions must explain all three pairs, and every pair's
+distance bound must still pass after excluding that same set. Each original
+cluster must retain five mentions and a full first name. Extensions are ordered
+by their highest pair-distance bound. They preserve every selected pair and stop
+at three original clusters.
+
+The repair keeps a one-byte-per-pair copy of each block's distances while the
+block clusters, about one eighth of the matrix. Extending a pair reuses the
+original pair sums and reads only the additional excluded rows.
 
 The repair reads a pair as forbidden only at the exact impossible-pair distance.
 A block is not repaired when its distances hold any other value above one, such as

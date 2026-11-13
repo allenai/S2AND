@@ -410,11 +410,53 @@ NAME_APOSTROPHE_LIKE_CHARS = frozenset("'`\u00b4\u2018\u2019\u02bb\u02bc\u2032\u
 # separator) and zero-width joiner.
 _NAME_INVISIBLE_FORMAT_CHARS = "\u00ad\u200d"
 
+# D10: Georgian and Armenian romanize with the tables of scholar's block keys
+# (BlockKeyNormalizers), not text_unidecode. Both sides then agree on names such
+# as ბერიძე -> beridze, where text_unidecode writes "berize".
+# Georgian is the national system without apostrophes. Mkhedruli letters give
+# lowercase. Mtavruli capitals give uppercase, which keeps the D9 case guard.
+_GEORGIAN_ROMANIZATION = dict(
+    zip(
+        "აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰჱჲჳჴჵჶ",
+        (
+            *("a", "b", "g", "d", "e", "v", "z", "t", "i", "k", "l", "m", "n", "o", "p", "zh"),
+            *("r", "s", "t", "u", "p", "k", "gh", "q", "sh", "ch", "ts", "dz", "ts", "ch", "kh"),
+            *("j", "h", "e", "y", "v", "kh", "o", "f"),
+        ),
+        strict=True,
+    )
+)
+# Mtavruli sits at a fixed offset from Mkhedruli.
+_GEORGIAN_MTAVRULI_OFFSET = 0x1C90 - 0x10D0
+# Eastern Armenian as most Latin sources write it. `_romanize_armenian` holds
+# the context rules for ու, a word-initial ե, and a word-initial ո.
+_ARMENIAN_ROMANIZATION = dict(
+    zip(
+        "աբգդեզէըթժիլխծկհձղճմյնշոչպջռսվտրցւփքօֆ",
+        (
+            *("a", "b", "g", "d", "e", "z", "e", "y", "t", "zh", "i", "l", "kh", "ts", "k", "h"),
+            *("dz", "gh", "ch", "m", "y", "n", "sh", "o", "ch", "p", "j", "r", "s", "v", "t"),
+            *("r", "ts", "v", "p", "k", "o", "f"),
+        ),
+        strict=True,
+    )
+)
+# Armenian capitals sit 0x30 below their small letters.
+_ARMENIAN_SMALL_FROM_CAPITAL = {chr(ord(small) - 0x30): small for small in _ARMENIAN_ROMANIZATION}
+# The ligature և is ե plus ւ under NFKC, which scholar applies first.
+_ARMENIAN_LIGATURE_ECH_YIWN = "և"
+_RE_ARMENIAN_LETTER = re.compile("[Ա-Ֆա-և]")
+
 _CANONICAL_NAME_TRANSLATION = str.maketrans(
     {
         **{character: None for character in _NAME_INVISIBLE_FORMAT_CHARS},
         **{character: "'" for character in NAME_APOSTROPHE_LIKE_CHARS},
         **{character: "-" for character in DASH_CHARS},
+        **_GEORGIAN_ROMANIZATION,
+        **{
+            chr(ord(letter) + _GEORGIAN_MTAVRULI_OFFSET): roman.upper()
+            for letter, roman in _GEORGIAN_ROMANIZATION.items()
+        },
     }
 )
 
@@ -462,12 +504,49 @@ class CanonicalNameParts(NamedTuple):
     last: str
 
 
+def _romanize_armenian(text: str) -> str:
+    """Romanize the Armenian letters of ``text`` with scholar's table (D10).
+
+    ու is ``u``. A word-initial ե is ``ye``, and a word-initial ո is ``vo``
+    unless վ follows. A word starts after any character that is not an
+    Armenian letter. A capital gives a capitalized romanization.
+    """
+
+    text = text.replace(_ARMENIAN_LIGATURE_ECH_YIWN, "եւ")
+    small = [_ARMENIAN_SMALL_FROM_CAPITAL.get(character, character) for character in text]
+    pieces: list[str] = []
+    for index, character in enumerate(text):
+        letter = small[index]
+        roman = _ARMENIAN_ROMANIZATION.get(letter)
+        if roman is None:
+            pieces.append(character)
+            continue
+        previous = small[index - 1] if index else ""
+        following = small[index + 1] if index + 1 < len(small) else ""
+        word_start = previous not in _ARMENIAN_ROMANIZATION
+        if letter == "ո" and following == "ւ":
+            roman = "u"
+        elif letter == "ւ" and previous == "ո":
+            roman = ""
+        elif letter == "ե" and word_start:
+            roman = "ye"
+        elif letter == "ո" and word_start and following != "վ":
+            roman = "vo"
+        pieces.append(roman.capitalize() if character != letter else roman)
+    return "".join(pieces)
+
+
 def _canonical_name_pretranslate(raw: str | None) -> str:
     """Delete invisible format controls, unify apostrophe-like marks to ASCII
-    apostrophe, and unify dash-like characters to ASCII hyphen — all on the raw
-    code points, before transliteration."""
+    apostrophe, unify dash-like characters to ASCII hyphen, and romanize
+    Georgian and Armenian letters (D10) — all on the raw code points, before
+    transliteration."""
 
-    return (raw or "").translate(_CANONICAL_NAME_TRANSLATION)
+    text = (raw or "").translate(_CANONICAL_NAME_TRANSLATION)
+    # Most names are ASCII, so test that first and skip the regex.
+    if not text.isascii() and _RE_ARMENIAN_LETTER.search(text) is not None:
+        return _romanize_armenian(text)
+    return text
 
 
 def _canonical_name_tokens(pretranslated: str) -> list[str]:

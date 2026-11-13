@@ -210,13 +210,130 @@ pub(crate) fn is_python_whitespace_compat(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{001C}' | '\u{001D}' | '\u{001E}' | '\u{001F}')
 }
 
+// D10 (mirrors Python `_GEORGIAN_ROMANIZATION`): scholar's Georgian table for
+// Mkhedruli U+10D0..=U+10F6, so names such as ბერიძე give "beridze" in both
+// systems. Mtavruli capitals (U+1C90..=U+1CB6) give the same letters in
+// uppercase, which keeps the D9 case guard.
+#[rustfmt::skip]
+const GEORGIAN_ROMANIZATION: [&str; 39] = [
+    "a", "b", "g", "d", "e", "v", "z", "t", "i", "k", "l", "m", "n", "o", "p", "zh",
+    "r", "s", "t", "u", "p", "k", "gh", "q", "sh", "ch", "ts", "dz", "ts", "ch", "kh",
+    "j", "h", "e", "y", "v", "kh", "o", "f",
+];
+const GEORGIAN_MKHEDRULI_START: u32 = 0x10D0;
+const GEORGIAN_MTAVRULI_START: u32 = 0x1C90;
+// D10 (mirrors Python `_ARMENIAN_ROMANIZATION`): scholar's Eastern Armenian
+// table for the small letters U+0561..=U+0586. `romanize_armenian` holds the
+// context rules.
+#[rustfmt::skip]
+const ARMENIAN_ROMANIZATION: [&str; 38] = [
+    "a", "b", "g", "d", "e", "z", "e", "y", "t", "zh", "i", "l", "kh", "ts", "k", "h",
+    "dz", "gh", "ch", "m", "y", "n", "sh", "o", "ch", "p", "j", "r", "s", "v", "t",
+    "r", "ts", "v", "p", "k", "o", "f",
+];
+const ARMENIAN_SMALL_START: u32 = 0x0561;
+// Armenian capitals sit 0x30 below their small letters.
+const ARMENIAN_CAPITAL_START: u32 = 0x0531;
+// The ligature և is ե plus ւ under NFKC, which scholar applies first.
+const ARMENIAN_LIGATURE_ECH_YIWN: char = '\u{0587}';
+const ARMENIAN_ECH: char = '\u{0565}';
+const ARMENIAN_VO: char = '\u{0578}';
+const ARMENIAN_VEW: char = '\u{057E}';
+const ARMENIAN_YIWN: char = '\u{0582}';
+
+/// Return the D10 Georgian romanization of `ch` and whether it is a capital.
+fn georgian_romanization(ch: char) -> Option<(&'static str, bool)> {
+    let code = ch as u32;
+    if let Some(roman) = code
+        .checked_sub(GEORGIAN_MKHEDRULI_START)
+        .and_then(|index| GEORGIAN_ROMANIZATION.get(index as usize))
+    {
+        return Some((roman, false));
+    }
+    code.checked_sub(GEORGIAN_MTAVRULI_START)
+        .and_then(|index| GEORGIAN_ROMANIZATION.get(index as usize))
+        .map(|roman| (*roman, true))
+}
+
+/// Return the small form of an Armenian letter in the D10 table, or `None`.
+fn armenian_small_letter(ch: char) -> Option<char> {
+    let code = ch as u32;
+    let small = if (ARMENIAN_CAPITAL_START..ARMENIAN_CAPITAL_START + 38).contains(&code) {
+        code + (ARMENIAN_SMALL_START - ARMENIAN_CAPITAL_START)
+    } else {
+        code
+    };
+    (ARMENIAN_SMALL_START..ARMENIAN_SMALL_START + 38)
+        .contains(&small)
+        .then(|| char::from_u32(small).expect("Armenian small letter"))
+}
+
+/// Match Python `_RE_ARMENIAN_LETTER`: the capitals, small letters, and և.
+fn is_armenian_letter_or_ligature(ch: char) -> bool {
+    matches!(ch, '\u{0531}'..='\u{0556}' | '\u{0561}'..='\u{0587}')
+}
+
+/// Romanize the Armenian letters of `text` with scholar's table (D10; mirrors
+/// Python `_romanize_armenian`). ու is "u". A word-initial ե is "ye", and a
+/// word-initial ո is "vo" unless վ follows. A word starts after any character
+/// that is not an Armenian letter. A capital gives a capitalized romanization.
+fn romanize_armenian(text: &str) -> String {
+    let chars: Vec<char> = text
+        .chars()
+        .flat_map(|ch| {
+            if ch == ARMENIAN_LIGATURE_ECH_YIWN {
+                [Some(ARMENIAN_ECH), Some(ARMENIAN_YIWN)]
+            } else {
+                [Some(ch), None]
+            }
+        })
+        .flatten()
+        .collect();
+    let small: Vec<Option<char>> = chars.iter().map(|&ch| armenian_small_letter(ch)).collect();
+    let mut out = String::with_capacity(text.len());
+    for (index, &ch) in chars.iter().enumerate() {
+        let Some(letter) = small[index] else {
+            out.push(ch);
+            continue;
+        };
+        let previous = index.checked_sub(1).and_then(|before| small[before]);
+        let following = small.get(index + 1).copied().flatten();
+        let word_start = previous.is_none();
+        let roman = if letter == ARMENIAN_VO && following == Some(ARMENIAN_YIWN) {
+            "u"
+        } else if letter == ARMENIAN_YIWN && previous == Some(ARMENIAN_VO) {
+            ""
+        } else if letter == ARMENIAN_ECH && word_start {
+            "ye"
+        } else if letter == ARMENIAN_VO && word_start && following != Some(ARMENIAN_VEW) {
+            "vo"
+        } else {
+            ARMENIAN_ROMANIZATION[(letter as u32 - ARMENIAN_SMALL_START) as usize]
+        };
+        let mut bytes = roman.bytes();
+        if ch != letter {
+            if let Some(head) = bytes.next() {
+                out.push(head.to_ascii_uppercase() as char);
+            }
+        }
+        out.extend(bytes.map(char::from));
+    }
+    out
+}
+
 /// canonical_v2 pre-translation on raw code points, before transliteration
 /// (mirrors Python `_canonical_name_pretranslate`): delete invisible format
-/// controls, unify apostrophe-like marks to ASCII apostrophe, and unify
-/// dash-like characters to ASCII hyphen.
+/// controls, unify apostrophe-like marks to ASCII apostrophe, unify dash-like
+/// characters to ASCII hyphen, and romanize Georgian and Armenian (D10).
 fn canonical_name_pretranslate(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
+    let mut has_armenian = false;
     for ch in raw.chars() {
+        if ch.is_ascii() {
+            // Most characters are ASCII; of those only the backtick changes.
+            out.push(if ch == '`' { '\'' } else { ch });
+            continue;
+        }
         if is_name_invisible_format(ch) {
             continue;
         }
@@ -224,9 +341,19 @@ fn canonical_name_pretranslate(raw: &str) -> String {
             out.push('\'');
         } else if is_name_dash(ch) {
             out.push('-');
+        } else if let Some((roman, capital)) = georgian_romanization(ch) {
+            if capital {
+                out.extend(roman.bytes().map(|byte| byte.to_ascii_uppercase() as char));
+            } else {
+                out.push_str(roman);
+            }
         } else {
+            has_armenian |= is_armenian_letter_or_ligature(ch);
             out.push(ch);
         }
+    }
+    if has_armenian {
+        return romanize_armenian(&out);
     }
     out
 }

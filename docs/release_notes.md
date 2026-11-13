@@ -8,6 +8,12 @@
   stored spelling. On the 9 benchmark blocks that hold both spellings of a listed surname, B3 F1 rises from
   0.878 to 0.986. Scholar's block keys put these spellings in one block (scholar issue 42640, options 18
   and 19). See "Canonical name contract" in `docs/canonical_names.md`.
+- Romanize Georgian and Armenian names with scholar's tables (canonical name decision D10), not
+  `text_unidecode`: `ბერიძე` becomes `beridze`, not `berize`, and Georgian capitals no longer drop.
+  Canonical names, count keys, and the last-name veto change for names in these scripts. No benchmark name
+  uses them. On 377 same-ORCID pairs in these scripts, last-name vetoes fall from 150 to 0. Name-count
+  indexes built earlier hold these names under the old spellings, so until a rebuild such a name looks up
+  the counts of its Latin spelling.
 - Publish model release `1.3.1`: the `1.3` boosters and linker with the close-pair bonus (`8` for pairs
   under `0.05`) and EPS `0.40`. On the benchmark outer test, signature-weighted B3 precision rises from
   0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204, with both

@@ -118,7 +118,8 @@ Use [the data guide](data.md) for model assets and the data bundles.
 authorities. Given raw `first`, `middle`, and `last` values, they:
 
 1. normalize Unicode spacing and remove soft hyphen and zero-width joiner;
-2. normalize apostrophe-like marks, transliterate, lowercase, and delete
+2. normalize apostrophe-like marks, romanize Georgian and Armenian with
+   scholar's tables (decision D10), transliterate, lowercase, and delete
    apostrophes rather than making token boundaries;
 3. treat supported Unicode dash variants as one separator;
 4. replace remaining nonletters with spaces and collapse whitespace;
@@ -132,6 +133,28 @@ authorities. Given raw `first`, `middle`, and `last` values, they:
 Examples: `Anne-Marie Claire` becomes first `anne marie`, middle `claire`;
 apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
 `Ou Yang` both become last `ou yang`.
+
+Decision D10 romanizes Georgian and Armenian before transliteration.
+It uses the tables of scholar's block keys (`BlockKeyNormalizers`), so S2AND
+and scholar spell these names alike.
+`text_unidecode` wrote `ბერიძე` as `berize` and `Արթուր` as `artowr`, and it
+dropped every Georgian capital (Mtavruli).
+Now they become `beridze` and `artur`.
+Georgian uses the national system without apostrophes.
+A Mtavruli capital maps like its small letter, but in capitals, so D9 reads an
+all-capitals Georgian last name as capitals.
+Armenian uses these context rules:
+
+- `ու` becomes `u`;
+- a word-initial `ե` becomes `ye`;
+- a word-initial `ո` becomes `vo`, unless `վ` follows; and
+- the ligature `և` is `ե` followed by `ւ`.
+
+A word starts after any character that is not an Armenian letter.
+Python `_canonical_name_pretranslate` and Rust `canonical_name_pretranslate`
+apply the rule, and the frozen examples cover both scripts.
+Name-count indexes built before D10 hold these names under the old spellings.
+Until an index is rebuilt, such a name looks up the counts of its Latin spelling.
 
 Decision D9 reads joined capitals as initials.
 The rule removes whitespace and periods from the raw first name.

@@ -45,6 +45,11 @@
       "status": "decided",
       "title": "Joined initials split",
       "description": "Remove whitespace and periods from the raw first. If 2-3 ASCII capitals remain, the rule reads them as initials. The first capital becomes first, and each other capital becomes a middle token before the existing middle tokens. The rule applies only when the transliterated raw last has at least one lowercase letter and no more capitals than lowercase letters. Thus an accented lowercase letter such as '\u00e1' counts as lowercase, and an all-capitals last such as 'WELLS' stops the rule. The rule does not apply to ED, a frequent given name, or to MD, which D7 keeps for Muhammad. The rule does not apply to a title prefix such as DR (D7). It also does not apply to a two-capital abbreviation of one given name with a final period: CH, SH, ZH, KH, TS, YU, YA, YE, GY, NY, SZ, ZS, CS, PH, or TH, for example 'PH.' (Philippe). Approved 2026-10-16. A second branch applies the same split to a raw first that, with whitespace removed, is one ASCII capital and one or two lowercase ASCII letters with no vowel (a, e, i, o, u, or y) and no period, for example 'Jh'. The last-name rule is the same. This branch does not apply to a title prefix such as 'Dr' (D7). It also does not apply to 35 listed strings: the given-name abbreviations ch, chr, cs, dzh, fr, gh, kh, khr, lj, ll, md, mhd, ph, sh, sk, st, sw, sz, th, vl, wm, zh, and zs; the titles ds, hjh, lt, mst, rr, and smt; the suffixes jr and sr; the real names lv, ng, and tsz; and the company word ltd. Mixed-case branch approved 2026-10-16."
+    },
+    "D10": {
+      "status": "decided",
+      "title": "Georgian and Armenian use scholar's romanization",
+      "description": "Before transliteration, Georgian and Armenian letters romanize with the tables of scholar's block keys (BlockKeyNormalizers), not text_unidecode, so both systems agree: \u10d1\u10d4\u10e0\u10d8\u10eb\u10d4 is 'beridze', not 'berize'. Georgian uses the national system without apostrophes; Mtavruli capitals map like their Mkhedruli letters, in capitals, so the D9 case guard reads them as capitals. Armenian is Eastern Armenian: \u0578\u0582 is 'u', a word-initial \u0565 is 'ye', a word-initial \u0578 is 'vo' unless \u057e follows, and the ligature \u0587 is \u0565 plus \u0582. A word starts after any character that is not an Armenian letter. Approved 2026-11-13."
     }
   },
   "compare_compatibility": {
@@ -2901,6 +2906,209 @@
         "D1"
       ],
       "notes": "Matches legacy spill: 'james' joins the middle ahead of 'lee'."
+    },
+    {
+      "id": "georgian-beridze",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u10d3\u10d0\u10da\u10d8",
+        "middle": "",
+        "last": "\u10d1\u10d4\u10e0\u10d8\u10eb\u10d4"
+      },
+      "canonical": {
+        "first": "dali",
+        "middle": "",
+        "last": "beridze",
+        "count_keys": {
+          "first": "dali",
+          "last": "beridze",
+          "first_last": "dali beridze",
+          "last_first_initial": "beridze d"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "text_unidecode wrote 'berize'."
+    },
+    {
+      "id": "georgian-mtavruli-initial",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u10dc\u10d8\u10dc\u10dd",
+        "middle": "",
+        "last": "\u1cac\u10d4\u10e0\u10d4\u10d7\u10d4\u10da\u10d8"
+      },
+      "canonical": {
+        "first": "nino",
+        "middle": "",
+        "last": "tsereteli",
+        "count_keys": {
+          "first": "nino",
+          "last": "tsereteli",
+          "first_last": "nino tsereteli",
+          "last_first_initial": "tsereteli n"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "A Mtavruli capital romanizes like its Mkhedruli letter; text_unidecode dropped it."
+    },
+    {
+      "id": "georgian-initials-mixed-case-last",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "DB",
+        "middle": "",
+        "last": "\u1c91\u10d4\u10e0\u10d8\u10eb\u10d4"
+      },
+      "canonical": {
+        "first": "d",
+        "middle": "b",
+        "last": "beridze",
+        "count_keys": {
+          "first": null,
+          "last": "beridze",
+          "first_last": null,
+          "last_first_initial": "beridze d"
+        }
+      },
+      "decisions": [
+        "D10",
+        "D9"
+      ],
+      "notes": "D9: one capital and lowercase letters pass the case guard."
+    },
+    {
+      "id": "georgian-initials-all-mtavruli-last",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "DB",
+        "middle": "",
+        "last": "\u1c91\u1c94\u1ca0\u1c98\u1cab\u1c94"
+      },
+      "canonical": {
+        "first": "db",
+        "middle": "",
+        "last": "beridze",
+        "count_keys": {
+          "first": "db",
+          "last": "beridze",
+          "first_last": "db beridze",
+          "last_first_initial": "beridze d"
+        }
+      },
+      "decisions": [
+        "D10",
+        "D9"
+      ],
+      "notes": "D9: an all-Mtavruli last reads as capitals, so the initials stay joined."
+    },
+    {
+      "id": "armenian-artur-petrosyan",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u0531\u0580\u0569\u0578\u0582\u0580",
+        "middle": "",
+        "last": "\u054a\u0565\u057f\u0580\u0578\u057d\u0575\u0561\u0576"
+      },
+      "canonical": {
+        "first": "artur",
+        "middle": "",
+        "last": "petrosyan",
+        "count_keys": {
+          "first": "artur",
+          "last": "petrosyan",
+          "first_last": "artur petrosyan",
+          "last_first_initial": "petrosyan a"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "\u0578\u0582 is u; text_unidecode wrote 'artowr'."
+    },
+    {
+      "id": "armenian-ligature-word-initial-ech",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u054c\u0578\u0582\u0562\u0565\u0576",
+        "middle": "",
+        "last": "\u0535\u0580\u0587\u0561\u0576\u0575\u0561\u0576"
+      },
+      "canonical": {
+        "first": "ruben",
+        "middle": "",
+        "last": "yerevanyan",
+        "count_keys": {
+          "first": "ruben",
+          "last": "yerevanyan",
+          "first_last": "ruben yerevanyan",
+          "last_first_initial": "yerevanyan r"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "Word-initial \u0565 is ye; \u0587 is \u0565 plus \u0582."
+    },
+    {
+      "id": "armenian-word-initial-vo",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u0548\u057d\u056f\u0561\u0576",
+        "middle": "",
+        "last": "\u0548\u057e\u057d\u0565\u0583\u0575\u0561\u0576"
+      },
+      "canonical": {
+        "first": "voskan",
+        "middle": "",
+        "last": "ovsepyan",
+        "count_keys": {
+          "first": "voskan",
+          "last": "ovsepyan",
+          "first_last": "voskan ovsepyan",
+          "last_first_initial": "ovsepyan v"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "Word-initial \u0578 is vo unless \u057e follows."
+    },
+    {
+      "id": "armenian-initials-all-capitals-last",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "AP",
+        "middle": "",
+        "last": "\u054a\u0535\u054f\u0550\u0548\u054d\u0545\u0531\u0546"
+      },
+      "canonical": {
+        "first": "ap",
+        "middle": "",
+        "last": "petrosyan",
+        "count_keys": {
+          "first": "ap",
+          "last": "petrosyan",
+          "first_last": "ap petrosyan",
+          "last_first_initial": "petrosyan a"
+        }
+      },
+      "decisions": [
+        "D10",
+        "D9"
+      ],
+      "notes": "D9: an all-capitals Armenian last stops the initials split."
     }
   ]
 }

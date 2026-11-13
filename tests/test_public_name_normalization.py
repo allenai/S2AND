@@ -72,3 +72,20 @@ def test_public_native_helpers_match_d9_edge_cases() -> None:
     for raw, expected in D9_EDGE_CASES:
         assert tuple(canonicalize_name_parts(*raw)) == expected, raw
         assert native.canonicalize_name_parts(*raw) == expected, raw
+
+
+def test_public_native_helpers_match_georgian_and_armenian_romanization() -> None:
+    """D10 is context-sensitive, so check every code point of both blocks next to the context letters."""
+
+    native = load_s2and_rust_extension()
+    code_points = [*range(0x0530, 0x0590), *range(0x10A0, 0x1100), *range(0x1C90, 0x1CC0)]
+    # ո, ւ, վ, ե, and the ligature drive the Armenian context rules; Ո is a capital.
+    contexts = ["{}", "ա{}ա", "{}ւ", "ո{}", "{}վ", "Ո{}", "x-{} {}և", "{}ևա", "ԵՐ{}"]
+    for code_point in code_points:
+        for context in contexts:
+            text = context.format(chr(code_point), chr(code_point))
+            assert native.canonicalize_name_text(text) == canonicalize_name_text(text), repr(text)
+            # The D9 guard counts capitals in the romanized last name.
+            assert native.canonicalize_name_parts("HG", None, text) == tuple(
+                canonicalize_name_parts("HG", None, text)
+            ), repr(text)

@@ -97,8 +97,9 @@ _REQUEST_LOCAL_PATH_ARGUMENTS = {
 class _ArtifactSpec:
     path: Path
     content_path: Path
-    byte_count: int
-    sha256: str
+    # None for the name-count index: a dataset locates it and does not vouch for it.
+    byte_count: int | None
+    sha256: str | None
 
 
 @dataclass
@@ -138,7 +139,8 @@ def _build_arrow_artifact_files(paths: Mapping[str, Any]) -> dict[str, Any]:
 
     files: dict[str, dict[str, Any]] = {}
     for key, raw_path in sorted((str(key), value) for key, value in paths.items()):
-        if key not in _ARROW_IMMUTABLE_KEYS:
+        # The index belongs to the model, which checks it. A dataset records only its path.
+        if key not in _ARROW_IMMUTABLE_KEYS or key == "name_counts_index":
             continue
         declared_path = Path(os.fspath(raw_path)).resolve()
         artifact_path = declared_path / "manifest.json" if declared_path.is_dir() else declared_path
@@ -491,8 +493,13 @@ def _load_artifact_specs(root: Path) -> tuple[str, Mapping[str, _ArtifactSpec]]:
     invalid_keys = sorted(str(key) for key in files if str(key) not in _ARROW_IMMUTABLE_KEYS)
     if invalid_keys:
         raise ValueError(f"Arrow artifact manifest contains unsupported immutable file keys: {invalid_keys}")
-    file_keys = {str(key) for key in files}
-    declared_immutable_keys = {str(key) for key in paths if str(key) in _ARROW_IMMUTABLE_KEYS}
+    # Manifests written before 1.0.0b11 also list the index here. That entry is ignored,
+    # so one dataset serves every model release.
+    files = {str(key): entry for key, entry in files.items() if str(key) != "name_counts_index"}
+    file_keys = set(files)
+    declared_immutable_keys = {
+        str(key) for key in paths if str(key) in _ARROW_IMMUTABLE_KEYS and str(key) != "name_counts_index"
+    }
     if file_keys != declared_immutable_keys:
         missing = sorted(declared_immutable_keys - file_keys)
         extra = sorted(file_keys - declared_immutable_keys)
@@ -540,6 +547,14 @@ def _load_artifact_specs(root: Path) -> tuple[str, Mapping[str, _ArtifactSpec]]:
             content_path=path / "manifest.json" if key == "name_counts_index" else path,
             byte_count=byte_count,
             sha256=sha256,
+        )
+    raw_index_path = paths.get("name_counts_index")
+    if raw_index_path is not None:
+        if not isinstance(raw_index_path, str) or not raw_index_path.strip():
+            raise ValueError("Arrow artifact manifest paths.name_counts_index is invalid")
+        index_path = _resolve_manifest_artifact_path(root, raw_index_path, key="name_counts_index")
+        specs["name_counts_index"] = _ArtifactSpec(
+            path=index_path, content_path=index_path / "manifest.json", byte_count=None, sha256=None
         )
     return computed_generation_id, MappingProxyType(specs)
 
@@ -811,6 +826,8 @@ class ArrowDataset:
                 retained[key] = _RetainedFile(content_path, _open_retained_path(content_path))
             if specs is not None:
                 for key, spec in specs.items():
+                    if spec.sha256 is None:
+                        continue
                     byte_count, sha256 = _hash_retained_file(retained[key])
                     if byte_count != spec.byte_count:
                         raise ValueError(
@@ -825,8 +842,11 @@ class ArrowDataset:
             name_counts_index: NameCountsIndex | None = None
             if "name_counts_index" in paths:
                 name_counts_index = NameCountsIndex.open(paths["name_counts_index"])
-                if specs is not None and name_counts_index.manifest_sha256 != specs["name_counts_index"].sha256:
-                    raise ValueError("opened name-count manifest does not match the Arrow artifact manifest")
+                if specs is not None:
+                    # Features depend on the counts, so caches keyed by the generation must too.
+                    generation_id = hashlib.sha256(
+                        f"{generation_id}:{name_counts_index.manifest_sha256}".encode()
+                    ).hexdigest()
             native_name_counts = None if name_counts_index is None else name_counts_index._native
             native = _construct_native_arrow_dataset(retained, native_name_counts)
         except Exception:

@@ -639,6 +639,31 @@ def test_name_counts_state_is_retained_by_the_dataset(tmp_path: Path) -> None:
     dataset.close()
 
 
+def test_dataset_opens_beside_another_name_count_index(tmp_path: Path) -> None:
+    """A dataset locates the index; the model checks which index it is."""
+    _write_dataset(tmp_path, include_name_counts=True, include_specter=True)
+    assert "name_counts_index" not in json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["files"]
+    with ArrowDataset.open(tmp_path, require_name_counts_index=True) as dataset:
+        assert dataset.name_counts_index is not None
+        first = dataset.generation_id, dataset.name_counts_index.manifest_sha256
+
+    # Point the dataset at other counts, under a manifest that names an index as 1.0.0b10 wrote it.
+    first_counts, *other_counts = tiny_name_counts_tuple()
+    write_name_counts_index(tmp_path / "other", ({**first_counts, "zzyzx": 7}, *other_counts))
+
+    def relocate(manifest):
+        manifest["paths"]["name_counts_index"] = "other/name_counts_index"
+        manifest["files"]["name_counts_index"] = {"byte_count": 1, "sha256": "0" * 64}
+
+    _rewrite_manifest(tmp_path, relocate)
+    with ArrowDataset.open(tmp_path, require_name_counts_index=True) as dataset:
+        assert dataset.name_counts_index is not None
+        second = dataset.generation_id, dataset.name_counts_index.manifest_sha256
+    # Caches keyed by the generation must not survive a change of counts.
+    assert second[1] != first[1]
+    assert second[0] != first[0]
+
+
 def test_manifest_rejects_declared_file_path_and_sidecar_inventory(tmp_path: Path) -> None:
     _write_dataset(tmp_path)
 

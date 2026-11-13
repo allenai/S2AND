@@ -85,7 +85,7 @@ def _validate_root_name_counts_binding(
     authoritative_manifest_sha256: str,
     dataset_manifests: Mapping[str, Path] | None = None,
 ) -> None:
-    """Require every dataset manifest to bind the authoritative count index."""
+    """Require every dataset manifest to locate the authoritative count index."""
 
     entries = _dataset_manifests(root) if dataset_manifests is None else dataset_manifests
     for dataset, manifest_path in entries.items():
@@ -102,15 +102,11 @@ def _validate_root_name_counts_binding(
         if not observed_manifest.is_file():
             raise FileNotFoundError(observed_manifest)
         observed_sha256 = sha256_file(observed_manifest)
-
-        files = manifest.get("files")
-        file_entry = files.get("name_counts_index") if isinstance(files, Mapping) else None
-        declared_sha256 = file_entry.get("sha256") if isinstance(file_entry, Mapping) else None
-        if observed_sha256 != authoritative_manifest_sha256 or declared_sha256 != authoritative_manifest_sha256:
+        # A dataset manifest records where the index is, not which one it is.
+        if observed_sha256 != authoritative_manifest_sha256:
             raise ValueError(
                 f"{manifest_path} ({dataset}) name_counts_index does not match the authoritative index: "
                 f"resolved_manifest_sha256={observed_sha256} "
-                f"declared_manifest_sha256={declared_sha256!r} "
                 f"authoritative_manifest_sha256={authoritative_manifest_sha256}"
             )
 
@@ -155,6 +151,9 @@ def _rebind_dataset_manifest(manifest_path: Path, *, name_counts_index: Path) ->
         for key, value in paths.items()
     }
     rebuilt = build_arrow_artifact_manifest(resolved_paths, manifest_path.parent)
+    # Manifests from before 1.0.0b11 also list the index among their files. Drop that entry:
+    # after relocation it could name another index.
+    manifest["files"] = {key: entry for key, entry in manifest["files"].items() if key != "name_counts_index"}
     if rebuilt["files"] != manifest["files"]:
         raise ValueError(f"Arrow artifact inventory mismatch before index relocation: {manifest_path}")
     manifest["paths"]["name_counts_index"] = rebuilt["paths"]["name_counts_index"]

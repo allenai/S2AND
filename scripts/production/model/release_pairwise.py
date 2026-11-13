@@ -588,8 +588,8 @@ def evaluate_heldout(args: argparse.Namespace) -> dict[str, Any]:
     corrections = _population_corrections(Path(args.model_plan).resolve())
     _check_plan_leakage(plan, _plan_populations(plan))
     artifacts, clusterer = _evaluation_model(args)
-    if clusterer.production_model_release_version != plan.release_version:
-        raise ValueError("Model plan and complete model release versions differ")
+    # The plan's release version names the model that training writes. Scoring reads only the
+    # plan's populations, so one published plan scores every model release.
     clusterer.n_jobs = int(args.n_jobs)
     name_tuples = artifacts.name_tuples.pairs
 

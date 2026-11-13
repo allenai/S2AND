@@ -133,7 +133,12 @@ def test_arrow_availability_accepts_utf8_bom_dataset_manifest(tmp_path: Path) ->
 
 @pytest.mark.parametrize(
     "artifact,corruption",
-    [("papers", "missing"), ("name_counts_index", "checksum"), ("name_counts_index", "missing")],
+    [
+        ("papers", "missing"),
+        ("papers", "checksum"),
+        ("name_counts_index", "checksum"),
+        ("name_counts_index", "missing"),
+    ],
 )
 def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, corruption: str, artifact: str) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
@@ -149,7 +154,10 @@ def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, 
     assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
     with pytest.raises(
         ValueError if corruption == "checksum" else FileNotFoundError,
-        match="checksum mismatch" if corruption == "checksum" else None,
+        # The index reports its own damage; the dataset manifest does not vouch for it.
+        match={"papers": "checksum mismatch", "name_counts_index": "failed to parse"}[artifact]
+        if corruption == "checksum"
+        else None,
     ):
         eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
 

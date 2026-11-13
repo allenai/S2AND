@@ -2,6 +2,13 @@
 
 ## Unreleased runtime changes
 
+- Arrow dataset manifests no longer bind the name-count index. A manifest still gives the index path, but
+  `ArrowDataset.open` does not compare the index with the manifest, and new manifests omit the index from
+  their checksum inventory. The model's feature contract remains the one check of which index is in use.
+  A published dataset bundle now works with any model release. Manifests from earlier versions open
+  unchanged; `1.0.0b10` and earlier still require the index a manifest names. `ArrowDataset.generation_id`
+  now depends on the opened index. `evaluate-heldout` no longer requires the model plan and the model to
+  carry the same release version, so the published plan scores a later model.
 - Stop vetoing merges between two spellings of one surname: the 279 listed variants in
   `s2and/data/s2and_surname_variants_canonical.txt` (`mueller` and `muller`) and the Slavic endings
   `-sky`/`-skiy`/`-skii`. Only the last-name veto changes; canonical names, count keys, and features keep the

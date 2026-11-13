@@ -179,6 +179,11 @@ Dataset manifests require `kind: "s2and_arrow_dataset"`, `format_version: 1`, po
 Name-count manifests require `kind: "s2and_name_counts"` and `format_version: 1`.
 Dataset and index compatibility depends on their formats and schemas, not an exact Python package version.
 Models additionally bind feature meanings, ordered feature names, and exact required artifact hashes.
+A dataset manifest gives the path of the name-count index and does not bind which index it is.
+The model binds the index: prediction refuses an index other than the one in the model's feature contract.
+So a dataset bundle works with every model release, and a new model or index needs only a new `inference` bundle.
+`evaluate-heldout` scores any model release with the dataset bundle's model plan.
+Manifests written before `1.0.0b11` also list the index in their checksum inventory; that entry is ignored.
 Python and Rust packages must still have compatible internal interfaces; the current install requires matched package versions.
 
 Do not edit an open Arrow root.

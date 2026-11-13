@@ -505,6 +505,7 @@ def _cache_metadata(
 ) -> dict[str, Any]:
     """Return metadata that must match for a cached distance vector."""
 
+    from s2and import __version__ as s2and_version
     from s2and.model import Clusterer, _orcid_name_waiver_setting
 
     model_fingerprint = _model_fingerprint(args)
@@ -525,6 +526,8 @@ def _cache_metadata(
         # Hidden ORCIDs waive nothing. The loaded model holds the class default.
         "orcid_name_waiver": None if args.suppress_orcid_constraints else _orcid_name_waiver_setting(Clusterer),
         "distance_source": "arrow-rust",
+        # A release can change the name rules, and with them the distances.
+        "s2and_version": s2and_version,
     }
 
 
@@ -627,8 +630,10 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
         "suppress_orcid_constraints",
         "orcid_feature_ids_hidden",
         "orcid_name_waiver",
+        "s2and_version",
     ]:
-        if metadata.get(key) != expected_metadata.get(key):
+        # A cache from an older script lacks the newer fields; reject it.
+        if key not in metadata or metadata[key] != expected_metadata.get(key):
             raise ValueError(f"Distance cache metadata mismatch for {path}: key={key}")
     return payload["dist"]
 

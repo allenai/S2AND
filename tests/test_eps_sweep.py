@@ -119,13 +119,16 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("replacement_model", "expected_generation", "waiver_off", "message"),
+    ("replacement_model", "expected_generation", "waiver_off", "dropped", "message"),
     (
-        (b"second model with different contents", "first-generation", False, "model_"),
-        (None, "second-generation", False, "arrow_generation_id"),
-        (None, "first-generation", True, "orcid_name_waiver"),
+        (b"second model with different contents", "first-generation", False, None, "model_"),
+        (None, "second-generation", False, None, "arrow_generation_id"),
+        (None, "first-generation", True, None, "orcid_name_waiver"),
+        # Caches written before these fields existed hold other name rules.
+        (None, "first-generation", False, "s2and_version", "s2and_version"),
+        (None, "first-generation", False, "orcid_name_waiver", "orcid_name_waiver"),
     ),
-    ids=("model-content", "arrow-generation", "orcid-name-waiver"),
+    ids=("model-content", "arrow-generation", "orcid-name-waiver", "no-version", "no-waiver-field"),
 )
 def test_distance_cache_metadata_rejects_changed_inputs(
     tmp_path,
@@ -133,6 +136,7 @@ def test_distance_cache_metadata_rejects_changed_inputs(
     replacement_model: bytes | None,
     expected_generation: str,
     waiver_off: bool,
+    dropped: str | None,
     message: str,
 ) -> None:
     model_path = tmp_path / "model.pkl"
@@ -152,6 +156,7 @@ def test_distance_cache_metadata_rejects_changed_inputs(
         ["s1", "s2"],
         "first-generation",
     )
+    metadata.pop(dropped or "", None)
     cache_path = tmp_path / "cache.pkl"
     with cache_path.open("wb") as outfile:
         pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)

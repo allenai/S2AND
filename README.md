@@ -65,7 +65,7 @@ Historical Arrow prefixes do not satisfy the current format-1 contract.
 ## Quick start
 
 After you [download](#download-data) `inference` and `dataset`, cluster every block of a released benchmark.
-For `qian` the model puts 6,312 signatures into 1,251 clusters:
+For `qian` the model puts 6,312 signatures into 1,248 clusters:
 
 ```bash
 uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \

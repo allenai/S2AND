@@ -135,8 +135,9 @@ apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
 `Ou Yang` both become last `ou yang`.
 
 Decision D10 romanizes Georgian and Armenian before transliteration.
-It uses the tables of scholar's block keys (`BlockKeyNormalizers`), so S2AND
-and scholar spell these names alike.
+It uses the tables planned for scholar's block keys (`BlockKeyNormalizers`).
+Scholar has not shipped them yet; once it does, S2AND and scholar spell these
+names alike.
 `text_unidecode` wrote `ბერიძე` as `berize` and `Արթուր` as `artowr`, and it
 dropped every Georgian capital (Mtavruli).
 Now they become `beridze` and `artur`.

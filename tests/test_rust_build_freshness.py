@@ -493,8 +493,17 @@ def test_real_build_script_tracks_directories_and_current_package_root(tmp_path:
     alternate = tmp_path / "alternate"
     shutil.copytree(source, alternate)
     (alternate / "src/new.rs").write_bytes(b"// Only in the current package\n")
-    build_script_name = "build-script-build.exe" if os.name == "nt" else "build-script-build"
-    build_script = next((target / "release/build").glob(f"s2and_freshness_probe-*/{build_script_name}"))
+    suffix = ".exe" if os.name == "nt" else ""
+    build_root = target / "release/build"
+    # Cargo 1.100 moved the build script from <package>-<hash>/ to <package>/<hash>/out/.
+    build_script = next(
+        path
+        for pattern in (
+            f"s2and_freshness_probe-*/build-script-build{suffix}",
+            f"s2and_freshness_probe/*/out/build_script_build{suffix}",
+        )
+        for path in build_root.glob(pattern)
+    )
     env["CARGO_MANIFEST_DIR"] = str(alternate)
     env["OUT_DIR"] = str(target / "release/build/direct/out")
     result = subprocess.run(

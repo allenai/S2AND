@@ -17,7 +17,12 @@ import numpy as np
 from s2and._sha256 import sha256_file as _sha256_file
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.contracts import canonical_json_digest
-from s2and.model import Clusterer, _selected_feature_indices
+from s2and.model import (
+    DEFAULT_ORCID_NAME_WAIVER,
+    Clusterer,
+    _orcid_name_waiver_setting,
+    _selected_feature_indices,
+)
 from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
 from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
 from s2and.production_bundle_contract import (
@@ -125,6 +130,13 @@ def _clusterer_config_payload(
             "Production bundle export cannot record name_conflict_repair_max_distance="
             f"{repair_distance!r}; a loaded model uses {DEFAULT_MAX_AVERAGE_DISTANCE}. "
             "Restore the default before export and set the attribute after loading."
+        )
+    waiver = _orcid_name_waiver_setting(clusterer)
+    if waiver != DEFAULT_ORCID_NAME_WAIVER:
+        # A bundle has no field for this setting either.
+        raise ValueError(
+            f"Production bundle export cannot record orcid_name_waiver={waiver!r}; a loaded model uses "
+            f"{DEFAULT_ORCID_NAME_WAIVER}. Restore the default before export and set the attribute after loading."
         )
     feature_contract = dict(raw_feature_contract)
     if expected_artifact_hashes is None:

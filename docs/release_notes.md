@@ -15,6 +15,17 @@
   uses them. On 377 same-ORCID pairs in these scripts, last-name vetoes fall from 150 to 0. Name-count
   indexes built earlier hold these names under the old spellings, so until a rebuild such a name looks up
   the counts of its Latin spelling.
+- Add the ORCID name waiver, on by default: when a block's distances are built, a mention with an ORCID
+  stops forbidding a mention without one if its name conflicts with other mentions of the same ORCID,
+  the name without an ORCID does not conflict with at least two of those, and it conflicts with at most 10%
+  of that ORCID's full-first-name mentions, of which the ORCID has at least five. The pair gets its model
+  distance. Clusters change for callers whose blocks hold such ORCIDs; set `Clusterer.orcid_name_waiver` to
+  `None` for the earlier output. The benchmark outer test does not change. On 127 production blocks with
+  the ORCID hidden on half of the ORCID mentions, B3 recall against the true ORCIDs rises by 0.003 to 0.005
+  on the hidden mentions and precision does not fall. The three block constraint methods of the Rust
+  featurizer take an optional `orcid_name_waiver` argument, off when absent. Bundle export refuses a
+  clusterer whose setting is not the default, because a bundle does not record it. See "ORCID name waiver"
+  in `docs/production_inference.md`.
 - Publish model release `1.3.1`: the `1.3` boosters and linker with the close-pair bonus (`8` for pairs
   under `0.05`) and EPS `0.40`. On the benchmark outer test, signature-weighted B3 precision rises from
   0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204, with both

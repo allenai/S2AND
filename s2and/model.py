@@ -350,6 +350,7 @@ def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
         bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         bool(getattr(clusterer, "suppress_orcid", False)),
         getattr(clusterer, "name_conflict_repair_max_distance", None),
+        _orcid_name_waiver_setting(clusterer),
     )
 
 
@@ -1494,6 +1495,31 @@ def _native_block_scorers(classifier: Any, nameless_classifier: Any | None) -> t
 _FUSED_BLOCK_SCORING = True
 # Tests compare the one-pass block fill against the chunked fused loop.
 _ONE_PASS_BLOCK_FILL = True
+# The fewest full-first-name mentions an ORCID needs, and the largest share of them a
+# name may conflict with. See Clusterer.orcid_name_waiver.
+DEFAULT_ORCID_NAME_WAIVER: tuple[int, float] = (5, 0.1)
+
+
+def _orcid_name_waiver_setting(clusterer: Any) -> tuple[int, float] | None:
+    """Return a clusterer's ORCID name waiver as the tuple the Rust calls take."""
+    setting = getattr(clusterer, "orcid_name_waiver", None)
+    if setting is None:
+        return None
+    # bool is an int, and a string is a sequence; neither is a setting.
+    valid = (
+        isinstance(setting, tuple | list)
+        and len(setting) == 2
+        and isinstance(setting[0], int)
+        and isinstance(setting[1], int | float)
+        and not any(isinstance(value, bool) for value in setting)
+        and setting[0] >= 1
+        and 0.0 <= setting[1] <= 1.0
+    )
+    if not valid:
+        raise ValueError(f"orcid_name_waiver must be None or (mentions >= 1, share in [0, 1]), got {setting!r}")
+    return (setting[0], float(setting[1]))
+
+
 # Tests shrink the one-pass tiles to cross tile edges in small blocks.
 _one_pass_tile_overrides: dict[str, int] = {}
 
@@ -1954,6 +1980,15 @@ class Clusterer:
     # from older pickles get it too. See s2and.name_conflict_repair.
     name_conflict_repair_max_distance: float | None = DEFAULT_MAX_AVERAGE_DISTANCE
 
+    # Block distances drop a name conflict that an ORCID's own mentions disprove.
+    # A mention with an ORCID stops forbidding a mention without one when its name
+    # conflicts with other mentions of its ORCID, the name without an ORCID does not
+    # conflict with at least two of those, and it conflicts with at most the second
+    # value's share of that ORCID's mentions with a full first name, of which the
+    # ORCID has at least the first value. The pair then gets its model distance.
+    # None turns this off. A class attribute, like the repair distance.
+    orcid_name_waiver: tuple[int, float] | None = DEFAULT_ORCID_NAME_WAIVER
+
     def __init__(
         self,
         featurizer_info: FeaturizationInfo,
@@ -2299,6 +2334,7 @@ class Clusterer:
                             num_threads=self.n_jobs,
                             featurizer=rust_featurizer,
                             suppress_orcid=constraint_backend.suppress_orcid,
+                            orcid_name_waiver=_orcid_name_waiver_setting(self),
                         )
                     except (RuntimeError, ValueError) as exc:
                         raise RuntimeError(
@@ -2947,6 +2983,7 @@ class Clusterer:
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     suppress_orcid=bool(getattr(self, "suppress_orcid", False)),
                     num_threads=resolve_n_jobs(self.n_jobs),
+                    orcid_name_waiver=_orcid_name_waiver_setting(self),
                     **_one_pass_tile_overrides,
                 )
                 model_predict_seconds += time.perf_counter() - stage_start
@@ -2973,6 +3010,7 @@ class Clusterer:
                             num_threads=self.n_jobs,
                             featurizer=rust_featurizer,
                             suppress_orcid=suppress_orcid,
+                            orcid_name_waiver=_orcid_name_waiver_setting(self),
                         )
                         constraint_seconds += time.perf_counter() - stage_start
                     else:
@@ -2985,6 +3023,7 @@ class Clusterer:
                             num_threads=self.n_jobs,
                             featurizer=rust_featurizer,
                             suppress_orcid=suppress_orcid,
+                            orcid_name_waiver=_orcid_name_waiver_setting(self),
                         )
                         constraint_seconds += time.perf_counter() - stage_start
                         stage_start = time.perf_counter()

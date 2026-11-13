@@ -119,17 +119,20 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("replacement_model", "expected_generation", "message"),
+    ("replacement_model", "expected_generation", "waiver_off", "message"),
     (
-        (b"second model with different contents", "first-generation", "model_"),
-        (None, "second-generation", "arrow_generation_id"),
+        (b"second model with different contents", "first-generation", False, "model_"),
+        (None, "second-generation", False, "arrow_generation_id"),
+        (None, "first-generation", True, "orcid_name_waiver"),
     ),
-    ids=("model-content", "arrow-generation"),
+    ids=("model-content", "arrow-generation", "orcid-name-waiver"),
 )
 def test_distance_cache_metadata_rejects_changed_inputs(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
     replacement_model: bytes | None,
     expected_generation: str,
+    waiver_off: bool,
     message: str,
 ) -> None:
     model_path = tmp_path / "model.pkl"
@@ -155,6 +158,8 @@ def test_distance_cache_metadata_rejects_changed_inputs(
 
     if replacement_model is not None:
         model_path.write_bytes(replacement_model)
+    if waiver_off:
+        monkeypatch.setattr("s2and.model.Clusterer.orcid_name_waiver", None)
     expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
         cast(Any, args),
         "block",

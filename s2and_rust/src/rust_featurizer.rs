@@ -294,6 +294,66 @@ struct ConstraintKeys<'a> {
     first_ids: Vec<u32>,
     /// Sorted ids of the first names each interned first name aliases.
     first_aliases: Vec<Vec<u32>>,
+    /// Name conflicts that block distances score instead of forbidding.
+    orcid_name_waivers: Option<OrcidNameWaivers>,
+}
+
+/// Name conflicts waived because an ORCID's own mentions disprove them.
+///
+/// Equal ORCIDs override the name rules, so one ORCID can hold mentions whose
+/// names conflict, say "André J." and "André A.". Such a mention then forbids
+/// the person's papers without an ORCID, which carry the other name form.
+struct OrcidNameWaivers {
+    /// Per entry: the slot in `fitting` of its ORCID and name when its name
+    /// conflicts with another mention of the same ORCID, else `u32::MAX`.
+    contradicted: Vec<u32>,
+    /// Per entry: its name's id when it has no ORCID, else `u32::MAX`.
+    outside_names: Vec<u32>,
+    /// Per slot: the sorted ids of the outside names whose conflict is waived.
+    fitting: Vec<Vec<u32>>,
+}
+
+impl OrcidNameWaivers {
+    fn waives(&self, left: usize, right: usize) -> bool {
+        let (slot, other) = match (self.contradicted[left], self.contradicted[right]) {
+            (u32::MAX, u32::MAX) => return false,
+            (slot, u32::MAX) => (slot, right),
+            (u32::MAX, slot) => (slot, left),
+            // Two ORCIDs: neither side is a mention without one.
+            _ => return false,
+        };
+        // `u32::MAX`, for a mention with an ORCID, is in no list.
+        self.fitting[slot as usize]
+            .binary_search(&self.outside_names[other])
+            .is_ok()
+    }
+}
+
+/// Reject an ORCID name waiver setting that would waive on no evidence.
+fn checked_orcid_name_waiver(setting: Option<(usize, f64)>) -> PyResult<Option<(usize, f64)>> {
+    if let Some((min_full_names, max_conflict_share)) = setting {
+        // The range test also rejects NaN.
+        if min_full_names == 0 || !(0.0..=1.0).contains(&max_conflict_share) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "orcid_name_waiver must be None or (mentions >= 1, share in [0, 1]), got ({min_full_names}, {max_conflict_share})"
+            )));
+        }
+    }
+    Ok(setting)
+}
+
+/// Fewest mentions of an ORCID that must show the second name form. One
+/// mention with a wrong ORCID then cannot waive a conflict by itself.
+const ORCID_WAIVER_MIN_SECOND_FORM_MENTIONS: usize = 2;
+
+/// Whether a normalized first name holds a word longer than one character.
+/// "j p", from "J.-P.", is two initials and not a full first name.
+fn has_full_first_name(signature: &SignatureData) -> bool {
+    signature.first_normalized().is_some_and(|first| {
+        first
+            .split_whitespace()
+            .any(|word| word.chars().nth(1).is_some())
+    })
 }
 
 /// Pairs featurized and scored per pool task in fused scoring. Tiles of 64
@@ -591,7 +651,9 @@ impl RustFeaturizer {
         num_threads: Option<usize>,
         suppress_orcid: bool,
         include_coordinates: bool,
+        orcid_name_waiver: Option<(usize, f64)>,
     ) -> PyResult<(Vec<u32>, Vec<u32>, Vec<Option<f64>>)> {
+        let orcid_name_waiver = checked_orcid_name_waiver(orcid_name_waiver)?;
         if block_signature_indices.len() <= 1 {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
@@ -640,7 +702,17 @@ impl RustFeaturizer {
         };
         let values = py.allow_threads(|| {
             let compute = || {
-                let keys = self.constraint_keys(&block_lookup);
+                let mut keys = self.constraint_keys(&block_lookup);
+                if let (Some((min_full_names, max_conflict_share)), false) =
+                    (orcid_name_waiver, suppress_orcid)
+                {
+                    keys.orcid_name_waivers = Self::orcid_name_waivers(
+                        &keys,
+                        &block_lookup,
+                        min_full_names,
+                        max_conflict_share,
+                    );
+                }
                 local_pairs
                     .par_iter()
                     .map(|(left_idx, right_idx)| {
@@ -997,7 +1069,177 @@ impl RustFeaturizer {
             in_disallow,
             first_ids,
             first_aliases,
+            orcid_name_waivers: None,
         }
+    }
+
+    /// Whether the name rules forbid entries `left` and `right` of `keys`.
+    fn keyed_names_conflict(keys: &ConstraintKeys<'_>, left: usize, right: usize) -> bool {
+        let first_id_2 = keys.first_ids[right];
+        let aliases = &keys.first_aliases[keys.first_ids[left] as usize];
+        constraint_names_conflict(&keys.names[left], &keys.names[right], || {
+            aliases.binary_search(&first_id_2).is_ok()
+        })
+    }
+
+    /// Find the name conflicts that an ORCID's own mentions disprove.
+    ///
+    /// A mention with an ORCID loses its name conflict with a mention without
+    /// one when all of these hold. Its name conflicts with other mentions of
+    /// its ORCID. The outside name does not conflict with at least
+    /// `ORCID_WAIVER_MIN_SECOND_FORM_MENTIONS` of those. The outside name conflicts with at most `max_conflict_share`
+    /// of the ORCID's mentions with a full first name, of which the ORCID has
+    /// at least `min_full_names`. The pair then gets its model distance.
+    /// Seeds and equal ORCIDs keep precedence.
+    fn orcid_name_waivers(
+        keys: &ConstraintKeys<'_>,
+        entries: &[(&str, &SignatureData)],
+        min_full_names: usize,
+        max_conflict_share: f64,
+    ) -> Option<OrcidNameWaivers> {
+        let mut groups: ahash::AHashMap<&str, Vec<usize>> = ahash::AHashMap::default();
+        let mut has_outside = false;
+        for (entry, orcid) in keys.orcids.iter().enumerate() {
+            match orcid {
+                Some(orcid) => groups.entry(*orcid).or_default().push(entry),
+                None => has_outside = true,
+            }
+        }
+        groups.retain(|_, members| members.len() >= min_full_names.max(2));
+        if groups.is_empty() || !has_outside {
+            return None;
+        }
+        // Mentions with one name share every name verdict, so verdicts are
+        // found once per pair of distinct names.
+        let mut name_index: ahash::AHashMap<(&str, &str, &str), u32> = ahash::AHashMap::default();
+        let mut name_entry: Vec<usize> = Vec::new();
+        let name_ids: Vec<u32> = entries
+            .iter()
+            .enumerate()
+            .map(|(entry, (_, signature))| {
+                let name = (
+                    signature.first_normalized().unwrap_or(""),
+                    signature.middle.as_deref().unwrap_or(""),
+                    signature.last_normalized.as_deref().unwrap_or(""),
+                );
+                *name_index.entry(name).or_insert_with(|| {
+                    name_entry.push(entry);
+                    (name_entry.len() - 1) as u32
+                })
+            })
+            .collect();
+        let conflict = |name_1: u32, name_2: u32| {
+            let (entry_1, entry_2) = (name_entry[name_1 as usize], name_entry[name_2 as usize]);
+            name_1 != name_2
+                && Self::keyed_names_conflict(keys, entry_1.min(entry_2), entry_1.max(entry_2))
+        };
+        let outside_names: Vec<u32> = (0..entries.len())
+            .map(|entry| match keys.orcids[entry] {
+                Some(_) => u32::MAX,
+                None => name_ids[entry],
+            })
+            .collect();
+        let mut outside_distinct: Vec<u32> = outside_names
+            .iter()
+            .copied()
+            .filter(|&name| name != u32::MAX)
+            .collect();
+        outside_distinct.sort_unstable();
+        outside_distinct.dedup();
+        // First-member order keeps the slots the same from run to run.
+        let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+        groups.sort_unstable_by_key(|members| members[0]);
+        // Per ORCID: each odd name with the outside names it stops forbidding.
+        let waived: Vec<Vec<(u32, Vec<u32>)>> = groups
+            .par_iter()
+            .map(|members| {
+                let mut names: Vec<u32> = members.iter().map(|&member| name_ids[member]).collect();
+                names.sort_unstable();
+                names.dedup();
+                if names.len() < 2 {
+                    // One name cannot conflict with itself.
+                    return Vec::new();
+                }
+                // A signature listed twice is one mention.
+                let mut seen: ahash::AHashSet<&str> = ahash::AHashSet::default();
+                let mut counts = vec![0usize; names.len()];
+                let mut full_counts = vec![0usize; names.len()];
+                let mut full_total = 0usize;
+                for &member in members {
+                    if seen.insert(keys.signature_ids[member]) {
+                        let position = names.binary_search(&name_ids[member]).unwrap();
+                        counts[position] += 1;
+                        if has_full_first_name(entries[member].1) {
+                            full_counts[position] += 1;
+                            full_total += 1;
+                        }
+                    }
+                }
+                if full_total < min_full_names {
+                    return Vec::new();
+                }
+                let inner: Vec<Vec<bool>> = names
+                    .iter()
+                    .map(|&name| names.iter().map(|&other| conflict(name, other)).collect())
+                    .collect();
+                let odd: Vec<usize> = (0..names.len())
+                    .filter(|&position| inner[position].iter().any(|&conflicts| conflicts))
+                    .collect();
+                if odd.is_empty() {
+                    // Skip the scan of outside names: nothing can be waived.
+                    return Vec::new();
+                }
+                let mut fits: Vec<Vec<u32>> = vec![Vec::new(); odd.len()];
+                let mut against = vec![false; names.len()];
+                for &outside in &outside_distinct {
+                    let mut conflicting = 0usize;
+                    for (position, &name) in names.iter().enumerate() {
+                        against[position] = conflict(outside, name);
+                        if against[position] {
+                            conflicting += full_counts[position];
+                        }
+                    }
+                    if conflicting as f64 > max_conflict_share * full_total as f64 {
+                        continue;
+                    }
+                    for (fit, &position) in fits.iter_mut().zip(&odd) {
+                        // The ORCID must show names that the outside name fits
+                        // and the odd name does not.
+                        if against[position]
+                            && (0..names.len())
+                                .filter(|&other| inner[position][other] && !against[other])
+                                .map(|other| counts[other])
+                                .sum::<usize>()
+                                >= ORCID_WAIVER_MIN_SECOND_FORM_MENTIONS
+                        {
+                            fit.push(outside);
+                        }
+                    }
+                }
+                odd.into_iter()
+                    .zip(fits)
+                    .filter(|(_, fit)| !fit.is_empty())
+                    .map(|(position, fit)| (names[position], fit))
+                    .collect()
+            })
+            .collect();
+        let mut contradicted = vec![u32::MAX; entries.len()];
+        let mut fitting: Vec<Vec<u32>> = Vec::new();
+        for (members, odd_names) in groups.iter().zip(waived) {
+            for (name, fit) in odd_names {
+                for &member in members {
+                    if name_ids[member] == name {
+                        contradicted[member] = fitting.len() as u32;
+                    }
+                }
+                fitting.push(fit);
+            }
+        }
+        (!fitting.is_empty()).then_some(OrcidNameWaivers {
+            contradicted,
+            outside_names,
+            fitting,
+        })
     }
 
     /// `constraint_value_from_records` for entries `left` and `right` of `keys`.
@@ -1038,12 +1280,16 @@ impl RustFeaturizer {
                 }
             }
         }
-        let first_id_2 = keys.first_ids[right];
-        let aliases = &keys.first_aliases[keys.first_ids[left] as usize];
-        if constraint_names_conflict(&keys.names[left], &keys.names[right], || {
-            aliases.binary_search(&first_id_2).is_ok()
-        }) {
-            return Some(high_value);
+        if Self::keyed_names_conflict(keys, left, right) {
+            // Waivers rest on ORCIDs, so hidden ORCIDs waive nothing.
+            let waived = !suppress_orcid
+                && keys
+                    .orcid_name_waivers
+                    .as_ref()
+                    .is_some_and(|waivers| waivers.waives(left, right));
+            if !waived {
+                return Some(high_value);
+            }
         }
         None
     }
@@ -2438,7 +2684,8 @@ impl RustFeaturizer {
             dont_merge_cluster_seeds = true,
             incremental_dont_use_cluster_seeds = false,
             num_threads = None,
-            suppress_orcid = false
+            suppress_orcid = false,
+            orcid_name_waiver = None
         )
     )]
     fn get_constraints_block_upper_triangle_indexed(
@@ -2453,6 +2700,7 @@ impl RustFeaturizer {
         incremental_dont_use_cluster_seeds: bool,
         num_threads: Option<usize>,
         suppress_orcid: bool,
+        orcid_name_waiver: Option<(usize, f64)>,
     ) -> PyResult<(Vec<u32>, Vec<u32>, Vec<Option<f64>>)> {
         self.constraints_block_upper_triangle_indexed_impl(
             py,
@@ -2466,6 +2714,7 @@ impl RustFeaturizer {
             num_threads,
             suppress_orcid,
             true,
+            orcid_name_waiver,
         )
     }
 
@@ -2483,7 +2732,8 @@ impl RustFeaturizer {
             dont_merge_cluster_seeds = true,
             incremental_dont_use_cluster_seeds = false,
             num_threads = None,
-            suppress_orcid = false
+            suppress_orcid = false,
+            orcid_name_waiver = None
         )
     )]
     fn _constraint_labels_block_upper_triangle_indexed<'py>(
@@ -2499,6 +2749,7 @@ impl RustFeaturizer {
         incremental_dont_use_cluster_seeds: bool,
         num_threads: Option<usize>,
         suppress_orcid: bool,
+        orcid_name_waiver: Option<(usize, f64)>,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let (_, _, values) = self.constraints_block_upper_triangle_indexed_impl(
             py,
@@ -2512,6 +2763,7 @@ impl RustFeaturizer {
             num_threads,
             suppress_orcid,
             false,
+            orcid_name_waiver,
         )?;
         let labels: Vec<f64> = values
             .into_iter()
@@ -2608,11 +2860,7 @@ impl RustFeaturizer {
             let Some(signature) = self.signatures.get(signature_id) else {
                 continue;
             };
-            if signature.first_normalized().is_some_and(|first| {
-                first
-                    .split_whitespace()
-                    .any(|word| word.chars().nth(1).is_some())
-            }) {
+            if has_full_first_name(signature) {
                 full_first_names.push(signature_id.clone());
             }
             if let Some(orcid) = &signature.orcid {
@@ -2965,7 +3213,8 @@ impl RustFeaturizer {
         suppress_orcid=false,
         num_threads=None,
         row_band=64,
-        column_block=128
+        column_block=128,
+        orcid_name_waiver=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn fill_block_distances_indexed<'py>(
@@ -2989,7 +3238,9 @@ impl RustFeaturizer {
         num_threads: Option<usize>,
         row_band: usize,
         column_block: usize,
+        orcid_name_waiver: Option<(usize, f64)>,
     ) -> PyResult<(usize, usize)> {
+        let orcid_name_waiver = checked_orcid_name_waiver(orcid_name_waiver)?;
         let signature_ids = self.signature_id_order();
         let signature_count = signature_ids.len();
         let mut feature_lookup: Vec<(&SignatureData, &PaperData)> =
@@ -3104,7 +3355,20 @@ impl RustFeaturizer {
         let scored_total = std::sync::atomic::AtomicUsize::new(0);
         py.allow_threads(|| {
             install_with_optional_rayon_pool(num_threads, || {
-                let keys = use_constraints.then(|| self.constraint_keys(&constraint_lookup));
+                let keys = use_constraints.then(|| {
+                    let mut keys = self.constraint_keys(&constraint_lookup);
+                    if let (Some((min_full_names, max_conflict_share)), false) =
+                        (orcid_name_waiver, suppress_orcid)
+                    {
+                        keys.orcid_name_waivers = Self::orcid_name_waivers(
+                            &keys,
+                            &constraint_lookup,
+                            min_full_names,
+                            max_conflict_share,
+                        );
+                    }
+                    keys
+                });
                 tiles
                     .par_iter()
                     .for_each(|&(band_start, band_end, column_start, column_end)| {

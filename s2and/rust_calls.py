@@ -212,6 +212,7 @@ def get_constraints_block_upper_triangle_indexed_rust(
     incremental_dont_use_cluster_seeds: bool = False,
     num_threads: int | None = None,
     suppress_orcid: bool = False,
+    orcid_name_waiver: tuple[int, float] | None = None,
 ) -> tuple[list[int], list[int], list[float | None]]:
     resolved_num_threads = None if num_threads is None else resolve_n_jobs(num_threads)
 
@@ -225,6 +226,7 @@ def get_constraints_block_upper_triangle_indexed_rust(
         incremental_dont_use_cluster_seeds,
         resolved_num_threads,
         suppress_orcid=suppress_orcid,
+        orcid_name_waiver=orcid_name_waiver,
     )
     # PyO3 converts the native Vec<u32> and Vec<Option<f64>> directly to
     # list[int] and list[float | None]; no per-pair Python coercion is needed.
@@ -244,6 +246,7 @@ def _get_constraint_labels_block_upper_triangle_indexed_rust(
     incremental_dont_use_cluster_seeds: bool = False,
     num_threads: int | None = None,
     suppress_orcid: bool = False,
+    orcid_name_waiver: tuple[int, float] | None = None,
 ) -> np.ndarray:
     """Get ordered bulk constraint labels without unused square-matrix coordinates.
 
@@ -262,6 +265,7 @@ def _get_constraint_labels_block_upper_triangle_indexed_rust(
         incremental_dont_use_cluster_seeds,
         resolved_num_threads,
         suppress_orcid=suppress_orcid,
+        orcid_name_waiver=orcid_name_waiver,
     )
 
 

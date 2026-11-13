@@ -1096,6 +1096,21 @@ def test_bundle_export_rejects_a_changed_name_conflict_repair_setting(
         )
 
 
+def test_bundle_export_rejects_a_changed_orcid_name_waiver(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    # A bundle has no field for this setting either.
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
+    source_clusterer.orcid_name_waiver = None
+
+    with pytest.raises(ValueError, match="cannot record orcid_name_waiver"):
+        write_pairwise_production_bundle(
+            source_clusterer, tmp_path / "waiver-off" / "production_model_v9.9", release_version="9.9"
+        )
+
+
 def test_pending_pairwise_loader_requires_placeholder_eps(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],

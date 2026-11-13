@@ -256,6 +256,47 @@ anchor's cluster, and within its subblock it can still join any other cluster.
 - Eviction honors exclusions. It does not remove another person's papers that
   the user did not exclude.
 
+### ORCID name waiver
+
+Two mentions with the same ORCID always may share a cluster, whatever their names. One
+ORCID can therefore hold mentions whose names conflict, such as "André J." and "André A."
+for one person. Each of them then forbids the person's papers without an ORCID that carry
+the other name form, and the cluster cannot take those papers in.
+
+When a block's distances are built, a mention with an ORCID stops forbidding a mention
+without one if all of these hold:
+
+- its name conflicts with the names of other mentions of the same ORCID;
+- the name without an ORCID does not conflict with at least two of those mentions;
+- the name without an ORCID conflicts with at most 10% of that ORCID's mentions that have
+  a full first name, and the ORCID has at least five such mentions in the block.
+
+So the ORCID's "André A." mention stops forbidding an "André J." paper without an ORCID,
+because the ORCID itself holds two "André J." mentions. It still forbids an "André M." paper:
+the ORCID shows no name that fits "André M." and conflicts with "André A.". One "André J."
+mention would not be enough, so a single mention with a wrong ORCID waives nothing. A
+signature that a block lists twice counts as one mention.
+
+The pair then gets its model distance, and linkage decides as it does for any other pair.
+Seed constraints keep precedence, and two mentions with different ORCIDs are not affected.
+
+The waiver is on by default: `Clusterer.orcid_name_waiver` is `(5, 0.1)`, the fewest
+full-first-name mentions and the largest conflicting share. Set it to `None` to turn it off.
+The first value must be at least 1 and the second between 0 and 1.
+A model bundle does not record the setting: a loaded model starts at the default, and bundle
+export refuses a clusterer that holds another value. `Clusterer.suppress_orcid` also turns
+it off.
+
+```python
+clusterer.orcid_name_waiver = None
+clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
+```
+
+The waiver applies wherever a call builds a whole block's or subblock's distances with a Rust
+featurizer. It looks only at the mentions of that block or subblock. Constraint calls on
+separate pairs keep the plain name rules: incremental linking, the linker's training labels,
+and name-conflict repair's own name test. `ANDData.get_constraint` also keeps them.
+
 ### Name-conflict repair
 
 One or two mentions with a wrong or misparsed name can keep a person's cluster away from

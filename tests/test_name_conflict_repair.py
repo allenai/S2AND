@@ -274,18 +274,32 @@ def test_repair_accepts_two_odd_mentions_but_not_three() -> None:
     assert run([(i, j) for i in (4, 5, 6) for j in range(7, 14)]) == labels
 
 
-@pytest.mark.parametrize("seed", range(8))
-def test_repair_preserves_direct_pair_search_and_bounds_extensions(seed: int) -> None:
+@pytest.mark.parametrize(
+    ("seed", "odd_count", "planted", "extends"),
+    # Six random odd mentions pair every cluster off, so none is left to absorb.
+    [(seed, 6, False, False) for seed in range(8)] + [(seed, 1, True, seed in (1, 2)) for seed in range(8)],
+)
+def test_repair_preserves_direct_pair_search_and_bounds_extensions(
+    seed: int, odd_count: int, planted: bool, extends: bool
+) -> None:
     # Random clusters and impossible pairs, checked against a plain search over cluster pairs.
     rng = np.random.default_rng(seed)
     n = 72
     labels = rng.integers(0, 6, size=n)
     square = rng.uniform(0.0, 0.3, size=(n, n))
     square = (square + square.T) / 2
-    for odd in rng.choice(n, size=6, replace=False):
-        other = rng.choice([c for c in range(6) if c != labels[odd]])
-        for j in np.flatnonzero(labels == other):
+
+    def forbid(odd: int, clusters: list[int]) -> None:
+        for j in np.flatnonzero(np.isin(labels, clusters)):
             square[odd, j] = square[j, odd] = LARGE_DISTANCE
+
+    for odd in rng.choice(n, size=odd_count, replace=False):
+        forbid(odd, [rng.choice([c for c in range(6) if c != labels[odd]])])
+    if planted:
+        # Two odd mentions hold three clusters apart, as in `_three_clusters`.
+        a, b, c = rng.permutation(6)[:3]
+        forbid(rng.choice(np.flatnonzero(labels == a)), [b, c])
+        forbid(rng.choice(np.flatnonzero(labels == b)), [c])
     np.fill_diagonal(square, 0.0)
     codes = quantize_distances(squareform(square))
     assert codes is not None
@@ -325,6 +339,8 @@ def test_repair_preserves_direct_pair_search_and_bounds_extensions(seed: int) ->
     for group in _partition(want.tolist(), signatures):
         assert len({int(got[int(signature)]) for signature in group}) == 1
     baseline_groups = _partition(want.tolist(), signatures)
+    widest = max(len({int(labels[int(s)]) for s in group}) for group in _partition(list(got), signatures))
+    assert (widest == 3) == extends
     for group in _partition(list(got), signatures):
         original = sorted({int(labels[int(signature)]) for signature in group})
         assert len(original) <= 3

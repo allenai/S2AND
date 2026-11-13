@@ -86,6 +86,8 @@ include = [
   { path = "s2and/data/first_k_letter_counts_from_orcid.manifest.json", format = ["sdist", "wheel"] },
   { path = "s2and/data/path_config.json", format = ["sdist", "wheel"] },
   { path = "s2and/data/s2and_name_tuples_canonical.txt", format = ["sdist", "wheel"] },
+  { path = "s2and/data/s2and_surname_variants_canonical.txt", format = ["sdist", "wheel"] },
+  { path = "tests/fixtures/surname_family_examples.json", format = "sdist" },
   { path = "s2and_rust/vendor/cld2/**/*", format = "sdist" },
   { path = "s2and_rust/vendor/cld2-sys/**/*", format = "sdist" },
 ]

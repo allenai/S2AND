@@ -3,8 +3,16 @@
 Pins the canonical semantics in docs/canonical_names.md.
 """
 
+import json
+from pathlib import Path
+
 from s2and.data import ANDData
-from s2and.text import canonical_lasts_equivalent
+from s2and.text import (
+    canonical_lasts_equivalent,
+    canonical_surname_family,
+    canonicalize_name_text,
+    surname_variant_map,
+)
 
 
 def test_canonical_lasts_equivalent_is_space_insensitive_compare_policy():
@@ -15,6 +23,29 @@ def test_canonical_lasts_equivalent_is_space_insensitive_compare_policy():
     assert canonical_lasts_equivalent("van der berg", "vanderberg") is True
     assert canonical_lasts_equivalent("li", "ouyang") is False
     assert canonical_lasts_equivalent("", "") is True
+
+
+def test_canonical_lasts_equivalent_joins_listed_variants_and_sky_endings():
+    # Blocking keys these spellings together, so the constraint must not veto them.
+    assert canonical_lasts_equivalent("muller", "mueller") is True
+    assert canonical_lasts_equivalent("tartakovskiy", "tartakovsky") is True
+    assert canonical_lasts_equivalent("mueller", "muller schmidt") is False
+    assert canonical_lasts_equivalent("xue", "xu") is False
+    assert canonical_lasts_equivalent("kowalski", "kowalsky") is False
+
+
+def test_canonical_surname_family_matches_shared_fixture():
+    cases = json.loads((Path(__file__).parent / "fixtures" / "surname_family_examples.json").read_text("utf-8"))
+    for case in cases["cases"]:
+        assert canonical_surname_family(case["last"]) == case["family"], case
+
+
+def test_surname_variant_list_is_canonical():
+    variants = surname_variant_map()
+    assert len(variants) > 200
+    for variant, canonical in variants.items():
+        assert canonicalize_name_text(variant) == variant
+        assert canonicalize_name_text(canonical) == canonical
 
 
 def _raw_signature(signature_id: str, *, paper_id: int, first: str, last: str) -> dict:

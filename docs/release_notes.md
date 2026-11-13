@@ -2,6 +2,12 @@
 
 ## Unreleased runtime changes
 
+- Stop vetoing merges between two spellings of one surname: the 279 listed variants in
+  `s2and/data/s2and_surname_variants_canonical.txt` (`mueller` and `muller`) and the Slavic endings
+  `-sky`/`-skiy`/`-skii`. Only the last-name veto changes; canonical names, count keys, and features keep the
+  stored spelling. On the 9 benchmark blocks that hold both spellings of a listed surname, B3 F1 rises from
+  0.878 to 0.986. Scholar's block keys put these spellings in one block (scholar issue 42640, options 18
+  and 19). See "Canonical name contract" in `docs/canonical_names.md`.
 - Publish model release `1.3.1`: the `1.3` boosters and linker with the close-pair bonus (`8` for pairs
   under `0.05`) and EPS `0.40`. On the benchmark outer test, signature-weighted B3 precision rises from
   0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204, with both

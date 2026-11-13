@@ -204,6 +204,22 @@ spaces in storage, but `canonical_lasts_equivalent` ignores spaces when
 comparing them: `ou yang` equals `ouyang`. Dash variants become spaces during
 canonicalization, before this comparison.
 
+The comparison also treats two spellings of one surname as equal:
+
+- a listed variant equals its canonical spelling, such as `mueller` and
+  `muller`. The list is
+  [s2and_surname_variants_canonical.txt](../s2and/data/s2and_surname_variants_canonical.txt),
+  279 `variant,canonical` lines from people who write their name both ways.
+- the Slavic endings `-sky`, `-skiy`, `-skyi`, `-skyy`, `-skii`, `-skij`, and
+  `-skyj` are equal after at least two letters, so `tartakovsky` equals
+  `tartakovskiy`. `sky` and `osky` keep their own spelling.
+
+The rule changes only the last-name veto. Canonical names, count keys, and
+features keep the stored spelling. Python `canonical_surname_family` and Rust
+`surname_family` apply it, and
+[surname_family_examples.json](../tests/fixtures/surname_family_examples.json)
+keeps the two equal.
+
 Full middle names also use `same_prefix_tokens` before a full-token conflict
 causes a veto. For example, `meg` matches `megan`, and `ch` matches `charles`.
 The rule compares aligned tokens up to the shorter list, as for first names.

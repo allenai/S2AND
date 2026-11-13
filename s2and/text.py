@@ -2,6 +2,8 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Set
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import jellyfish
@@ -659,11 +661,75 @@ def canonical_lasts_equivalent(last_a: str, last_b: str) -> bool:
     upstream blocking groups surname spelling variants under one block key, and
     the within-block last-name constraint must not veto pairs that blocking
     deliberately grouped (ruled 2026-07-09 with the canonical_v2 cutover).
+    For the same reason, listed spelling variants (``muller`` == ``mueller``)
+    and Slavic -sky endings (``tartakovskiy`` == ``tartakovsky``) are
+    equivalent; see ``canonical_surname_family``.
     """
 
     if last_a == last_b:
         return True
-    return last_a.replace(" ", "") == last_b.replace(" ", "")
+    return canonical_surname_family(last_a) == canonical_surname_family(last_b)
+
+
+SURNAME_VARIANTS_FILENAME = "s2and_surname_variants_canonical.txt"
+# A Slavic -sky ending after at least two letters; every spelling maps to -skii.
+_SLAVIC_SKY_ENDING = re.compile(r"(?<=[a-z]{2})sk(?:iy|yi|yy|ii|ij|yj|y)$")
+
+
+@lru_cache(maxsize=1)
+def surname_variant_map() -> dict[str, str]:
+    """Load the packaged spelling variants of one surname (``mueller`` -> ``muller``).
+
+    Each line is ``variant,canonical`` in canonical last-name form without
+    spaces. Blocking puts both spellings under one block key, so the
+    last-name constraint must not veto them.
+
+    Returns:
+        A map from each variant spelling to its canonical spelling.
+
+    Raises:
+        ValueError: When the file is unsorted, malformed or chains variants.
+    """
+
+    path = Path(__file__).parent / "data" / SURNAME_VARIANTS_FILENAME
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if lines != sorted(lines):
+        raise ValueError(f"{path} must be sorted")
+    variants: dict[str, str] = {}
+    for line in lines:
+        fields = line.split(",")
+        if len(fields) != 2 or not all(re.fullmatch(r"[a-z]+", field) for field in fields):
+            raise ValueError(f"{path}: malformed line {line!r}")
+        variant, canonical = fields
+        if variant == canonical or variant in variants:
+            raise ValueError(f"{path}: repeated or self-mapped variant {variant!r}")
+        variants[variant] = canonical
+    chained = set(variants) & set(variants.values())
+    if chained:
+        raise ValueError(f"{path}: canonical spellings that are also variants: {sorted(chained)[:5]}")
+    return variants
+
+
+# Training compares millions of pairs over far fewer distinct last names, so cache the form.
+@lru_cache(maxsize=1 << 16)
+def canonical_surname_family(last: str) -> str:
+    """Return the compare-time form of a canonical last name.
+
+    Removes spaces, maps a listed spelling variant to its canonical spelling,
+    and writes every Slavic -sky ending as -skii. Two last names with the same
+    form never trigger the last-name constraint. Name counts and features keep
+    the stored spelling.
+
+    Args:
+        last: A canonical last name.
+
+    Returns:
+        The last name in its compare-time form.
+    """
+
+    compact = last.replace(" ", "")
+    compact = surname_variant_map().get(compact, compact)
+    return _SLAVIC_SKY_ENDING.sub("skii", compact)
 
 
 def name_text_features(

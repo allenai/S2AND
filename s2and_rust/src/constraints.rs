@@ -14,14 +14,70 @@ pub(crate) fn count_initials(s: &str) -> HashMap<char, usize> {
 
 #[cfg(test)]
 // Compare-time equivalence for canonical last names: joined and spaced
-// spellings of one surname are equivalent ("ou yang" == "ouyang"). Deliberate
-// canonical_v2 compare-time policy (not a legacy artifact shim); mirrors
+// spellings of one surname are equivalent ("ou yang" == "ouyang"), and so are
+// listed spelling variants and Slavic -sky endings. Deliberate canonical_v2
+// compare-time policy (not a legacy artifact shim); mirrors
 // s2and.text.canonical_lasts_equivalent.
 pub(crate) fn lasts_equivalent_for_constraint(l1: &str, l2: &str) -> bool {
     if l1 == l2 {
         return true;
     }
-    l1.replace(' ', "") == l2.replace(' ', "")
+    surname_family(l1) == surname_family(l2)
+}
+
+// Blocking puts both spellings of a listed surname under one block key, so the
+// constraint must not veto them. Same file as s2and.text.surname_variant_map.
+const SURNAME_VARIANTS: &str =
+    include_str!("../../s2and/data/s2and_surname_variants_canonical.txt");
+
+fn surname_variants() -> &'static HashMap<&'static str, &'static str> {
+    static VARIANTS: std::sync::OnceLock<HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    VARIANTS.get_or_init(|| {
+        SURNAME_VARIANTS
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                line.split_once(',')
+                    .expect("surname variant lines are `variant,canonical`")
+            })
+            .collect()
+    })
+}
+
+// Longest first is not needed: no ending is a suffix of another.
+const SLAVIC_SKY_ENDINGS: [&str; 7] = ["skiy", "skyi", "skyy", "skii", "skij", "skyj", "sky"];
+
+/// The compare-time form of a canonical last name.
+///
+/// Removes spaces, maps a listed spelling variant to its canonical spelling,
+/// and writes a Slavic -sky ending after two letters as -skii. Mirrors
+/// `s2and.text.canonical_surname_family`.
+pub(crate) fn surname_family(last: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let compact: Cow<'_, str> = if last.contains(' ') {
+        Cow::Owned(last.replace(' ', ""))
+    } else {
+        Cow::Borrowed(last)
+    };
+    let mapped: Cow<'_, str> = match surname_variants().get(compact.as_ref()) {
+        Some(canonical) => Cow::Borrowed(*canonical),
+        None => compact,
+    };
+    for ending in SLAVIC_SKY_ENDINGS {
+        if let Some(stem) = mapped.strip_suffix(ending) {
+            let bytes = stem.as_bytes();
+            let two_letters = bytes.len() >= 2
+                && bytes[bytes.len() - 2..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase());
+            if two_letters {
+                return Cow::Owned(format!("{stem}skii"));
+            }
+            break;
+        }
+    }
+    mapped
 }
 
 pub(crate) fn same_prefix_tokens(a: &str, b: &str) -> bool {
@@ -34,8 +90,8 @@ pub(crate) fn same_prefix_tokens(a: &str, b: &str) -> bool {
 /// removes most of the constraint's string work.
 pub(crate) struct ConstraintNameKey<'a> {
     last: &'a str,
-    /// The last name without spaces; it borrows `last` when there are none.
-    last_compact: std::borrow::Cow<'a, str>,
+    /// `surname_family(last)`; it borrows `last` when nothing changes.
+    last_family: std::borrow::Cow<'a, str>,
     first_initial: Option<char>,
     first_tokens: Vec<&'a str>,
     middle_tokens: Vec<&'a str>,
@@ -46,16 +102,12 @@ pub(crate) struct ConstraintNameKey<'a> {
 
 impl<'a> ConstraintNameKey<'a> {
     pub(crate) fn new(first: &'a str, middle: &'a str, last: &'a str) -> Self {
-        let last_compact = if last.contains(' ') {
-            std::borrow::Cow::Owned(last.replace(' ', ""))
-        } else {
-            std::borrow::Cow::Borrowed(last)
-        };
+        let last_family = surname_family(last);
         let middle_tokens: Vec<&'a str> = middle.split_whitespace().collect();
         let middle_summary = MiddleSummary::new(&middle_tokens);
         Self {
             last,
-            last_compact,
+            last_family,
             first_initial: if first.is_empty() {
                 None
             } else {
@@ -152,7 +204,7 @@ pub(crate) fn constraint_names_conflict(
     key_2: &ConstraintNameKey<'_>,
     first_aliases: impl FnOnce() -> bool,
 ) -> bool {
-    if key_1.last != key_2.last && key_1.last_compact != key_2.last_compact {
+    if key_1.last != key_2.last && key_1.last_family != key_2.last_family {
         return true;
     }
     if let (Some(c1), Some(c2)) = (key_1.first_initial, key_2.first_initial) {
@@ -480,6 +532,27 @@ pub(crate) fn first_names_name_compatible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surname_family_matches_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/surname_family_examples.json"
+        ))
+        .expect("parse surname family fixture");
+        for case in fixture["cases"].as_array().expect("fixture cases") {
+            let last = case["last"].as_str().unwrap();
+            assert_eq!(
+                surname_family(last),
+                case["family"].as_str().unwrap(),
+                "{last}"
+            );
+        }
+        assert!(lasts_equivalent_for_constraint("muller", "mueller"));
+        assert!(!lasts_equivalent_for_constraint("xue", "xu"));
+        let a = ConstraintNameKey::new("gero", "", "muller");
+        let b = ConstraintNameKey::new("gero", "", "mueller");
+        assert!(!constraint_names_conflict(&a, &b, || false));
+    }
 
     #[test]
     fn name_tuple_compatibility_does_not_apply_extra_case_normalization() {

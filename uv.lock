@@ -1235,7 +1235,7 @@ wheels = [
 
 [[package]]
 name = "s2and"
-version = "1.0.0b10"
+version = "1.0.0b11"
 source = { editable = "." }
 dependencies = [
     { name = "fastcluster" },

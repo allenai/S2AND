@@ -4,7 +4,7 @@ Download the `inference` and `dataset` bundles into `s2and/data/` first; see doc
 The Arrow route runs in Rust through `Clusterer.predict_from_arrow` and clusters every block:
 
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --model-path s2and/data/production_model_v1.3.1 \
+      --model-path s2and/data/production_model_v1.3.2 \
       --arrow-dataset s2and/data/benchmarks/qian \
       --n-jobs 4 --output-json qian_clusters.json
 
@@ -14,7 +14,7 @@ Labeled signatures on papers before 2015 play the existing profiles; the block's
 signatures arrive as new papers:
 
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --model-path s2and/data/production_model_v1.3.1 \
+      --model-path s2and/data/production_model_v1.3.2 \
       --arrow-dataset s2and/data/benchmarks/aminer \
       --incremental-block "j wang" \
       --seed-clusters s2and/data/benchmarks/aminer/aminer_clusters.json \
@@ -24,7 +24,7 @@ The JSON route runs in Python through `Clusterer.predict` on an `ANDData` built 
 `signatures.json`, `papers.json`, and a SPECTER2 embedding pickle:
 
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --model-path s2and/data/production_model_v1.3.1 \
+      --model-path s2and/data/production_model_v1.3.2 \
       --json-dir path/to/records --specter-pickle path/to/specter2.pkl \
       --name-counts-index s2and/data/name_counts_index --n-jobs 4
 

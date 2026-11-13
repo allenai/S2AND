@@ -2,6 +2,15 @@
 
 ## Unreleased runtime changes
 
+- Publish model release `1.3.2`: the `1.3.1` boosters, linker, and linkage settings, bound to a name-count
+  index rebuilt with the `1.0.0b11` name rules. Georgian and Armenian author rows now count under their new
+  spellings, which also changes the counts of the matching Latin names: 2% of the distinct benchmark and
+  replay names shift, most by 1 or 2. The held-out scores are identical to `1.3.1` (B3 F1 0.969488). Clusters
+  can change for a name whose count shifted: on the `a silva` giant block, about 100 `Artur` mentions regroup
+  in each direction and no other name changes; `j smith` does not change. The bundle is at
+  `s3://ai2-s2-research-public/s2and/1.3.2/inference/` and needs `s2and` `1.0.0b11` or later. It has no
+  dataset bundle: use `s2and/1.3.1/dataset/`. `scripts/production/model/rebind_name_counts_index.py` writes
+  such a copy without another fit. The `1.3.1` bundle stays at `s2and/1.3.1/inference/` and still loads.
 - Arrow dataset manifests no longer bind the name-count index. A manifest still gives the index path, but
   `ArrowDataset.open` does not compare the index with the manifest, and new manifests omit the index from
   their checksum inventory. The model's feature contract remains the one check of which index is in use.

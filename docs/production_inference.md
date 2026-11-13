@@ -15,7 +15,7 @@ bundle.
 ```python
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model("/path/to/production_model_v1.3.1", n_jobs=8)
+clusterer = load_production_model("/path/to/production_model_v1.3.2", n_jobs=8)
 ```
 
 Without `n_jobs`, a loaded bundle keeps its stored `n_jobs=1` and scores

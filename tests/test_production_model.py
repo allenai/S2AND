@@ -1420,3 +1420,63 @@ def test_manifest_writer_rejects_invalid_release_or_lifecycle_before_writing(tmp
             )
 
     assert not (tmp_path / "manifest.json").exists()
+
+
+def test_rebinding_the_name_count_index_changes_only_the_bound_metadata(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    """Bind a complete model to another index and keep every trained file."""
+    from scripts.production.model.rebind_name_counts_index import rebind_name_counts_index
+    from tests.helpers import tiny_name_counts_index_path
+
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    bundle_dir = tmp_path / "explicit-pairwise"
+    write_pairwise_production_bundle(
+        source_clusterer,
+        bundle_dir,
+        release_version="9.9",
+        pairwise_training_config={"input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES)},
+        pairwise_training_summary={"pair_count": 11},
+    )
+    source = tmp_path / "complete" / "production_model_v9.9"
+    linker_dir = tmp_path / "linker"
+    finalize_production_bundle(
+        pairwise_bundle_dir=bundle_dir,
+        output_bundle_dir=source,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=_write_synthetic_linker(
+            bundle_dir, linker_dir, expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES
+        ),
+        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+    )
+    output = tmp_path / "rebound" / "production_model_v9.10"
+
+    report = rebind_name_counts_index(
+        source_model=source,
+        name_counts_index=Path(tiny_name_counts_index_path()),
+        output_model=output,
+        release_version="9.10",
+    )
+
+    loaded = load_production_model(output)
+    index_hash = tiny_name_counts_index().manifest_sha256
+    assert loaded.production_model_release_version == "9.10"
+    assert loaded.feature_contract["name_counts_manifest_sha256"] == index_hash
+    assert report["output_name_counts_manifest_sha256"] == index_hash != report["source_name_counts_manifest_sha256"]
+    changed = {
+        path.relative_to(output).as_posix()
+        for path in output.rglob("*")
+        if path.is_file() and path.read_bytes() != (source / path.relative_to(output)).read_bytes()
+    }
+    assert changed == {"clusterer.json", "incremental_linker/metadata.json", "manifest.json"}
+    # The source stays loadable, and a second run refuses to overwrite.
+    load_production_model(source)
+    with pytest.raises(FileExistsError):
+        rebind_name_counts_index(
+            source_model=source,
+            name_counts_index=Path(tiny_name_counts_index_path()),
+            output_model=output,
+            release_version="9.10",
+        )

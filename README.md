@@ -3,10 +3,10 @@
 S2AND provides author-name-disambiguation datasets and the reference model from [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421).
 The model predicts author clusters from paper and author records.
 
-This branch prepares Python/Rust runtime `1.0.0`, model release `1.3.1`, and data release `1.3`.
+This branch prepares Python/Rust runtime `1.0.0`, model release `1.3.2`, and data release `1.3`.
 
 > **Update at v1.3 release:** Runtime `1.0.0` is not on PyPI yet, and the release tag does not exist yet.
-> Use the `canonical-v2-migration` branch. The `1.3.1` model and the `1.3` data are published on S3.
+> Use the `canonical-v2-migration` branch. The `1.3.2` model and the `1.3` data are published on S3.
 
 Use [the release process](docs/release.md) for current preparation, fit, evaluation, and publication steps.
 
@@ -49,12 +49,13 @@ Sync the bundles into `s2and/data/`, the default data folder.
 The commands use the AWS CLI and need no AWS account.
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/inference/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.2/inference/ s2and/data/
 # Training, evaluation, and the quick start examples also need:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/dataset/ s2and/data/
 ```
 
 `inference` holds the complete model and the name-count index (2.4 GB).
+The `dataset` bundle works with every model release, so it stays under `s2and/1.3.1/`.
 `dataset` holds the benchmark Arrow data and labels (9.1 GB).
 The [data guide](docs/data.md#choose-the-required-data) states which bundles each user needs.
 Git ignores the downloaded files.
@@ -69,7 +70,7 @@ For `qian` the model puts 6,312 signatures into 1,248 clusters:
 
 ```bash
 uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-    --model-path s2and/data/production_model_v1.3.1 \
+    --model-path s2and/data/production_model_v1.3.2 \
     --arrow-dataset s2and/data/benchmarks/qian --n-jobs 8
 ```
 
@@ -79,7 +80,7 @@ The block's 303 other signatures arrive as new papers; 242 of them join a profil
 
 ```bash
 uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-    --model-path s2and/data/production_model_v1.3.1 \
+    --model-path s2and/data/production_model_v1.3.2 \
     --arrow-dataset s2and/data/benchmarks/aminer \
     --incremental-block "j wang" \
     --seed-clusters s2and/data/benchmarks/aminer/aminer_clusters.json \
@@ -92,7 +93,7 @@ In your own code, load the complete model from an explicit path:
 from s2and.arrow_inputs import ArrowDataset
 from s2and.production_model import load_production_model
 
-clusterer = load_production_model('s2and/data/production_model_v1.3.1', n_jobs=8)
+clusterer = load_production_model('s2and/data/production_model_v1.3.2', n_jobs=8)
 blocks = {'j smith': ['signature_1', 'signature_2']}
 with ArrowDataset.open('/path/to/your_arrow_dataset') as dataset:
     clusters, distances = clusterer.predict_from_arrow(

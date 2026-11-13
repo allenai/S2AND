@@ -2,7 +2,7 @@
 
 This guide defines the production release process.
 The Python and Rust package version is `1.0.0`.
-The current model version is `1.3.1`, on research snapshot `1.3`.
+The current model version is `1.3.2`, on research snapshot `1.3`.
 Public Arrow and name-count data use format `1`.
 
 The [data guide](data.md#download) lists the release `1.3` populations.
@@ -256,6 +256,9 @@ Write the bundles again with the accepted model, then publish each bundle to its
 Release `1.3` uses `s3://ai2-s2-research-public/s2and/1.3/` with `inference/`, `dataset/`, and `source/`.
 Model release `1.3.1` changes only linkage settings, so it publishes `inference/` and `dataset/` under `s2and/1.3.1/` and reuses the `1.3` `source/` bundle.
 Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan.
+Model release `1.3.2` rebinds the `1.3.1` model to a rebuilt name-count index with
+`scripts/production/model/rebind_name_counts_index.py`, so it publishes only `inference/` under `s2and/1.3.2/`.
+A dataset bundle does not name an index or a model release; publish a new one only when the data changes.
 Sync `inference` and `dataset` into one fresh local root.
 Verify hashes and repeat installed bulk and incremental smoke checks.
 Run one public step from the [reproduction guide](reproduce.md) on that root.

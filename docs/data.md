@@ -24,6 +24,11 @@ Its `inference/` and `dataset/` bundles are under `s2and/1.3.1/`.
 That `dataset/` bundle differs from the `1.3` one only in `pairwise/model_plan.json`.
 The `source/` bundle is unchanged and stays under `s2and/1.3/`.
 The `1.3` model remains at `s2and/1.3/inference/`.
+
+Model release `1.3.2` is the `1.3.1` model bound to a rebuilt name-count index.
+The index applies the `1.0.0b11` name rules: Georgian and Armenian names count under their new spellings.
+Its `inference/` bundle is under `s2and/1.3.2/`; it has no `dataset/` bundle and uses the `1.3.1` one.
+It needs `s2and` `1.0.0b11` or later. The `1.3.1` model remains at `s2and/1.3.1/inference/`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
 The complete model contains both pairwise boosters, the reviewed EPS, the incremental linker, and required prediction fixtures.
 See [the inference contract](production_inference.md#complete-model-bundles).
@@ -36,7 +41,7 @@ Sync the bundles into `s2and/data/`, the default data folder of a source checkou
 The commands use the AWS CLI and need no AWS account.
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/inference/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.2/inference/ s2and/data/
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/dataset/ s2and/data/
 # Release preparation only:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2and/data/
@@ -54,8 +59,8 @@ The model and the index bind their files through these manifests:
 
 | Manifest | SHA-256 |
 | --- | --- |
-| `production_model_v1.3.1/manifest.json` | `f688ee5b5945c40754601e109f2d490f54abec1d687e368e45efea17c15693b3` |
-| `name_counts_index/manifest.json` | `87459dc14e41fd676730f56b0857d3eb61015cdc42bd73ec9b8b01e2f2b8f4b3` |
+| `production_model_v1.3.2/manifest.json` | `10f19730fd355cf31770cde85bb11b12cd3c1144af3521da3f2e421d2a5cda02` |
+| `name_counts_index/manifest.json` | `cf0dac4845e8f7a5ef0b2efc0b0e0618310ccb13367347dfc0dc84abdd6da1b3` |
 
 The [reproduction guide](reproduce.md) runs the full training process on the synced folder.
 Release `1.3` excludes patent data.
@@ -78,7 +83,7 @@ Each future refresh of the index is a staff step.
 s2and/data/
   path_config.json  s2and_name_tuples_*.txt  first_k_letter_counts_from_orcid*.json   # tracked files
   name_counts_index/          # inference: binary name-count index
-  production_model_v1.3.1/    # inference: complete model
+  production_model_v1.3.2/    # inference: complete model
   manifest.json               # dataset: public-data manifest
   benchmarks/<source>/        # dataset: Arrow tables, <source>_clusters.json, unknown-signature list
   pairwise/

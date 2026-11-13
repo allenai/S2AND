@@ -4,6 +4,8 @@ This guide runs the production training process on the published `1.3` data.
 The result is approximately the released `1.3.1` model.
 `1.3.1` is the `1.3` fit with new linkage settings: close-pair bonus `8` for pairs under `0.05`, and EPS `0.40`.
 Its boosters and linker are the `1.3` files, so steps 1 and 3 reproduce the `1.3` fit.
+The current release, `1.3.2`, is this same model bound to a rebuilt name-count index; nothing in it is refitted.
+This guide uses the `1.3.1` index, the one the model was fitted with.
 Three steps stay outside public reproduction:
 
 - **Name counts.** Only AI2 staff can rebuild the name-count index from internal data. Use the released index.

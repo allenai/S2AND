@@ -1,5 +1,6 @@
 use crate::{HashMap, HashSet};
 use pyo3::prelude::PyResult;
+use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 pub(crate) fn ensure_unidecode_for_text(
     text: &str,
@@ -268,37 +269,89 @@ fn armenian_small_letter(ch: char) -> Option<char> {
         .then(|| char::from_u32(small).expect("Armenian small letter"))
 }
 
-/// Match Python `_RE_ARMENIAN_LETTER`: the capitals, small letters, and և.
+/// Match Python `_RE_ARMENIAN_LETTER`: the capitals, small letters, and ligatures.
 fn is_armenian_letter_or_ligature(ch: char) -> bool {
-    matches!(ch, '\u{0531}'..='\u{0556}' | '\u{0561}'..='\u{0587}')
+    matches!(ch, '\u{0531}'..='\u{0556}' | '\u{0561}'..='\u{0587}' | '\u{FB13}'..='\u{FB17}')
+}
+
+/// The two letters of an Armenian ligature, as NFKC splits it (mirrors Python
+/// `_ARMENIAN_LIGATURES`). Scholar applies NFKC first.
+fn armenian_ligature_letters(ch: char) -> Option<[char; 2]> {
+    match ch {
+        ARMENIAN_LIGATURE_ECH_YIWN => Some([ARMENIAN_ECH, ARMENIAN_YIWN]),
+        '\u{FB13}' => Some(['\u{0574}', '\u{0576}']),
+        '\u{FB14}' => Some(['\u{0574}', '\u{0565}']),
+        '\u{FB15}' => Some(['\u{0574}', '\u{056B}']),
+        '\u{FB16}' => Some(['\u{057E}', '\u{0576}']),
+        '\u{FB17}' => Some(['\u{0574}', '\u{056D}']),
+        _ => None,
+    }
+}
+
+/// Scholar deletes these characters before it reads an Armenian letter's
+/// neighbors: punctuation, nonspacing marks, and format, control,
+/// private-use, and surrogate characters (mirrors Python
+/// `_ARMENIAN_CONTEXT_SKIPPED_CATEGORIES`).
+fn skipped_in_armenian_context(ch: char) -> bool {
+    matches!(
+        ch.general_category(),
+        GeneralCategory::NonspacingMark
+            | GeneralCategory::Format
+            | GeneralCategory::Control
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Surrogate
+    ) || ch.general_category_group() == GeneralCategoryGroup::Punctuation
 }
 
 /// Romanize the Armenian letters of `text` with scholar's table (D10; mirrors
 /// Python `_romanize_armenian`). ու is "u". A word-initial ե is "ye", and a
-/// word-initial ո is "vo" unless վ follows. A word starts after any character
-/// that is not an Armenian letter. A capital gives a capitalized romanization.
+/// word-initial ո is "vo" unless վ follows. As in scholar, the neighbors of a
+/// letter skip punctuation, nonspacing marks, and format and control
+/// characters, and a word starts after a character that is not a letter
+/// (Unicode category L). A capital gives a capitalized romanization.
 fn romanize_armenian(text: &str) -> String {
-    let chars: Vec<char> = text
-        .chars()
-        .flat_map(|ch| {
-            if ch == ARMENIAN_LIGATURE_ECH_YIWN {
-                [Some(ARMENIAN_ECH), Some(ARMENIAN_YIWN)]
-            } else {
-                [Some(ch), None]
-            }
-        })
-        .flatten()
+    let mut chars: Vec<char> = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        match armenian_ligature_letters(ch) {
+            Some(letters) => chars.extend(letters),
+            None => chars.push(ch),
+        }
+    }
+    let folded: Vec<char> = chars
+        .iter()
+        .map(|&ch| armenian_small_letter(ch).unwrap_or(ch))
         .collect();
-    let small: Vec<Option<char>> = chars.iter().map(|&ch| armenian_small_letter(ch)).collect();
+    // The nearest kept neighbor on each side; `None` at either end of the text.
+    let kept: Vec<bool> = chars
+        .iter()
+        .map(|&ch| !skipped_in_armenian_context(ch))
+        .collect();
+    let mut previous_kept: Vec<Option<char>> = vec![None; chars.len()];
+    let mut last = None;
+    for index in 0..chars.len() {
+        previous_kept[index] = last;
+        if kept[index] {
+            last = Some(folded[index]);
+        }
+    }
+    let mut following_kept: Vec<Option<char>> = vec![None; chars.len()];
+    last = None;
+    for index in (0..chars.len()).rev() {
+        following_kept[index] = last;
+        if kept[index] {
+            last = Some(folded[index]);
+        }
+    }
     let mut out = String::with_capacity(text.len());
     for (index, &ch) in chars.iter().enumerate() {
-        let Some(letter) = small[index] else {
+        let Some(letter) = armenian_small_letter(ch) else {
             out.push(ch);
             continue;
         };
-        let previous = index.checked_sub(1).and_then(|before| small[before]);
-        let following = small.get(index + 1).copied().flatten();
-        let word_start = previous.is_none();
+        let previous = previous_kept[index];
+        let following = following_kept[index];
+        let word_start = previous
+            .is_none_or(|before| before.general_category_group() != GeneralCategoryGroup::Letter);
         let roman = if letter == ARMENIAN_VO && following == Some(ARMENIAN_YIWN) {
             "u"
         } else if letter == ARMENIAN_YIWN && previous == Some(ARMENIAN_VO) {

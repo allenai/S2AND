@@ -148,9 +148,15 @@ Armenian uses these context rules:
 - `ու` becomes `u`;
 - a word-initial `ե` becomes `ye`;
 - a word-initial `ո` becomes `vo`, unless `վ` follows; and
-- the ligature `և` is `ե` followed by `ւ`.
+- the ligatures `և` and U+FB13 to U+FB17 split into their letters, as NFKC
+  splits them.
 
-A word starts after any character that is not an Armenian letter.
+As in scholar, a letter's neighbors skip punctuation, nonspacing marks, and
+format and control characters, so `Տեր-Եղիազարյան` becomes `ter eghiazaryan`.
+A word starts after a character that is not a letter (Unicode category L), so
+a space starts a word and a Latin letter does not.
+Python reads categories from `unicodedata` and Rust from `unicode-properties`.
+They can differ for letters added in a newer Unicode version than Python's.
 Python `_canonical_name_pretranslate` and Rust `canonical_name_pretranslate`
 apply the rule, and the frozen examples cover both scripts.
 Name-count indexes built before D10 hold these names under the old spellings.

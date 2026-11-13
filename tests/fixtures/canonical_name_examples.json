@@ -49,7 +49,7 @@
     "D10": {
       "status": "decided",
       "title": "Georgian and Armenian use scholar's romanization",
-      "description": "Before transliteration, Georgian and Armenian letters romanize with the tables of scholar's block keys (BlockKeyNormalizers), not text_unidecode, so both systems agree: \u10d1\u10d4\u10e0\u10d8\u10eb\u10d4 is 'beridze', not 'berize'. Georgian uses the national system without apostrophes; Mtavruli capitals map like their Mkhedruli letters, in capitals, so the D9 case guard reads them as capitals. Armenian is Eastern Armenian: \u0578\u0582 is 'u', a word-initial \u0565 is 'ye', a word-initial \u0578 is 'vo' unless \u057e follows, and the ligature \u0587 is \u0565 plus \u0582. A word starts after any character that is not an Armenian letter. Approved 2026-11-13."
+      "description": "Before transliteration, Georgian and Armenian letters romanize with the tables of scholar's block keys (BlockKeyNormalizers), not text_unidecode, so both systems agree: \u10d1\u10d4\u10e0\u10d8\u10eb\u10d4 is 'beridze', not 'berize'. Georgian uses the national system without apostrophes; Mtavruli capitals map like their Mkhedruli letters, in capitals, so the D9 case guard reads them as capitals. Armenian is Eastern Armenian: \u0578\u0582 is 'u', a word-initial \u0565 is 'ye', a word-initial \u0578 is 'vo' unless \u057e follows, and the ligatures (\u0587 and U+FB13-U+FB17) split into their letters as under NFKC. As in scholar, a letter's neighbors skip punctuation (dashes and apostrophes included), nonspacing marks, and format and control characters, and a word starts after a character that is not a letter (Unicode category L). Approved 2026-11-13."
     }
   },
   "compare_compatibility": {
@@ -3109,6 +3109,81 @@
         "D9"
       ],
       "notes": "D9: an all-capitals Armenian last stops the initials split."
+    },
+    {
+      "id": "armenian-hyphen-not-word-start",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u0531\u0580\u0561\u0574",
+        "middle": "",
+        "last": "\u054f\u0565\u0580-\u0535\u0572\u056b\u0561\u0566\u0561\u0580\u0575\u0561\u0576"
+      },
+      "canonical": {
+        "first": "aram",
+        "middle": "",
+        "last": "ter eghiazaryan",
+        "count_keys": {
+          "first": "aram",
+          "last": "ter eghiazaryan",
+          "first_last": "aram ter eghiazaryan",
+          "last_first_initial": "ter eghiazaryan a"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "Scholar deletes the dash before it reads neighbors, so \u0535 after it is not word-initial."
+    },
+    {
+      "id": "armenian-after-latin-letter",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u0531\u0580\u0561\u0574",
+        "middle": "",
+        "last": "T\u0565\u0580-\u054a\u0565\u057f\u0580\u0578\u057d\u0575\u0561\u0576"
+      },
+      "canonical": {
+        "first": "aram",
+        "middle": "",
+        "last": "ter petrosyan",
+        "count_keys": {
+          "first": "aram",
+          "last": "ter petrosyan",
+          "first_last": "aram ter petrosyan",
+          "last_first_initial": "ter petrosyan a"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "A Latin letter before \u0565 continues the word, as Character.isLetter does in scholar."
+    },
+    {
+      "id": "armenian-presentation-ligature",
+      "family": "transliteration",
+      "equivalence_group": null,
+      "input": {
+        "first": "\u054e\u0561\u0580\u0564\u0561\u0576",
+        "middle": "",
+        "last": "\ufb13\u0561\u0581\u0561\u056f\u0561\u0576\u0575\u0561\u0576"
+      },
+      "canonical": {
+        "first": "vardan",
+        "middle": "",
+        "last": "mnatsakanyan",
+        "count_keys": {
+          "first": "vardan",
+          "last": "mnatsakanyan",
+          "first_last": "vardan mnatsakanyan",
+          "last_first_initial": "mnatsakanyan v"
+        }
+      },
+      "decisions": [
+        "D10"
+      ],
+      "notes": "U+FB13 splits into \u0574\u0576 as under NFKC."
     }
   ]
 }

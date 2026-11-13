@@ -1,5 +1,6 @@
 import logging
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Set
 from functools import lru_cache
@@ -443,9 +444,20 @@ _ARMENIAN_ROMANIZATION = dict(
 )
 # Armenian capitals sit 0x30 below their small letters.
 _ARMENIAN_SMALL_FROM_CAPITAL = {chr(ord(small) - 0x30): small for small in _ARMENIAN_ROMANIZATION}
-# The ligature և is ե plus ւ under NFKC, which scholar applies first.
-_ARMENIAN_LIGATURE_ECH_YIWN = "և"
-_RE_ARMENIAN_LETTER = re.compile("[Ա-Ֆա-և]")
+# Scholar applies NFKC first, which splits the Armenian ligatures into letters.
+_ARMENIAN_LIGATURES = {
+    "և": "եւ",
+    "ﬓ": "մն",
+    "ﬔ": "մե",
+    "ﬕ": "մի",
+    "ﬖ": "վն",
+    "ﬗ": "մխ",
+}
+_RE_ARMENIAN_LETTER = re.compile("[Ա-Ֆա-ևﬓ-ﬗ]")
+# Scholar deletes these characters before it reads an Armenian letter's
+# neighbors: punctuation, nonspacing marks, and format, control, private-use,
+# and surrogate characters. The context rules skip them.
+_ARMENIAN_CONTEXT_SKIPPED_CATEGORIES = frozenset({"Mn", "Cf", "Cc", "Co", "Cs"})
 
 _CANONICAL_NAME_TRANSLATION = str.maketrans(
     {
@@ -508,12 +520,32 @@ def _romanize_armenian(text: str) -> str:
     """Romanize the Armenian letters of ``text`` with scholar's table (D10).
 
     ու is ``u``. A word-initial ե is ``ye``, and a word-initial ո is ``vo``
-    unless վ follows. A word starts after any character that is not an
-    Armenian letter. A capital gives a capitalized romanization.
+    unless վ follows. As in scholar, the neighbors of a letter skip
+    punctuation, nonspacing marks, and format and control characters, and a
+    word starts after a character that is not a letter (Unicode category L).
+    A capital gives a capitalized romanization.
     """
 
-    text = text.replace(_ARMENIAN_LIGATURE_ECH_YIWN, "եւ")
+    for ligature, letters in _ARMENIAN_LIGATURES.items():
+        text = text.replace(ligature, letters)
     small = [_ARMENIAN_SMALL_FROM_CAPITAL.get(character, character) for character in text]
+    # The nearest kept neighbor on each side; "" at either end of the text.
+    kept = [
+        not (category in _ARMENIAN_CONTEXT_SKIPPED_CATEGORIES or category[0] == "P")
+        for category in map(unicodedata.category, text)
+    ]
+    previous_kept = [""] * len(text)
+    last = ""
+    for index in range(len(text)):
+        previous_kept[index] = last
+        if kept[index]:
+            last = small[index]
+    following_kept = [""] * len(text)
+    last = ""
+    for index in range(len(text) - 1, -1, -1):
+        following_kept[index] = last
+        if kept[index]:
+            last = small[index]
     pieces: list[str] = []
     for index, character in enumerate(text):
         letter = small[index]
@@ -521,9 +553,9 @@ def _romanize_armenian(text: str) -> str:
         if roman is None:
             pieces.append(character)
             continue
-        previous = small[index - 1] if index else ""
-        following = small[index + 1] if index + 1 < len(small) else ""
-        word_start = previous not in _ARMENIAN_ROMANIZATION
+        previous = previous_kept[index]
+        following = following_kept[index]
+        word_start = not previous or not unicodedata.category(previous).startswith("L")
         if letter == "ո" and following == "ւ":
             roman = "u"
         elif letter == "ւ" and previous == "ո":
@@ -752,7 +784,7 @@ def canonical_lasts_equivalent(last_a: str, last_b: str) -> bool:
 
 SURNAME_VARIANTS_FILENAME = "s2and_surname_variants_canonical.txt"
 # A Slavic -sky ending after at least two letters; every spelling maps to -skii.
-_SLAVIC_SKY_ENDING = re.compile(r"(?<=[a-z]{2})sk(?:iy|yi|yy|ii|ij|yj|y)$")
+_SLAVIC_SKY_ENDING = re.compile(r"(?<=[a-z]{2})sk(?:iy|yi|yy|ii|ij|yj|y)\Z")
 
 
 @lru_cache(maxsize=1)

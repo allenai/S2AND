@@ -6,7 +6,8 @@
   `s2and/data/s2and_surname_variants_canonical.txt` (`mueller` and `muller`) and the Slavic endings
   `-sky`/`-skiy`/`-skii`. Only the last-name veto changes; canonical names, count keys, and features keep the
   stored spelling. On the 9 benchmark blocks that hold both spellings of a listed surname, B3 F1 rises from
-  0.878 to 0.986. Scholar's block keys put these spellings in one block (scholar issue 42640, options 18
+  0.878 to 0.986: recall rises from 0.783 to 0.978 and precision falls from 1.000 to 0.994, from one wrong
+  mention. Scholar's block keys put these spellings in one block (scholar issue 42640, options 18
   and 19). See "Canonical name contract" in `docs/canonical_names.md`.
 - Romanize Georgian and Armenian names with scholar's tables (canonical name decision D10), not
   `text_unidecode`: `ბერიძე` becomes `beridze`, not `berize`, and Georgian capitals no longer drop.

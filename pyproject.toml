@@ -99,6 +99,8 @@ cache-keys = [
   { file = "s2and_rust/Cargo.toml" },
   { file = "s2and_rust/Cargo.lock" },
   { file = "s2and_rust/build.rs" },
+  # Rust embeds the surname variant list, so an edit to it must rebuild.
+  { file = "s2and/data/s2and_surname_variants_canonical.txt" },
   { file = "s2and_rust/src/**/*.rs" },
   { file = "s2and_rust/vendor/cld2/Cargo.toml" },
   { file = "s2and_rust/vendor/cld2/src/**/*.rs" },

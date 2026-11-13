@@ -79,8 +79,10 @@ def test_public_native_helpers_match_georgian_and_armenian_romanization() -> Non
 
     native = load_s2and_rust_extension()
     code_points = [*range(0x0530, 0x0590), *range(0x10A0, 0x1100), *range(0x1C90, 0x1CC0)]
-    # ո, ւ, վ, ե, and the ligature drive the Armenian context rules; Ո is a capital.
+    # ո, ւ, վ, ե, and the ligatures drive the Armenian context rules; Ո is a capital.
+    # Dashes, marks, and format characters are skipped; Latin and Georgian letters continue a word.
     contexts = ["{}", "ա{}ա", "{}ւ", "ո{}", "{}վ", "Ո{}", "x-{} {}և", "{}ևա", "ԵՐ{}"]
+    contexts += ["a{}ե", "{}-ե", "ա́{}", "{}́ւ", "ﬓ{}", "ო{}ե", "{}‌ե", "({}) ո"]
     for code_point in code_points:
         for context in contexts:
             text = context.format(chr(code_point), chr(code_point))

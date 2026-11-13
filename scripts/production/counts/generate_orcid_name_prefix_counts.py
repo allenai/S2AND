@@ -259,7 +259,8 @@ def build_prefix_counts_from_sorted_rows(
 
         last_entry = canonical_last_cache.get(raw_last)
         if last_entry is None:
-            # The same space-insensitive comparison key as canonical_lasts_equivalent.
+            # Spaces are removed as in canonical_lasts_equivalent. Listed spelling variants
+            # and -sky endings stay distinct here; the published artifact predates that rule.
             last_entry = (
                 canonicalize_name_text(raw_last).replace(" ", ""),
                 last_name_allows_joined_initials(raw_last),

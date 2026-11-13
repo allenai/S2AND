@@ -27,7 +27,8 @@ pub(crate) fn lasts_equivalent_for_constraint(l1: &str, l2: &str) -> bool {
 
 // Blocking puts both spellings of a listed surname under one block key, so the
 // constraint must not veto them. Same file as s2and.text.surname_variant_map.
-const SURNAME_VARIANTS: &str =
+// Build info exposes it, so a stale build fails the test-session check.
+pub(crate) const SURNAME_VARIANTS: &str =
     include_str!("../../s2and/data/s2and_surname_variants_canonical.txt");
 
 fn surname_variants() -> &'static HashMap<&'static str, &'static str> {

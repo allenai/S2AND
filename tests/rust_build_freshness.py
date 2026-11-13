@@ -137,7 +137,17 @@ def stale_rust_extension_message(root: Path = RUST_PACKAGE_ROOT) -> str | None:
     except (OSError, ValueError) as exc:
         return f"Cannot verify s2and_rust source freshness: {exc}. Correct the native source inputs before rebuilding."
     if embedded == expected:
-        return None
+        # constraints.rs embeds this file from outside the crate, so the digest misses it.
+        embedded_variants = get_build_info().get("surname_variants")
+        variants_path = root.parent / "s2and" / "data" / "s2and_surname_variants_canonical.txt"
+        if embedded_variants is None or not variants_path.is_file():
+            return None
+        if embedded_variants == variants_path.read_text(encoding="utf-8"):
+            return None
+        return (
+            f"Loaded s2and_rust extension {loaded} embeds a different {variants_path.name}. "
+            f"Rebuild it with: {REBUILD_COMMAND}"
+        )
     return (
         f"Loaded s2and_rust extension {loaded} was built from different sources "
         f"(embedded={embedded!r}, checkout={expected!r}). Rebuild it with: {REBUILD_COMMAND}. "

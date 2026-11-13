@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import s2and
 from s2and import _s2and_rust as s2and_rust
 
 
@@ -9,6 +12,10 @@ def main() -> None:
     """Validate APIs needed by production scoring without loading model data."""
 
     build_info = s2and_rust.get_build_info()
+    # Rust embeds the surname variant list at build time, and Python reads the packaged copy.
+    variants_path = Path(s2and.__file__).parent / "data" / "s2and_surname_variants_canonical.txt"
+    if build_info.get("surname_variants") != variants_path.read_text(encoding="utf-8"):
+        raise RuntimeError(f"s2and_rust embeds a different surname variant list than {variants_path}")
     required_planner_methods = {
         "from_query_signatures",
         "from_auto_queries",

@@ -1192,6 +1192,9 @@ def _fnv64_arrow_utf8(keys: Any) -> np.ndarray:
     else:
         # Non-string keys hash their text form, as the per-key path always did.
         return np.asarray(_fnv64_utf8_batch([str(key) for key in keys.to_pylist()]), dtype=np.uint64)
+    if len(keys) == 0:
+        # A zero-row array may come with an empty offsets buffer, which has no room for the one offset read below.
+        return np.zeros(0, dtype=np.uint64)
     _validity, offsets_buffer, data_buffer = keys.buffers()
     offsets = np.frombuffer(
         offsets_buffer, dtype=offset_dtype, count=len(keys) + 1, offset=keys.offset * offset_dtype.itemsize

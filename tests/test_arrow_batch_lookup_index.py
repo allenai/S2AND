@@ -77,6 +77,41 @@ def test_vectorized_arrow_hash_matches_python_fnv1a64(arrow_type: str) -> None:
     assert hashes.tolist() == [feature_block_arrow_module._fnv64_bytes(v.encode("utf-8")) for v in values]  # noqa: SLF001
 
 
+def _empty_keys_without_offsets(arrow_type: str):  # noqa: ANN202
+    """A zero-row string array whose offsets buffer is empty, as the Java Arrow writer sends it."""
+    import pyarrow as pa
+
+    return pa.Array.from_buffers(getattr(pa, arrow_type)(), 0, [None, pa.py_buffer(b""), pa.py_buffer(b"")])
+
+
+@pytest.mark.parametrize("arrow_type", ["string", "large_string"])
+def test_vectorized_arrow_hash_accepts_zero_rows_with_empty_offsets_buffer(arrow_type: str) -> None:
+    keys = _empty_keys_without_offsets(arrow_type)
+    assert keys.buffers()[1].size == 0
+
+    hashes = feature_block_arrow_module._fnv64_arrow_utf8(keys)  # noqa: SLF001
+
+    assert hashes.dtype.name == "uint64"
+    assert hashes.tolist() == []
+
+
+def test_index_accepts_a_zero_row_batch_with_empty_offsets_buffer(tmp_path: Path) -> None:
+    import pyarrow as pa
+
+    keys = _empty_keys_without_offsets("string")
+    path = tmp_path / "specter.arrow"
+    with pa.OSFile(str(path), "wb") as sink, pa.ipc.new_file(sink, pa.schema([("paper_id", pa.string())])) as writer:
+        writer.write_batch(pa.record_batch([keys], names=["paper_id"]))
+    index_path = tmp_path / "specter.index"
+
+    write_arrow_batch_lookup_index(str(path), index_path, key_column="paper_id", table_name="specter")
+
+    assert (
+        read_arrow_batch_lookup_index_batch_indices(str(path), index_path, key_column="paper_id", values=iter(["p1"]))
+        == set()
+    )
+
+
 def test_vectorized_arrow_hash_uses_text_form_for_non_string_keys() -> None:
     import pyarrow as pa
 

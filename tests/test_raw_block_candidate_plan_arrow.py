@@ -613,6 +613,34 @@ def test_rust_featurizer_from_arrow_dataset_accepts_empty_specter_table(tmp_path
     assert np.isnan(matrix).any()
 
 
+def test_rust_featurizer_accepts_a_zero_row_specter_batch_with_empty_offsets_buffer(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path, with_indexes=False)
+    paper_ids = pa.Array.from_buffers(pa.string(), 0, [None, pa.py_buffer(b""), pa.py_buffer(b"")])
+    embeddings = pa.FixedSizeListArray.from_arrays(pa.array([], type=pa.float32()), 1)
+    specter_path = tmp_path / "specter.arrow"
+    with (
+        pa.OSFile(str(specter_path), "wb") as sink,
+        pa.ipc.new_file(sink, pa.schema([("paper_id", pa.string()), ("embedding", embeddings.type)])) as writer,
+    ):
+        writer.write_batch(pa.record_batch([paper_ids, embeddings], names=["paper_id", "embedding"]))
+    paths["specter"] = str(specter_path)
+    paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+
+    featurizer = _native_featurizer(paths, ["q1", "s1"], set())
+    signature_index = {str(signature_id): index for index, signature_id in enumerate(featurizer.signature_ids())}
+    matrix = np.asarray(
+        featurizer.featurize_pairs_matrix_indexed(
+            [(signature_index["q1"], signature_index["s1"])],
+            None,
+            1,
+            np.nan,
+        )
+    )
+
+    assert matrix.shape == (1, 33)
+    assert np.isnan(matrix).any()
+
+
 @pytest.mark.parametrize(
     ("name_tuples", "message"),
     [

@@ -311,7 +311,7 @@ clusterer.name_conflict_repair_max_distance = None
 clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
 ```
 
-Three more class attributes on `Clusterer` change the repair. Their defaults keep the
+Four more class attributes on `Clusterer` change the repair. Their defaults keep the
 released rule, and a model bundle does not record them:
 
 - `name_conflict_repair_uses_close_pair_bonus` (default `False`): compare the close-pair
@@ -324,6 +324,8 @@ released rule, and a model bundle does not record them:
   keep a mention with a full first name once the odd mentions are left out.
 - `name_conflict_repair_rounds` (default `1`): the most repair rounds per block. A round
   merges each cluster at most once; a later round sees the merged clusters.
+- `name_conflict_repair_initials_side_min_mentions` (default `None`): a side with no full
+  first name passes the full-name test when it keeps at least this many mentions.
 
 The setting applies wherever a call builds a block's distances and clusters them:
 `predict_from_arrow`, `predict`, `predict_from_rust_featurizer`, and the two clustering

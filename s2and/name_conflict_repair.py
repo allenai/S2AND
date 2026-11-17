@@ -106,8 +106,26 @@ def _close_code(repair: NameConflictRepair) -> int:
 
 
 def _height_bound(code_sum: float, close_count: float, count: int, repair: NameConflictRepair) -> float:
-    """Upper bound of the close-pair height from a code sum and a lower bound of close pairs."""
-    return ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
+    """Upper bound of the close-pair height from a code sum and a lower bound of close pairs.
+
+    With a bonus bound set, a pair whose plain average is over the limit may use the bonus
+    only when enough of its pairs are certainly close and its plain average is under the cap.
+    A few very close pairs then cannot carry two clusters that are otherwise far apart.
+    Such a pair gets an infinite bound.
+    """
+    adjusted = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
+    if repair.close_pair_bonus <= 0 or (
+        repair.bonus_min_close_share is None and repair.bonus_max_plain_average is None
+    ):
+        return adjusted
+    plain = (code_sum / count + 1) / _SCALE
+    if plain <= repair.max_average_distance:
+        return adjusted
+    if repair.bonus_min_close_share is not None and close_count < repair.bonus_min_close_share * count:
+        return math.inf
+    if repair.bonus_max_plain_average is not None and plain > repair.bonus_max_plain_average:
+        return math.inf
+    return adjusted
 
 
 def _common_odd_average_bound(
@@ -162,6 +180,11 @@ class NameConflictRepair:
         rounds: Most repair rounds per block; each merges a cluster at most once.
         initials_side_min_mentions: A side with no full first name passes the full-name
             test when it keeps at least this many mentions. ``None`` exempts no side.
+        bonus_min_close_share: With a close-pair bonus, a pair whose plain average is
+            over ``max_average_distance`` needs at least this share of certainly close
+            pairs. ``None`` sets no floor.
+        bonus_max_plain_average: With a close-pair bonus, the plain average above which
+            the bonus cannot carry a pair. ``None`` sets no cap.
         full_first_names: Signature ids whose first name is longer than one letter.
         orcids: ORCID per signature id, for signatures that have one.
         name_rules_alone_forbid: For pairs of signature ids, whether the name rules make
@@ -182,6 +205,8 @@ class NameConflictRepair:
     require_full_first_names: bool = True
     rounds: int = 1
     initials_side_min_mentions: int | None = None
+    bonus_min_close_share: float | None = None
+    bonus_max_plain_average: float | None = None
 
     def lacks_full_name(self, side: Sequence[str]) -> bool:
         """Whether a side fails the full-first-name test."""
@@ -196,6 +221,10 @@ class NameConflictRepair:
             raise ValueError("close_pair_bonus must be finite and non-negative")
         if self.close_pair_bonus > 0 and not 0 < self.close_pair_distance <= 1:
             raise ValueError("close_pair_distance must lie in (0, 1] when close_pair_bonus is positive")
+        if self.bonus_min_close_share is not None and not 0 <= self.bonus_min_close_share <= 1:
+            raise ValueError("bonus_min_close_share must lie in [0, 1]")
+        if self.bonus_max_plain_average is not None and not 0 < self.bonus_max_plain_average <= 1:
+            raise ValueError("bonus_max_plain_average must lie in (0, 1]")
 
 
 def has_full_first_name(first: str | None) -> bool:

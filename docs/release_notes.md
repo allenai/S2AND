@@ -10,11 +10,13 @@
   equivalent Unicode characters and expanding `々`. Incomplete transliterations cannot veto a merge.
   A pair with a romanized name uses the ordinary rules. See "Canonical name contract" in
   `docs/canonical_names.md`.
-- Add four opt-in name-conflict repair settings on `Clusterer`, all off by default:
+- Add six opt-in name-conflict repair settings on `Clusterer`, all off by default:
   `name_conflict_repair_uses_close_pair_bonus` tests the close-pair linkage height instead of the
   plain average, `name_conflict_repair_requires_full_first_names` can drop the full-first-name test,
-  `name_conflict_repair_rounds` repeats the repair, and
-  `name_conflict_repair_initials_side_min_mentions` lets a large initials-only side pass the full-name test. The Rust kernel `name_conflict_candidates`
+  `name_conflict_repair_rounds` repeats the repair,
+  `name_conflict_repair_initials_side_min_mentions` lets a large initials-only side pass the full-name test,
+  and `name_conflict_repair_bonus_min_close_share` with `name_conflict_repair_bonus_max_plain_average`
+  limits what the close-pair bonus can carry. The Rust kernel `name_conflict_candidates`
   takes `close_code` and `bonus_code` (defaults keep the plain average) and returns a close-pair
   count with each candidate. See "Name-conflict repair" in `docs/production_inference.md`.
 - Publish model release `1.3.2`: the `1.3.1` boosters, linker, and linkage settings, bound to a name-count

@@ -12,6 +12,7 @@ import pytest
 from scipy.spatial.distance import squareform
 
 import s2and.model as model_module
+import s2and.name_conflict_repair as name_conflict_repair_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
@@ -162,6 +163,77 @@ def test_close_pair_height_equals_the_plain_average_without_close_pairs() -> Non
     square = _square(cross=0.3)
     repair = NameConflictRepair(0.2, FULL, close_pair_bonus=8.0, close_pair_distance=0.05)
     assert _repair(square, repair) == _labels(square)
+
+
+def _bounded(floor: float | None, cap: float | None) -> NameConflictRepair:
+    return NameConflictRepair(
+        0.2,
+        FULL,
+        close_pair_bonus=8.0,
+        close_pair_distance=0.05,
+        bonus_min_close_share=floor,
+        bonus_max_plain_average=cap,
+    )
+
+
+def _code_sum(plain_bound: float, count: int) -> float:
+    """Code sum whose plain-average upper bound is ``plain_bound``."""
+    return count * (plain_bound * 254.999 - 1)
+
+
+@pytest.mark.parametrize(
+    ("plain", "close", "passes"),
+    [
+        # The bonus carries a pair over the limit only with a 10% close share ...
+        (0.30, 10, True),
+        (0.30, 9, False),
+        # ... and a plain average under the cap, however many pairs are close.
+        (0.36, 50, False),
+        (0.35, 50, True),
+        # A pair under the limit on its plain average needs no close pair.
+        (0.15, 0, True),
+    ],
+)
+def test_bonus_bound_limits_what_the_bonus_can_carry(plain: float, close: int, passes: bool) -> None:
+    bound = name_conflict_repair_module._height_bound(_code_sum(plain, 100), close, 100, _bounded(0.10, 0.35))
+    assert (bound <= 0.2) is passes
+
+
+def test_bonus_bound_off_keeps_the_close_pair_height() -> None:
+    repair = _bounded(None, None)
+    assert name_conflict_repair_module._height_bound(_code_sum(0.30, 100), 2, 100, repair) == pytest.approx(
+        0.30 - 8.0 * 0.02
+    )
+
+
+@pytest.mark.parametrize(("floor", "cap", "merges"), [(0.10, None, True), (0.40, None, False), (None, 0.35, False)])
+def test_bonus_bound_applies_in_block_repair(floor: float | None, cap: float | None, merges: bool) -> None:
+    # 9 of 25 clean pairs are close and the plain average is about 0.52.
+    square = _half_close_square()
+    merged = _partition(_repair(square, _bounded(floor, cap))) == {
+        frozenset(SIGNATURES[:11]),
+        frozenset(SIGNATURES[11:]),
+    }
+    assert merged is merges
+
+
+@pytest.mark.parametrize(("floor", "cap"), [(-0.1, None), (1.1, None), (None, 0.0), (None, 1.5)])
+def test_repair_settings_reject_an_invalid_bonus_bound(floor: float | None, cap: float | None) -> None:
+    with pytest.raises(ValueError, match="bonus_m"):
+        _bounded(floor, cap)
+
+
+def test_clusterer_hands_its_bonus_bound_to_the_repair() -> None:
+    clusterer = SimpleNamespace(
+        cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05),
+        name_conflict_repair_uses_close_pair_bonus=True,
+        name_conflict_repair_bonus_min_close_share=0.1,
+        name_conflict_repair_bonus_max_plain_average=0.35,
+    )
+    settings = model_module._repair_height_settings(clusterer)
+    assert (settings["bonus_min_close_share"], settings["bonus_max_plain_average"]) == (0.1, 0.35)
+    assert Clusterer.name_conflict_repair_bonus_min_close_share is None
+    assert Clusterer.name_conflict_repair_bonus_max_plain_average is None
 
 
 @pytest.mark.parametrize(("bonus", "distance"), [(-1.0, 0.05), (float("nan"), 0.05), (8.0, 0.0), (8.0, 1.5)])

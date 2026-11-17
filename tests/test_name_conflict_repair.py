@@ -165,7 +165,7 @@ def test_close_pair_height_equals_the_plain_average_without_close_pairs() -> Non
     assert _repair(square, repair) == _labels(square)
 
 
-def _bounded(floor: float | None, cap: float | None) -> NameConflictRepair:
+def _bounded(floor: float | None, cap: float | None, min_side: int | None = None) -> NameConflictRepair:
     return NameConflictRepair(
         0.2,
         FULL,
@@ -173,6 +173,7 @@ def _bounded(floor: float | None, cap: float | None) -> NameConflictRepair:
         close_pair_distance=0.05,
         bonus_min_close_share=floor,
         bonus_max_plain_average=cap,
+        bonus_min_side_mentions=min_side,
     )
 
 
@@ -217,10 +218,35 @@ def test_bonus_bound_applies_in_block_repair(floor: float | None, cap: float | N
     assert merged is merges
 
 
-@pytest.mark.parametrize(("floor", "cap"), [(-0.1, None), (1.1, None), (None, 0.0), (None, 1.5)])
-def test_repair_settings_reject_an_invalid_bonus_bound(floor: float | None, cap: float | None) -> None:
+@pytest.mark.parametrize(
+    ("floor", "cap", "min_side"),
+    [(-0.1, None, None), (1.1, None, None), (None, 0.0, None), (None, 1.5, None), (None, None, 0)],
+)
+def test_repair_settings_reject_an_invalid_bonus_bound(
+    floor: float | None, cap: float | None, min_side: int | None
+) -> None:
     with pytest.raises(ValueError, match="bonus_m"):
-        _bounded(floor, cap)
+        _bounded(floor, cap, min_side)
+
+
+@pytest.mark.parametrize(("smaller_side", "passes"), [(9, False), (10, True), (None, True)])
+def test_bonus_bound_needs_enough_mentions_on_each_side(smaller_side: int | None, passes: bool) -> None:
+    repair = _bounded(0.10, 0.35, min_side=10)
+    bound = name_conflict_repair_module._height_bound(_code_sum(0.30, 100), 20, 100, repair, smaller_side)
+    assert (bound <= 0.2) is passes
+    # A pair under the limit on its plain average keeps the repair's own minimum.
+    assert name_conflict_repair_module._height_bound(_code_sum(0.15, 100), 0, 100, repair, 5) <= 0.2
+
+
+@pytest.mark.parametrize(("min_side", "merges"), [(5, True), (6, False)])
+def test_bonus_min_side_applies_in_block_repair(min_side: int, merges: bool) -> None:
+    # The two sides keep 5 mentions each once the odd mention is left out.
+    square = _half_close_square()
+    merged = _partition(_repair(square, _bounded(0.10, None, min_side))) == {
+        frozenset(SIGNATURES[:11]),
+        frozenset(SIGNATURES[11:]),
+    }
+    assert merged is merges
 
 
 def test_clusterer_hands_its_bonus_bound_to_the_repair() -> None:
@@ -229,11 +255,17 @@ def test_clusterer_hands_its_bonus_bound_to_the_repair() -> None:
         name_conflict_repair_uses_close_pair_bonus=True,
         name_conflict_repair_bonus_min_close_share=0.1,
         name_conflict_repair_bonus_max_plain_average=0.35,
+        name_conflict_repair_bonus_min_side_mentions=10,
     )
     settings = model_module._repair_height_settings(clusterer)
-    assert (settings["bonus_min_close_share"], settings["bonus_max_plain_average"]) == (0.1, 0.35)
+    assert (
+        settings["bonus_min_close_share"],
+        settings["bonus_max_plain_average"],
+        settings["bonus_min_side_mentions"],
+    ) == (0.1, 0.35, 10)
     assert Clusterer.name_conflict_repair_bonus_min_close_share is None
     assert Clusterer.name_conflict_repair_bonus_max_plain_average is None
+    assert Clusterer.name_conflict_repair_bonus_min_side_mentions is None
 
 
 @pytest.mark.parametrize(("bonus", "distance"), [(-1.0, 0.05), (float("nan"), 0.05), (8.0, 0.0), (8.0, 1.5)])

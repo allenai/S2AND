@@ -311,7 +311,7 @@ clusterer.name_conflict_repair_max_distance = None
 clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
 ```
 
-Six more class attributes on `Clusterer` change the repair. Their defaults keep the
+Seven more class attributes on `Clusterer` change the repair. Their defaults keep the
 released rule, and a model bundle does not record them:
 
 - `name_conflict_repair_uses_close_pair_bonus` (default `False`): compare the close-pair
@@ -326,12 +326,14 @@ released rule, and a model bundle does not record them:
   merges each cluster at most once; a later round sees the merged clusters.
 - `name_conflict_repair_initials_side_min_mentions` (default `None`): a side with no full
   first name passes the full-name test when it keeps at least this many mentions.
-- `name_conflict_repair_bonus_min_close_share` and
-  `name_conflict_repair_bonus_max_plain_average` (default `None`): with the close-pair
+- `name_conflict_repair_bonus_min_close_share`,
+  `name_conflict_repair_bonus_max_plain_average` and
+  `name_conflict_repair_bonus_min_side_mentions` (default `None`): with the close-pair
   height on, a pair whose plain average is over the limit may use the bonus only when at
-  least this share of its pairs is certainly close and its plain average is at most the cap.
-  A few very close pairs then cannot carry two clusters that are otherwise far apart. A pair
-  under the limit on its plain average is not affected.
+  least this share of its pairs is certainly close, its plain average is at most the cap,
+  and each side keeps at least this many mentions. A few very close pairs then cannot carry
+  two clusters that are otherwise far apart. A pair under the limit on its plain average is
+  not affected.
 
 The setting applies wherever a call builds a block's distances and clusters them:
 `predict_from_arrow`, `predict`, `predict_from_rust_featurizer`, and the two clustering

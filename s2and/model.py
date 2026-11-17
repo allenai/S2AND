@@ -827,6 +827,7 @@ def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
         settings["close_pair_distance"] = float(getattr(cluster_model, "close_pair_distance", 0.0))
         settings["bonus_min_close_share"] = getattr(clusterer, "name_conflict_repair_bonus_min_close_share", None)
         settings["bonus_max_plain_average"] = getattr(clusterer, "name_conflict_repair_bonus_max_plain_average", None)
+        settings["bonus_min_side_mentions"] = getattr(clusterer, "name_conflict_repair_bonus_min_side_mentions", None)
     return settings
 
 
@@ -2024,12 +2025,13 @@ class Clusterer:
     name_conflict_repair_initials_side_min_mentions: int | None = None
 
     # With the close-pair bonus on, a repair pair whose plain average is over the repair
-    # distance may use the bonus only with at least this share of certainly close pairs and
-    # a plain average at most the cap. None sets no floor or no cap. A few very close pairs
-    # then cannot carry two clusters that are otherwise far apart. Class attributes, like
-    # the repair distance.
+    # distance may use the bonus only with at least this share of certainly close pairs, a
+    # plain average at most the cap, and at least this many mentions on each side. None sets
+    # no such limit. A few very close pairs then cannot carry two clusters that are otherwise
+    # far apart. Class attributes, like the repair distance.
     name_conflict_repair_bonus_min_close_share: float | None = None
     name_conflict_repair_bonus_max_plain_average: float | None = None
+    name_conflict_repair_bonus_min_side_mentions: int | None = None
 
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name

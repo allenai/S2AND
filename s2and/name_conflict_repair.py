@@ -105,17 +105,21 @@ def _close_code(repair: NameConflictRepair) -> int:
     return math.floor(repair.close_pair_distance * _SCALE - 1)
 
 
-def _height_bound(code_sum: float, close_count: float, count: int, repair: NameConflictRepair) -> float:
+def _height_bound(
+    code_sum: float, close_count: float, count: int, repair: NameConflictRepair, smaller_side: int | None = None
+) -> float:
     """Upper bound of the close-pair height from a code sum and a lower bound of close pairs.
 
     With a bonus bound set, a pair whose plain average is over the limit may use the bonus
-    only when enough of its pairs are certainly close and its plain average is under the cap.
-    A few very close pairs then cannot carry two clusters that are otherwise far apart.
-    Such a pair gets an infinite bound.
+    only when enough of its pairs are certainly close, its plain average is under the cap and
+    its smaller side keeps enough mentions. A few very close pairs then cannot carry two
+    clusters that are otherwise far apart. Such a pair gets an infinite bound.
     """
     adjusted = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
     if repair.close_pair_bonus <= 0 or (
-        repair.bonus_min_close_share is None and repair.bonus_max_plain_average is None
+        repair.bonus_min_close_share is None
+        and repair.bonus_max_plain_average is None
+        and repair.bonus_min_side_mentions is None
     ):
         return adjusted
     plain = (code_sum / count + 1) / _SCALE
@@ -124,6 +128,12 @@ def _height_bound(code_sum: float, close_count: float, count: int, repair: NameC
     if repair.bonus_min_close_share is not None and close_count < repair.bonus_min_close_share * count:
         return math.inf
     if repair.bonus_max_plain_average is not None and plain > repair.bonus_max_plain_average:
+        return math.inf
+    if (
+        repair.bonus_min_side_mentions is not None
+        and smaller_side is not None
+        and smaller_side < repair.bonus_min_side_mentions
+    ):
         return math.inf
     return adjusted
 
@@ -161,8 +171,9 @@ def _common_odd_average_bound(
     for mention in extra_a:
         added, added_close = row_sum(int(mention), extra_b)
         code_sum, close_count = code_sum + added, close_count + added_close
-    count = (len(original_a) - len(extra_a)) * (len(original_b) - len(extra_b))
-    return _height_bound(code_sum, close_count, count, repair)
+    side_a_kept, side_b_kept = len(original_a) - len(extra_a), len(original_b) - len(extra_b)
+    count = side_a_kept * side_b_kept
+    return _height_bound(code_sum, close_count, count, repair, min(side_a_kept, side_b_kept))
 
 
 @dataclass(frozen=True)
@@ -185,6 +196,9 @@ class NameConflictRepair:
             pairs. ``None`` sets no floor.
         bonus_max_plain_average: With a close-pair bonus, the plain average above which
             the bonus cannot carry a pair. ``None`` sets no cap.
+        bonus_min_side_mentions: With a close-pair bonus, the fewest mentions each side of
+            a pair over ``max_average_distance`` must keep for the bonus to carry it.
+            ``None`` sets no minimum beyond the repair's own.
         full_first_names: Signature ids whose first name is longer than one letter.
         orcids: ORCID per signature id, for signatures that have one.
         name_rules_alone_forbid: For pairs of signature ids, whether the name rules make
@@ -207,6 +221,7 @@ class NameConflictRepair:
     initials_side_min_mentions: int | None = None
     bonus_min_close_share: float | None = None
     bonus_max_plain_average: float | None = None
+    bonus_min_side_mentions: int | None = None
 
     def lacks_full_name(self, side: Sequence[str]) -> bool:
         """Whether a side fails the full-first-name test."""
@@ -225,6 +240,8 @@ class NameConflictRepair:
             raise ValueError("bonus_min_close_share must lie in [0, 1]")
         if self.bonus_max_plain_average is not None and not 0 < self.bonus_max_plain_average <= 1:
             raise ValueError("bonus_max_plain_average must lie in (0, 1]")
+        if self.bonus_min_side_mentions is not None and self.bonus_min_side_mentions < 1:
+            raise ValueError("bonus_min_side_mentions must be at least 1")
 
 
 def has_full_first_name(first: str | None) -> bool:
@@ -366,10 +383,11 @@ def _repair_round(
         # Codes round down, so the true average is at most one step above the coded one.
         # Merge only when the height is certainly under the limit.
         count = len(ids_a) * len(ids_b)
-        if _height_bound(code_sum, close_count, count, repair) > repair.max_average_distance:
+        bound = _height_bound(code_sum, close_count, count, repair, min(len(ids_a), len(ids_b)))
+        if bound > repair.max_average_distance:
             continue
         # The middle of the range orders the merges and goes to the log.
-        average = _height_bound(code_sum, close_count, count, repair) - 0.5 / _SCALE
+        average = bound - 0.5 / _SCALE
         if repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
             continue
         if repair.orcids:

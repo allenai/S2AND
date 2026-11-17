@@ -10,7 +10,13 @@ import pandas as pd
 import pytest
 
 import s2and.subblocking as subblocking
+from s2and.arrow_inputs import ArrowDataset
+from s2and.consts import LARGE_DISTANCE
+from s2and.featurizer import FeaturizationInfo
+from s2and.model import Clusterer, FastCluster
 from scripts.eps_sweep import common, sweep_eps_on_linking_gold
+from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
+from tests.model_helpers import ConstantDistanceClassifier
 
 
 def _cli(*extra: str) -> list[str]:
@@ -174,6 +180,54 @@ def test_distance_cache_metadata_rejects_changed_inputs(
 
     with pytest.raises(ValueError, match=message):
         sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
+
+
+def test_distance_cache_recomputes_for_the_new_name_policy(tmp_path) -> None:
+    arrow_root = tmp_path / "arrow"
+    model_path = tmp_path / "model"
+    model_path.write_bytes(b"constant pairwise distance")
+    args = sweep_eps_on_linking_gold.parse_args(
+        [
+            "--dataset",
+            "dummy",
+            "--arrow-root",
+            str(arrow_root),
+            "--model-path",
+            str(model_path),
+            "--compute-missing-dists",
+            "--n-jobs",
+            "1",
+        ]
+    )
+    scorer = Clusterer(
+        FeaturizationInfo(["year_diff"]),
+        ConstantDistanceClassifier(0.1),
+        cluster_model=FastCluster(eps=0.5),
+        n_jobs=1,
+    )
+    dataset = _dataset([("孝", "", "鈴木"), ("孝徳", "", "鈴木")], {})
+    prepare_seed_arrow_bundle(dataset, arrow_root)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    block = {"block": ["0", "1"]}
+    cache_path = sweep_eps_on_linking_gold._distance_cache_path(cache_dir, args.dataset, 0, "block")
+    with ArrowDataset.open(arrow_root) as arrow:
+        metadata = sweep_eps_on_linking_gold._cache_metadata(args, "block", block["block"], arrow.generation_id)
+        for stale in ({}, {"distance_policy_version": metadata["distance_policy_version"] - 1}):
+            old_metadata = {key: value for key, value in metadata.items() if key != "distance_policy_version"}
+            with cache_path.open("wb") as outfile:
+                pickle.dump({"metadata": old_metadata | stale, "dist": [0.1]}, outfile)
+            with pytest.raises(ValueError, match="key=distance_policy_version"):
+                sweep_eps_on_linking_gold._ensure_distance_caches(args, scorer, block, cache_dir, arrow)
+
+        args.overwrite_dists = True
+        rows = sweep_eps_on_linking_gold._ensure_distance_caches(args, scorer, block, cache_dir, arrow)
+        assert rows[0]["computed"]
+        assert list(sweep_eps_on_linking_gold._load_cached_distance(cache_path, metadata)) == [LARGE_DISTANCE]
+
+        args.overwrite_dists = False
+        reused = sweep_eps_on_linking_gold._ensure_distance_caches(args, scorer, block, cache_dir, arrow)
+        assert not reused[0]["computed"]
 
 
 def test_eps_sweep_resolves_bound_model_and_arrow_inputs(tmp_path) -> None:

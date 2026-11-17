@@ -118,6 +118,7 @@ Use fresh output paths for plans and measured runs.
 Review the runtime estimate and approved resource limits before the full run.
 Keep stdout, stderr, and a process ID for long jobs.
 Distance caches permit recovery after an interrupted run.
+Reuse requires matching package and distance-policy versions. Use `--overwrite-dists --compute-missing-dists` to rebuild incompatible caches.
 The production route caches every subblock of each target block and runs the linker steps once per EPS value.
 Time one EPS value on the largest giant before choosing the grid.
 

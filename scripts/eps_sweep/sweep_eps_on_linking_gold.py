@@ -51,6 +51,9 @@ from scripts.eps_sweep.common import (
 )
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
 
+# Bump when a distance rule changes within the same package version.
+DISTANCE_POLICY_VERSION = 1
+
 WEIGHT_COLUMNS = [
     "weight_pair",
     "weight_query_balanced",
@@ -526,6 +529,7 @@ def _cache_metadata(
         # Hidden ORCIDs waive nothing. The loaded model holds the class default.
         "orcid_name_waiver": None if args.suppress_orcid_constraints else _orcid_name_waiver_setting(Clusterer),
         "distance_source": "arrow-rust",
+        "distance_policy_version": DISTANCE_POLICY_VERSION,
         # A release can change the name rules, and with them the distances.
         "s2and_version": s2and_version,
     }
@@ -623,6 +627,7 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
         "arrow_root",
         "arrow_generation_id",
         "distance_source",
+        "distance_policy_version",
         "block_key",
         "signature_count",
         "signature_ids_digest",

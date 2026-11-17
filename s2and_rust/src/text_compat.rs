@@ -1,5 +1,6 @@
 use crate::{HashMap, HashSet};
 use pyo3::prelude::PyResult;
+use unicode_normalization::UnicodeNormalization;
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 pub(crate) fn ensure_unidecode_for_text(
@@ -460,6 +461,113 @@ pub(crate) fn canonicalize_name_text_compat(
     canonical_name_tokens(&canonical_name_pretranslate(raw), unidecode_char_map).join(" ")
 }
 
+// Han, kana and hangul code points (mirrors Python `_CJK_NAME_RANGES`).
+// Transliteration writes each Han character as one pinyin syllable, so the
+// syllables of two different given names often match by prefix ("zhong xi"
+// and "zhong xiang"). The name rule compares such given names whole.
+const HAN_NAME_RANGES: [(u32, u32); 4] = [
+    (0x3400, 0x4DBF),   // CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),   // CJK Unified Ideographs
+    (0xF900, 0xFAFF),   // CJK Compatibility Ideographs
+    (0x20000, 0x323AF), // CJK Unified Ideographs Extensions B-H and Compatibility Supplement
+];
+const OTHER_CJK_NAME_RANGES: [(u32, u32); 8] = [
+    (0x1100, 0x11FF), // Hangul Jamo
+    (0x3005, 0x3007), // Ideographic iteration mark, closing mark and number zero
+    (0x3040, 0x30FF), // Hiragana and Katakana
+    (0x3130, 0x318F), // Hangul Compatibility Jamo
+    (0x31F0, 0x31FF), // Katakana Phonetic Extensions
+    (0xA960, 0xA97F), // Hangul Jamo Extended-A
+    (0xAC00, 0xD7FF), // Hangul Syllables and Hangul Jamo Extended-B
+    (0xFF66, 0xFFDC), // Halfwidth Katakana and Halfwidth Hangul
+];
+
+fn is_cjk_name_character(ch: char) -> bool {
+    let code = ch as u32;
+    HAN_NAME_RANGES
+        .iter()
+        .chain(&OTHER_CJK_NAME_RANGES)
+        .any(|&(start, end)| start <= code && code <= end)
+}
+
+/// Whether a raw given name is written in Han, kana or hangul only (mirrors
+/// Python `is_cjk_given_name`). The given name is the raw first and middle
+/// fields together. It needs one CJK character, and its other characters must
+/// transliterate to no letter.
+fn is_cjk_given_name(
+    first_raw: &str,
+    middle_raw: &str,
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> bool {
+    let given = [first_raw, middle_raw];
+    if given.iter().all(|part| part.is_ascii())
+        || !given
+            .iter()
+            .any(|part| part.chars().any(is_cjk_name_character))
+    {
+        return false;
+    }
+    let other: String = given
+        .iter()
+        .flat_map(|part| part.chars().chain(std::iter::once(' ')))
+        .map(|ch| if is_cjk_name_character(ch) { ' ' } else { ch })
+        .collect();
+    canonical_name_tokens(&canonical_name_pretranslate(&other), unidecode_char_map).is_empty()
+}
+
+/// Prepare the whole CJK given name for constraints. An empty string is
+/// incomplete evidence. None selects the ordinary name rules.
+pub(crate) fn cjk_given_name_for_constraint(
+    first_raw: &str,
+    middle_raw: &str,
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> Option<String> {
+    if !is_cjk_given_name(first_raw, middle_raw, unidecode_char_map) {
+        return None;
+    }
+
+    let raw = canonical_name_pretranslate(&format!("{first_raw}{middle_raw}"));
+    let mut previous = None;
+    let mut given = String::new();
+    for mut ch in raw
+        .chars()
+        .filter(|&ch| !is_python_whitespace_compat(ch))
+        .nfc()
+    {
+        if ch == '々' {
+            let Some(ideograph) = previous.filter(|&previous| {
+                HAN_NAME_RANGES
+                    .iter()
+                    .any(|&(start, end)| (start..=end).contains(&(previous as u32)))
+            }) else {
+                return Some(String::new());
+            };
+            ch = ideograph;
+        }
+        let mapped = unidecode_char_map
+            .and_then(|char_map| char_map.get(&ch).map(String::as_str))
+            .unwrap_or_else(|| text_unidecode_char(ch));
+        let start = given.len();
+        given.extend(
+            mapped
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .map(|letter| letter.to_ascii_lowercase()),
+        );
+        // A partial transliteration can make equivalent names look different.
+        if given.len() == start
+            && (ch.general_category_group() == GeneralCategoryGroup::Letter
+                || matches!(ch, '〇' | '\u{3099}' | '\u{309a}')
+                || (ch.general_category() == GeneralCategory::Unassigned
+                    && is_cjk_name_character(ch)))
+        {
+            return Some(String::new());
+        }
+        previous = Some(ch);
+    }
+    Some(given)
+}
+
 // D9 (mirrors Python `_JOINED_INITIALS_GIVEN_NAMES`): ED is a frequent given
 // name, and MD abbreviates Muhammad (D7).
 const JOINED_INITIALS_GIVEN_NAMES: [&str; 2] = ["ED", "MD"];
@@ -709,9 +817,41 @@ pub(crate) fn compute_block_compat(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_name_count_keys_compat, canonicalize_name_parts_compat,
+        canonical_name_count_keys_compat, canonicalize_name_parts_compat, is_cjk_given_name,
         normalize_text_compat_native, text_unidecode_char, MIXED_CASE_NON_INITIALS,
     };
+
+    #[test]
+    fn cjk_given_names_are_han_kana_or_hangul_only() {
+        for (first, middle) in [
+            ("重喜", ""),
+            ("孝", ""),
+            ("重", "喜"),
+            ("ひろし", ""),
+            ("ヒロシ", ""),
+            ("민수", ""),
+            ("민 수", ""),
+            ("佐々木", ""),
+            ("重喜.", " "),
+        ] {
+            assert!(
+                is_cjk_given_name(first, middle, None),
+                "{first:?} {middle:?}"
+            );
+        }
+        for (first, middle) in [
+            ("", ""),
+            ("Wei", ""),
+            ("重喜", "Shigeki"),
+            ("Shigeki 重喜", ""),
+            ("Ж", ""),
+        ] {
+            assert!(
+                !is_cjk_given_name(first, middle, None),
+                "{first:?} {middle:?}"
+            );
+        }
+    }
     use crate::HashSet;
     use std::path::Path;
 

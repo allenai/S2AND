@@ -2,6 +2,14 @@
 
 ## Unreleased runtime changes
 
+- Veto merges between two different given names written in Han, kana, or hangul. Transliteration made
+  each Han character a pinyin syllable and the name rules matched the syllables by prefix, so `重喜`
+  (`zhong xi`) matched `重郷` (`zhong xiang`) and `孝` matched `孝徳`. Production merged such authors in
+  the `重 鈴木`, `勝 井上`, and `孝 清水` blocks. When both raw given names use only these scripts, their
+  complete transliterations must agree. Compare the combined first and middle fields after normalizing
+  equivalent Unicode characters and expanding `々`. Incomplete transliterations cannot veto a merge.
+  A pair with a romanized name uses the ordinary rules. See "Canonical name contract" in
+  `docs/canonical_names.md`.
 - Publish model release `1.3.2`: the `1.3.1` boosters, linker, and linkage settings, bound to a name-count
   index rebuilt with the `1.0.0b11` name rules. Georgian and Armenian author rows now count under their new
   spellings, which also changes the counts of the matching Latin names: 2% of the distinct benchmark and

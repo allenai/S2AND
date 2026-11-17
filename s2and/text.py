@@ -508,6 +508,95 @@ _RE_ASCII_LOWERCASE = re.compile(r"[a-z]")
 _RE_ASCII_UPPERCASE = re.compile(r"[A-Z]")
 
 
+# Han, kana and hangul code points. Transliteration writes each Han character as one
+# pinyin syllable, so the syllables of two different given names often match by
+# prefix ("zhong xi" and "zhong xiang"). The name rule compares such given names whole.
+# Keep the ranges in sync with Rust `text_compat`.
+_HAN_NAME_RANGES: tuple[tuple[int, int], ...] = (
+    (0x3400, 0x4DBF),  # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+    (0x20000, 0x323AF),  # CJK Unified Ideographs Extensions B-H and Compatibility Supplement
+)
+_CJK_NAME_RANGES: tuple[tuple[int, int], ...] = (
+    *_HAN_NAME_RANGES,
+    (0x1100, 0x11FF),  # Hangul Jamo
+    (0x3005, 0x3007),  # Ideographic iteration mark, closing mark and number zero
+    (0x3040, 0x30FF),  # Hiragana and Katakana
+    (0x3130, 0x318F),  # Hangul Compatibility Jamo
+    (0x31F0, 0x31FF),  # Katakana Phonetic Extensions
+    (0xA960, 0xA97F),  # Hangul Jamo Extended-A
+    (0xAC00, 0xD7FF),  # Hangul Syllables and Hangul Jamo Extended-B
+    (0xFF66, 0xFFDC),  # Halfwidth Katakana and Halfwidth Hangul
+)
+
+
+def _is_cjk_name_character(character: str) -> bool:
+    code = ord(character)
+    return any(start <= code <= end for start, end in _CJK_NAME_RANGES)
+
+
+def is_cjk_given_name(first_raw: str | None, middle_raw: str | None) -> bool:
+    """Return whether a raw given name is written in Han, kana or hangul only.
+
+    The given name is the raw first and middle fields together. It needs at least
+    one CJK character, and its other characters must transliterate to no letter.
+    Spaces, punctuation and digits may appear. Rust `is_cjk_given_name` mirrors it.
+
+    Args:
+        first_raw: Raw first name, or ``None``.
+        middle_raw: Raw middle name, or ``None``.
+
+    Returns:
+        True for a given name such as ``重喜``, ``ひろし`` or ``민수``; False for
+        ``Wei``, ``重喜 Shigeki`` or an empty name.
+    """
+
+    given = f"{first_raw or ''} {middle_raw or ''}"
+    if given.isascii() or not any(map(_is_cjk_name_character, given)):
+        return False
+    other = "".join(" " if _is_cjk_name_character(character) else character for character in given)
+    return not _canonical_name_tokens(_canonical_name_pretranslate(other))
+
+
+def cjk_given_name_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
+    """Prepare a whole CJK given name for the hard constraint.
+
+    Args:
+        first_raw: Raw first name, or ``None``.
+        middle_raw: Raw middle name, or ``None``.
+
+    Returns:
+        Joined transliterated letters, an empty string for incomplete CJK
+        evidence, or ``None`` when the ordinary name rules apply.
+    """
+    if not is_cjk_given_name(first_raw, middle_raw):
+        return None
+
+    raw = _canonical_name_pretranslate((first_raw or "") + (middle_raw or ""))
+    given = unicodedata.normalize("NFC", "".join(raw.split()))
+    previous = ""
+    parts: list[str] = []
+    for character in given:
+        if character == "々":
+            if not previous or not any(start <= ord(previous) <= end for start, end in _HAN_NAME_RANGES):
+                return ""
+            character = previous
+        letters = _RE_CANONICAL_NON_LETTER.sub("", unidecode(character).lower())
+        # A partial transliteration can make equivalent names look different.
+        if not letters:
+            category = unicodedata.category(character)
+            if (
+                category.startswith("L")
+                or character in "〇\u3099\u309a"
+                or (category == "Cn" and _is_cjk_name_character(character))
+            ):
+                return ""
+        parts.append(letters)
+        previous = character
+    return "".join(parts)
+
+
 class CanonicalNameParts(NamedTuple):
     """Canonical (canonical_v2) first/middle/last name fields."""
 
@@ -1176,18 +1265,21 @@ def canonical_names_conflict(
     name_a: CanonicalNameParts,
     name_b: CanonicalNameParts,
     name_tuples: Set[tuple[str, str]],
+    *,
+    cjk_given_names: tuple[str | None, str | None] = (None, None),
 ) -> bool:
     """Return whether two canonical names violate the hard name constraint.
 
     This is the name part of ``ANDData._get_constraint`` and of its Rust
-    equivalent: last names, first initials, first-name compatibility and
-    effective middle names. Seed, explicit disallow and ORCID rules are not
-    part of it.
+    equivalent: last names, CJK given names, first initials, first-name
+    compatibility and effective middle names. Seed, explicit disallow and
+    ORCID rules are not part of it.
 
     Args:
         name_a: Canonical name parts of one record.
         name_b: Canonical name parts of the other record.
         name_tuples: Canonical first-name alias pairs.
+        cjk_given_names: Results of ``cjk_given_name_for_constraint`` in pair order.
 
     Returns:
         True when the two names cannot belong to the same person.
@@ -1195,6 +1287,9 @@ def canonical_names_conflict(
 
     if not canonical_lasts_equivalent(name_a.last, name_b.last):
         return True
+    given_a, given_b = cjk_given_names
+    if given_a is not None and given_b is not None:
+        return bool(given_a and given_b and given_a != given_b)
     if name_a.first and name_b.first and name_a.first[0] != name_b.first[0]:
         return True
     if not first_names_name_compatible(name_a.first, name_b.first, name_tuples):

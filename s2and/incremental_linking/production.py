@@ -35,7 +35,13 @@ from s2and.incremental_linking.retrieval import RawArrowPlanBundle
 from s2and.incremental_linking.seed_assignment import LinkPriority, apply_seed_links, reject_conflicting_new_links
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
-from s2and.text import CanonicalNameParts, canonical_names_conflict, canonicalize_name_parts, normalize_orcid
+from s2and.text import (
+    CanonicalNameParts,
+    canonical_names_conflict,
+    canonicalize_name_parts,
+    cjk_given_name_for_constraint,
+    normalize_orcid,
+)
 from s2and.thread_config import resolve_n_jobs
 
 logger = logging.getLogger("s2and")
@@ -402,23 +408,27 @@ def _new_link_name_conflict(
 
     ORCID does not count, as in the linker's constraint labels. A caller
     distance for the pair takes precedence over the name rule, as in scoring.
-    The key is the canonical name, or the signature ID when caller distances
-    involve the signature, so equal keys give equal verdicts.
+    The key is the canonical name with its CJK given-name comparison value, or the
+    signature ID when caller distances involve the signature, so equal keys
+    give equal verdicts.
     """
 
     name_tuples = name_tuples_for_incremental_rules(dataset.name_tuples)
-    names: dict[str, CanonicalNameParts] = {}
-    verdicts: dict[tuple[CanonicalNameParts, CanonicalNameParts], bool] = {}
+    names: dict[str, tuple[CanonicalNameParts, str | None]] = {}
+    verdicts: dict[tuple[tuple[CanonicalNameParts, str | None], tuple[CanonicalNameParts, str | None]], bool] = {}
 
-    def name(signature_id: str) -> CanonicalNameParts:
-        parts = names.get(signature_id)
-        if parts is None:
+    def name(signature_id: str) -> tuple[CanonicalNameParts, str | None]:
+        entry = names.get(signature_id)
+        if entry is None:
             signature = dataset.signatures[signature_id]
-            parts = canonicalize_name_parts(
-                signature.author_info_first, signature.author_info_middle, signature.author_info_last
+            entry = (
+                canonicalize_name_parts(
+                    signature.author_info_first, signature.author_info_middle, signature.author_info_last
+                ),
+                cjk_given_name_for_constraint(signature.author_info_first, signature.author_info_middle),
             )
-            names[signature_id] = parts
-        return parts
+            names[signature_id] = entry
+        return entry
 
     def conflict(left: str, right: str) -> bool:
         distance = runtime_module._partial_supervision_distance(partial_supervision, left, right)  # noqa: SLF001
@@ -427,7 +437,10 @@ def _new_link_name_conflict(
         key = (name(left), name(right))
         verdict = verdicts.get(key)
         if verdict is None:
-            verdict = canonical_names_conflict(key[0], key[1], name_tuples)
+            (parts_left, cjk_left), (parts_right, cjk_right) = key
+            verdict = canonical_names_conflict(
+                parts_left, parts_right, name_tuples, cjk_given_names=(cjk_left, cjk_right)
+            )
             verdicts[key] = verdict
         return verdict
 

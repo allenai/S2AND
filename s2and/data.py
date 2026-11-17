@@ -41,6 +41,7 @@ from s2and.text import (
     canonical_names_conflict,
     canonicalize_name_parts,
     canonicalize_name_text,
+    cjk_given_name_for_constraint,
     compute_block,
     detect_language,
     get_text_ngrams,
@@ -1401,11 +1402,11 @@ class ANDData:
         3) If both ORCIDs are present and equal and `suppress_orcid` is false, return `low_value`.
         4) Return `high_value` for deterministic conflicts:
            - normalized last names disagree (hyphen/space-insensitive)
-           - first initials disagree
-           - first names are neither compatible prefixes nor known aliases
-             from `self.name_tuples`
-           - middle initials conflict, or full middle tokens conflict without
-             compatible aligned prefixes
+           - for two given names written in Han, kana or hangul only,
+             their complete transliterations differ
+           - for other pairs, the first initials disagree, the first names
+             are neither compatible prefixes nor known aliases from
+             `self.name_tuples`, or the effective middle names conflict
 
         If no hard rule applies, return `None`.
 
@@ -1516,6 +1517,10 @@ class ANDData:
             CanonicalNameParts(first_1, middle_1_text, _materialize_constraint_last_normalized(signature_1)),
             CanonicalNameParts(first_2, middle_2_text, _materialize_constraint_last_normalized(signature_2)),
             self.name_tuples,
+            cjk_given_names=(
+                cjk_given_name_for_constraint(signature_1.author_info_first, signature_1.author_info_middle),
+                cjk_given_name_for_constraint(signature_2.author_info_first, signature_2.author_info_middle),
+            ),
         ):
             return high_value
         return None

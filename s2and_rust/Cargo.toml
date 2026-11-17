@@ -25,6 +25,7 @@ sha2 = "0.10"
 arrow = { version = "54", default-features = false, features = ["ipc"] }
 unidecode = "0.3.0"
 memmap2 = "0.9"
+unicode-normalization = "0.1"
 unicode-properties = "0.1"
 
 # Worker threads that allocate in parallel contend for glibc malloc arenas.

@@ -91,6 +91,7 @@ mod constraint_key_tests {
             name_counts: None,
             middle_initial_counts: Vec::new(),
             adv_name: Some(first),
+            cjk_given_name: None,
         }
     }
 
@@ -108,7 +109,18 @@ mod constraint_key_tests {
             let last = LASTS[rng.below(LASTS.len())];
             let orcid = [None, None, Some("0000-0001"), Some("0000-0002")][rng.below(4)];
             let signature_id = format!("s{index}");
-            signatures.insert(signature_id.clone(), signature(first, middle, last, orcid));
+            let mut data = signature(first, middle, last, orcid);
+            // Some names stand for CJK-script given names, so the keyed CJK rule runs too.
+            if rng.below(3) == 0 {
+                data.cjk_given_name = Some(
+                    data.first_normalized()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .chain(data.middle.as_deref().unwrap_or("").split_whitespace())
+                        .collect(),
+                );
+            }
+            signatures.insert(signature_id.clone(), data);
             signature_ids.push(signature_id);
         }
         let mut name_tuples = HashMap::default();
@@ -964,6 +976,10 @@ impl RustFeaturizer {
 
         let first1 = s1.first_normalized().unwrap_or("");
         let first2 = s2.first_normalized().unwrap_or("");
+        if let (Some(given1), Some(given2)) = (&s1.cjk_given_name, &s2.cjk_given_name) {
+            return (!given1.is_empty() && !given2.is_empty() && given1 != given2)
+                .then_some(high_value);
+        }
         if !first1.is_empty() && !first2.is_empty() {
             if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
                 if c1 != c2 {
@@ -1000,6 +1016,7 @@ impl RustFeaturizer {
                     signature.first_normalized().unwrap_or(""),
                     signature.middle.as_deref().unwrap_or(""),
                     signature.last_normalized.as_deref().unwrap_or(""),
+                    signature.cjk_given_name.as_deref(),
                 )
             })
             .collect();
@@ -1111,7 +1128,7 @@ impl RustFeaturizer {
         }
         // Mentions with one name share every name verdict, so verdicts are
         // found once per pair of distinct names.
-        let mut name_index: ahash::AHashMap<(&str, &str, &str), u32> = ahash::AHashMap::default();
+        let mut name_index = ahash::AHashMap::default();
         let mut name_entry: Vec<usize> = Vec::new();
         let name_ids: Vec<u32> = entries
             .iter()
@@ -1121,6 +1138,7 @@ impl RustFeaturizer {
                     signature.first_normalized().unwrap_or(""),
                     signature.middle.as_deref().unwrap_or(""),
                     signature.last_normalized.as_deref().unwrap_or(""),
+                    signature.cjk_given_name.as_deref(),
                 );
                 *name_index.entry(name).or_insert_with(|| {
                     name_entry.push(entry);

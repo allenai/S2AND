@@ -250,6 +250,24 @@ features keep the stored spelling. Python `canonical_surname_family` and Rust
 [surname_family_examples.json](../tests/fixtures/surname_family_examples.json)
 keeps the two equal.
 
+Given names written in Han, kana, or hangul are compared whole.
+Transliteration writes each Han character as one pinyin syllable, so the
+canonical name of `重喜` is first `zhong`, middle `xi`, and the canonical name
+of `重郷` is first `zhong`, middle `xiang`. The prefix rules would let these
+match, and they would also let `孝` (first `xiao`) match `孝徳` (first `xiao`,
+middle `de`). `is_cjk_given_name` holds when the raw first and middle names
+together contain a Han, kana, or hangul character and no other character that
+transliterates to a letter. `cjk_given_name_for_constraint` joins the raw fields,
+normalizes them to Unicode NFC, expands `々` after a Han character, and
+transliterates the result. So `拓海` matches `拓海`, `奈々` matches `奈奈`,
+`张伟` matches `張偉`, and `민수` matches `민 수`.
+When both records meet the script rule, the whole given name replaces the
+ordinary first and middle name checks. Two complete transliterations veto
+the pair if they differ, as in `ひろ` and `ひろし`. If transliteration loses a
+name character, the given names cannot veto the pair. A pair with one romanized
+name, such as `Xiao` and `孝徳`, uses the ordinary rules. This normalization
+applies only to the constraint. Feature and count keys use canonical_v2.
+
 Full middle names also use `same_prefix_tokens` before a full-token conflict
 causes a veto. For example, `meg` matches `megan`, and `ch` matches `charles`.
 The rule compares aligned tokens up to the shorter list, as for first names.

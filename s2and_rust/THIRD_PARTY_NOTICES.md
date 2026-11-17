@@ -47,6 +47,12 @@ SOFTWARE.
 The vendored cld2-sys 1.0.2 source makes detection debug state thread-local.
 See vendor/cld2-sys/S2AND_PATCHES.md for the patch and supported detection settings.
 
+The native extension uses `unicode-normalization` and its dependency `tinyvec`
+under the Apache License, Version 2.0. See `vendor/cld2/LICENSE-APACHE.txt` for the
+license text. The Unicode normalization code is copyright The Rust Project
+Developers. The upstream projects are <https://github.com/unicode-rs/unicode-normalization>
+and <https://github.com/Lokathor/tinyvec>.
+
 The s2and musllinux wheels bundle the GCC C++ runtime, `libstdc++` and `libgcc_s`,
 in `s2and.libs/`, because CLD2 is C++ and musllinux does not provide that runtime.
 These libraries are part of GCC <https://gcc.gnu.org/> and are distributed under the

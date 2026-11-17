@@ -99,16 +99,24 @@ pub(crate) struct ConstraintNameKey<'a> {
     /// The summary `middle_names_conflict_small` would build from
     /// `middle_tokens`, when it depends on this signature alone.
     middle_summary: Option<MiddleSummary<'a>>,
+    cjk_given_name: Option<&'a str>,
 }
 
 impl<'a> ConstraintNameKey<'a> {
-    pub(crate) fn new(first: &'a str, middle: &'a str, last: &'a str) -> Self {
+    /// `cjk_given_name` holds the prepared value from `cjk_given_name_for_constraint`.
+    pub(crate) fn new(
+        first: &'a str,
+        middle: &'a str,
+        last: &'a str,
+        cjk_given_name: Option<&'a str>,
+    ) -> Self {
         let last_family = surname_family(last);
         let middle_tokens: Vec<&'a str> = middle.split_whitespace().collect();
         let middle_summary = MiddleSummary::new(&middle_tokens);
         Self {
             last,
             last_family,
+            cjk_given_name,
             first_initial: if first.is_empty() {
                 None
             } else {
@@ -197,7 +205,8 @@ fn middle_summaries_conflict(
 /// Return whether two signatures' names violate the hard constraint.
 ///
 /// Matches the name steps of `RustFeaturizer::constraint_value_from_records`:
-/// last names, first initials, first-name compatibility, then middle names.
+/// last names, CJK given names, first initials, first-name compatibility, then
+/// middle names.
 /// `first_aliases` answers the name-tuple lookup, which only runs for first
 /// names that share no prefix.
 pub(crate) fn constraint_names_conflict(
@@ -207,6 +216,9 @@ pub(crate) fn constraint_names_conflict(
 ) -> bool {
     if key_1.last != key_2.last && key_1.last_family != key_2.last_family {
         return true;
+    }
+    if let (Some(given_1), Some(given_2)) = (key_1.cjk_given_name, key_2.cjk_given_name) {
+        return !given_1.is_empty() && !given_2.is_empty() && given_1 != given_2;
     }
     if let (Some(c1), Some(c2)) = (key_1.first_initial, key_2.first_initial) {
         if c1 != c2 {
@@ -550,9 +562,45 @@ mod tests {
         }
         assert!(lasts_equivalent_for_constraint("muller", "mueller"));
         assert!(!lasts_equivalent_for_constraint("xue", "xu"));
-        let a = ConstraintNameKey::new("gero", "", "muller");
-        let b = ConstraintNameKey::new("gero", "", "mueller");
+        let a = ConstraintNameKey::new("gero", "", "muller", None);
+        let b = ConstraintNameKey::new("gero", "", "mueller", None);
         assert!(!constraint_names_conflict(&a, &b, || false));
+    }
+
+    #[test]
+    fn different_cjk_given_names_conflict_and_equal_ones_do_not() {
+        let name_tuples: HashMap<String, HashSet<String>> = HashMap::default();
+        let conflict = |a: (&str, &str, bool), b: (&str, &str, bool)| {
+            let given_a: String = [a.0, a.1]
+                .into_iter()
+                .flat_map(str::split_whitespace)
+                .collect();
+            let given_b: String = [b.0, b.1]
+                .into_iter()
+                .flat_map(str::split_whitespace)
+                .collect();
+            let key_a = ConstraintNameKey::new(a.0, a.1, "ling mu", a.2.then_some(&given_a));
+            let key_b = ConstraintNameKey::new(b.0, b.1, "ling mu", b.2.then_some(&given_b));
+            constraint_names_conflict(&key_a, &key_b, || {
+                name_tuple_contains(&name_tuples, a.0, b.0)
+            })
+        };
+        // 重喜 / 重郷 / 重憲, 勝央 / 勝彦 and 孝徳 / 孝: syllables match by prefix.
+        assert!(conflict(("zhong", "xi", true), ("zhong", "xiang", true)));
+        assert!(conflict(("zhong", "xiang", true), ("zhong", "xian", true)));
+        assert!(conflict(("sheng", "yang", true), ("sheng", "yan", true)));
+        assert!(conflict(("xiao", "de", true), ("xiao", "", true)));
+        // 민 / 민수 and ひろ / ひろし: one token that prefixes the other.
+        assert!(conflict(("min", "", true), ("minsu", "", true)));
+        // The same given name, also split across first and middle or spaced.
+        assert!(!conflict(("zhong", "xi", true), ("zhong", "xi", true)));
+        assert!(!conflict(("min su", "", true), ("minsu", "", true)));
+        assert!(!conflict(("hi", "rosi", true), ("hiro", "si", true)));
+        // A romanized side keeps the plain rules.
+        assert!(!conflict(("zhong", "xi", true), ("zhong", "xiang", false)));
+        assert!(!conflict(("xiao", "", false), ("xiao", "de", true)));
+        // A CJK name without transliterated letters is missing evidence.
+        assert!(!conflict(("", "", true), ("zhong", "xi", true)));
     }
 
     #[test]

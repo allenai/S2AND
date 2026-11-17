@@ -311,6 +311,20 @@ clusterer.name_conflict_repair_max_distance = None
 clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
 ```
 
+Three more class attributes on `Clusterer` change the repair. Their defaults keep the
+released rule, and a model bundle does not record them:
+
+- `name_conflict_repair_uses_close_pair_bonus` (default `False`): compare the close-pair
+  linkage height instead of the plain average distance. The height is the average less the
+  cluster model's `close_pair_bonus` times the share of pairs under `close_pair_distance`,
+  the height that close-pair linkage cuts. Only codes whose whole range lies under the close
+  distance count as close, so the height is an upper bound. The limit stays
+  `name_conflict_repair_max_distance`.
+- `name_conflict_repair_requires_full_first_names` (default `True`): whether each side must
+  keep a mention with a full first name once the odd mentions are left out.
+- `name_conflict_repair_rounds` (default `1`): the most repair rounds per block. A round
+  merges each cluster at most once; a later round sees the merged clusters.
+
 The setting applies wherever a call builds a block's distances and clusters them:
 `predict_from_arrow`, `predict`, `predict_from_rust_featurizer`, and the two clustering
 steps of incremental prediction (new mentions that attach to no profile, and the

@@ -114,6 +114,82 @@ def test_repair_needs_a_full_first_name_on_each_side() -> None:
     assert _repair(square, NameConflictRepair(0.2, only_b_and_odd)) == _labels(square)
 
 
+def test_repair_can_skip_the_full_first_name_test() -> None:
+    square = _square()
+    only_b_and_odd = frozenset(SIGNATURES[5:11])
+    repair = NameConflictRepair(0.2, only_b_and_odd, require_full_first_names=False)
+    assert _partition(_repair(square, repair)) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
+
+
+def _half_close_square() -> np.ndarray:
+    """A third of the clean cross pairs are close (0.01), the rest 0.8: a plain average of 0.516.
+
+    Each side is tight (0.0), so linkage forms both sides before any cross pair, and the odd
+    mention then keeps them apart.
+    """
+    square = _square()
+    for group in (A, B):
+        for i in group:
+            for j in group:
+                if i != j:
+                    square[i, j] = 0.0
+    kept_a = [i for i in A if i != ODD]
+    for k, (i, j) in enumerate(itertools.product(kept_a, B)):
+        square[i, j] = square[j, i] = 0.01 if k % 3 == 0 else 0.8
+    return square
+
+
+def test_close_pair_height_merges_what_the_plain_average_keeps_apart() -> None:
+    square = _half_close_square()
+    assert _repair(square, NameConflictRepair(0.2, FULL)) == _labels(square)
+    # 9 of 25 pairs are close: the height is about 0.52 - 8 * 0.36, far under the limit.
+    repair = NameConflictRepair(0.2, FULL, close_pair_bonus=8.0, close_pair_distance=0.05)
+    assert _partition(_repair(square, repair)) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
+
+
+def test_close_pair_height_counts_only_codes_certainly_under_the_close_distance() -> None:
+    square = _half_close_square()
+    kept_a = [i for i in A if i != ODD]
+    for k, (i, j) in enumerate(itertools.product(kept_a, B)):
+        if k % 3 == 0:
+            # Code 12 holds [0.0471, 0.0510): it may lie above 0.05, so it does not count.
+            square[i, j] = square[j, i] = 0.0499
+    repair = NameConflictRepair(0.2, FULL, close_pair_bonus=8.0, close_pair_distance=0.05)
+    assert _repair(square, repair) == _labels(square)
+
+
+def test_close_pair_height_equals_the_plain_average_without_close_pairs() -> None:
+    square = _square(cross=0.3)
+    repair = NameConflictRepair(0.2, FULL, close_pair_bonus=8.0, close_pair_distance=0.05)
+    assert _repair(square, repair) == _labels(square)
+
+
+@pytest.mark.parametrize(("bonus", "distance"), [(-1.0, 0.05), (float("nan"), 0.05), (8.0, 0.0), (8.0, 1.5)])
+def test_repair_settings_reject_an_invalid_close_pair_rule(bonus: float, distance: float) -> None:
+    with pytest.raises(ValueError, match="close_pair"):
+        NameConflictRepair(0.2, FULL, close_pair_bonus=bonus, close_pair_distance=distance)
+
+
+@pytest.mark.parametrize(("uses_bonus", "requires_full"), [(False, True), (True, True), (True, False)])
+def test_clusterer_hands_its_close_pair_rule_to_the_repair(uses_bonus: bool, requires_full: bool) -> None:
+    clusterer = SimpleNamespace(
+        cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05),
+        name_conflict_repair_uses_close_pair_bonus=uses_bonus,
+        name_conflict_repair_requires_full_first_names=requires_full,
+    )
+    settings = model_module._repair_height_settings(clusterer)
+    assert settings["require_full_first_names"] is requires_full
+    assert settings.get("close_pair_bonus", 0.0) == (8.0 if uses_bonus else 0.0)
+    # A clusterer without a close-pair bonus keeps the plain average.
+    clusterer.cluster_model = SimpleNamespace(close_pair_bonus=0.0, close_pair_distance=0.0)
+    assert "close_pair_bonus" not in model_module._repair_height_settings(clusterer)
+
+
+def test_released_clusterer_defaults_keep_the_plain_average_rule() -> None:
+    assert Clusterer.name_conflict_repair_uses_close_pair_bonus is False
+    assert Clusterer.name_conflict_repair_requires_full_first_names is True
+
+
 def test_repair_skips_sides_with_different_orcids() -> None:
     square = _square()
     orcids = {"a0": "0000-0000-0000-0001", "b0": "0000-0000-0000-0002"}
@@ -827,3 +903,44 @@ def test_incremental_prediction_repairs_when_it_clusters_new_mentions(
         )
     assert len(seen) == 1 and seen[0] is not None
     assert seen[0].full_first_names >= {"1", "2"}
+
+
+def _four_way_split() -> tuple[np.ndarray, list[str]]:
+    """Four groups of six mentions of one person; each group's last mention conflicts with the others'."""
+    signatures = [f"{group}{i}" for group in "wxyz" for i in range(6)]
+    square = np.full((24, 24), 0.1)
+    for g in range(4):
+        square[6 * g : 6 * g + 6, 6 * g : 6 * g + 6] = 0.05
+    odd = [6 * g + 5 for g in range(4)]
+    for i in odd:
+        for j in odd:
+            if i != j:
+                square[i, j] = LARGE_DISTANCE
+    np.fill_diagonal(square, 0.0)
+    return square, signatures
+
+
+@pytest.mark.parametrize(("rounds", "clusters"), [(1, 2), (2, 1), (5, 1)])
+def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int) -> None:
+    square, signatures = _four_way_split()
+    labels = _labels(square)
+    assert len(set(labels)) == 4
+    codes = quantize_distances(squareform(square))
+    assert codes is not None
+    repair = NameConflictRepair(0.2, frozenset(signatures), rounds=rounds)
+    repaired = repair_name_conflicts_in_block(signatures, labels, codes, repair)
+    assert len(set(np.asarray(repaired).tolist())) == clusters
+
+
+def test_repair_settings_reject_zero_rounds() -> None:
+    with pytest.raises(ValueError, match="rounds"):
+        NameConflictRepair(0.2, FULL, rounds=0)
+
+
+@pytest.mark.parametrize(("minimum", "merges"), [(None, False), (6, False), (5, True)])
+def test_a_large_initials_side_can_pass_the_full_name_test(minimum: int | None, merges: bool) -> None:
+    # Without the odd mention, the first side keeps five mentions and no full first name.
+    square = _square()
+    only_b_and_odd = frozenset(SIGNATURES[5:11])
+    repair = NameConflictRepair(0.2, only_b_and_odd, initials_side_min_mentions=minimum)
+    assert (len(_partition(_repair(square, repair))) == 2) is merges

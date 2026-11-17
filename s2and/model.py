@@ -810,6 +810,24 @@ def _dataset_name_rules_alone_forbid(dataset: ANDData) -> Callable[[Sequence[tup
     return forbid
 
 
+def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
+    """Return the repair's close-pair and full-first-name settings from the clusterer.
+
+    Both routes read them here, so the Python and Arrow routes repair alike.
+    """
+    settings: dict[str, Any] = {
+        "require_full_first_names": bool(getattr(clusterer, "name_conflict_repair_requires_full_first_names", True)),
+        "rounds": int(getattr(clusterer, "name_conflict_repair_rounds", 1)),
+        "initials_side_min_mentions": getattr(clusterer, "name_conflict_repair_initials_side_min_mentions", None),
+    }
+    cluster_model = getattr(clusterer, "cluster_model", None)
+    bonus = float(getattr(cluster_model, "close_pair_bonus", 0.0) or 0.0)
+    if getattr(clusterer, "name_conflict_repair_uses_close_pair_bonus", False) and bonus > 0:
+        settings["close_pair_bonus"] = bonus
+        settings["close_pair_distance"] = float(getattr(cluster_model, "close_pair_distance", 0.0))
+    return settings
+
+
 def _name_conflict_repair_from_rust_featurizer(
     clusterer: Any, block_dict: Mapping[str, Sequence[str]], rust_featurizer: object
 ) -> NameConflictRepair | None:
@@ -825,6 +843,7 @@ def _name_conflict_repair_from_rust_featurizer(
         frozenset(full_first_names),
         dict(orcids) if use_orcid else {},
         _rust_name_rules_alone_forbid(rust_featurizer),
+        **_repair_height_settings(clusterer),
     )
 
 
@@ -857,7 +876,11 @@ def _name_conflict_repair_from_dataset(
             if orcid is not None:
                 orcids[signature_id] = orcid
     return NameConflictRepair(
-        max_average_distance, frozenset(full_first_names), orcids, _dataset_name_rules_alone_forbid(dataset)
+        max_average_distance,
+        frozenset(full_first_names),
+        orcids,
+        _dataset_name_rules_alone_forbid(dataset),
+        **_repair_height_settings(clusterer),
     )
 
 
@@ -1979,6 +2002,24 @@ class Clusterer:
     # clusters; None turns the repair off. A class attribute, so models loaded
     # from older pickles get it too. See s2and.name_conflict_repair.
     name_conflict_repair_max_distance: float | None = DEFAULT_MAX_AVERAGE_DISTANCE
+
+    # Whether name-conflict repair tests the close-pair linkage height (the average
+    # distance less the cluster model's close-pair bonus times the share of close pairs)
+    # instead of the plain average. Off keeps the released rule. A class attribute, like
+    # the repair distance.
+    name_conflict_repair_uses_close_pair_bonus: bool = False
+
+    # Whether name-conflict repair needs a full first name on each side once the odd
+    # mentions are left out. A class attribute, like the repair distance.
+    name_conflict_repair_requires_full_first_names: bool = True
+
+    # Most name-conflict repair rounds per block. A round merges each cluster at most once;
+    # one round is the released rule. A class attribute, like the repair distance.
+    name_conflict_repair_rounds: int = 1
+
+    # A repair side with no full first name passes the full-name test when it keeps at least
+    # this many mentions; None exempts no side. A class attribute, like the repair distance.
+    name_conflict_repair_initials_side_min_mentions: int | None = None
 
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name

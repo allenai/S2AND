@@ -11,9 +11,14 @@ After a block is clustered, this module merges two clusters when all of these ho
   the two clusters; the smallest such set is the odd mentions, and a larger set is
   not tried when the smallest fails a later test;
 - without them, each cluster keeps at least ``MIN_SIDE`` mentions;
-- without them, each cluster has a mention with a full first name;
-- the average model distance between the clusters, without them, is certainly
-  below ``max_average_distance``;
+- without them, each cluster has a mention with a full first name, unless
+  ``require_full_first_names`` is off or the side keeps at least
+  ``initials_side_min_mentions`` mentions;
+- the height between the clusters, without them, is certainly below
+  ``max_average_distance``. The height is the average model distance, less
+  ``close_pair_bonus`` times the share of pairs under ``close_pair_distance``:
+  the merge height that close-pair linkage cuts. A zero bonus makes it the plain
+  average;
 - the two clusters do not carry different majority ORCIDs, odd mentions included;
 - the two clusters do not hold mentions of two different required seed groups;
 - no pair across the two clusters is a seed disallow or a profile exclusion;
@@ -29,7 +34,9 @@ A precomputed matrix can hold a caller's impossible pair on names that also conf
 which nothing can tell apart; ``predict(..., dists=...)`` therefore skips the repair.
 
 Codes round distances down, so the average is known to within one code step (0.004).
-The repair merges only when the upper end of that range is under the limit.
+The repair merges only when the upper end of that range is under the limit. A code
+counts as a close pair only when its whole range lies under ``close_pair_distance``,
+so the share of close pairs is a lower bound and the height an upper bound.
 
 The odd mentions stay in the merged cluster. Blind judging on seven large blocks
 called all 28 sampled merges with one odd mention and all 13 with two correct, and
@@ -52,6 +59,7 @@ copy made by ``quantize_distances`` before the first linkage.
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
@@ -84,6 +92,22 @@ class _RepairCandidate:
     b: int
     odd: tuple[int, ...]
     code_sum: int
+    close_count: int = 0
+
+
+def _close_code(repair: NameConflictRepair) -> int:
+    """Return the largest code whose whole range lies under the close distance, or -1.
+
+    Code ``c`` holds distances in ``[c, c + 1) / _SCALE``.
+    """
+    if repair.close_pair_bonus <= 0:
+        return -1
+    return math.floor(repair.close_pair_distance * _SCALE - 1)
+
+
+def _height_bound(code_sum: float, close_count: float, count: int, repair: NameConflictRepair) -> float:
+    """Upper bound of the close-pair height from a code sum and a lower bound of close pairs."""
+    return ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
 
 
 def _common_odd_average_bound(
@@ -92,6 +116,7 @@ def _common_odd_average_bound(
     members: Mapping[int, np.ndarray],
     codes: np.ndarray,
     block_width: int,
+    repair: NameConflictRepair,
 ) -> float:
     """Recompute a pair's bound after excluding the shared scoring exceptions."""
     side_a, side_b = members[candidate.a], members[candidate.b]
@@ -99,22 +124,27 @@ def _common_odd_average_bound(
     original_b = side_b[~np.isin(side_b, candidate.odd)]
     extra_a = original_a[np.isin(original_a, odd)]
     extra_b = original_b[np.isin(original_b, odd)]
-    code_sum = candidate.code_sum
+    code_sum, close_count = candidate.code_sum, candidate.close_count
+    close_code = _close_code(repair)
 
-    def row_sum(mention: int, others: np.ndarray) -> int:
+    def row_sum(mention: int, others: np.ndarray) -> tuple[int, int]:
         low, high = np.minimum(mention, others), np.maximum(mention, others)
         indices = block_width * low - low * (low + 1) // 2 + high - low - 1
-        return int(codes[indices].sum(dtype=np.uint64))
+        row = codes[indices]
+        return int(row.sum(dtype=np.uint64)), int(np.count_nonzero((row != 255) & (row.astype(np.int64) <= close_code)))
 
     # Read only the extra rows; the kernel already summed the original clean pair.
     for mention in extra_a:
-        code_sum -= row_sum(int(mention), original_b)
+        removed, removed_close = row_sum(int(mention), original_b)
+        code_sum, close_count = code_sum - removed, close_count - removed_close
     for mention in extra_b:
-        code_sum -= row_sum(int(mention), original_a)
+        removed, removed_close = row_sum(int(mention), original_a)
+        code_sum, close_count = code_sum - removed, close_count - removed_close
     for mention in extra_a:
-        code_sum += row_sum(int(mention), extra_b)
+        added, added_close = row_sum(int(mention), extra_b)
+        code_sum, close_count = code_sum + added, close_count + added_close
     count = (len(original_a) - len(extra_a)) * (len(original_b) - len(extra_b))
-    return (code_sum / count + 1) / _SCALE
+    return _height_bound(code_sum, close_count, count, repair)
 
 
 @dataclass(frozen=True)
@@ -122,7 +152,16 @@ class NameConflictRepair:
     """Settings and per-signature facts for name-conflict repair.
 
     Attributes:
-        max_average_distance: Merge only below this average model distance.
+        max_average_distance: Merge only below this height. With no close-pair bonus,
+            the height is the average model distance.
+        close_pair_bonus: Bonus that close-pair linkage gives a close pair. Zero
+            compares the plain average distance.
+        close_pair_distance: Distance under which a pair is close.
+        require_full_first_names: Whether each side must keep a mention with a full
+            first name once the odd mentions are left out.
+        rounds: Most repair rounds per block; each merges a cluster at most once.
+        initials_side_min_mentions: A side with no full first name passes the full-name
+            test when it keeps at least this many mentions. ``None`` exempts no side.
         full_first_names: Signature ids whose first name is longer than one letter.
         orcids: ORCID per signature id, for signatures that have one.
         name_rules_alone_forbid: For pairs of signature ids, whether the name rules make
@@ -138,6 +177,25 @@ class NameConflictRepair:
     name_rules_alone_forbid: Callable[[Sequence[tuple[str, str]]], Sequence[bool]] | None = field(
         default=None, compare=False
     )
+    close_pair_bonus: float = 0.0
+    close_pair_distance: float = 0.0
+    require_full_first_names: bool = True
+    rounds: int = 1
+    initials_side_min_mentions: int | None = None
+
+    def lacks_full_name(self, side: Sequence[str]) -> bool:
+        """Whether a side fails the full-first-name test."""
+        if not self.require_full_first_names or any(s in self.full_first_names for s in side):
+            return False
+        return self.initials_side_min_mentions is None or len(side) < self.initials_side_min_mentions
+
+    def __post_init__(self) -> None:
+        if self.rounds < 1:
+            raise ValueError("rounds must be at least 1")
+        if not (math.isfinite(self.close_pair_bonus) and self.close_pair_bonus >= 0):
+            raise ValueError("close_pair_bonus must be finite and non-negative")
+        if self.close_pair_bonus > 0 and not 0 < self.close_pair_distance <= 1:
+            raise ValueError("close_pair_distance must lie in (0, 1] when close_pair_bonus is positive")
 
 
 def has_full_first_name(first: str | None) -> bool:
@@ -202,6 +260,32 @@ def repair_name_conflicts_in_block(
     seed_groups: Mapping[str, object] | None = None,
     block_key: str = "",
 ) -> np.ndarray | Sequence[int]:
+    """Run up to ``repair.rounds`` repair rounds, stopping at the first that merges nothing.
+
+    A round merges each cluster at most once. A later round sees the merged clusters, so a
+    person split three ways by different odd mentions can rejoin over two rounds.
+    """
+    current = labels
+    for _ in range(repair.rounds):
+        repaired = _repair_round(
+            block_signatures, current, codes, repair, forbidden=forbidden, seed_groups=seed_groups, block_key=block_key
+        )
+        if repaired is current:
+            break
+        current = repaired
+    return current
+
+
+def _repair_round(
+    block_signatures: Sequence[str],
+    labels: np.ndarray | Sequence[int],
+    codes: np.ndarray,
+    repair: NameConflictRepair,
+    *,
+    forbidden: Mapping[str, Set[str]] | None = None,
+    seed_groups: Mapping[str, object] | None = None,
+    block_key: str = "",
+) -> np.ndarray | Sequence[int]:
     """Merge cluster pairs that one or two odd mentions keep apart.
 
     Args:
@@ -230,28 +314,34 @@ def repair_name_conflicts_in_block(
     # The kernel applies the size and distance tests; the bound it gets is
     # one code step loose, and the strict test follows below.
     candidates = load_s2and_rust_extension().name_conflict_candidates(
-        codes, cluster, len(big), MIN_SIDE, repair.max_average_distance * _SCALE, MAX_ODD_MENTIONS
+        codes,
+        cluster,
+        len(big),
+        MIN_SIDE,
+        repair.max_average_distance * _SCALE,
+        MAX_ODD_MENTIONS,
+        _close_code(repair),
+        repair.close_pair_bonus * _SCALE,
     )
     if not candidates:
         return labels
 
-    members = {index: np.flatnonzero(cluster == index) for index in {c for a, b, _, _ in candidates for c in (a, b)}}
-    full_names = repair.full_first_names
+    members = {index: np.flatnonzero(cluster == index) for index in {c for a, b, *_ in candidates for c in (a, b)}}
     accepted: list[_RepairCandidate] = []
-    for a, b, odd, code_sum in candidates:
+    for a, b, odd, code_sum, close_count in candidates:
         odd_ids = {block_signatures[m] for m in odd}
         all_a = [block_signatures[m] for m in members[a]]
         all_b = [block_signatures[m] for m in members[b]]
         ids_a = [s for s in all_a if s not in odd_ids]
         ids_b = [s for s in all_b if s not in odd_ids]
         # Codes round down, so the true average is at most one step above the coded one.
-        # Merge only when it is certainly under the limit.
-        coded_average = code_sum / (len(ids_a) * len(ids_b))
-        if (coded_average + 1) / _SCALE > repair.max_average_distance:
+        # Merge only when the height is certainly under the limit.
+        count = len(ids_a) * len(ids_b)
+        if _height_bound(code_sum, close_count, count, repair) > repair.max_average_distance:
             continue
         # The middle of the range orders the merges and goes to the log.
-        average = (coded_average + 0.5) / _SCALE
-        if not any(s in full_names for s in ids_a) or not any(s in full_names for s in ids_b):
+        average = _height_bound(code_sum, close_count, count, repair) - 0.5 / _SCALE
+        if repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
             continue
         if repair.orcids:
             # The odd mentions stay in the merged cluster, so their ORCIDs count.
@@ -280,7 +370,7 @@ def repair_name_conflicts_in_block(
             )
             if not all(verdicts):
                 continue
-        accepted.append(_RepairCandidate(average, a, b, tuple(odd), code_sum))
+        accepted.append(_RepairCandidate(average, a, b, tuple(odd), code_sum, close_count))
     if not accepted:
         return labels
 
@@ -297,8 +387,7 @@ def repair_name_conflicts_in_block(
         selected.append(candidate)
         merged[members[b]] = unique[big[a]]
         logger.info(
-            "Name-conflict repair: block %s merges clusters of %d and %d mentions, "
-            "average distance %.3f, odd mentions %s",
+            "Name-conflict repair: block %s merges clusters of %d and %d mentions, height %.3f, odd mentions %s",
             block_key,
             int(sizes[big[a]]),
             int(sizes[big[b]]),
@@ -325,10 +414,11 @@ def repair_name_conflicts_in_block(
                 kept = [members[index][~np.isin(members[index], odd)] for index in (a, b, c)]
                 if any(len(side) < MIN_SIDE for side in kept):
                     continue
-                if any(not any(block_signatures[m] in full_names for m in side) for side in kept):
+                if any(repair.lacks_full_name([block_signatures[m] for m in side]) for side in kept):
                     continue
                 bound = max(
-                    _common_odd_average_bound(item, odd, members, codes, len(block_signatures)) for item in (ab, ac, bc)
+                    _common_odd_average_bound(item, odd, members, codes, len(block_signatures), repair)
+                    for item in (ab, ac, bc)
                 )
                 if bound <= repair.max_average_distance:
                     extensions.append((bound, a, b, c, odd))

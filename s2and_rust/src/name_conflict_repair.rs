@@ -95,8 +95,14 @@ fn pair_code(codes: &[u8], n: usize, i: usize, j: usize) -> u8 {
     codes[row_start(n, low) + high - low - 1]
 }
 
-/// A cluster pair, the odd mentions between them, and the sum of codes without those mentions.
-type Candidate = (usize, usize, Vec<usize>, u64);
+/// A cluster pair, the odd mentions between them, and the sum of codes and the count of
+/// close codes without those mentions.
+type Candidate = (usize, usize, Vec<usize>, u64, u64);
+
+/// Whether a code certainly holds a close pair; a negative `close_code` marks none.
+fn is_close(code: u8, close_code: i64) -> bool {
+    code != HARD && i64::from(code) <= close_code
+}
 
 /// Smallest sets of at most `max_odd` mentions that take part in every impossible pair.
 ///
@@ -164,12 +170,17 @@ fn odd_mention_sets(
 
 /// Cluster pairs that at most `max_odd` odd mentions keep apart.
 ///
-/// Returns `(a, b, odd, code_sum)` with `a < b`: every impossible pair between
-/// clusters `a` and `b` holds a mention of `odd`, and `code_sum` is the sum of
-/// codes between the two clusters without those mentions.
+/// Returns `(a, b, odd, code_sum, close_count)` with `a < b`: every impossible
+/// pair between clusters `a` and `b` holds a mention of `odd`, `code_sum` is the
+/// sum of codes between the two clusters without those mentions, and
+/// `close_count` counts those codes at most `close_code`.
+///
+/// The test is on the linkage height: the mean code minus `bonus_code` times the
+/// share of close codes must be below `max_mean_code`. A zero `bonus_code` makes
+/// it the plain mean code.
 ///
 /// One front-to-back pass over the matrix collects, per cluster pair, the sum
-/// of codes and the count of impossible pairs, and per mention and cluster,
+/// of codes, the count of close codes and the count of impossible pairs, and per mention and cluster,
 /// whether the mention has an impossible pair with that cluster. It runs on
 /// the calling thread: the clustering step calls it while the pool scores the
 /// next block, and a pool job would wait behind that scoring.
@@ -180,6 +191,8 @@ fn find_candidates(
     min_side: usize,
     max_mean_code: f64,
     max_odd: usize,
+    close_code: i64,
+    bonus_code: f64,
 ) -> Vec<Candidate> {
     let n = cluster.len();
     let k = cluster_count;
@@ -196,11 +209,13 @@ fn find_candidates(
     };
     let mut code_sums = vec![0u64; k * (k + 1) / 2];
     let mut hard_counts = vec![0u32; k * (k + 1) / 2];
+    let mut close_counts = vec![0u64; k * (k + 1) / 2];
     // Bit m of row c: mention m has an impossible pair with cluster c.
     let words = n.div_ceil(64);
     let mut conflicts = vec![0u64; k * words];
     let mut row_sums = vec![0u32; k];
     let mut row_hard = vec![0u32; k];
+    let mut row_close = vec![0u32; k];
     for i in 0..n.saturating_sub(1) {
         if cluster[i] < 0 {
             continue;
@@ -214,19 +229,25 @@ fn find_candidates(
                 continue;
             }
             row_sums[label as usize] += code as u32;
+            if is_close(code, close_code) {
+                row_close[label as usize] += 1;
+            }
             if code == HARD {
                 row_hard[label as usize] += 1;
                 own_conflicts[j / 64] |= 1 << (j % 64);
             }
         }
         for other in 0..k {
-            // An impossible pair adds 255, so a zero sum has none.
-            if row_sums[other] == 0 {
+            // An impossible pair adds 255, so a zero sum has none. Codes of zero can
+            // still be close, so a zero sum with close codes is recorded too.
+            if row_sums[other] == 0 && row_close[other] == 0 {
                 continue;
             }
             let index = pair_index(own, other);
             code_sums[index] += row_sums[other] as u64;
             row_sums[other] = 0;
+            close_counts[index] += row_close[other] as u64;
+            row_close[other] = 0;
             if row_hard[other] > 0 {
                 hard_counts[index] += row_hard[other];
                 row_hard[other] = 0;
@@ -262,30 +283,33 @@ fn find_candidates(
                 if size_a - odd_in_a < min_side || size_b - odd_in_b < min_side {
                     continue;
                 }
-                let mut removed: u64 = odd
-                    .iter()
-                    .map(|&mention| {
-                        let across = if cluster[mention] as usize == a {
-                            &members[b]
-                        } else {
-                            &members[a]
-                        };
-                        across
-                            .iter()
-                            .map(|&other| pair_code(codes, n, mention, other) as u64)
-                            .sum::<u64>()
-                    })
-                    .sum();
+                let (mut removed, mut removed_close) = (0u64, 0u64);
+                for &mention in &odd {
+                    let across = if cluster[mention] as usize == a {
+                        &members[b]
+                    } else {
+                        &members[a]
+                    };
+                    for &other in across {
+                        let code = pair_code(codes, n, mention, other);
+                        removed += code as u64;
+                        removed_close += u64::from(is_close(code, close_code));
+                    }
+                }
                 // The pair of two odd mentions from different clusters was counted twice.
                 if let [first, second] = odd[..] {
                     if cluster[first] != cluster[second] {
-                        removed -= pair_code(codes, n, first, second) as u64;
+                        let code = pair_code(codes, n, first, second);
+                        removed -= code as u64;
+                        removed_close -= u64::from(is_close(code, close_code));
                     }
                 }
                 let code_sum = code_sums[index] - removed;
+                let close_count = close_counts[index] - removed_close;
                 let rest = ((size_a - odd_in_a) * (size_b - odd_in_b)) as f64;
-                if (code_sum as f64) < max_mean_code * rest {
-                    found.push((a, b, odd, code_sum));
+                let height_sum = code_sum as f64 - bonus_code * close_count as f64;
+                if height_sum < max_mean_code * rest {
+                    found.push((a, b, odd, code_sum, close_count));
                 }
             }
         }
@@ -298,11 +322,15 @@ fn find_candidates(
 ///
 /// `cluster` holds each mention's cluster index in `0..cluster_count`, or -1
 /// for a mention outside every eligible cluster. Each result is
-/// `(a, b, odd, code_sum)` with `a < b`: every impossible pair between `a` and
-/// `b` holds a mention of `odd`, both clusters keep `min_side` mentions without
-/// them, and the mean code between the clusters without them is below
+/// `(a, b, odd, code_sum, close_count)` with `a < b`: every impossible pair
+/// between `a` and `b` holds a mention of `odd`, both clusters keep `min_side`
+/// mentions without them, and the mean code between the clusters without them,
+/// less `bonus_code` times the share of codes at most `close_code`, is below
 /// `max_mean_code`. No smaller set of mentions is in every impossible pair.
+/// The defaults (`close_code` -1, `bonus_code` 0) test the plain mean code.
 #[pyfunction]
+#[pyo3(signature = (codes, cluster, cluster_count, min_side, max_mean_code, max_odd, close_code = -1, bonus_code = 0.0))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn name_conflict_candidates<'py>(
     py: Python<'py>,
     codes: PyReadonlyArray1<'py, u8>,
@@ -311,6 +339,8 @@ pub(crate) fn name_conflict_candidates<'py>(
     min_side: usize,
     max_mean_code: f64,
     max_odd: usize,
+    close_code: i64,
+    bonus_code: f64,
 ) -> PyResult<Vec<Candidate>> {
     let codes = codes.as_slice()?;
     let cluster = cluster.as_slice()?;
@@ -328,6 +358,11 @@ pub(crate) fn name_conflict_candidates<'py>(
     if !(1..=2).contains(&max_odd) {
         return Err(PyValueError::new_err("max_odd must be 1 or 2"));
     }
+    if !bonus_code.is_finite() || bonus_code < 0.0 {
+        return Err(PyValueError::new_err(
+            "bonus_code must be finite and non-negative",
+        ));
+    }
     Ok(py.allow_threads(|| {
         find_candidates(
             codes,
@@ -336,6 +371,8 @@ pub(crate) fn name_conflict_candidates<'py>(
             min_side,
             max_mean_code,
             max_odd,
+            close_code,
+            bonus_code,
         )
     }))
 }
@@ -405,44 +442,89 @@ mod tests {
     fn finds_one_odd_mention_in_either_cluster() {
         let (codes, cluster) = two_clusters(|i, _| i == 6);
         assert_eq!(
-            find_candidates(&codes, &cluster, 2, 5, 60.0, 2),
-            vec![(0, 1, vec![6], 20 * 6 * 7)]
+            find_candidates(&codes, &cluster, 2, 5, 60.0, 2, -1, 0.0),
+            vec![(0, 1, vec![6], 20 * 6 * 7, 0)]
         );
         // The same block with the cluster indexes swapped.
         let swapped: Vec<i64> = cluster.iter().map(|label| 1 - label).collect();
         assert_eq!(
-            find_candidates(&codes, &swapped, 2, 5, 60.0, 2),
-            vec![(0, 1, vec![6], 20 * 6 * 7)]
+            find_candidates(&codes, &swapped, 2, 5, 60.0, 2, -1, 0.0),
+            vec![(0, 1, vec![6], 20 * 6 * 7, 0)]
         );
         // A higher mean or too few mentions: no candidate.
-        assert!(find_candidates(&codes, &cluster, 2, 5, 20.0, 2).is_empty());
-        assert!(find_candidates(&codes, &cluster, 2, 7, 60.0, 2).is_empty());
+        assert!(find_candidates(&codes, &cluster, 2, 5, 20.0, 2, -1, 0.0).is_empty());
+        assert!(find_candidates(&codes, &cluster, 2, 7, 60.0, 2, -1, 0.0).is_empty());
     }
 
     #[test]
     fn finds_two_odd_mentions_only_when_allowed() {
         // Both in one cluster.
         let (codes, cluster) = two_clusters(|i, _| i == 5 || i == 6);
-        assert!(find_candidates(&codes, &cluster, 2, 5, 60.0, 1).is_empty());
+        assert!(find_candidates(&codes, &cluster, 2, 5, 60.0, 1, -1, 0.0).is_empty());
         assert_eq!(
-            find_candidates(&codes, &cluster, 2, 5, 60.0, 2),
-            vec![(0, 1, vec![5, 6], 20 * 5 * 7)]
+            find_candidates(&codes, &cluster, 2, 5, 60.0, 2, -1, 0.0),
+            vec![(0, 1, vec![5, 6], 20 * 5 * 7, 0)]
         );
         // One in each cluster: mention 6 against all of cluster 1, mention 7 against all of cluster 0.
         let (codes, cluster) = two_clusters(|i, j| i == 6 || j == 7);
         assert_eq!(
-            find_candidates(&codes, &cluster, 2, 5, 60.0, 2),
-            vec![(0, 1, vec![6, 7], 20 * 6 * 6)]
+            find_candidates(&codes, &cluster, 2, 5, 60.0, 2, -1, 0.0),
+            vec![(0, 1, vec![6, 7], 20 * 6 * 6, 0)]
         );
         // Two separate impossible pairs: one mention from each pair works.
         let (codes, cluster) = two_clusters(|i, j| (i, j) == (5, 8) || (i, j) == (6, 9));
-        let odd: Vec<Vec<usize>> = find_candidates(&codes, &cluster, 2, 5, 60.0, 2)
+        let odd: Vec<Vec<usize>> = find_candidates(&codes, &cluster, 2, 5, 60.0, 2, -1, 0.0)
             .into_iter()
-            .map(|(_, _, odd, _)| odd)
+            .map(|(_, _, odd, _, _)| odd)
             .collect();
         assert_eq!(odd, vec![vec![5, 6], vec![5, 9], vec![6, 8], vec![8, 9]]);
         // Three mentions behind the impossible pairs: no candidate.
         let (codes, cluster) = two_clusters(|i, _| i >= 4);
-        assert!(find_candidates(&codes, &cluster, 2, 4, 60.0, 2).is_empty());
+        assert!(find_candidates(&codes, &cluster, 2, 4, 60.0, 2, -1, 0.0).is_empty());
+    }
+
+    #[test]
+    fn close_codes_lower_the_height() {
+        // Mention 6 conflicts with all of cluster 1. Without it, cross codes are 2
+        // (close) when i + j is even and 60 otherwise: 21 of each.
+        let cluster: Vec<i64> = (0..14).map(|i| if i < 7 { 0 } else { 1 }).collect();
+        let codes = condensed(14, |i, j| {
+            if (i < 7) == (j < 7) {
+                10
+            } else if i == 6 {
+                HARD
+            } else if (i + j) % 2 == 0 {
+                2
+            } else {
+                60
+            }
+        });
+        // The plain mean code is 31, above a limit of 20.
+        assert!(find_candidates(&codes, &cluster, 2, 5, 20.0, 2, -1, 0.0).is_empty());
+        // With a bonus of 40 codes per close share the height is 31 - 20 = 11.
+        let found = find_candidates(&codes, &cluster, 2, 5, 20.0, 2, 11, 40.0);
+        assert_eq!(found, vec![(0, 1, vec![6], 21 * 2 + 21 * 60, 21)]);
+        // Codes above close_code are not close.
+        assert!(find_candidates(&codes, &cluster, 2, 5, 20.0, 2, 1, 40.0).is_empty());
+    }
+
+    #[test]
+    fn zero_codes_count_as_close() {
+        // Without mention 6, cross pairs with mention 13 have code 0: six close codes.
+        let cluster: Vec<i64> = (0..14).map(|i| if i < 7 { 0 } else { 1 }).collect();
+        let codes = condensed(14, |i, j| {
+            if (i < 7) == (j < 7) {
+                10
+            } else if i == 6 {
+                HARD
+            } else if j == 13 {
+                0
+            } else {
+                60
+            }
+        });
+        let found = find_candidates(&codes, &cluster, 2, 5, 255.0, 2, 11, 0.0);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].4, 6);
     }
 }

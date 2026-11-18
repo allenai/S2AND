@@ -383,6 +383,19 @@ cluster must retain five mentions and a full first name. Extensions are ordered
 by their highest pair-distance bound. They preserve every selected pair and stop
 at three original clusters.
 
+Each repair round first runs a reading step for joined-initials readings (see
+"Canonical name contract" in `docs/canonical_names.md`). The name rules veto "Ec" against
+a bare "Edward", although "Ec" agrees with "Edward C.". When linkage puts "Ec" beside
+"Edward C." mentions, that one veto keeps the piece away from the profile that holds the
+bare "Edward". The step sets aside each impossible pair between a reading mention and a
+mention without a reading when the reading mention's opposite cluster holds a mention that
+spells the reading, as incremental linking does for restored profiles. Two clusters with no
+other impossible pair merge when their close-pair height is under the linkage EPS, where
+linkage would have merged them. When other impossible pairs remain, at most two odd mentions
+must explain them, and the odd-mention tests above apply. The ORCID, seed, disallow,
+exclusion and name-rule tests apply to every merge. Pair verdicts and linkage do not change.
+The step runs only for an average-linkage `FastCluster`.
+
 The repair keeps a one-byte-per-pair copy of each block's distances while the
 block clusters, about one eighth of the matrix. Extending a pair reuses the
 original pair sums and reads only the additional excluded rows.

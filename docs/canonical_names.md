@@ -281,7 +281,11 @@ and spells exactly these initials in order, with every later token an initial or
 least four letters. So `Ka` matches `Kristan Allan` and `Kristian A.`, `Mal` matches
 `Marco Aurelio Lisboa`, and `MArfan` matches `Mohammad Arfan`, while `Li` and `Lei`,
 `Ji` and `Jong In`, and `Ka` and `Kristian` still conflict. Two readings never clear a
-veto. Like the CJK rule, the reading changes only the constraint, not canonical names
+veto. Canonical names keep a middle of joined capitals as one token (`Johanna IP` gives
+middle `ip`), so `spelled_middle_initials_for_constraint` records its initials (`Sip`)
+when the middle passes the D9 initials test and the first name has a lowercase letter.
+The name rule then reads the middle as initials: `Johanna IP` agrees with `Johanna Inge
+Petra`, and `Jip` spells `Johanna I P`. Like the CJK rule, the reading changes only the constraint, not canonical names
 or count keys.
 
 Full middle names also use `same_prefix_tokens` before a full-token conflict

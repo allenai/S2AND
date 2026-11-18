@@ -43,7 +43,7 @@ pub struct CanonicalNameCountKeys {
     pub last_first_initial: Option<String>,
 }
 
-fn name_prefixes() -> &'static HashSet<String> {
+pub(crate) fn name_prefixes() -> &'static HashSet<String> {
     static PREFIXES: OnceLock<HashSet<String>> = OnceLock::new();
     PREFIXES.get_or_init(|| NAME_PREFIXES.into_iter().map(str::to_string).collect())
 }

@@ -110,8 +110,8 @@ mod constraint_key_tests {
             let orcid = [None, None, Some("0000-0001"), Some("0000-0002")][rng.below(4)];
             let signature_id = format!("s{index}");
             let mut data = signature(first, middle, last, orcid);
-            // Some names stand for CJK-script given names (tag H) and some for joined initials
-            // (tag J), so the keyed CJK and joined-initials rules run too.
+            // Some names stand for CJK-script given names (tag H), joined initials (tag J) or
+            // spelled middle initials (tag S), so the keyed CJK and joined-initials rules run too.
             let tokens: Vec<String> = data
                 .first_normalized()
                 .unwrap_or("")
@@ -124,6 +124,10 @@ mod constraint_key_tests {
                 1 if !tokens.is_empty() => {
                     let initials: String = tokens.iter().filter_map(|t| t.chars().next()).collect();
                     data.cjk_given_name = Some(format!("J{initials}"));
+                }
+                // Spelled middle initials (tag S) name the last middle token.
+                2 if tokens.len() > 1 => {
+                    data.cjk_given_name = Some(format!("S{}", tokens[tokens.len() - 1]));
                 }
                 _ => {}
             }
@@ -989,8 +993,22 @@ impl RustFeaturizer {
                 return (given1 != given2).then_some(high_value);
             }
         }
-        let middle1 = s1.middle.as_deref().unwrap_or("");
-        let middle2 = s2.middle.as_deref().unwrap_or("");
+        // A joined-capitals middle ("Johanna IP") reads as initials; see
+        // `constraints::spell_middle_tokens`.
+        let spelled1 = crate::constraints::spelled_middle(
+            s1.middle.as_deref().unwrap_or(""),
+            s1.cjk_given_name.as_deref(),
+        );
+        let spelled2 = crate::constraints::spelled_middle(
+            s2.middle.as_deref().unwrap_or(""),
+            s2.cjk_given_name.as_deref(),
+        );
+        let middle1 = spelled1
+            .as_deref()
+            .unwrap_or(s1.middle.as_deref().unwrap_or(""));
+        let middle2 = spelled2
+            .as_deref()
+            .unwrap_or(s2.middle.as_deref().unwrap_or(""));
         let ordinary = || {
             if !first1.is_empty() && !first2.is_empty() {
                 if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
@@ -2900,6 +2918,50 @@ impl RustFeaturizer {
             }
         }
         (full_first_names, orcids)
+    }
+
+    /// Facts for the repair's reading step: `(signature_id, reading)` for signatures whose
+    /// given name has a joined-initials reading (tag J or W), and `(signature_id, reading)`
+    /// for signatures without one whose name spells a reading that some signature has
+    /// (`constraints::spelled_reading_forms`).
+    fn joined_reading_facts(&self) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        let mut readings = Vec::new();
+        let mut values: HashSet<&str> = HashSet::default();
+        for signature_id in self.signature_id_order() {
+            let Some(signature) = self.signatures.get(signature_id) else {
+                continue;
+            };
+            let value = signature.cjk_given_name.as_deref();
+            if crate::constraints::is_joined_reading(value) {
+                let value = value.unwrap_or("");
+                values.insert(value);
+                readings.push((signature_id.clone(), value.to_string()));
+            }
+        }
+        let mut spellers = Vec::new();
+        if values.is_empty() {
+            return (readings, spellers);
+        }
+        for signature_id in self.signature_id_order() {
+            let Some(signature) = self.signatures.get(signature_id) else {
+                continue;
+            };
+            let value = signature.cjk_given_name.as_deref();
+            if crate::constraints::is_joined_reading(value) {
+                continue;
+            }
+            let first = signature.first_normalized().unwrap_or("");
+            let middle = signature.middle.as_deref().unwrap_or("");
+            for form in crate::constraints::spelled_reading_forms(
+                first.split_whitespace().chain(middle.split_whitespace()),
+                value,
+            ) {
+                if values.contains(form.as_str()) {
+                    spellers.push((signature_id.clone(), form));
+                }
+            }
+        }
+        (readings, spellers)
     }
 
     fn cluster_seeds_require(&self) -> Vec<(String, String)> {

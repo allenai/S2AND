@@ -8,6 +8,16 @@
   parser reads `Ka` as a given name. Incremental linking applies the same reading when it checks a link
   to a restored profile. Canonical names, features and count keys do not change. See "Canonical name
   contract" in `docs/canonical_names.md`.
+- Read a middle name of two or three joined capitals as initials in the hard name rule: `Johanna IP`
+  agrees with `Johanna Inge Petra` and `Johanna I. P.`, and `Jip` spells it. Canonical names, features
+  and count keys do not change.
+- Rejoin pieces of a profile that a joined-initials reading keeps apart. One `Ec` mention beside
+  `Edward C.` mentions vetoes every bare `Edward`, so linkage left 27 Edward C. Holmes mentions out of
+  his 1,033-mention profile. Name-conflict repair now sets such vetoes aside when the other cluster
+  spells the reading, and merges under the linkage EPS. On 128 production blocks, both blind judges
+  called 16 of 19 such merges right; the 3 wrong ones moved 2 to 4 mentions each. Held-out
+  signature-weighted F1 rose from 0.969738 to 0.969970 with precision unchanged. See "Name-conflict
+  repair" in `docs/production_inference.md`.
 - Veto merges between two different given names written in Han, kana, or hangul. Transliteration made
   each Han character a pinyin syllable and the name rules matched the syllables by prefix, so `重喜`
   (`zhong xi`) matched `重郷` (`zhong xiang`) and `孝` matched `孝徳`. Production merged such authors in

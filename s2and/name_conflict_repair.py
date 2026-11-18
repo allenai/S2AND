@@ -49,6 +49,17 @@ the distance limit after removing that same set. Each original cluster must keep
 five mentions and a full first name. An extension never grows beyond three
 original clusters or changes another pair merge.
 
+Each round first runs a reading step. A short given name may be joined initials
+("Ec" for E. C.), and the name rules veto it against a bare "Edward". Once linkage puts
+"Ec" beside "Edward C." mentions, that veto keeps the piece away from the profile that
+holds the bare "Edward". Incremental linking accepts a reading when any member of the
+profile spells it, so the step does the same: it sets aside each impossible pair between
+a reading mention and a mention without a reading, when the reading mention's opposite
+cluster holds a mention that spells the reading. Two clusters with no other impossible
+pair merge when their close-pair height is under the linkage cut, as linkage would have
+merged them. When other impossible pairs remain, at most ``MAX_ODD_MENTIONS`` mentions
+must explain them, and the odd-mention tests above apply. Pair verdicts do not change.
+
 ``Clusterer.name_conflict_repair_max_distance`` sets the distance for every route
 that clusters blocks; ``None`` turns the repair off.
 
@@ -214,6 +225,10 @@ class NameConflictRepair:
             two different required groups. The repair merges two clusters only when this
             holds for every impossible pair between them.
             ``None`` skips the test; every route that clusters real blocks supplies it.
+        joined_readings: Joined-initials reading (``given_name_for_constraint`` tag J or W)
+            per signature id, for signatures that have one.
+        reading_spellers: Per reading, the signature ids without a reading whose name spells
+            it (``spelled_reading_forms``). The reading step needs both mappings.
     """
 
     max_average_distance: float
@@ -230,6 +245,8 @@ class NameConflictRepair:
     bonus_min_close_share: float | None = None
     bonus_max_plain_average: float | None = None
     bonus_min_side_mentions: int | None = None
+    joined_readings: Mapping[str, str] = field(default_factory=dict)
+    reading_spellers: Mapping[str, Set[str]] = field(default_factory=dict)
 
     def lacks_full_name(self, side: Sequence[str]) -> bool:
         """Whether a side fails the full-first-name test."""
@@ -322,6 +339,234 @@ def _impossible_pairs(
     return sorted(pairs)
 
 
+def _passes_merge_guards(
+    all_a: Sequence[str],
+    all_b: Sequence[str],
+    impossible_pairs: Callable[[], Sequence[tuple[int, int]]],
+    block_signatures: Sequence[str],
+    repair: NameConflictRepair,
+    forbidden: Mapping[str, Set[str]] | None,
+    seed_groups: Mapping[str, object] | None,
+) -> bool:
+    """Apply the ORCID, seed, forbidden-pair and name-rule tests to a proposed merge."""
+    if repair.orcids:
+        # The odd mentions stay in the merged cluster, so their ORCIDs count. Two sides
+        # with ORCIDs merge only when they share a leading ORCID.
+        orcids_a = _top_orcids(all_a, repair.orcids)
+        orcids_b = _top_orcids(all_b, repair.orcids)
+        if orcids_a and orcids_b and orcids_a.isdisjoint(orcids_b):
+            return False
+    if seed_groups:
+        # Impossible pairs between two required seed groups are not name conflicts.
+        groups = {seed_groups[s] for s in (*all_a, *all_b) if s in seed_groups}
+        if len(groups) > 1:
+            return False
+    if forbidden:
+        # The odd mentions stay in the merged cluster, so their forbidden pairs count too.
+        set_a, set_b = set(all_a), set(all_b)
+        if any(not set_b.isdisjoint(forbidden.get(s, ())) for s in all_a):
+            return False
+        if any(not set_a.isdisjoint(forbidden.get(s, ())) for s in all_b):
+            return False
+    if repair.name_rules_alone_forbid is not None:
+        # An impossible pair that the name rules do not explain comes from a seed or from
+        # the caller's supervision, and the repair may not merge across it.
+        verdicts = repair.name_rules_alone_forbid(
+            [(block_signatures[left], block_signatures[right]) for left, right in impossible_pairs()]
+        )
+        if not all(verdicts):
+            return False
+    return True
+
+
+def _codes_against(codes: np.ndarray, block_width: int, mention: int, others: np.ndarray) -> np.ndarray:
+    """Return the codes between one mention and other mentions, none equal to it."""
+    low, high = np.minimum(mention, others), np.maximum(mention, others)
+    return codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
+
+
+def _block_codes(codes: np.ndarray, block_width: int, side_a: np.ndarray, side_b: np.ndarray) -> np.ndarray:
+    """Return the codes between two disjoint groups of mentions, one row per ``side_a`` mention."""
+    out = np.empty((len(side_a), len(side_b)), dtype=codes.dtype)
+    # Chunks of rows bound the index arrays for large clusters.
+    step = max(1, (1 << 22) // max(1, len(side_b)))
+    for start in range(0, len(side_a), step):
+        rows = side_a[start : start + step, None]
+        low, high = np.minimum(rows, side_b[None, :]), np.maximum(rows, side_b[None, :])
+        out[start : start + step] = codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
+    return out
+
+
+def _smallest_covers(residual: np.ndarray) -> list[tuple[tuple[int, int], ...]]:
+    """Return every smallest set of at most ``MAX_ODD_MENTIONS`` rows or columns holding all true cells.
+
+    Each entry is (0, row) or (1, column); the covers come sorted, and none fit returns [].
+    Every cover holds an end of the first true cell, so branching on that choice finds them.
+    """
+
+    def search(mask: np.ndarray, depth: int) -> list[tuple[tuple[int, int], ...]]:
+        cells = np.argwhere(mask)
+        if len(cells) == 0:
+            return [()]
+        if depth == 0:
+            return []
+        row, column = int(cells[0][0]), int(cells[0][1])
+        found: list[tuple[tuple[int, int], ...]] = []
+        for axis, index in ((0, row), (1, column)):
+            rest = mask.copy()
+            if axis == 0:
+                rest[index, :] = False
+            else:
+                rest[:, index] = False
+            found.extend(((axis, index), *tail) for tail in search(rest, depth - 1))
+        return found
+
+    for size in range(MAX_ODD_MENTIONS + 1):
+        covers = search(residual, size)
+        if covers:
+            return sorted({tuple(sorted(cover)) for cover in covers})
+    return []
+
+
+def _reading_merge_bound(
+    block: np.ndarray,
+    side_a: np.ndarray,
+    side_b: np.ndarray,
+    odd: tuple[int, ...],
+    block_signatures: Sequence[str],
+    repair: NameConflictRepair,
+    cut_height: float,
+    close_code: int,
+) -> float | None:
+    """Return the merge height of a reading-step pair once ``odd`` is left out, or None."""
+    keep_a, keep_b = ~np.isin(side_a, odd), ~np.isin(side_b, odd)
+    kept = block[np.ix_(keep_a, keep_b)]
+    allowed = kept[kept != 255].astype(np.int64)
+    if allowed.size == 0:
+        return None
+    code_sum, close_count = int(allowed.sum()), int(np.count_nonzero(allowed <= close_code))
+    if odd:
+        # Other impossible pairs remain, so the odd-mention tests apply.
+        ids_a = [block_signatures[m] for m in side_a[keep_a].tolist()]
+        ids_b = [block_signatures[m] for m in side_b[keep_b].tolist()]
+        smaller = min(len(ids_a), len(ids_b))
+        if smaller < MIN_SIDE or repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
+            return None
+        bound = _height_bound(code_sum, close_count, int(allowed.size), repair, smaller)
+        return bound if bound <= repair.max_average_distance else None
+    # Only set-aside pairs kept the clusters apart: merge where linkage would have.
+    bound = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / allowed.size + 1) / _SCALE
+    return bound if bound <= cut_height else None
+
+
+def _reading_round(
+    block_signatures: Sequence[str],
+    labels: np.ndarray | Sequence[int],
+    codes: np.ndarray,
+    repair: NameConflictRepair,
+    cut_height: float | None,
+    *,
+    forbidden: Mapping[str, Set[str]] | None = None,
+    seed_groups: Mapping[str, object] | None = None,
+    block_key: str = "",
+) -> np.ndarray | Sequence[int]:
+    """Merge cluster pairs that joined-initials readings keep apart (see the module docstring).
+
+    Returns:
+        ``labels`` unchanged when nothing merges, else a new label array.
+    """
+    readings, spellers = repair.joined_readings, repair.reading_spellers
+    if cut_height is None or not readings or not spellers:
+        return labels
+    width = len(block_signatures)
+    is_reading = np.fromiter((s in readings for s in block_signatures), dtype=bool, count=width)
+    label_array = np.asarray(labels)
+    unique, inverse = np.unique(label_array, return_inverse=True)
+    position = {signature: index for index, signature in enumerate(block_signatures)}
+    # Clusters that hold a mention spelling each reading of the block.
+    spelling_clusters: dict[str, set[int]] = {}
+    for mention in np.flatnonzero(is_reading).tolist():
+        value = readings[block_signatures[mention]]
+        if value not in spelling_clusters:
+            spelling_clusters[value] = {int(inverse[position[s]]) for s in spellers.get(value, ()) if s in position}
+    everyone = np.arange(width)
+    # Candidates: a reading mention's cluster and each other cluster that it has an impossible
+    # pair with and that spells its reading. Readings that nothing spells cost nothing.
+    facing: set[tuple[int, int]] = set()
+    for mention in np.flatnonzero(is_reading).tolist():
+        own = int(inverse[mention])
+        spelling = spelling_clusters[readings[block_signatures[mention]]] - {own}
+        if not spelling:
+            continue
+        others = everyone[everyone != mention]
+        partners = others[_codes_against(codes, width, mention, others) == 255]
+        facing.update((mention, c) for c in np.unique(inverse[partners]).tolist() if c in spelling)
+    if not facing:
+        return labels
+    members = {c: np.flatnonzero(inverse == c) for c in {int(inverse[m]) for m, _ in facing} | {c for _, c in facing}}
+
+    def is_spelled(mention: int, cluster: int) -> bool:
+        # Whether a mention without a reading in the cluster spells this mention's reading.
+        return cluster in spelling_clusters.get(readings[block_signatures[mention]], ())
+
+    pairs = sorted({(min(int(inverse[m]), c), max(int(inverse[m]), c)) for m, c in facing})
+    close_code = _close_code(repair)
+    accepted: list[tuple[float, int, int, tuple[int, ...]]] = []
+    for a, b in pairs:
+        side_a, side_b = members[a], members[b]
+        block = _block_codes(codes, width, side_a, side_b)
+        impossible = block == 255
+        set_aside = np.zeros_like(impossible)
+        for row, mention in enumerate(side_a.tolist()):
+            if is_reading[mention] and is_spelled(mention, b):
+                set_aside[row, ~is_reading[side_b]] = True
+        for column, mention in enumerate(side_b.tolist()):
+            if is_reading[mention] and is_spelled(mention, a):
+                set_aside[~is_reading[side_a], column] = True
+        set_aside &= impossible
+        if not set_aside.any():
+            continue
+        found = None
+        # Try each smallest cover of the remaining conflicts; none means no other conflict.
+        for cover in _smallest_covers(impossible & ~set_aside):
+            odd = tuple(sorted(int(side_a[i]) if axis == 0 else int(side_b[i]) for axis, i in cover))
+            bound = _reading_merge_bound(block, side_a, side_b, odd, block_signatures, repair, cut_height, close_code)
+            if bound is not None:
+                found = (bound, odd)
+                break
+        if found is None:
+            continue
+        bound, odd = found
+        rows, columns = np.nonzero(impossible)
+        positions = [
+            (min(int(side_a[i]), int(side_b[j])), max(int(side_a[i]), int(side_b[j])))
+            for i, j in zip(rows.tolist(), columns.tolist(), strict=True)
+        ]
+        all_a = [block_signatures[m] for m in side_a.tolist()]
+        all_b = [block_signatures[m] for m in side_b.tolist()]
+        if _passes_merge_guards(all_a, all_b, lambda p=positions: p, block_signatures, repair, forbidden, seed_groups):
+            accepted.append((bound, a, b, odd))
+    if not accepted:
+        return labels
+    merged = label_array.copy()
+    used: set[int] = set()
+    for bound, a, b, odd in sorted(accepted):
+        if a in used or b in used:
+            continue
+        used.update((a, b))
+        merged[members[b]] = unique[a]
+        logger.info(
+            "Name-conflict repair: block %s merges clusters of %d and %d mentions over joined-initials "
+            "readings, height %.3f, odd mentions %s",
+            block_key,
+            len(members[a]),
+            len(members[b]),
+            bound,
+            ", ".join(block_signatures[m] for m in odd),
+        )
+    return merged
+
+
 def repair_name_conflicts_in_block(
     block_signatures: Sequence[str],
     labels: np.ndarray | Sequence[int],
@@ -331,16 +576,29 @@ def repair_name_conflicts_in_block(
     forbidden: Mapping[str, Set[str]] | None = None,
     seed_groups: Mapping[str, object] | None = None,
     block_key: str = "",
+    cut_height: float | None = None,
 ) -> np.ndarray | Sequence[int]:
     """Run up to ``repair.rounds`` repair rounds, stopping at the first that merges nothing.
 
-    A round merges each cluster at most once. A later round sees the merged clusters, so a
-    person split three ways by different odd mentions can rejoin over two rounds.
+    A round runs the reading step, then the odd-mention step, and each step merges a cluster
+    at most once. A later round sees the merged clusters, so a person split three ways by
+    different odd mentions can rejoin over two rounds. ``cut_height`` is the linkage cut
+    that the reading step merges under; ``None`` skips the reading step.
     """
     current = labels
     for _ in range(repair.rounds):
+        read = _reading_round(
+            block_signatures,
+            current,
+            codes,
+            repair,
+            cut_height,
+            forbidden=forbidden,
+            seed_groups=seed_groups,
+            block_key=block_key,
+        )
         repaired = _repair_round(
-            block_signatures, current, codes, repair, forbidden=forbidden, seed_groups=seed_groups, block_key=block_key
+            block_signatures, read, codes, repair, forbidden=forbidden, seed_groups=seed_groups, block_key=block_key
         )
         if repaired is current:
             break
@@ -416,34 +674,16 @@ def _repair_round(
         average = bound - 0.5 / _SCALE
         if repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
             continue
-        if repair.orcids:
-            # The odd mentions stay in the merged cluster, so their ORCIDs count. Two sides
-            # with ORCIDs merge only when they share a leading ORCID.
-            orcids_a = _top_orcids(all_a, repair.orcids)
-            orcids_b = _top_orcids(all_b, repair.orcids)
-            if orcids_a and orcids_b and orcids_a.isdisjoint(orcids_b):
-                continue
-        if seed_groups:
-            # Impossible pairs between two required seed groups are not name conflicts.
-            groups = {seed_groups[s] for s in (*all_a, *all_b) if s in seed_groups}
-            if len(groups) > 1:
-                continue
-        if forbidden:
-            # The odd mentions stay in the merged cluster, so their forbidden pairs count too.
-            set_a, set_b = set(all_a), set(all_b)
-            if any(not set_b.isdisjoint(forbidden.get(s, ())) for s in all_a):
-                continue
-            if any(not set_a.isdisjoint(forbidden.get(s, ())) for s in all_b):
-                continue
-        if repair.name_rules_alone_forbid is not None:
-            # An impossible pair that the name rules do not explain comes from a seed or from
-            # the caller's supervision, and the repair may not merge across it.
-            impossible = _impossible_pairs(codes, len(block_signatures), members[a], members[b], odd)
-            verdicts = repair.name_rules_alone_forbid(
-                [(block_signatures[left], block_signatures[right]) for left, right in impossible]
-            )
-            if not all(verdicts):
-                continue
+        if not _passes_merge_guards(
+            all_a,
+            all_b,
+            lambda a=a, b=b, odd=odd: _impossible_pairs(codes, len(block_signatures), members[a], members[b], odd),
+            block_signatures,
+            repair,
+            forbidden,
+            seed_groups,
+        ):
+            continue
         accepted.append(_RepairCandidate(average, a, b, tuple(odd), code_sum, close_count))
     if not accepted:
         return labels

@@ -740,6 +740,7 @@ def _facts_featurizer(name_rule_conflicts: bool = True) -> SimpleNamespace:
     constraint = model_module._NAME_RULE_CONFLICT if name_rule_conflicts else LARGE_DISTANCE
     return SimpleNamespace(
         name_conflict_facts=lambda: (list(SIGNATURES), {"a0": "0000000218250097"}),
+        joined_reading_facts=lambda: ([], []),
         cluster_seeds_require=lambda: [],
         signature_ids=lambda: list(SIGNATURES),
         get_constraints_matrix_indexed=lambda pairs, *_args, **_kwargs: [constraint] * len(pairs),
@@ -942,7 +943,11 @@ def test_eps_grid_from_a_rust_featurizer_repairs_as_its_predict_does() -> None:
 
 
 def test_eps_grid_from_a_rust_featurizer_refuses_required_seeds() -> None:
-    seeded = SimpleNamespace(name_conflict_facts=lambda: ([], {}), cluster_seeds_require=lambda: [("a0", "p1")])
+    seeded = SimpleNamespace(
+        name_conflict_facts=lambda: ([], {}),
+        joined_reading_facts=lambda: ([], []),
+        cluster_seeds_require=lambda: [("a0", "p1")],
+    )
 
     with pytest.raises(ValueError, match="cluster_seeds_require cannot be used with precomputed dists"):
         _model().predict_eps_grid_from_rust_featurizer({"b": SIGNATURES}, seeded, {"b": squareform(_square())}, [0.5])
@@ -1092,3 +1097,59 @@ def test_bonus_floor_admits_a_share_exactly_at_the_floor(floor: float, close: in
     # 0.07 * 100 is 7.000000000000001 in floating point; the share itself compares exactly.
     bound = name_conflict_repair_module._height_bound(_code_sum(0.30, count), close, count, _bounded(floor, 0.40))
     assert np.isfinite(bound)
+
+
+# Reading step: a5 is a joined-initials reading ("Ec"), b0 spells it ("Edward C."), and the
+# rest of the b mentions are bare names that the reading conflicts with.
+def _reading_repair(spellers: frozenset[str] = frozenset({"b0"}), **kwargs: Any) -> NameConflictRepair:
+    readings = {"a5": "Jec", **kwargs.pop("readings", {})}
+    return NameConflictRepair(0.2, FULL, joined_readings=readings, reading_spellers={"Jec": set(spellers)}, **kwargs)
+
+
+def test_reading_step_merges_under_the_linkage_cut_when_the_other_cluster_spells_the_reading() -> None:
+    # 0.3 fails the odd-mention test (0.2) but is under the 0.5 cut, as linkage would merge it.
+    square = _square(cross=0.3)
+    assert _repair(square, _reading_repair()) == _labels(square)
+    merged = _repair(square, _reading_repair(), cut_height=0.5)
+    assert _partition(merged) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
+
+
+@pytest.mark.parametrize(
+    ("cross", "spellers"),
+    [
+        (0.3, frozenset()),  # no mention in the other cluster spells the reading
+        (0.6, frozenset({"b0"})),  # over the linkage cut
+    ],
+)
+def test_reading_step_needs_a_speller_and_a_height_under_the_cut(cross: float, spellers: frozenset[str]) -> None:
+    square = _square(cross=cross)
+    assert _repair(square, _reading_repair(spellers), cut_height=0.5) == _labels(square)
+
+
+def test_reading_step_hands_other_conflicts_to_the_odd_mention_tests() -> None:
+    # Readings a4 and a5 plus a plain conflict a0-b1: three mentions, over today's two, but
+    # once the readings are set aside one odd mention (a0 or b1) explains the rest.
+    square = _square(cross=0.1)
+    for j in B:
+        square[4, j] = square[j, 4] = LARGE_DISTANCE
+    square[0, 7] = square[7, 0] = LARGE_DISTANCE
+    labels = _labels(square)
+    assert _repair(square, NameConflictRepair(0.2, FULL)) == labels
+    repair = _reading_repair(readings={"a4": "Jec"})
+    assert _partition(_repair(square, repair, cut_height=0.5)) == {
+        frozenset(SIGNATURES[:11]),
+        frozenset(SIGNATURES[11:]),
+    }
+    # At 0.3 the remaining conflict needs the odd-mention distance test, which fails.
+    square_far = square.copy()
+    for i in A:
+        for j in B:
+            if square_far[i, j] != LARGE_DISTANCE:
+                square_far[i, j] = square_far[j, i] = 0.3
+    assert _repair(square_far, repair, cut_height=0.5) == _labels(square_far)
+
+
+def test_reading_step_keeps_pairs_the_name_rules_do_not_explain() -> None:
+    square = _square(cross=0.3)
+    repair = _reading_repair(name_rules_alone_forbid=lambda pairs: [False for _ in pairs])
+    assert _repair(square, repair, cut_height=0.5) == _labels(square)

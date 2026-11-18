@@ -646,9 +646,24 @@ pub(crate) fn joined_initials_for_constraint(first_raw: &str, middle_raw: &str) 
     None
 }
 
-/// The CJK given-name value, else the joined-initials reading (mirrors Python
-/// `given_name_for_constraint`). CJK given names are not ASCII and joined initials are,
-/// so the two never apply to one name.
+/// "S" plus the middle initials of a name whose middle is joined capitals (mirrors Python
+/// `spelled_middle_initials_for_constraint`): "Johanna IP" gives "Sip". Canonical names keep
+/// "IP" as one token. The first name needs a lowercase letter, since an all-capitals name
+/// carries no case.
+pub(crate) fn spelled_middle_initials_for_constraint(
+    first_raw: &str,
+    middle_raw: &str,
+) -> Option<String> {
+    if !first_raw.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        return None;
+    }
+    joined_initials(middle_raw, crate::name_normalization::name_prefixes())
+        .map(|initials| format!("S{initials}"))
+}
+
+/// The CJK given-name value, else a joined-initials value (mirrors Python
+/// `given_name_for_constraint`). CJK given names are not ASCII, joined-initials readings
+/// have no middle name, and spelled middle initials need one, so the values never overlap.
 pub(crate) fn given_name_for_constraint(
     first_raw: &str,
     middle_raw: &str,
@@ -656,6 +671,7 @@ pub(crate) fn given_name_for_constraint(
 ) -> Option<String> {
     cjk_given_name_for_constraint(first_raw, middle_raw, unidecode_char_map)
         .or_else(|| joined_initials_for_constraint(first_raw, middle_raw))
+        .or_else(|| spelled_middle_initials_for_constraint(first_raw, middle_raw))
 }
 
 // D9 (mirrors Python `_JOINED_INITIALS_GIVEN_NAMES`): ED is a frequent given
@@ -908,9 +924,21 @@ pub(crate) fn compute_block_compat(name: &str) -> String {
 mod tests {
     use super::{
         canonical_name_count_keys_compat, canonicalize_name_parts_compat,
-        cjk_given_name_for_constraint, is_cjk_given_name, normalize_text_compat_native,
-        text_unidecode_char, MIXED_CASE_NON_INITIALS,
+        cjk_given_name_for_constraint, given_name_for_constraint, is_cjk_given_name,
+        normalize_text_compat_native, text_unidecode_char, MIXED_CASE_NON_INITIALS,
     };
+
+    #[test]
+    fn spelled_middle_initials_need_joined_capitals_and_a_cased_first_name() {
+        let value = |first: &str, middle: &str| given_name_for_constraint(first, middle, None);
+        assert_eq!(value("Johanna", "IP").as_deref(), Some("Sip"));
+        assert_eq!(value("Johanna", "I.P.").as_deref(), Some("Sip"));
+        assert_eq!(value("Johanna", "Ip"), None);
+        assert_eq!(value("Johanna", "I. Petra"), None);
+        assert_eq!(value("JOHANNA", "IP"), None);
+        assert_eq!(value("Edward", "ED"), None);
+        assert_eq!(value("Ka", "").as_deref(), Some("Jka"));
+    }
 
     #[test]
     fn cjk_given_name_values_carry_a_script_tag_or_mark_incomplete_names() {

@@ -125,8 +125,11 @@ from s2and.supervision import (
 )
 from s2and.text import (
     canonicalize_name_parts,
+    given_name_for_constraint,
+    is_joined_reading,
     normalize_orcid,
     normalize_orcid_compact,
+    spelled_reading_forms,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -817,6 +820,27 @@ def _dataset_name_rules_alone_forbid(dataset: ANDData) -> Callable[[Sequence[tup
     return forbid
 
 
+def _reading_facts(readings: Sequence[tuple[str, str]], spellers: Sequence[tuple[str, str]]) -> dict[str, Any]:
+    """Return the reading-step fields of ``NameConflictRepair`` from reading and speller pairs."""
+    by_reading: dict[str, set[str]] = {}
+    for signature_id, reading in spellers:
+        by_reading.setdefault(reading, set()).add(signature_id)
+    return {"joined_readings": dict(readings), "reading_spellers": by_reading}
+
+
+def _average_linkage_cut(cluster_model: Any, params: Mapping[str, Any] | None) -> float | None:
+    """Return the EPS cut of an average-linkage FastCluster, else None.
+
+    The repair's reading step merges two clusters under this cut, as linkage would have.
+    """
+    if not isinstance(cluster_model, FastCluster) or cluster_model.input_as_observation_matrix:
+        return None
+    settings = {**cluster_model.get_params(), **(params or {})}
+    if settings.get("linkage") != "average" or settings.get("eps") is None:
+        return None
+    return float(settings["eps"])
+
+
 def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
     """Return the repair's close-pair and full-first-name settings from the clusterer.
 
@@ -851,7 +875,8 @@ def _name_conflict_repair_from_rust_featurizer(
     max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
     if max_average_distance is None:
         return None
-    full_first_names, orcids = cast(Any, rust_featurizer).name_conflict_facts()
+    featurizer = cast(Any, rust_featurizer)
+    full_first_names, orcids = featurizer.name_conflict_facts()
     # A clusterer that hides ORCIDs from its constraints hides them from the repair too.
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
     return NameConflictRepair(
@@ -860,6 +885,7 @@ def _name_conflict_repair_from_rust_featurizer(
         dict(orcids) if use_orcid else {},
         _rust_name_rules_alone_forbid(rust_featurizer),
         **_repair_height_settings(clusterer),
+        **_reading_facts(*featurizer.joined_reading_facts()),
     )
 
 
@@ -875,10 +901,12 @@ def _name_conflict_repair_from_dataset(
         return None
     full_first_names: set[str] = set()
     orcids: dict[str, str] = {}
+    values: dict[str, str | None] = {}
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
     for members in block_dict.values():
         for signature_id in members:
             signature = dataset.signatures[signature_id]
+            values[signature_id] = given_name_for_constraint(signature.author_info_first, signature.author_info_middle)
             first = signature.author_info_first_normalized
             if first is None:
                 # An Arrow-backed dataset leaves normalized names to Rust; parse as the name rules do,
@@ -891,12 +919,28 @@ def _name_conflict_repair_from_dataset(
             orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
             if orcid is not None:
                 orcids[signature_id] = orcid
+    # The same facts as the Rust featurizer's joined_reading_facts, for the block's signatures.
+    readings = [(s, value) for s, value in values.items() if value is not None and is_joined_reading(value)]
+    reading_values = {value for _, value in readings}
+    spellers: list[tuple[str, str]] = []
+    if reading_values:
+        for signature_id, value in values.items():
+            if is_joined_reading(value):
+                continue
+            signature = dataset.signatures[signature_id]
+            parts = canonicalize_name_parts(
+                signature.author_info_first, signature.author_info_middle, signature.author_info_last
+            )
+            spellers.extend(
+                (signature_id, form) for form in spelled_reading_forms(parts, value) if form in reading_values
+            )
     return NameConflictRepair(
         max_average_distance,
         frozenset(full_first_names),
         orcids,
         _dataset_name_rules_alone_forbid(dataset),
         **_repair_height_settings(clusterer),
+        **_reading_facts(readings, spellers),
     )
 
 
@@ -4971,6 +5015,7 @@ class Clusterer:
                 forbidden=forbidden,
                 seed_groups=self._repair_seed_groups(dataset, prediction_state),
                 block_key=block_key,
+                cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
             ),
         )
 
@@ -5167,6 +5212,7 @@ class Clusterer:
                         forbidden=disallow_adjacency,
                         seed_groups=seed_groups,
                         block_key=block_key,
+                        cut_height=float(eps) if self.cluster_model.linkage == "average" else None,
                     )
                 _, block_ids = np.unique(np.asarray(labels), return_inverse=True)
                 ids.append(next_id + block_ids.astype(np.int64))

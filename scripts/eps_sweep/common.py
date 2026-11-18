@@ -27,8 +27,9 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # Bump when a distance rule changes within the same package version. Distance caches and
 # sweep plans record it, and release EPS review rejects curves from another policy.
 # 1: version field added; 2: CJK given-name veto (same-script, complete names only);
-# 3: joined-initials reading of short given names.
-DISTANCE_POLICY_VERSION = 3
+# 3: joined-initials reading of short given names; 4: joined-capitals middles read as
+# initials, and the repair's reading step.
+DISTANCE_POLICY_VERSION = 4
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

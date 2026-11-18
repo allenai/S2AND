@@ -111,7 +111,8 @@ impl<'a> ConstraintNameKey<'a> {
         cjk_given_name: Option<&'a str>,
     ) -> Self {
         let last_family = surname_family(last);
-        let middle_tokens: Vec<&'a str> = middle.split_whitespace().collect();
+        let mut middle_tokens: Vec<&'a str> = middle.split_whitespace().collect();
+        spell_middle_tokens(&mut middle_tokens, cjk_given_name);
         let middle_summary = MiddleSummary::new(&middle_tokens);
         Self {
             last,
@@ -211,6 +212,33 @@ pub(crate) fn cjk_given_names_comparable(given_1: &str, given_2: &str) -> bool {
         && matches!(given_1.as_bytes()[0], b'H' | b'K' | b'G')
 }
 
+/// Split a joined-capitals middle back into initials (mirrors Python
+/// `spell_middle_initials`): with the S value "Sip", tokens ["ip"] become ["i", "p"].
+pub(crate) fn spell_middle_tokens<'a>(tokens: &mut Vec<&'a str>, value: Option<&'a str>) {
+    let Some(spelled) = value.and_then(|value| value.strip_prefix('S')) else {
+        return;
+    };
+    if tokens.last() == Some(&spelled) {
+        tokens.pop();
+        // Split by character, as Python does.
+        tokens.extend(
+            spelled
+                .char_indices()
+                .map(|(index, ch)| &spelled[index..index + ch.len_utf8()]),
+        );
+    }
+}
+
+/// The middle name with a joined-capitals middle split into initials, for the per-pair
+/// reference rule; `None` when nothing changes.
+#[cfg(test)]
+pub(crate) fn spelled_middle(middle: &str, value: Option<&str>) -> Option<String> {
+    let mut tokens: Vec<&str> = middle.split_whitespace().collect();
+    let before = tokens.len();
+    spell_middle_tokens(&mut tokens, value);
+    (tokens.len() != before).then(|| tokens.join(" "))
+}
+
 /// Whether a value is a joined-initials reading (tag J or W).
 pub(crate) fn is_joined_reading(value: Option<&str>) -> bool {
     matches!(value.and_then(|v| v.as_bytes().first()), Some(b'J' | b'W'))
@@ -220,34 +248,49 @@ pub(crate) fn is_joined_reading(value: Option<&str>) -> bool {
 /// `_joined_initials_match`). The other name needs a full first name. For J readings its
 /// first and middle tokens must have exactly these initials in order, and every later
 /// token must be an initial or at least four letters, so "Ji" does not match "Jong In".
-/// For W readings it must be the initial and then exactly that word.
+/// For W readings it must be the initial and then exactly that word. An `other_value`
+/// with tag S splits the joined middle back into initials first.
 pub(crate) fn joined_initials_match<'t>(
     reading: &str,
     tokens: impl Iterator<Item = &'t str>,
+    other_value: Option<&str>,
 ) -> bool {
-    let tokens: Vec<&str> = tokens.collect();
+    spelled_reading_forms(tokens, other_value)
+        .iter()
+        .any(|form| form == reading)
+}
+
+/// The joined-initials readings a name spells exactly, at most two (mirrors Python
+/// `spelled_reading_forms`): the J reading of its initials when every later token is an
+/// initial or at least four letters, and with exactly two tokens the W reading of its
+/// initial and second word. The name needs a full first name.
+pub(crate) fn spelled_reading_forms<'t>(
+    tokens: impl Iterator<Item = &'t str>,
+    other_value: Option<&str>,
+) -> Vec<String> {
+    let mut tokens: Vec<&str> = tokens.collect();
+    // "Johanna IP" canonicalizes to "johanna ip"; read it as "johanna i p".
+    spell_middle_tokens(&mut tokens, other_value);
+    let mut forms = Vec::new();
     let Some(first) = tokens.first() else {
-        return false;
+        return forms;
     };
     if first.chars().count() < 2 {
-        return false;
+        return forms;
     }
-    if let Some(rest) = reading.strip_prefix('W') {
-        let Some((initial, word)) = rest.split_once(' ') else {
-            return false;
-        };
-        return tokens.len() == 2 && first.starts_with(initial) && tokens[1] == word;
+    if tokens[1..].iter().all(|token| {
+        let length = token.chars().count();
+        length == 1 || length >= 4
+    }) {
+        let mut form = String::from("J");
+        form.extend(tokens.iter().filter_map(|token| token.chars().next()));
+        forms.push(form);
     }
-    let letters: Vec<char> = reading[1..].chars().collect();
-    tokens.len() == letters.len()
-        && tokens
-            .iter()
-            .zip(&letters)
-            .all(|(token, letter)| token.starts_with(*letter))
-        && tokens[1..].iter().all(|token| {
-            let length = token.chars().count();
-            length == 1 || length >= 4
-        })
+    if tokens.len() == 2 {
+        let initial = first.chars().next().unwrap_or_default();
+        forms.push(format!("W{initial} {}", tokens[1]));
+    }
+    forms
 }
 
 /// Apply the joined-initials reading to an ordinary conflict verdict. Only one side may
@@ -263,8 +306,8 @@ pub(crate) fn joined_initials_reconcile<'t>(
         return false;
     }
     match (is_joined_reading(given_1), is_joined_reading(given_2)) {
-        (true, false) => !joined_initials_match(given_1.unwrap_or(""), tokens_2),
-        (false, true) => !joined_initials_match(given_2.unwrap_or(""), tokens_1),
+        (true, false) => !joined_initials_match(given_1.unwrap_or(""), tokens_2, given_2),
+        (false, true) => !joined_initials_match(given_2.unwrap_or(""), tokens_1, given_1),
         _ => true,
     }
 }
@@ -665,6 +708,30 @@ mod tests {
         assert!(conflict(("ka", "", Some("Jka")), ("kristian", "", None)));
         assert!(conflict(("ji", "", Some("Jji")), ("jong", "in", None)));
         assert!(conflict(("ka", "", Some("Jka")), ("ki", "", Some("Jki"))));
+        // A joined-capitals middle ("Johanna IP") is spelled out; one middle initial is not enough.
+        assert!(!conflict(
+            ("jip", "", Some("Jjip")),
+            ("johanna", "ip", Some("Sip"))
+        ));
+        assert!(!conflict(
+            ("johanna", "ip", Some("Sip")),
+            ("jip", "", Some("Jjip"))
+        ));
+        assert!(conflict(("jip", "", Some("Jjip")), ("johanna", "ip", None)));
+        assert!(conflict(("jip", "", Some("Jjip")), ("johanna", "i", None)));
+        // The spelled middle also holds against full middle names.
+        assert!(!conflict(
+            ("johanna", "ip", Some("Sip")),
+            ("johanna", "inge petra", None)
+        ));
+        assert!(conflict(
+            ("johanna", "ip", Some("Sip")),
+            ("johanna", "karin maria", None)
+        ));
+        assert!(conflict(
+            ("johanna", "ip", None),
+            ("johanna", "inge petra", None)
+        ));
     }
 
     #[test]

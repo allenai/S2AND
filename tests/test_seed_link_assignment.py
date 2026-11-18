@@ -200,6 +200,8 @@ def test_restored_profile_name_check_applies_the_cjk_rule(query_first, query_cjk
         (("Ka", ""), ("Kristan", "Allan"), True),
         (("Marco Aurelio Lisboa", ""), ("Mal", ""), True),
         (("Mohammad", "Arfan"), ("MArfan", ""), True),
+        (("Johanna", "IP"), ("Jip", ""), True),
+        (("Jip", ""), ("Johanna", "IP"), True),
         # Other names keep the first-name rule.
         (("Kristian", ""), ("Ka", ""), False),
     ],

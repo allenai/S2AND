@@ -94,11 +94,11 @@ def _joined_initials_compatible(
     if is_joined_reading(query_value):
         return any(
             not is_joined_reading(cjk_names.get(member))
-            and joined_initials_match(query_value or "", name_parts(member))
+            and joined_initials_match(query_value or "", name_parts(member), cjk_names.get(member))
             for member in members
         )
     readings = [cjk_names.get(member) for member in members if is_joined_reading(cjk_names.get(member))]
-    return any(joined_initials_match(reading or "", name_parts(query)) for reading in readings)
+    return any(joined_initials_match(reading or "", name_parts(query), query_value) for reading in readings)
 
 
 @dataclass

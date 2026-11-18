@@ -198,7 +198,9 @@ def test_eps_sweep_clusters_cached_distances_as_fastcluster_does(monkeypatch: py
         n_jobs=1,
     )
     # No signature has a full first name, so name-conflict repair leaves the linkage clusters alone.
-    featurizer = SimpleNamespace(name_conflict_facts=lambda: ([], {}), cluster_seeds_require=lambda: [])
+    featurizer = SimpleNamespace(
+        name_conflict_facts=lambda: ([], {}), joined_reading_facts=lambda: ([], []), cluster_seeds_require=lambda: []
+    )
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_build_arrow_featurizer", lambda *_args: featurizer)
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_cache_metadata", lambda *_args: {})
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_load_cached_distance", lambda *_args: condensed)

@@ -58,8 +58,11 @@ def residual_first_initial_groups(
         if not signature_initials:
             return [residual_signature_ids]
         if cjk_given_names is not None:
-            # The value is a script tag, then the transliterated letters.
-            cjk_initial = (cjk_given_names.get(signature_id) or "")[1:2]
+            # A CJK value is a script tag, then the transliterated letters. Other values
+            # add no initial: a joined reading starts with the first initial, and
+            # spelled middle initials are not first initials.
+            value = cjk_given_names.get(signature_id) or ""
+            cjk_initial = value[1:2] if value[:1] in ("H", "K", "G") else ""
             if cjk_initial:
                 signature_initials = signature_initials | {cjk_initial}
         initials[signature_id] = signature_initials
@@ -150,8 +153,8 @@ def complete_incremental_prediction(
         start_cluster_id: First candidate ID for new residual clusters.
         prediction_state: Request-owned destination for completion telemetry.
         cluster_residuals: Backend operation for a group of two or more signatures.
-        cjk_given_names: ``given_name_for_constraint`` values: whole CJK given names or
-            joined-initials readings, whose second character is the first initial.
+        cjk_given_names: ``given_name_for_constraint`` values. Only whole CJK given names
+            add an initial, the second character of the value.
 
     Returns:
         Owned seed and residual cluster lists. Callback failures propagate unchanged.

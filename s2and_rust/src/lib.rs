@@ -245,7 +245,8 @@ struct SignatureData {
     /// merge two of these instead of counting both names per pair.
     middle_initial_counts: Vec<(char, u32)>,
     /// Given-name value for constraints (`given_name_for_constraint`): a whole CJK given
-    /// name (tags H, K, G; empty when incomplete) or a joined-initials reading (J, W).
+    /// name (tags H, K, G; empty when incomplete), a joined-initials reading (J, W), or
+    /// spelled middle initials (S).
     cjk_given_name: Option<String>,
 }
 

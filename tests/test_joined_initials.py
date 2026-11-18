@@ -38,6 +38,24 @@ def test_joined_initials_reading(first, middle, expected):
     assert joined_initials_for_constraint(first, middle) == expected
 
 
+@pytest.mark.parametrize(
+    ("first", "middle", "expected"),
+    [
+        ("Johanna", "IP", "Sip"),
+        ("Johanna", "I.P.", "Sip"),
+        # A vowel makes a mixed-case middle a name; ED stays a name; an all-capitals
+        # first name carries no case.
+        ("Johanna", "Ip", None),
+        ("Edward", "ED", None),
+        ("JOHANNA", "IP", None),
+        ("Johanna", "I. Petra", None),
+        ("Ka", "", "Jka"),
+    ],
+)
+def test_spelled_middle_initials_value(first, middle, expected):
+    assert given_name_for_constraint(first, middle) == expected
+
+
 def _conflict(a: tuple[str, str], b: tuple[str, str], last: str = "Leite") -> bool:
     name_a = canonicalize_name_parts(a[0], a[1], last)
     name_b = canonicalize_name_parts(b[0], b[1], last)
@@ -54,12 +72,18 @@ def _conflict(a: tuple[str, str], b: tuple[str, str], last: str = "Leite") -> bo
         (("Mal", ""), ("Marco Aurelio Lisboa", ""), False),
         (("MArfan", ""), ("Mohammad", "Arfan"), False),
         (("Al", ""), ("Andrew", "L."), False),
+        # A joined-capitals middle is spelled out ("Johanna IP" is J. I. P.).
+        (("Jip", ""), ("Johanna", "IP"), False),
+        (("Jip", ""), ("Johanna", "I. P."), False),
         # Too few names on the other side, or other initials, keep the veto.
         (("Ka", ""), ("Kristian", ""), True),
         (("Mal", ""), ("Mark", ""), True),
         (("MArfan", ""), ("Mohammad", ""), True),
         (("MArfan", ""), ("Mohammad", "Arif"), True),
         (("Jim", ""), ("Jack", "M. T."), True),
+        (("Jip", ""), ("Johanna", "I."), True),
+        (("Jip", ""), ("Johanna", "Ip"), True),
+        (("Jip", ""), ("Johanna", "IQ"), True),
         # Short romanized syllables on the other side keep the veto.
         (("Li", ""), ("Lei", ""), True),
         (("Ji", ""), ("Jong", "In"), True),
@@ -72,6 +96,22 @@ def _conflict(a: tuple[str, str], b: tuple[str, str], last: str = "Leite") -> bo
     ],
 )
 def test_joined_initials_reconcile_only_exact_spellings(left, right, expected):
+    assert _conflict(left, right) is expected
+    assert _conflict(right, left) is expected
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        # A joined-capitals middle reads as initials in the whole name rule.
+        (("Johanna", "IP"), ("Johanna", "Inge Petra"), False),
+        (("Johanna", "IP"), ("Johanna", "I. P."), False),
+        (("Johanna", "IP"), ("Johanna", "Karin Maria"), True),
+        # A title-case middle stays a name.
+        (("Johanna", "Ip"), ("Johanna", "Inge Petra"), True),
+    ],
+)
+def test_joined_capitals_middle_reads_as_initials(left, right, expected):
     assert _conflict(left, right) is expected
     assert _conflict(right, left) is expected
 
@@ -93,9 +133,22 @@ def test_joined_initials_keep_the_surname_rule():
         ([("MArfan", "", "Ikram"), ("Mohammad", "Arfan", "Ikram")], 1),
         ([("Li", "", "Wang"), ("Lei", "", "Wang")], 2),
         ([("Ka", "", "Hahn"), ("Kristian", "", "Hahn")], 2),
+        ([("Jip", "", "de Vries"), ("Johanna", "IP", "de Vries")], 1),
+        ([("Johanna", "IP", "de Vries"), ("Johanna", "Inge Petra", "de Vries")], 1),
     ],
 )
 def test_full_block_prediction_applies_the_joined_initials_reading(tmp_path: Path, route, names, clusters):
     dataset = _dataset(names, {})
     found = _predict(tmp_path, dataset, {"block": [str(i) for i in range(len(names))]}, route, threshold=None)
     assert len(found) == clusters
+
+
+@pytest.mark.parametrize("route", ["arrow", "python"])
+def test_repair_rejoins_a_piece_that_a_joined_reading_keeps_apart(tmp_path: Path, route):
+    # "Ec" spells "Edward C." but conflicts with a bare "Edward". With every model distance
+    # at 0.1, linkage leaves "Ec" in a piece that the bare "Edward" mentions cannot join;
+    # the repair's reading step merges it back, since the other piece spells "Ec".
+    names = [("Ec", "", "Holmes")] + [("Edward", "C.", "Holmes")] * 6 + [("Edward", "", "Holmes")] * 5
+    dataset = _dataset(names, {})
+    found = _predict(tmp_path, dataset, {"block": [str(i) for i in range(len(names))]}, route, threshold=None)
+    assert len(found) == 1

@@ -571,7 +571,9 @@ def _widen_kana(text: str) -> str:
 
 # Tags of `given_name_for_constraint` values. H, K and G mark whole CJK given names.
 # J marks a short title-case given name that may be joined initials ("Ka", "Mal"), and
-# W a capital initial run into a given name ("MArfan"). Rust `text_compat` mirrors them.
+# W a capital initial run into a given name ("MArfan"). S marks a full first name with a
+# middle of joined capitals ("Johanna IP" gives "Sip"), which canonical names keep as one
+# token. Rust `text_compat` mirrors them.
 _CJK_SCRIPT_TAGS = frozenset("HKG")
 _RE_SHORT_GIVEN_NAME = re.compile(r"[A-Z][a-z]{1,2}")
 _RE_INITIAL_THEN_NAME = re.compile(r"[A-Z]([A-Z][a-z]{2,})")
@@ -586,8 +588,10 @@ def joined_initials_for_constraint(first_raw: str | None, middle_raw: str | None
     """Return the joined-initials reading of a raw given name, or None.
 
     "Ka" (no middle name) reads "Jka", meaning K. A.; "MArfan" reads "Wm arfan", meaning
-    M. Arfan. Real short names ("Ka", "Mal", "Al") take the reading too; it only matters
-    when another name spells exactly these initials (see `joined_initials_match`).
+    M. Arfan. Real short names ("Ka", "Mal", "Al") take the reading too. A pair verdict
+    changes only when the other name spells exactly these initials (see
+    `joined_initials_match`), but the changed verdicts can change which clusters linkage
+    builds, and name-conflict repair reads the reading at cluster level.
     Rust `joined_initials_for_constraint` mirrors it.
     """
     first = (first_raw or "").strip()
@@ -609,35 +613,78 @@ def joined_initials_for_constraint(first_raw: str | None, middle_raw: str | None
     return None
 
 
-def given_name_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
-    """Return the CJK given-name value, else the joined-initials reading, else None.
+def spelled_middle_initials_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
+    """Return "S" plus the middle initials of a name with a joined-capitals middle, or None.
 
-    The two never apply to one name: CJK given names are not ASCII, joined initials are.
+    "Johanna IP" gives "Sip". Canonical names keep "IP" as the one token "ip", so without
+    this value "Jip" could not spell "Johanna IP". The middle must pass the D9 initials test
+    on its own, and the first name needs a lowercase letter, since an all-capitals name
+    carries no case. Rust `spelled_middle_initials_for_constraint` mirrors it.
+    """
+    first = (first_raw or "").strip()
+    if not _RE_ASCII_LOWERCASE.search(first):
+        return None
+    initials = _joined_initials(middle_raw)
+    if initials is None:
+        return None
+    return "S" + initials
+
+
+def given_name_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
+    """Return the CJK given-name value, else a joined-initials value, else None.
+
+    The values never overlap: CJK given names are not ASCII, joined-initials readings
+    have no middle name, and spelled middle initials need one.
     """
     cjk = cjk_given_name_for_constraint(first_raw, middle_raw)
-    return cjk if cjk is not None else joined_initials_for_constraint(first_raw, middle_raw)
+    if cjk is not None:
+        return cjk
+    reading = joined_initials_for_constraint(first_raw, middle_raw)
+    return reading if reading is not None else spelled_middle_initials_for_constraint(first_raw, middle_raw)
 
 
-def joined_initials_match(reading: str, other: "CanonicalNameParts") -> bool:
-    """Return whether a joined-initials reading spells the other name exactly.
+def spell_middle_initials(name: "CanonicalNameParts", value: str | None) -> "CanonicalNameParts":
+    """Split a joined-capitals middle back into initials for the name rule.
 
-    The other name needs a full first name. For "J" readings its first and middle tokens
-    must have exactly these initials in order, and every later token must be an initial
-    or at least four letters, so "Ji" does not match "Jong In" and "Li" does not match
-    "Lei". For "W" readings it must be the initial and then exactly that word.
+    With an S value from `spelled_middle_initials_for_constraint`, "johanna ip" becomes
+    "johanna i p", so it agrees with "Johanna I. P." and "Johanna Inge Petra". Other names
+    return unchanged. Rust `spelled_middle_tokens` mirrors it.
     """
+    if not value or value[0] != "S":
+        return name
+    tokens = name.middle.split()
+    if not tokens or tokens[-1] != value[1:]:
+        return name
+    return name._replace(middle=" ".join([*tokens[:-1], *value[1:]]))
+
+
+def spelled_reading_forms(other: "CanonicalNameParts", other_value: str | None = None) -> tuple[str, ...]:
+    """Return the joined-initials readings that a name spells exactly, at most two.
+
+    The name needs a full first name. It spells the "J" reading of its first and middle
+    initials when every later token is an initial or at least four letters, so "Jong In"
+    spells no "Ji" and "Lei" spells no "Li". With exactly two tokens it also spells the
+    "W" reading of its initial and second word. An ``other_value`` with tag S splits the
+    joined middle back into initials first. Rust `spelled_reading_forms` mirrors it.
+    """
+    other = spell_middle_initials(other, other_value)
     tokens = other.first.split() + other.middle.split()
     if not tokens or len(tokens[0]) < 2:
-        return False
-    if reading[0] == "W":
-        initial, word = reading[1:].split(" ", 1)
-        return len(tokens) == 2 and tokens[0][0] == initial and tokens[1] == word
-    letters = reading[1:]
-    return (
-        len(tokens) == len(letters)
-        and all(token[0] == letter for token, letter in zip(tokens, letters, strict=True))
-        and all(len(token) == 1 or len(token) >= 4 for token in tokens[1:])
-    )
+        return ()
+    forms: list[str] = []
+    if all(len(token) == 1 or len(token) >= 4 for token in tokens[1:]):
+        forms.append("J" + "".join(token[0] for token in tokens))
+    if len(tokens) == 2:
+        forms.append("W" + tokens[0][0] + " " + tokens[1])
+    return tuple(forms)
+
+
+def joined_initials_match(reading: str, other: "CanonicalNameParts", other_value: str | None = None) -> bool:
+    """Return whether a joined-initials reading spells the other name exactly.
+
+    For example "Jka" spells "Kristan Allan" but not "Kristian"; see `spelled_reading_forms`.
+    """
+    return reading in spelled_reading_forms(other, other_value)
 
 
 def _cjk_script_tag(given: str) -> str:
@@ -1404,14 +1451,15 @@ def canonical_names_conflict(
     # Incomplete or cross-script CJK given names keep the ordinary rules below.
     if given_a and given_b and given_a[0] == given_b[0] and given_a[0] in _CJK_SCRIPT_TAGS:
         return given_a != given_b
+    name_a, name_b = spell_middle_initials(name_a, given_a), spell_middle_initials(name_b, given_b)
     if not _ordinary_names_conflict(name_a, name_b, name_tuples):
         return False
     # A short given name may be joined initials ("Ka" for K. A.). It reconciles a
     # conflict only against a name whose initials it spells exactly.
     if is_joined_reading(given_a) and not is_joined_reading(given_b):
-        return not joined_initials_match(given_a or "", name_b)
+        return not joined_initials_match(given_a or "", name_b, given_b)
     if is_joined_reading(given_b) and not is_joined_reading(given_a):
-        return not joined_initials_match(given_b or "", name_a)
+        return not joined_initials_match(given_b or "", name_a, given_a)
     return True
 
 

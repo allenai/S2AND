@@ -5,7 +5,12 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Protocol
 
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
-from s2and.text import canonical_name_tuple_pair, canonicalize_name_parts, normalize_orcid_compact
+from s2and.text import (
+    canonical_name_tuple_pair,
+    canonicalize_name_parts,
+    cjk_given_name_for_constraint,
+    normalize_orcid_compact,
+)
 
 logger = logging.getLogger("s2and")
 
@@ -18,6 +23,9 @@ class CompletionSignature(Protocol):
 
     @property
     def author_info_first_normalized(self) -> str | None: ...
+
+    @property
+    def author_info_middle(self) -> str | None: ...
 
     @property
     def author_info_last(self) -> str | None: ...
@@ -42,6 +50,23 @@ class SignatureFirstNames(Mapping[str, str]):
 
     def __getitem__(self, signature_id: str) -> str:
         return signature_first(self._signatures[signature_id])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._signatures)
+
+    def __len__(self) -> int:
+        return len(self._signatures)
+
+
+class SignatureCjkGivenNames(Mapping[str, str | None]):
+    """Project signatures to the whole CJK given name that the hard name rule compares."""
+
+    def __init__(self, signatures: Mapping[str, CompletionSignature]) -> None:
+        self._signatures = signatures
+
+    def __getitem__(self, signature_id: str) -> str | None:
+        signature = self._signatures[signature_id]
+        return cjk_given_name_for_constraint(signature.author_info_first, signature.author_info_middle)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._signatures)

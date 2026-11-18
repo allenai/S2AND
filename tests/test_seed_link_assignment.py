@@ -40,6 +40,24 @@ def test_incompatible_links_are_distinguished_from_abstentions():
     assert result.rejected_signature_ids == ["bad2", "bad1"]
 
 
+def test_forced_link_skips_the_final_name_check():
+    # A require constraint already decided the forced link; the name check must not undo it.
+    inputs = dict(
+        unassigned_signature_ids=["forced", "free"],
+        linked_signature_to_cluster={"forced": 10, "free": 10},
+        recluster_map={10: 1},
+        cluster_seeds_require_inverse={1: ["seed"]},
+        prevent_new_incompatibilities=True,
+        first_names={"seed": "alice", "forced": "bob", "free": "bob"},
+        name_tuples=set(),
+    )
+    result = apply_seed_links(**inputs, forced_signature_ids={"forced"})
+
+    assert result.clusters == {"1": ["seed", "forced"]}
+    assert result.residual_signature_ids == ["free"]
+    assert result.rejected_signature_ids == ["free"]
+
+
 @pytest.mark.parametrize("query_name", ["rob", "robert", "r", "", "bob"])
 def test_prefix_alias_and_unknown_names_are_compatible(query_name):
     result = apply_seed_links(
@@ -147,3 +165,28 @@ def test_assignment_does_not_mutate_or_alias_inputs():
     assert inputs == original
     assert result.residual_signature_ids == ["bad", "abstain", "output_only"]
     assert result.rejected_signature_ids == ["bad", "output_only"]
+
+
+@pytest.mark.parametrize(
+    ("query_first", "query_cjk", "accepted"),
+    [
+        # 重郷 shares the prefix "zhong" with 重喜 but is a different whole CJK name.
+        ("zhong", "Hzhongxiang", False),
+        ("zhong", "Hzhongxi", True),
+        # Hangul and Han forms compare by the first-name rule.
+        ("zhong", "Gzhongxiang", True),
+    ],
+)
+def test_restored_profile_name_check_applies_the_cjk_rule(query_first, query_cjk, accepted):
+    result = apply_seed_links(
+        unassigned_signature_ids=["query"],
+        linked_signature_to_cluster={"query": 10},
+        recluster_map={10: 1},
+        cluster_seeds_require_inverse={1: ["seed"]},
+        prevent_new_incompatibilities=True,
+        first_names={"seed": "zhong", "query": query_first},
+        name_tuples=set(),
+        cjk_given_names={"seed": "Hzhongxi", "query": query_cjk},
+    )
+
+    assert (result.clusters == {"1": ["seed", "query"]}) is accepted

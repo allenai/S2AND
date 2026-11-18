@@ -81,6 +81,7 @@ def _signature_info_loader(captured: dict[str, Any], *, orcid_signature_id: str 
                 author_info_first="Alex",
                 author_info_last="Smith",
                 author_info_first_normalized="alex",
+                author_info_middle=None,
                 author_info_orcid="0000-0000-0000-0001" if str(signature_id) == orcid_signature_id else None,
             )
             for signature_id in signature_ids
@@ -183,6 +184,7 @@ def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow
         return SimpleNamespace(
             author_info_first=first,
             author_info_first_normalized=normalized,
+            author_info_middle=None,
             author_info_last="Jones",
             paper_id=f"p-{normalized}",
         )
@@ -251,6 +253,21 @@ def test_model_presplit_cache_fingerprint_hashes_complete_fitted_state(kind) -> 
 
     assert repr(classifier.__dict__) == legacy_state_repr
     assert classifier.predict([[9.0]]).item() == 0
+    assert model_module._model_presplit_cache_fingerprint(clusterer) != before
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("name_conflict_repair_rounds", 2),
+        ("name_conflict_repair_uses_close_pair_bonus", False),
+        ("name_conflict_repair_bonus_min_side_mentions", 5),
+    ],
+)
+def test_model_presplit_cache_fingerprint_follows_the_repair_settings(setting, value) -> None:
+    clusterer = SimpleNamespace(cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05))
+    before = model_module._model_presplit_cache_fingerprint(clusterer)
+    setattr(clusterer, setting, value)
     assert model_module._model_presplit_cache_fingerprint(clusterer) != before
 
 
@@ -567,6 +584,7 @@ def test_predict_incremental_from_arrow_loads_seed_orcids_for_budget_floor(
                 author_info_first=None,
                 author_info_last=None,
                 author_info_first_normalized=None,
+                author_info_middle=None,
                 author_info_orcid="0000-0000-0000-0001" if str(signature_id) == "8" else None,
             )
             for signature_id in signature_ids
@@ -1269,6 +1287,7 @@ def test_promoted_linker_reuses_one_plan_and_featurizer_for_four_scoring_batches
         captured["scored_batches"].append(batch)
         return SimpleNamespace(
             linked_signature_clusters={signature_id: "c_seed" for signature_id in batch},
+            compact_result=SimpleNamespace(decisions=()),
             telemetry={"query_count": len(batch), "candidate_row_count": 0, "pair_count": 0},
         )
 
@@ -1345,6 +1364,7 @@ def test_promoted_linker_views_one_background_block_featurizer_for_every_window(
         captured["scored_batches"].append(batch)
         return SimpleNamespace(
             linked_signature_clusters={signature_id: "c_seed" for signature_id in batch},
+            compact_result=SimpleNamespace(decisions=()),
             telemetry={"query_count": len(batch), "candidate_row_count": 0, "pair_count": 0},
         )
 
@@ -1417,6 +1437,7 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
         captured["scored_batches"].append(batch)
         return SimpleNamespace(
             linked_signature_clusters={signature_id: "c_seed" for signature_id in batch},
+            compact_result=SimpleNamespace(decisions=()),
             telemetry={"query_count": len(batch), "candidate_row_count": len(batch), "pair_count": len(batch)},
         )
 
@@ -1774,6 +1795,7 @@ def test_arrow_completion_forwards_first_names_and_orcid_bridges(tmp_path: Path)
             key: SimpleNamespace(
                 author_info_first=name,
                 author_info_first_normalized=name,
+                author_info_middle=None,
                 author_info_orcid="0000-0000-0000-0001" if key in {"a2", "b2"} else None,
             )
             for key, name in names.items()

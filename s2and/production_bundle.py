@@ -114,6 +114,18 @@ def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
     return payload
 
 
+# Clusterer repair settings that a bundle does not record.
+_UNRECORDED_REPAIR_SETTINGS = (
+    "name_conflict_repair_uses_close_pair_bonus",
+    "name_conflict_repair_requires_full_first_names",
+    "name_conflict_repair_rounds",
+    "name_conflict_repair_initials_side_min_mentions",
+    "name_conflict_repair_bonus_min_close_share",
+    "name_conflict_repair_bonus_max_plain_average",
+    "name_conflict_repair_bonus_min_side_mentions",
+)
+
+
 def _clusterer_config_payload(
     clusterer: Clusterer,
     *,
@@ -131,6 +143,14 @@ def _clusterer_config_payload(
             f"{repair_distance!r}; a loaded model uses {DEFAULT_MAX_AVERAGE_DISTANCE}. "
             "Restore the default before export and set the attribute after loading."
         )
+    for setting in _UNRECORDED_REPAIR_SETTINGS:
+        # These have no bundle field either; compare with the class default a loaded model gets.
+        value, default = getattr(clusterer, setting, getattr(Clusterer, setting)), getattr(Clusterer, setting)
+        if value != default:
+            raise ValueError(
+                f"Production bundle export cannot record {setting}={value!r}; a loaded model uses {default!r}. "
+                "Restore the default before export and set the attribute after loading."
+            )
     waiver = _orcid_name_waiver_setting(clusterer)
     if waiver != DEFAULT_ORCID_NAME_WAIVER:
         # A bundle has no field for this setting either.

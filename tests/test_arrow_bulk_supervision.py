@@ -249,3 +249,90 @@ def test_attach_name_check_covers_only_initial_only_attachment(tmp_path, monkeyp
         )
     assert observed[-1] is None
     assert model_module._ARROW_ATTACH_NAME_CHECK_EXEMPT.get() is None
+
+
+@pytest.mark.parametrize("prevent_new_incompatibilities", [True, False])
+def test_incremental_keeps_a_required_link_to_an_altered_profile(tmp_path, prevent_new_incompatibilities):
+    # Seeds Alan and Brian form one altered profile; the caller requires Caleb to join Alan.
+    # The final name check must not undo the required link or hide it from the residual count.
+    names = [("Alan", "", "Lee"), ("Brian", "", "Lee"), ("Caleb", "", "Lee")]
+    dataset = _dataset(names, {"0": "anchor", "1": "anchor"})
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    clusterer = Clusterer(
+        FeaturizationInfo(["year_diff"]), ConstantDistanceClassifier(0.1), cluster_model=FastCluster(eps=0.5), n_jobs=1
+    )
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker", link=False)
+
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        result = clusterer.predict_incremental_from_arrow(
+            ["2"],
+            arrow_dataset,
+            partial_supervision={("0", "2"): 0.0},
+            cluster_seeds_require={"0": "anchor", "1": "anchor"},
+            altered_cluster_signatures=["0"],
+            prevent_new_incompatibilities=prevent_new_incompatibilities,
+            name_tuples=frozenset(),
+        )
+
+    assert sorted(result["clusters"]["anchor"]) == ["0", "1", "2"]
+    assert result["phase_b_residual_count"] == 0
+
+
+def test_incremental_residuals_keep_equivalent_cjk_given_names_together(tmp_path):
+    # U+FA45 is a compatibility form of 海; full-block clustering merges these two mentions.
+    names = [("Alice", "", "Lee"), ("\ufa45\u62d3", "", "Lee"), ("\u6d77\u62d3", "", "Lee")]
+    dataset = _dataset(names, {"0": "anchor"})
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    clusterer = _clusterer(0.1)
+    attach_tiny_incremental_linker(clusterer, tmp_path / "linker", link=False)
+
+    with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        result = clusterer.predict_incremental_from_arrow(
+            ["1", "2"], arrow_dataset, cluster_seeds_require={"0": "anchor"}, name_tuples=frozenset()
+        )
+
+    assert sorted(sorted(members) for members in result["clusters"].values()) == [["0"], ["1", "2"]]
+
+
+@pytest.mark.parametrize("distance", [0.0, 0.2, LARGE_DISTANCE - 1])
+@pytest.mark.parametrize("route", ["python", "arrow"])
+def test_bulk_rejects_a_caller_distance_that_joins_two_seed_groups(tmp_path, route, distance):
+    # Seed restoration would merge both profiles through the one pair, past the hard pair (1, 2).
+    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
+    blocks = {"probe": ["0", "2", "1"]}
+    supervision = {("2", "0"): distance, ("0", "1"): 0.2}
+    clusterer = _clusterer(0.1)
+    with pytest.raises(ValueError, match=r"partial_supervision_joins_seed_groups: pair=\('0', '2'\)"):
+        if route == "python":
+            clusterer.predict(blocks, dataset, partial_supervision=supervision)
+        else:
+            prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+            with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+                clusterer.predict_from_arrow(
+                    blocks,
+                    arrow_dataset,
+                    partial_supervision=supervision,
+                    cluster_seeds_require=dataset.cluster_seeds_require,
+                    name_tuples=frozenset(),
+                )
+
+
+@pytest.mark.parametrize("route", ["python", "arrow"])
+def test_bulk_accepts_a_hard_distance_between_seed_groups(tmp_path, route):
+    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
+    blocks = {"probe": ["0", "2", "1"]}
+    supervision = {("0", "2"): LARGE_DISTANCE, ("0", "1"): 0.2}
+    clusterer = _clusterer(0.1)
+    if route == "python":
+        clusters, _ = clusterer.predict(blocks, dataset, partial_supervision=supervision)
+    else:
+        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+        with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+            clusters, _ = clusterer.predict_from_arrow(
+                blocks,
+                arrow_dataset,
+                partial_supervision=supervision,
+                cluster_seeds_require=dataset.cluster_seeds_require,
+                name_tuples=frozenset(),
+            )
+    assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"]]

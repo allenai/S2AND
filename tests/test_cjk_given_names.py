@@ -73,6 +73,14 @@ def _conflict(first_a: str, first_b: str, last_a: str = "鈴木", last_b: str = 
         ("민수", "민 수", False),
         # A romanized side keeps the plain rules, which allow this pair.
         ("Xiao", "孝徳", False),
+        # An incomplete transliteration (the long-vowel mark ー, a halfwidth voiced mark, a Han
+        # character outside the table) keeps the ordinary rules, which veto these pairs.
+        ("ピーター", "ジョン", True),
+        ("メアリー", "トーマス", True),
+        ("ｼﾞｭﾝ", "ｹﾝ", True),
+        ("𠮷秀", "重喜", True),
+        # Hangul and Han forms of one name romanize differently, so they keep the ordinary rules.
+        ("민수", "敏洙", False),
     ],
 )
 def test_cjk_given_names_conflict_only_when_they_differ(first_a, first_b, expected):
@@ -117,8 +125,11 @@ def test_full_block_prediction_keeps_different_cjk_given_names_apart(
         (("奈々", ""), ("奈", ""), 2),
         (("重喜", ""), ("重", "喜"), 1),
         (("ひ", "ろし"), ("ひろ", "し"), 1),
-        (("𠮷秀", ""), ("吉秀", ""), 1),
+        # 𠮷 has no transliteration, so the ordinary rules apply and veto "xiu" against "ji xiu".
+        (("𠮷秀", ""), ("吉秀", ""), 2),
         (("しけ", "\u3099る"), ("しげる", ""), 1),
+        # U+323B0 is unassigned in some Unicode versions; both routes treat it as incomplete.
+        (("孝𲎰", ""), ("孝徳", ""), 1),
     ],
 )
 def test_whole_given_name_orthography(tmp_path: Path, route, left, right, cluster_count):

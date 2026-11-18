@@ -531,9 +531,32 @@ _CJK_NAME_RANGES: tuple[tuple[int, int], ...] = (
 )
 
 
+# Script tags of a whole CJK given name. Pinyin of a Han name and the romanization of its
+# hangul or kana form differ ("minzhu" for 敏洙, "minsu" for 민수), so only names in one
+# script are compared whole. Keep the ranges and tags in sync with Rust `text_compat`.
+_HANGUL_NAME_RANGES: tuple[tuple[int, int], ...] = (
+    (0x1100, 0x11FF),
+    (0x3130, 0x318F),
+    (0xA960, 0xA97F),
+    (0xAC00, 0xD7FF),
+    (0xFFA0, 0xFFDC),
+)
+_KANA_NAME_RANGES: tuple[tuple[int, int], ...] = ((0x3040, 0x30FF), (0x31F0, 0x31FF), (0xFF66, 0xFF9F))
+
+
 def _is_cjk_name_character(character: str) -> bool:
     code = ord(character)
     return any(start <= code <= end for start, end in _CJK_NAME_RANGES)
+
+
+def _cjk_script_tag(given: str) -> str:
+    """Return "G" for a given name with hangul, else "K" with kana, else "H" (Han only)."""
+    codes = [ord(character) for character in given]
+    if any(start <= code <= end for code in codes for start, end in _HANGUL_NAME_RANGES):
+        return "G"
+    if any(start <= code <= end for code in codes for start, end in _KANA_NAME_RANGES):
+        return "K"
+    return "H"
 
 
 def is_cjk_given_name(first_raw: str | None, middle_raw: str | None) -> bool:
@@ -567,8 +590,10 @@ def cjk_given_name_for_constraint(first_raw: str | None, middle_raw: str | None)
         middle_raw: Raw middle name, or ``None``.
 
     Returns:
-        Joined transliterated letters, an empty string for incomplete CJK
-        evidence, or ``None`` when the ordinary name rules apply.
+        A script tag (``_cjk_script_tag``) followed by the joined transliterated
+        letters, an empty string for incomplete CJK evidence, or ``None`` when the
+        given name is not CJK. The hard rule compares two values whole only when
+        both are complete and share a script; otherwise the ordinary rules apply.
     """
     if not is_cjk_given_name(first_raw, middle_raw):
         return None
@@ -583,18 +608,14 @@ def cjk_given_name_for_constraint(first_raw: str | None, middle_raw: str | None)
                 return ""
             character = previous
         letters = _RE_CANONICAL_NON_LETTER.sub("", unidecode(character).lower())
-        # A partial transliteration can make equivalent names look different.
-        if not letters:
-            category = unicodedata.category(character)
-            if (
-                category.startswith("L")
-                or character in "〇\u3099\u309a"
-                or (category == "Cn" and _is_cjk_name_character(character))
-            ):
-                return ""
+        # A partial transliteration can make equivalent names look different. Any non-ASCII
+        # character without letters marks the name incomplete, so the ordinary rules apply.
+        # Unicode categories are not used: Python and Rust ship different Unicode versions.
+        if not letters and not character.isascii():
+            return ""
         parts.append(letters)
         previous = character
-    return "".join(parts)
+    return _cjk_script_tag(given) + "".join(parts)
 
 
 class CanonicalNameParts(NamedTuple):
@@ -1288,8 +1309,9 @@ def canonical_names_conflict(
     if not canonical_lasts_equivalent(name_a.last, name_b.last):
         return True
     given_a, given_b = cjk_given_names
-    if given_a is not None and given_b is not None:
-        return bool(given_a and given_b and given_a != given_b)
+    # Incomplete or cross-script CJK given names keep the ordinary rules below.
+    if given_a and given_b and given_a[0] == given_b[0]:
+        return given_a != given_b
     if name_a.first and name_b.first and name_a.first[0] != name_b.first[0]:
         return True
     if not first_names_name_compatible(name_a.first, name_b.first, name_tuples):

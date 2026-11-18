@@ -757,3 +757,26 @@ def test_fixed_pairs_rejects_unknown_labels():
             )
         else:
             raise AssertionError(f"{invalid_split}: unknown fixed-pair label was accepted")
+
+
+def test_fixed_pair_csv_keeps_signature_ids_as_text(tmp_path):
+    from s2and.data import _map_fixed_pair_labels
+
+    path = tmp_path / "train_pairs.csv"
+    path.write_text("signature_id_1,signature_id_2,label\n00,01,1.0\nNA,7,0.0\n", encoding="utf-8")
+
+    frame = _map_fixed_pair_labels(ANDData.maybe_load_dataframe(str(path)), "train")
+
+    assert frame.values.tolist() == [["00", "01", 1], ["NA", "7", 0]]
+
+
+@pytest.mark.parametrize("seed_id", [-1, -2, "-1"])
+def test_negative_seed_ids_do_not_require_unseeded_signatures(seed_id):
+    from tests.incremental_test_helpers import _dataset
+
+    # Ada and Beth conflict by name; a seed ID equal to a missing-key sentinel must not force them together.
+    dataset = _dataset([("Ada", "", "Smith"), ("Beth", "", "Smith")], {})
+    dataset.cluster_seeds_require = {"1": seed_id}
+
+    assert dataset.get_constraint("0", "1") == dataset.get_constraint("1", "0")
+    assert dataset.get_constraint("0", "1") != 0

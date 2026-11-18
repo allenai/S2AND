@@ -209,6 +209,12 @@ fn middle_summaries_conflict(
 /// middle names.
 /// `first_aliases` answers the name-tuple lookup, which only runs for first
 /// names that share no prefix.
+/// Whether two `cjk_given_name_for_constraint` values are compared whole: both complete,
+/// with the same script tag as their first byte.
+pub(crate) fn cjk_given_names_comparable(given_1: &str, given_2: &str) -> bool {
+    !given_1.is_empty() && !given_2.is_empty() && given_1.as_bytes()[0] == given_2.as_bytes()[0]
+}
+
 pub(crate) fn constraint_names_conflict(
     key_1: &ConstraintNameKey<'_>,
     key_2: &ConstraintNameKey<'_>,
@@ -217,8 +223,11 @@ pub(crate) fn constraint_names_conflict(
     if key_1.last != key_2.last && key_1.last_family != key_2.last_family {
         return true;
     }
+    // Incomplete or cross-script CJK given names keep the ordinary rules below.
     if let (Some(given_1), Some(given_2)) = (key_1.cjk_given_name, key_2.cjk_given_name) {
-        return !given_1.is_empty() && !given_2.is_empty() && given_1 != given_2;
+        if cjk_given_names_comparable(given_1, given_2) {
+            return given_1 != given_2;
+        }
     }
     if let (Some(c1), Some(c2)) = (key_1.first_initial, key_2.first_initial) {
         if c1 != c2 {

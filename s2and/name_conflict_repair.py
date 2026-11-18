@@ -78,6 +78,14 @@ MIN_SIDE = 5
 MAX_ODD_MENTIONS = 2
 # A block needs two sides and an odd mention.
 MIN_BLOCK_SIZE = 2 * MIN_SIDE + 1
+# Clusterer defaults for the close-pair repair. On 127 dev blocks, 7 ORCID-labelled giant
+# blocks and 40 fresh blocks, these bounds made no ORCID-confirmed wrong merge. Five rounds
+# rejoin a profile split into several parts. A smaller side under 10 mentions was where the
+# judged-wrong merges concentrated.
+DEFAULT_REPAIR_ROUNDS = 5
+DEFAULT_BONUS_MIN_CLOSE_SHARE = 0.10
+DEFAULT_BONUS_MAX_PLAIN_AVERAGE = 0.40
+DEFAULT_BONUS_MIN_SIDE_MENTIONS = 10
 # A code is the distance times the scale, rounded down: [0, 1] maps to 0..254,
 # and 255 marks an impossible pair. The Rust kernels use the same scale.
 _SCALE = 254.999
@@ -125,7 +133,7 @@ def _height_bound(
     plain = (code_sum / count + 1) / _SCALE
     if plain <= repair.max_average_distance:
         return adjusted
-    if repair.bonus_min_close_share is not None and close_count < repair.bonus_min_close_share * count:
+    if repair.bonus_min_close_share is not None and close_count / count < repair.bonus_min_close_share:
         return math.inf
     if repair.bonus_max_plain_average is not None and plain > repair.bonus_max_plain_average:
         return math.inf
@@ -230,8 +238,15 @@ class NameConflictRepair:
         return self.initials_side_min_mentions is None or len(side) < self.initials_side_min_mentions
 
     def __post_init__(self) -> None:
-        if self.rounds < 1:
-            raise ValueError("rounds must be at least 1")
+        # bool is an int subclass; True as a count is a caller mistake.
+        if not isinstance(self.rounds, int) or isinstance(self.rounds, bool) or self.rounds < 1:
+            raise ValueError("rounds must be an integer of at least 1")
+        if self.initials_side_min_mentions is not None and (
+            not isinstance(self.initials_side_min_mentions, int)
+            or isinstance(self.initials_side_min_mentions, bool)
+            or self.initials_side_min_mentions < 1
+        ):
+            raise ValueError("initials_side_min_mentions must be an integer of at least 1")
         if not (math.isfinite(self.close_pair_bonus) and self.close_pair_bonus >= 0):
             raise ValueError("close_pair_bonus must be finite and non-negative")
         if self.close_pair_bonus > 0 and not 0 < self.close_pair_distance <= 1:
@@ -272,9 +287,16 @@ def quantize_distances(condensed: np.ndarray, *, num_threads: int | None = None)
     return load_s2and_rust_extension().quantize_block_distances(condensed, float(LARGE_DISTANCE), num_threads)
 
 
-def _majority_orcid(signature_ids: Sequence[str], orcids: Mapping[str, str]) -> str | None:
+def _top_orcids(signature_ids: Sequence[str], orcids: Mapping[str, str]) -> frozenset[str]:
+    """Return every ORCID tied for the most mentions in a cluster.
+
+    Keeping all tied ORCIDs makes the repair independent of mention order.
+    """
     counts = Counter(orcids[s] for s in signature_ids if s in orcids)
-    return counts.most_common(1)[0][0] if counts else None
+    if not counts:
+        return frozenset()
+    most = max(counts.values())
+    return frozenset(orcid for orcid, count in counts.items() if count == most)
 
 
 def _impossible_pairs(
@@ -391,10 +413,11 @@ def _repair_round(
         if repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
             continue
         if repair.orcids:
-            # The odd mentions stay in the merged cluster, so their ORCIDs count.
-            orcid_a = _majority_orcid(all_a, repair.orcids)
-            orcid_b = _majority_orcid(all_b, repair.orcids)
-            if orcid_a is not None and orcid_b is not None and orcid_a != orcid_b:
+            # The odd mentions stay in the merged cluster, so their ORCIDs count. Two sides
+            # with ORCIDs merge only when they share a leading ORCID.
+            orcids_a = _top_orcids(all_a, repair.orcids)
+            orcids_b = _top_orcids(all_b, repair.orcids)
+            if orcids_a and orcids_b and orcids_a.isdisjoint(orcids_b):
                 continue
         if seed_groups:
             # Impossible pairs between two required seed groups are not name conflicts.

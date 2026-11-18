@@ -976,9 +976,11 @@ impl RustFeaturizer {
 
         let first1 = s1.first_normalized().unwrap_or("");
         let first2 = s2.first_normalized().unwrap_or("");
+        // Incomplete or cross-script CJK given names keep the ordinary rules below.
         if let (Some(given1), Some(given2)) = (&s1.cjk_given_name, &s2.cjk_given_name) {
-            return (!given1.is_empty() && !given2.is_empty() && given1 != given2)
-                .then_some(high_value);
+            if crate::constraints::cjk_given_names_comparable(given1, given2) {
+                return (given1 != given2).then_some(high_value);
+            }
         }
         if !first1.is_empty() && !first2.is_empty() {
             if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {

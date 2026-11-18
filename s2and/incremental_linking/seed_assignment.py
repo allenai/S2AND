@@ -69,6 +69,19 @@ def reject_conflicting_new_links(
     return accepted, rejected
 
 
+def _seed_name_compatible(
+    seed_first: str,
+    seed_cjk: str | None,
+    query_first: str,
+    query_cjk: str | None,
+    name_tuples: Set[tuple[str, str]],
+) -> bool:
+    # Complete CJK names with one script tag compare whole, as in canonical_names_conflict.
+    if seed_cjk and query_cjk and seed_cjk[0] == query_cjk[0]:
+        return seed_cjk == query_cjk
+    return first_names_name_compatible(seed_first, query_first, name_tuples)
+
+
 @dataclass
 class SeedLinkAssignment:
     """Owned clusters, residual signatures, and rejected links for diagnostics."""
@@ -88,6 +101,8 @@ def apply_seed_links(
     first_names: Mapping[str, str],
     name_tuples: Set[tuple[str, str]],
     split_cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]] | None = None,
+    forced_signature_ids: Set[str] = frozenset(),
+    cjk_given_names: Mapping[str, str | None] | None = None,
 ) -> SeedLinkAssignment:
     """Apply links, restoring altered profiles and checking name compatibility.
 
@@ -100,6 +115,11 @@ def apply_seed_links(
         first_names: Prepared first names, accessed only for compatibility checks.
         name_tuples: Resolved canonical name-alias pairs.
         split_cluster_seeds_require_inverse: Members of individual altered-profile splits.
+        forced_signature_ids: Queries whose link a require constraint forced. The name
+            check skips them, because the constraint already decided the link.
+        cjk_given_names: Whole CJK given names (``cjk_given_name_for_constraint``). Two
+            complete names in one script are compatible only when equal, as in the hard
+            name rule; other pairs use the first-name rule.
 
     Returns:
         New cluster lists, queries needing residual clustering, and queries whose
@@ -123,15 +143,22 @@ def apply_seed_links(
             continue
         linked_cluster_id = linked_signature_to_cluster[signature_id]
         restored_cluster_id = recluster_map.get(linked_cluster_id, linked_cluster_id)
-        if prevent_new_incompatibilities and linked_cluster_id in recluster_map:
+        if (
+            prevent_new_incompatibilities
+            and linked_cluster_id in recluster_map
+            and signature_id not in forced_signature_ids
+        ):
             members = compatibility_members.get(
                 linked_cluster_id, cluster_seeds_require_inverse.get(restored_cluster_id, [])
             )
-            seed_firsts = {first_names[member] for member in members}
-            seed_firsts = {first for first in seed_firsts if len(first) > 1}
-            if seed_firsts:
-                query_first = first_names[signature_id]
-                if not any(first_names_name_compatible(first, query_first, name_tuples) for first in seed_firsts):
+            cjk_names: Mapping[str, str | None] = {} if cjk_given_names is None else cjk_given_names
+            seed_names = {(first_names[member], cjk_names.get(member)) for member in members}
+            seed_names = {(first, cjk) for first, cjk in seed_names if len(first) > 1}
+            if seed_names:
+                query_first, query_cjk = first_names[signature_id], cjk_names.get(signature_id)
+                if not any(
+                    _seed_name_compatible(first, cjk, query_first, query_cjk, name_tuples) for first, cjk in seed_names
+                ):
                     residual_signature_ids.append(signature_id)
                     rejected_signature_ids.append(signature_id)
                     continue

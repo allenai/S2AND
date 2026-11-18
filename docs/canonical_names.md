@@ -261,11 +261,14 @@ transliterates to a letter. `cjk_given_name_for_constraint` joins the raw fields
 normalizes them to Unicode NFC, expands `々` after a Han character, and
 transliterates the result. So `拓海` matches `拓海`, `奈々` matches `奈奈`,
 `张伟` matches `張偉`, and `민수` matches `민 수`.
-When both records meet the script rule, the whole given name replaces the
-ordinary first and middle name checks. Two complete transliterations veto
-the pair if they differ, as in `ひろ` and `ひろし`. If transliteration loses a
-name character, the given names cannot veto the pair. A pair with one romanized
-name, such as `Xiao` and `孝徳`, uses the ordinary rules. This normalization
+The value starts with a script tag: `G` when the name holds hangul, else `K`
+when it holds kana, else `H`. When both records have complete transliterations
+with the same tag, the whole given name replaces the ordinary first and middle
+name checks, and two different values veto the pair, as in `ひろ` and `ひろし`.
+Every other pair uses the ordinary rules: a pair with one romanized name, such
+as `Xiao` and `孝徳`; a pair in two scripts, such as `민수` and `敏洙`, whose
+pinyin and hangul romanization differ; and a pair where transliteration loses a
+name character, such as the long-vowel mark in `ピーター` or `𠮷` in `𠮷秀`. This normalization
 applies only to the constraint. Feature and count keys use canonical_v2.
 
 Full middle names also use `same_prefix_tokens` before a full-token conflict

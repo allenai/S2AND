@@ -263,9 +263,6 @@ def test_clusterer_hands_its_bonus_bound_to_the_repair() -> None:
         settings["bonus_max_plain_average"],
         settings["bonus_min_side_mentions"],
     ) == (0.1, 0.35, 10)
-    assert Clusterer.name_conflict_repair_bonus_min_close_share is None
-    assert Clusterer.name_conflict_repair_bonus_max_plain_average is None
-    assert Clusterer.name_conflict_repair_bonus_min_side_mentions is None
 
 
 @pytest.mark.parametrize(("bonus", "distance"), [(-1.0, 0.05), (float("nan"), 0.05), (8.0, 0.0), (8.0, 1.5)])
@@ -289,9 +286,22 @@ def test_clusterer_hands_its_close_pair_rule_to_the_repair(uses_bonus: bool, req
     assert "close_pair_bonus" not in model_module._repair_height_settings(clusterer)
 
 
-def test_released_clusterer_defaults_keep_the_plain_average_rule() -> None:
-    assert Clusterer.name_conflict_repair_uses_close_pair_bonus is False
-    assert Clusterer.name_conflict_repair_requires_full_first_names is True
+def test_clusterer_defaults_use_the_bounded_close_pair_rule() -> None:
+    cluster_model = SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05)
+    # An object without the repair attributes gets the same settings as the class defaults.
+    bare = SimpleNamespace(cluster_model=cluster_model)
+    with_class_defaults = type("WithClassDefaults", (Clusterer,), {"cluster_model": cluster_model})
+    for source in (bare, with_class_defaults):
+        settings = model_module._repair_height_settings(source)
+        assert settings["close_pair_bonus"] == 8.0
+        assert settings["rounds"] == 5
+        assert settings["require_full_first_names"] is True
+        assert settings["initials_side_min_mentions"] is None
+        assert (
+            settings["bonus_min_close_share"],
+            settings["bonus_max_plain_average"],
+            settings["bonus_min_side_mentions"],
+        ) == (0.10, 0.40, 10)
 
 
 def test_repair_skips_sides_with_different_orcids() -> None:
@@ -300,6 +310,18 @@ def test_repair_skips_sides_with_different_orcids() -> None:
     assert _repair(square, NameConflictRepair(0.2, FULL, orcids)) == _labels(square)
     same = {"a0": "0000-0000-0000-0001", "b0": "0000-0000-0000-0001"}
     assert len(_partition(_repair(square, NameConflictRepair(0.2, FULL, same)))) == 2
+
+
+@pytest.mark.parametrize("swap", [False, True])
+@pytest.mark.parametrize(("other", "merges"), [("x", True), ("z", False)])
+def test_repair_orcid_tie_does_not_depend_on_mention_order(swap: bool, other: str, merges: bool) -> None:
+    # Side A holds one mention each of ORCIDs x and y. Side B shares x, or has only z.
+    tied = {"a0": "x", "a1": "y"}
+    if swap:
+        tied = {"a0": "y", "a1": "x"}
+    orcids = {**tied, "b0": other}
+    merged = len(_partition(_repair(_square(), NameConflictRepair(0.2, FULL, orcids)))) == 2
+    assert merged is merges
 
 
 def test_repair_counts_the_odd_mention_orcid() -> None:
@@ -1036,9 +1058,21 @@ def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int
     assert len(set(np.asarray(repaired).tolist())) == clusters
 
 
-def test_repair_settings_reject_zero_rounds() -> None:
-    with pytest.raises(ValueError, match="rounds"):
-        NameConflictRepair(0.2, FULL, rounds=0)
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("rounds", 0),
+        ("rounds", 1.9),
+        ("rounds", True),
+        ("initials_side_min_mentions", 0),
+        ("initials_side_min_mentions", -3),
+        ("initials_side_min_mentions", 2.5),
+        ("initials_side_min_mentions", True),
+    ],
+)
+def test_repair_settings_reject_a_count_that_is_not_a_positive_integer(setting: str, value: Any) -> None:
+    with pytest.raises(ValueError, match=setting):
+        NameConflictRepair(0.2, FULL, **{setting: value})
 
 
 @pytest.mark.parametrize(("minimum", "merges"), [(None, False), (6, False), (5, True)])
@@ -1048,3 +1082,10 @@ def test_a_large_initials_side_can_pass_the_full_name_test(minimum: int | None, 
     only_b_and_odd = frozenset(SIGNATURES[5:11])
     repair = NameConflictRepair(0.2, only_b_and_odd, initials_side_min_mentions=minimum)
     assert (len(_partition(_repair(square, repair))) == 2) is merges
+
+
+@pytest.mark.parametrize(("floor", "close", "count"), [(0.07, 7, 100), (0.1, 3, 30), (0.3, 3, 10)])
+def test_bonus_floor_admits_a_share_exactly_at_the_floor(floor: float, close: int, count: int) -> None:
+    # 0.07 * 100 is 7.000000000000001 in floating point; the share itself compares exactly.
+    bound = name_conflict_repair_module._height_bound(_code_sum(0.30, count), close, count, _bounded(floor, 0.40))
+    assert np.isfinite(bound)

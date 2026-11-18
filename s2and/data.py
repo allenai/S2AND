@@ -1329,7 +1329,14 @@ class ANDData:
         import pandas as pd
 
         if isinstance(path_or_dataframe, str):
-            return pd.read_csv(path_or_dataframe, sep=",")
+            # Signature IDs are text: "00" must not become 0, and "NA" must not become missing.
+            # The stubs' overloads do not cover this keyword mix; the call returns a DataFrame.
+            read_csv = cast(Any, pd.read_csv)
+            frame = read_csv(path_or_dataframe, sep=",", dtype=str, keep_default_na=False)
+            if "label" in frame:
+                # Labels keep pandas' type inference, so a numeric 1.0 column still maps.
+                frame["label"] = read_csv(path_or_dataframe, sep=",", usecols=["label"])["label"]
+            return frame
         if path_or_dataframe is None or isinstance(path_or_dataframe, pd.DataFrame):
             return path_or_dataframe
         raise TypeError(f"Expected dataframe path or DataFrame, got {type(path_or_dataframe)}")
@@ -1496,9 +1503,13 @@ class ANDData:
             signature_id_1,
         ) in cluster_seeds_disallow:
             return CLUSTER_SEEDS_LOOKUP["disallow"]
-        elif (cluster_seeds_require.get(signature_id_1, -1) == cluster_seeds_require.get(signature_id_2, -2)) and (
+        elif (
             not incremental_dont_use_cluster_seeds
+            and signature_id_1 in cluster_seeds_require
+            and signature_id_2 in cluster_seeds_require
+            and cluster_seeds_require[signature_id_1] == cluster_seeds_require[signature_id_2]
         ):
+            # Membership, not sentinel defaults: any seed ID, including -1 or -2, is valid.
             return CLUSTER_SEEDS_LOOKUP["require"]
         elif (
             dont_merge_cluster_seeds

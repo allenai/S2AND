@@ -482,6 +482,35 @@ const OTHER_CJK_NAME_RANGES: [(u32, u32); 8] = [
     (0xFF66, 0xFFDC), // Halfwidth Katakana and Halfwidth Hangul
 ];
 
+// Script tags of a whole CJK given name (mirrors Python `_cjk_script_tag`). Pinyin of a
+// Han name and the romanization of its hangul or kana form differ, so only names in one
+// script are compared whole.
+const HANGUL_NAME_RANGES: [(u32, u32); 5] = [
+    (0x1100, 0x11FF),
+    (0x3130, 0x318F),
+    (0xA960, 0xA97F),
+    (0xAC00, 0xD7FF),
+    (0xFFA0, 0xFFDC),
+];
+const KANA_NAME_RANGES: [(u32, u32); 3] = [(0x3040, 0x30FF), (0x31F0, 0x31FF), (0xFF66, 0xFF9F)];
+
+fn cjk_script_tag(given: &str) -> char {
+    let in_ranges = |ranges: &[(u32, u32)]| {
+        given.chars().any(|ch| {
+            ranges
+                .iter()
+                .any(|&(start, end)| (start..=end).contains(&(ch as u32)))
+        })
+    };
+    if in_ranges(&HANGUL_NAME_RANGES) {
+        'G'
+    } else if in_ranges(&KANA_NAME_RANGES) {
+        'K'
+    } else {
+        'H'
+    }
+}
+
 fn is_cjk_name_character(ch: char) -> bool {
     let code = ch as u32;
     HAN_NAME_RANGES
@@ -515,8 +544,9 @@ fn is_cjk_given_name(
     canonical_name_tokens(&canonical_name_pretranslate(&other), unidecode_char_map).is_empty()
 }
 
-/// Prepare the whole CJK given name for constraints. An empty string is
-/// incomplete evidence. None selects the ordinary name rules.
+/// Prepare the whole CJK given name for constraints: a script tag, then the joined
+/// letters. An empty string is incomplete evidence. None marks a name that is not CJK.
+/// Constraints compare two values whole only when both are complete and share a tag.
 pub(crate) fn cjk_given_name_for_constraint(
     first_raw: &str,
     middle_raw: &str,
@@ -528,7 +558,7 @@ pub(crate) fn cjk_given_name_for_constraint(
 
     let raw = canonical_name_pretranslate(&format!("{first_raw}{middle_raw}"));
     let mut previous = None;
-    let mut given = String::new();
+    let mut given = String::from(cjk_script_tag(&raw));
     for mut ch in raw
         .chars()
         .filter(|&ch| !is_python_whitespace_compat(ch))
@@ -554,13 +584,10 @@ pub(crate) fn cjk_given_name_for_constraint(
                 .filter(char::is_ascii_alphabetic)
                 .map(|letter| letter.to_ascii_lowercase()),
         );
-        // A partial transliteration can make equivalent names look different.
-        if given.len() == start
-            && (ch.general_category_group() == GeneralCategoryGroup::Letter
-                || matches!(ch, '〇' | '\u{3099}' | '\u{309a}')
-                || (ch.general_category() == GeneralCategory::Unassigned
-                    && is_cjk_name_character(ch)))
-        {
+        // A partial transliteration can make equivalent names look different. Any non-ASCII
+        // character without letters marks the name incomplete, so the ordinary rules apply.
+        // Unicode categories are not used: Python and Rust ship different Unicode versions.
+        if given.len() == start && !ch.is_ascii() {
             return Some(String::new());
         }
         previous = Some(ch);
@@ -817,9 +844,23 @@ pub(crate) fn compute_block_compat(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_name_count_keys_compat, canonicalize_name_parts_compat, is_cjk_given_name,
-        normalize_text_compat_native, text_unidecode_char, MIXED_CASE_NON_INITIALS,
+        canonical_name_count_keys_compat, canonicalize_name_parts_compat,
+        cjk_given_name_for_constraint, is_cjk_given_name, normalize_text_compat_native,
+        text_unidecode_char, MIXED_CASE_NON_INITIALS,
     };
+
+    #[test]
+    fn cjk_given_name_values_carry_a_script_tag_or_mark_incomplete_names() {
+        let value = |first: &str| cjk_given_name_for_constraint(first, "", None);
+        assert_eq!(value("重喜").as_deref(), Some("Hzhongxi"));
+        assert_eq!(value("奈々").as_deref(), value("奈奈").as_deref());
+        assert_eq!(value("ひろし").as_deref(), Some("Khirosi"));
+        assert_eq!(value("ヒロシ").as_deref(), Some("Khirosi"));
+        assert_eq!(value("민수").as_deref(), Some("Gminsu"));
+        // A long-vowel mark has no letters, so the name keeps the ordinary rules.
+        assert_eq!(value("ピーター").as_deref(), Some(""));
+        assert_eq!(value("Wei"), None);
+    }
 
     #[test]
     fn cjk_given_names_are_han_kana_or_hangul_only() {

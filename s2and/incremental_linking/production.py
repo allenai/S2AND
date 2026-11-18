@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence, Set
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +18,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.incremental_linking.completion import ResidualClusterer, complete_incremental_prediction
 from s2and.incremental_linking.completion_metadata import (
+    SignatureCjkGivenNames,
     SignatureFirstNames,
     SignatureOrcids,
     log_rejected_links,
@@ -1021,6 +1022,7 @@ def finish_with_seed_links(
     suppress_orcid: bool,
     prediction_state: PredictionState,
     cluster_residuals: ResidualClusterer,
+    forced_signature_ids: Set[str] = frozenset(),
 ) -> dict[str, list[str]]:
     """Apply accepted seed links, then cluster the signatures that no link placed.
 
@@ -1037,9 +1039,12 @@ def finish_with_seed_links(
         suppress_orcid: Whether shared ORCIDs stop keeping residual signatures together.
         prediction_state: Request state that receives completion telemetry.
         cluster_residuals: Clusters each residual group.
+        forced_signature_ids: Queries whose link a require constraint forced.
 
     Returns:
-        Predicted clusters keyed by seed or newly allocated cluster ID.
+        Predicted clusters keyed by seed or newly allocated cluster ID. The number of
+        queries left for residual clustering goes to ``prediction_state`` telemetry under
+        ``incremental_seed_links``.
     """
     logger.info("Assigning unassigned signatures for incremental clustering")
     check_names = prevent_new_incompatibilities and bool(recluster_map)
@@ -1052,11 +1057,18 @@ def finish_with_seed_links(
         first_names=SignatureFirstNames(dataset.signatures) if check_names else {},
         name_tuples=name_tuples_for_incremental_rules(dataset.name_tuples) if check_names else frozenset(),
         split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+        forced_signature_ids=forced_signature_ids,
+        cjk_given_names=SignatureCjkGivenNames(dataset.signatures) if check_names else None,
     )
     log_rejected_links(assignment.rejected_signature_ids, dataset.signatures)
+    # Count residuals after the name check, which can send linked queries back.
+    prediction_state.telemetry["incremental_seed_links"] = {
+        "residual_signature_count": len(assignment.residual_signature_ids)
+    }
     return complete_incremental_prediction(
         assignment,
         first_names=SignatureFirstNames(dataset.signatures),
+        cjk_given_names=SignatureCjkGivenNames(dataset.signatures),
         orcids=SignatureOrcids(dataset.signatures),
         partial_supervision=partial_supervision,
         use_default_constraints_as_supervision=use_default_constraints_as_supervision,
@@ -1669,10 +1681,11 @@ def _predict_incremental_promoted_linker_from_arrow(
                     partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
                     name_check_exempt_signature_ids=name_check_exempt_signature_ids,
                 )
-                if name_check_exempt_signature_ids is not None:
-                    _record_link_priorities(
-                        result.compact_result.decisions, raw_batch_featurizer.signature_ids(), link_priorities
-                    )
+                # The in-pass name check reads every link; the final seed-link check reads
+                # forced links. Forced links are rare, so most batches skip the ID lookup.
+                batch_decisions = result.compact_result.decisions
+                if name_check_exempt_signature_ids is not None or any(decision.forced for decision in batch_decisions):
+                    _record_link_priorities(batch_decisions, raw_batch_featurizer.signature_ids(), link_priorities)
                 if query_disallow_partners:
                     scored_batch = _scored_query_decisions_from_result(
                         result,
@@ -1745,7 +1758,7 @@ def _predict_incremental_promoted_linker_from_arrow(
                 )
                 rescore_outcomes.append(outcome)
                 rescored = outcome.decision.decision
-                if name_check_exempt_signature_ids is not None and rescored.action == "link":
+                if rescored.action == "link":
                     link_priorities[signature_id] = LinkPriority(
                         forced=rescored.forced, score=float(rescored.score or 0.0)
                     )
@@ -1870,6 +1883,9 @@ def _predict_incremental_promoted_linker_from_arrow(
                 suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
                 prediction_state=prediction_state,
                 cluster_residuals=cluster_residuals,
+                forced_signature_ids=frozenset(
+                    signature_id for signature_id, priority in link_priorities.items() if priority.forced
+                ),
             )
         finally:
             feature_port.RESIDUAL_FEATURIZER.reset(held_token)
@@ -1877,9 +1893,7 @@ def _predict_incremental_promoted_linker_from_arrow(
                 feature_port.release_rust_handle(held_residual_featurizer.featurizer)
         finish_seconds = time.perf_counter() - finish_start
         residual_phase_b_telemetry = dict(prediction_state.telemetry.get("incremental_residual_phase_b", {}))
-        residual_count = sum(
-            1 for signature_id in unassigned_signature_ids if signature_id not in linked_signature_clusters
-        )
+        residual_count = int(prediction_state.telemetry["incremental_seed_links"]["residual_signature_count"])
         phase_b_required_bytes = residual_count * (residual_count - 1) // 2 * 8
         payload = {
             "clusters": predicted_clusters,

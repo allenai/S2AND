@@ -176,3 +176,30 @@ def test_residual_partition_preserves_transitive_mixed_bridges(suppress_orcid: b
 def test_cluster_id_allocation_only_skips_exact_numeric_keys():
     assert next_unused_cluster_id({"4": [], "5": [], "07": [], "named": []}, 4) == 6
     assert next_unused_cluster_id({"07": []}, 7) == 7
+
+
+@pytest.mark.parametrize(
+    ("cjk", "expected"),
+    [
+        # Same whole CJK name: the full-block rule keeps them together, so grouping must too.
+        ({"compat": "Hhaituo", "standard": "Hhaituo", "other": None}, [["compat", "standard"], ["other"]]),
+        # Different whole CJK names conflict, so the old initials may split them.
+        ({"compat": "Htuo", "standard": "Hhaituo", "other": None}, [["compat"], ["standard"], ["other"]]),
+        # Incomplete or cross-script names keep the ordinary rules, which the old initials follow.
+        ({"compat": "", "standard": "Hhaituo", "other": None}, [["compat"], ["standard"], ["other"]]),
+        ({"compat": "Ghaituo", "standard": "Hhaituo", "other": None}, [["compat", "standard"], ["other"]]),
+    ],
+)
+def test_residual_grouping_follows_the_whole_cjk_given_name(cjk, expected):
+    # The prepared first name drops the compatibility kanji U+FA45, leaving "tuo" against "hai".
+    groups = residual_first_initial_groups(
+        ["compat", "standard", "other"],
+        first_names={"compat": "tuo", "standard": "hai", "other": "mark"},
+        orcids={},
+        partial_supervision={},
+        use_default_constraints_as_supervision=True,
+        suppress_orcid=False,
+        cjk_given_names=cjk,
+    )
+
+    assert groups == expected

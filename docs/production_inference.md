@@ -311,10 +311,14 @@ clusterer.name_conflict_repair_max_distance = None
 clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
 ```
 
-Seven more class attributes on `Clusterer` change the repair. Their defaults keep the
-released rule, and a model bundle does not record them:
+Seven more class attributes on `Clusterer` change the repair. A model bundle does not record
+them, so a loaded model uses the class defaults, and bundle export refuses a clusterer whose
+values differ from them. Since `1.0.0b12` the defaults use the bounded
+close-pair rule: on 127 dev blocks, 7 ORCID-labelled giant blocks and 40 fresh blocks it made no
+ORCID-confirmed wrong merge. Setting the first to `False` and the rounds to `1` restores the
+`1.0.0b11` rule.
 
-- `name_conflict_repair_uses_close_pair_bonus` (default `False`): compare the close-pair
+- `name_conflict_repair_uses_close_pair_bonus` (default `True`): compare the close-pair
   linkage height instead of the plain average distance. The height is the average less the
   cluster model's `close_pair_bonus` times the share of pairs under `close_pair_distance`,
   the height that close-pair linkage cuts. Only codes whose whole range lies under the close
@@ -322,13 +326,14 @@ released rule, and a model bundle does not record them:
   `name_conflict_repair_max_distance`.
 - `name_conflict_repair_requires_full_first_names` (default `True`): whether each side must
   keep a mention with a full first name once the odd mentions are left out.
-- `name_conflict_repair_rounds` (default `1`): the most repair rounds per block. A round
+- `name_conflict_repair_rounds` (default `5`): the most repair rounds per block. A round
   merges each cluster at most once; a later round sees the merged clusters.
 - `name_conflict_repair_initials_side_min_mentions` (default `None`): a side with no full
   first name passes the full-name test when it keeps at least this many mentions.
 - `name_conflict_repair_bonus_min_close_share`,
   `name_conflict_repair_bonus_max_plain_average` and
-  `name_conflict_repair_bonus_min_side_mentions` (default `None`): with the close-pair
+  `name_conflict_repair_bonus_min_side_mentions` (defaults `0.10`, `0.40` and `10`; `None`
+  sets no limit): with the close-pair
   height on, a pair whose plain average is over the limit may use the bonus only when at
   least this share of its pairs is certainly close, its plain average is at most the cap,
   and each side keeps at least this many mentions. A few very close pairs then cannot carry
@@ -445,7 +450,10 @@ and `(B, A)` are deduplicated; differing values raise `ValueError` identifying
 the pair and both distances. NaN and infinity also raise. Validation runs
 before candidate selection, subblocking, or scoring, without mutating the
 caller's mapping. Finite soft distances keep their normal meaning and range; this does not turn zero distances into globally enforced transitive
-must-links.
+must-links. A soft distance must stay at least `1e-6` from 0 and from `10000`; values closer
+to either end raise `ValueError`, because scoring would read them as a forced link or a hard
+veto. Bulk prediction also rejects a distance below `10000` between members of two different
+required seed groups, because seed restoration would then merge both whole groups.
 
 Arrow bulk prediction accepts integer signature IDs by normalizing block members
 and supervision keys to strings. Its output members are strings whether or not

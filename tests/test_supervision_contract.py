@@ -81,6 +81,22 @@ def test_normalization_rejects_nonfinite_distances_without_mutating_input(value)
     assert partial[("paper-a", "paper-b")] is value
 
 
+@pytest.mark.parametrize("value", [1e-9, 5e-7, 9999.999999999998, 10000.0 - 5e-7])
+def test_normalization_rejects_soft_distances_that_would_read_as_hard(value):
+    from s2and.supervision import normalize_partial_supervision
+
+    # Scoring would turn these into a forced link or a hard veto.
+    with pytest.raises(ValueError, match="too close to a hard value"):
+        normalize_partial_supervision({("a", "b"): value})
+
+
+@pytest.mark.parametrize("value", [0, 0.0, 1e-6, 0.5, 9999.0, 10000.0 - 1e-6, 10000.0, 10001.0])
+def test_normalization_keeps_hard_values_and_soft_distances_outside_the_margins(value):
+    from s2and.supervision import normalize_partial_supervision
+
+    assert normalize_partial_supervision({("a", "b"): value}) == {("a", "b"): value}
+
+
 @pytest.mark.parametrize("value", [-1.0, 10000.0])
 def test_normalization_deduplicates_equal_reverse_values_and_owns_its_result(value):
     from s2and.supervision import normalize_partial_supervision

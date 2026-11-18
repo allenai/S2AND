@@ -31,12 +31,19 @@ def residual_first_initial_groups(
     partial_supervision: Mapping[tuple[str, str], int | float],
     use_default_constraints_as_supervision: bool,
     suppress_orcid: bool,
+    cjk_given_names: Mapping[str, str | None] | None = None,
 ) -> list[list[str]]:
     """Split residuals only where hard first-initial constraints make it safe.
 
     Names and ORCIDs are prepared rule metadata. Shared initials, unsuppressed
     shared ORCIDs, and supervision below LARGE_DISTANCE keep signatures together.
     Missing or empty names disable splitting. Input and group order are preserved.
+
+    Two complete CJK given names in one script conflict only when their whole
+    transliterations differ, and the prepared first name can drop characters the CJK
+    rule keeps. A signature with a complete CJK given name therefore also carries that
+    name's initial, so a pair with the same CJK name always shares one. Other pairs
+    keep the ordinary rules, which the prepared initials already follow.
     """
     residual_signature_ids = [str(signature_id) for signature_id in signature_ids]
     if len(residual_signature_ids) <= 1 or not use_default_constraints_as_supervision:
@@ -50,6 +57,11 @@ def residual_first_initial_groups(
         signature_initials = first_initials(first)
         if not signature_initials:
             return [residual_signature_ids]
+        if cjk_given_names is not None:
+            # The value is a script tag, then the transliterated letters.
+            cjk_initial = (cjk_given_names.get(signature_id) or "")[1:2]
+            if cjk_initial:
+                signature_initials = signature_initials | {cjk_initial}
         initials[signature_id] = signature_initials
     if len(set().union(*initials.values())) <= 1:
         return [residual_signature_ids]
@@ -124,6 +136,7 @@ def complete_incremental_prediction(
     start_cluster_id: int,
     prediction_state: PredictionState,
     cluster_residuals: ResidualClusterer,
+    cjk_given_names: Mapping[str, str | None] | None = None,
 ) -> dict[str, list[str]]:
     """Cluster residual groups and allocate IDs without accessing a model or dataset.
 
@@ -137,6 +150,7 @@ def complete_incremental_prediction(
         start_cluster_id: First candidate ID for new residual clusters.
         prediction_state: Request-owned destination for completion telemetry.
         cluster_residuals: Backend operation for a group of two or more signatures.
+        cjk_given_names: Whole CJK given names, compared by the hard name rule.
 
     Returns:
         Owned seed and residual cluster lists. Callback failures propagate unchanged.
@@ -153,6 +167,7 @@ def complete_incremental_prediction(
             partial_supervision=partial_supervision,
             use_default_constraints_as_supervision=use_default_constraints_as_supervision,
             suppress_orcid=suppress_orcid,
+            cjk_given_names=cjk_given_names,
         )
         if residual_signature_ids
         else []

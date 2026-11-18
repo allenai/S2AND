@@ -42,6 +42,7 @@ def test_incremental_route_uses_split_members_for_names_and_original_members_for
         return SimpleNamespace(
             author_info_first=first,
             author_info_first_normalized=first.lower(),
+            author_info_middle=None,
             author_info_last="Jones",
             author_info_orcid=None,
             paper_id=f"p-{first}",
@@ -90,6 +91,7 @@ def test_incremental_route_uses_split_members_for_names_and_original_members_for
         "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
         lambda *_args, **_kwargs: SimpleNamespace(
             linked_signature_clusters={"query": "split_linked"},
+            compact_result=SimpleNamespace(decisions=()),
             telemetry={"query_count": 1, "candidate_row_count": 1, "pair_count": 1},
         ),
     )

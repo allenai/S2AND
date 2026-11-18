@@ -73,7 +73,11 @@ from s2and.model_pairwise import (
 )
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_conflict_repair import (
+    DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
+    DEFAULT_BONUS_MIN_CLOSE_SHARE,
+    DEFAULT_BONUS_MIN_SIDE_MENTIONS,
     DEFAULT_MAX_AVERAGE_DISTANCE,
+    DEFAULT_REPAIR_ROUNDS,
     MIN_BLOCK_SIZE,
     NameConflictRepair,
     has_full_first_name,
@@ -117,6 +121,7 @@ from s2and.supervision import (
     effective_dataset_disallows,
     normalize_partial_supervision,
     validate_incremental_seed_disallows,
+    validate_seed_group_separations,
 )
 from s2and.text import (
     canonicalize_name_parts,
@@ -350,6 +355,8 @@ def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
         bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         bool(getattr(clusterer, "suppress_orcid", False)),
         getattr(clusterer, "name_conflict_repair_max_distance", None),
+        # The repair's height rule and rounds change the pre-split partition too.
+        _cacheable_value(_repair_height_settings(clusterer)),
         _orcid_name_waiver_setting(clusterer),
     )
 
@@ -817,17 +824,23 @@ def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
     """
     settings: dict[str, Any] = {
         "require_full_first_names": bool(getattr(clusterer, "name_conflict_repair_requires_full_first_names", True)),
-        "rounds": int(getattr(clusterer, "name_conflict_repair_rounds", 1)),
+        "rounds": getattr(clusterer, "name_conflict_repair_rounds", DEFAULT_REPAIR_ROUNDS),
         "initials_side_min_mentions": getattr(clusterer, "name_conflict_repair_initials_side_min_mentions", None),
     }
     cluster_model = getattr(clusterer, "cluster_model", None)
     bonus = float(getattr(cluster_model, "close_pair_bonus", 0.0) or 0.0)
-    if getattr(clusterer, "name_conflict_repair_uses_close_pair_bonus", False) and bonus > 0:
+    if getattr(clusterer, "name_conflict_repair_uses_close_pair_bonus", True) and bonus > 0:
         settings["close_pair_bonus"] = bonus
         settings["close_pair_distance"] = float(getattr(cluster_model, "close_pair_distance", 0.0))
-        settings["bonus_min_close_share"] = getattr(clusterer, "name_conflict_repair_bonus_min_close_share", None)
-        settings["bonus_max_plain_average"] = getattr(clusterer, "name_conflict_repair_bonus_max_plain_average", None)
-        settings["bonus_min_side_mentions"] = getattr(clusterer, "name_conflict_repair_bonus_min_side_mentions", None)
+        settings["bonus_min_close_share"] = getattr(
+            clusterer, "name_conflict_repair_bonus_min_close_share", DEFAULT_BONUS_MIN_CLOSE_SHARE
+        )
+        settings["bonus_max_plain_average"] = getattr(
+            clusterer, "name_conflict_repair_bonus_max_plain_average", DEFAULT_BONUS_MAX_PLAIN_AVERAGE
+        )
+        settings["bonus_min_side_mentions"] = getattr(
+            clusterer, "name_conflict_repair_bonus_min_side_mentions", DEFAULT_BONUS_MIN_SIDE_MENTIONS
+        )
     return settings
 
 
@@ -2008,17 +2021,18 @@ class Clusterer:
 
     # Whether name-conflict repair tests the close-pair linkage height (the average
     # distance less the cluster model's close-pair bonus times the share of close pairs)
-    # instead of the plain average. Off keeps the released rule. A class attribute, like
-    # the repair distance.
-    name_conflict_repair_uses_close_pair_bonus: bool = False
+    # instead of the plain average. The clustering cut uses that height, so repair
+    # rejoins what the cut would have joined. A class attribute, like the repair distance.
+    name_conflict_repair_uses_close_pair_bonus: bool = True
 
     # Whether name-conflict repair needs a full first name on each side once the odd
     # mentions are left out. A class attribute, like the repair distance.
     name_conflict_repair_requires_full_first_names: bool = True
 
-    # Most name-conflict repair rounds per block. A round merges each cluster at most once;
-    # one round is the released rule. A class attribute, like the repair distance.
-    name_conflict_repair_rounds: int = 1
+    # Most name-conflict repair rounds per block. A round merges each cluster at most once,
+    # so a profile split into several parts needs several rounds. A class attribute, like
+    # the repair distance.
+    name_conflict_repair_rounds: int = DEFAULT_REPAIR_ROUNDS
 
     # A repair side with no full first name passes the full-name test when it keeps at least
     # this many mentions; None exempts no side. A class attribute, like the repair distance.
@@ -2029,9 +2043,9 @@ class Clusterer:
     # plain average at most the cap, and at least this many mentions on each side. None sets
     # no such limit. A few very close pairs then cannot carry two clusters that are otherwise
     # far apart. Class attributes, like the repair distance.
-    name_conflict_repair_bonus_min_close_share: float | None = None
-    name_conflict_repair_bonus_max_plain_average: float | None = None
-    name_conflict_repair_bonus_min_side_mentions: int | None = None
+    name_conflict_repair_bonus_min_close_share: float | None = DEFAULT_BONUS_MIN_CLOSE_SHARE
+    name_conflict_repair_bonus_max_plain_average: float | None = DEFAULT_BONUS_MAX_PLAIN_AVERAGE
+    name_conflict_repair_bonus_min_side_mentions: int | None = DEFAULT_BONUS_MIN_SIDE_MENTIONS
 
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name
@@ -4150,6 +4164,16 @@ class Clusterer:
 
         block_dict = {key: [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
         partial_supervision = normalize_partial_supervision(partial_supervision, stringify_ids=True)
+        # Attachment passes send large seed maps without caller distances; skip the copy then.
+        if (
+            partial_supervision
+            and cluster_seeds_require is not None
+            and not incremental_dont_use_cluster_seeds
+            and getattr(self, "dont_merge_cluster_seeds", True)
+        ):
+            validate_seed_group_separations(
+                _normalize_cluster_seeds_require(cluster_seeds_require), partial_supervision
+            )
         exclusions = normalize_profile_exclusions(profile_exclusions)
         prediction_state: PredictionState | None = None
         if exclusions:
@@ -4768,6 +4792,12 @@ class Clusterer:
             raise ValueError("Clusterer.predict operates on ANDData through Python; use predict_from_arrow for Rust")
 
         prediction_state = _prediction_state_from_dataset(dataset)
+        if (
+            partial_supervision
+            and not incremental_dont_use_cluster_seeds
+            and getattr(self, "dont_merge_cluster_seeds", True)
+        ):
+            validate_seed_group_separations(prediction_state.cluster_seeds_require, partial_supervision)
         exclusions = normalize_profile_exclusions(profile_exclusions)
         if exclusions:
             if dists is not None or use_s2_clusters:

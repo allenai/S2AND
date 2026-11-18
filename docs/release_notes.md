@@ -58,8 +58,8 @@
 - Fix tooling edge cases: fixed-pair CSVs keep signature IDs as text (`00` no longer becomes `0`); seed ID `-1` no
   longer matches unseeded signatures; `rebind_name_counts_index.py` rejects an output inside its source;
   `generate_name_counts_from_parquet.py --resume` adopts an index published just before a stop; EPS
-  review requires `--route production` curves with the current distance-policy version (now 3, for the
-  CJK and joined-initials rules), which sweep plans now record; an EPS retry reuses an ORCID-free dataset copy only for the same source.
+  review requires `--route production` curves with the current distance-policy version (now 5, for the
+  CJK and joined-initials rules, the repair's reading step and the year-gap split), which sweep plans now record; an EPS retry reuses an ORCID-free dataset copy only for the same source.
 - Add seven name-conflict repair settings on `Clusterer`:
   `name_conflict_repair_uses_close_pair_bonus` tests the close-pair linkage height instead of the
   plain average, `name_conflict_repair_requires_full_first_names` can drop the full-first-name test,

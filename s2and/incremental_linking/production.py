@@ -1008,6 +1008,23 @@ def merge_promoted_incremental_batch_telemetry(
     return merged
 
 
+def _cached_name_parts(signatures: Mapping[str, Any]) -> Callable[[str], CanonicalNameParts]:
+    """Return a memoized canonical-name lookup for the restored-profile name check."""
+    cache: dict[str, CanonicalNameParts] = {}
+
+    def parts(signature_id: str) -> CanonicalNameParts:
+        found = cache.get(signature_id)
+        if found is None:
+            signature = signatures[signature_id]
+            found = canonicalize_name_parts(
+                signature.author_info_first, signature.author_info_middle, signature.author_info_last
+            )
+            cache[signature_id] = found
+        return found
+
+    return parts
+
+
 def finish_with_seed_links(
     dataset: Any,
     *,
@@ -1059,6 +1076,7 @@ def finish_with_seed_links(
         split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
         forced_signature_ids=forced_signature_ids,
         cjk_given_names=SignatureCjkGivenNames(dataset.signatures) if check_names else None,
+        name_parts=_cached_name_parts(dataset.signatures) if check_names else None,
     )
     log_rejected_links(assignment.rejected_signature_ids, dataset.signatures)
     # Count residuals after the name check, which can send linked queries back.

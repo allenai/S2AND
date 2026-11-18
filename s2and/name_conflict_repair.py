@@ -255,8 +255,12 @@ class NameConflictRepair:
             raise ValueError("bonus_min_close_share must lie in [0, 1]")
         if self.bonus_max_plain_average is not None and not 0 < self.bonus_max_plain_average <= 1:
             raise ValueError("bonus_max_plain_average must lie in (0, 1]")
-        if self.bonus_min_side_mentions is not None and self.bonus_min_side_mentions < 1:
-            raise ValueError("bonus_min_side_mentions must be at least 1")
+        if self.bonus_min_side_mentions is not None and (
+            not isinstance(self.bonus_min_side_mentions, int)
+            or isinstance(self.bonus_min_side_mentions, bool)
+            or self.bonus_min_side_mentions < 1
+        ):
+            raise ValueError("bonus_min_side_mentions must be an integer of at least 1")
 
 
 def has_full_first_name(first: str | None) -> bool:

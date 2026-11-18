@@ -24,7 +24,13 @@ from s2and.model import (
     _selected_feature_indices,
 )
 from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
-from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
+from s2and.name_conflict_repair import (
+    DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
+    DEFAULT_BONUS_MIN_CLOSE_SHARE,
+    DEFAULT_BONUS_MIN_SIDE_MENTIONS,
+    DEFAULT_MAX_AVERAGE_DISTANCE,
+    DEFAULT_REPAIR_ROUNDS,
+)
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
     CLOSE_PAIR_FIELDS,
@@ -114,16 +120,17 @@ def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
     return payload
 
 
-# Clusterer repair settings that a bundle does not record.
-_UNRECORDED_REPAIR_SETTINGS = (
-    "name_conflict_repair_uses_close_pair_bonus",
-    "name_conflict_repair_requires_full_first_names",
-    "name_conflict_repair_rounds",
-    "name_conflict_repair_initials_side_min_mentions",
-    "name_conflict_repair_bonus_min_close_share",
-    "name_conflict_repair_bonus_max_plain_average",
-    "name_conflict_repair_bonus_min_side_mentions",
-)
+# Clusterer repair settings that a bundle does not record, with the package defaults a
+# loaded model gets. Fixed values, so a changed class attribute cannot pass the check.
+_UNRECORDED_REPAIR_SETTINGS: dict[str, object] = {
+    "name_conflict_repair_uses_close_pair_bonus": True,
+    "name_conflict_repair_requires_full_first_names": True,
+    "name_conflict_repair_rounds": DEFAULT_REPAIR_ROUNDS,
+    "name_conflict_repair_initials_side_min_mentions": None,
+    "name_conflict_repair_bonus_min_close_share": DEFAULT_BONUS_MIN_CLOSE_SHARE,
+    "name_conflict_repair_bonus_max_plain_average": DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
+    "name_conflict_repair_bonus_min_side_mentions": DEFAULT_BONUS_MIN_SIDE_MENTIONS,
+}
 
 
 def _clusterer_config_payload(
@@ -143,9 +150,9 @@ def _clusterer_config_payload(
             f"{repair_distance!r}; a loaded model uses {DEFAULT_MAX_AVERAGE_DISTANCE}. "
             "Restore the default before export and set the attribute after loading."
         )
-    for setting in _UNRECORDED_REPAIR_SETTINGS:
-        # These have no bundle field either; compare with the class default a loaded model gets.
-        value, default = getattr(clusterer, setting, getattr(Clusterer, setting)), getattr(Clusterer, setting)
+    for setting, default in _UNRECORDED_REPAIR_SETTINGS.items():
+        # These have no bundle field either.
+        value = getattr(clusterer, setting, default)
         if value != default:
             raise ValueError(
                 f"Production bundle export cannot record {setting}={value!r}; a loaded model uses {default!r}. "

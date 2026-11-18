@@ -904,7 +904,12 @@ def _write_orcid_free_dataset(source_dir: Path, target_dir: Path) -> Path:
     from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
     from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
 
-    source_digest = _hash_file(source_dir / "manifest.json")
+    # The manifest does not hash the name-count index it points to, so bind that too.
+    source_manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
+    index_dir = source_manifest.get("paths", {}).get("name_counts_index")
+    index_manifest = (source_dir / index_dir / "manifest.json").resolve() if index_dir else None
+    index_digest = _hash_file(index_manifest) if index_manifest is not None and index_manifest.is_file() else "none"
+    source_digest = f"{_hash_file(source_dir / 'manifest.json')}:{index_digest}"
     marker_name = "source_manifest.sha256"
     if target_dir.exists():
         marker = target_dir / marker_name

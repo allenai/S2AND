@@ -1521,3 +1521,19 @@ def test_rebinding_rejects_an_output_inside_the_source(tmp_path: Path) -> None:
             release_version="9.10",
         )
     assert list(source.iterdir()) == []
+
+
+def test_bundle_export_compares_repair_settings_with_fixed_defaults(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A changed class attribute must not pass as the default: a fresh process loads 5 rounds.
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
+    source_clusterer.orcid_name_waiver = Clusterer.orcid_name_waiver
+    monkeypatch.setattr(Clusterer, "name_conflict_repair_rounds", 1)
+    with pytest.raises(ValueError, match="cannot record name_conflict_repair_rounds"):
+        write_pairwise_production_bundle(
+            source_clusterer, tmp_path / "class" / "production_model_v9.9", release_version="9.9"
+        )

@@ -626,8 +626,10 @@ pub(crate) fn joined_initials_for_constraint(first_raw: &str, middle_raw: &str) 
         && all(&bytes[1..], u8::is_ascii_lowercase)
     {
         let lowered = first.to_ascii_lowercase();
+        // ED and MD stay given names, as in the canonical initials parser.
         if MIXED_CASE_NON_INITIALS.contains(&lowered.as_str())
             || crate::name_normalization::NAME_PREFIXES.contains(&lowered.as_str())
+            || JOINED_INITIALS_GIVEN_NAMES.contains(&first.to_ascii_uppercase().as_str())
         {
             return None;
         }

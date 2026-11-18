@@ -30,6 +30,7 @@ from tests.incremental_test_helpers import _dataset, _predict
         ("Kristan", "", None),
         ("Dr", "", None),
         ("Md", "", None),
+        ("Ed", "", None),
         ("K", "", None),
     ],
 )

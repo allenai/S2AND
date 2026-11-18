@@ -202,15 +202,8 @@ fn middle_summaries_conflict(
     conflicting_initials || conflicting_full_names
 }
 
-/// Return whether two signatures' names violate the hard constraint.
-///
-/// Matches the name steps of `RustFeaturizer::constraint_value_from_records`:
-/// last names, CJK given names, first initials, first-name compatibility, then
-/// middle names.
-/// `first_aliases` answers the name-tuple lookup, which only runs for first
-/// names that share no prefix.
-/// Whether two `cjk_given_name_for_constraint` values are compared whole: both complete,
-/// with the same script tag as their first byte.
+/// Whether two `given_name_for_constraint` values are compared whole as CJK given names:
+/// both complete, with the same CJK script tag (H, K or G) as their first byte.
 pub(crate) fn cjk_given_names_comparable(given_1: &str, given_2: &str) -> bool {
     !given_1.is_empty()
         && !given_2.is_empty()
@@ -276,6 +269,13 @@ pub(crate) fn joined_initials_reconcile<'t>(
     }
 }
 
+/// Return whether two signatures' names violate the hard constraint.
+///
+/// Matches the name steps of `RustFeaturizer::constraint_value_from_records`:
+/// last names, CJK given names, first initials, first-name compatibility, then
+/// middle names, with the joined-initials reading (`joined_initials_reconcile`).
+/// `first_aliases` answers the name-tuple lookup, which only runs for first
+/// names that share no prefix.
 pub(crate) fn constraint_names_conflict(
     key_1: &ConstraintNameKey<'_>,
     key_2: &ConstraintNameKey<'_>,

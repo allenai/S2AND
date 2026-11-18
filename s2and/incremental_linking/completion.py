@@ -150,7 +150,8 @@ def complete_incremental_prediction(
         start_cluster_id: First candidate ID for new residual clusters.
         prediction_state: Request-owned destination for completion telemetry.
         cluster_residuals: Backend operation for a group of two or more signatures.
-        cjk_given_names: Whole CJK given names, compared by the hard name rule.
+        cjk_given_names: ``given_name_for_constraint`` values: whole CJK given names or
+            joined-initials readings, whose second character is the first initial.
 
     Returns:
         Owned seed and residual cluster lists. Callback failures propagate unchanged.

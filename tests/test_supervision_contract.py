@@ -81,7 +81,7 @@ def test_normalization_rejects_nonfinite_distances_without_mutating_input(value)
     assert partial[("paper-a", "paper-b")] is value
 
 
-@pytest.mark.parametrize("value", [1e-9, 5e-7, 9999.999999999998, 10000.0 - 5e-7])
+@pytest.mark.parametrize("value", [1e-9, 5e-7, -5e-9, 9999.999999999998, 10000.0 - 5e-7])
 def test_normalization_rejects_soft_distances_that_would_read_as_hard(value):
     from s2and.supervision import normalize_partial_supervision
 

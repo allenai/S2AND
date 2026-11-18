@@ -1068,6 +1068,9 @@ def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int
         ("initials_side_min_mentions", -3),
         ("initials_side_min_mentions", 2.5),
         ("initials_side_min_mentions", True),
+        ("bonus_min_side_mentions", True),
+        ("bonus_min_side_mentions", 1.5),
+        ("bonus_min_side_mentions", float("nan")),
     ],
 )
 def test_repair_settings_reject_a_count_that_is_not_a_positive_integer(setting: str, value: Any) -> None:

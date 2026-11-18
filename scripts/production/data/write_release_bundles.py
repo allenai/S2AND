@@ -231,7 +231,8 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
         # A model bound to another index fails at its first prediction; refuse it before writing.
         contract = _read_json(model.resolve() / "clusterer.json")["feature_contract"]
         bound = contract.get(NAME_COUNTS_MANIFEST_SHA256_FIELD)
-        if bound != index.manifest_sha256:
+        # A model that uses no name counts declares no binding.
+        if bound is not None and bound != index.manifest_sha256:
             raise ValueError(
                 f"Model {model} is bound to name-count index {bound}, not the packaged {index.manifest_sha256}; "
                 "rebind it with scripts/production/model/rebind_name_counts_index.py"

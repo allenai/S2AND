@@ -1,7 +1,7 @@
 """Request-boundary policy for undirected caller distance overrides."""
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from itertools import chain
 
 from s2and.consts import LARGE_DISTANCE
@@ -43,7 +43,10 @@ def normalize_partial_supervision(
             raise ValueError(
                 f"partial_supervision requires finite distances: pair={(left, right)!r}, value={distance!r}"
             )
-        if 0 < distance < SOFT_DISTANCE_MARGIN or LARGE_DISTANCE - SOFT_DISTANCE_MARGIN < distance < LARGE_DISTANCE:
+        if (
+            0 < abs(distance) < SOFT_DISTANCE_MARGIN
+            or LARGE_DISTANCE - SOFT_DISTANCE_MARGIN < distance < LARGE_DISTANCE
+        ):
             raise ValueError(
                 f"partial_supervision distance is too close to a hard value: pair={(left, right)!r}, "
                 f"value={distance!r}; use exactly 0 or {LARGE_DISTANCE:g}, or keep {SOFT_DISTANCE_MARGIN:g} away"
@@ -124,6 +127,7 @@ def validate_incremental_seed_disallows(
 def validate_seed_group_separations(
     required_assignments: Mapping[str, int | str],
     partial_supervision: Mapping[tuple[str, str], int | float],
+    signatures: Container[str] | None = None,
 ) -> None:
     """Reject caller distances that would join two different required seed groups.
 
@@ -135,6 +139,7 @@ def validate_seed_group_separations(
     Args:
         required_assignments: Signature-to-group assignments of the request.
         partial_supervision: Normalized caller distances.
+        signatures: Signatures the request clusters; pairs outside them are not checked.
 
     Raises:
         ValueError: A caller distance below ``LARGE_DISTANCE`` connects members of
@@ -145,9 +150,12 @@ def validate_seed_group_separations(
     for (left, right), distance in partial_supervision.items():
         if distance >= LARGE_DISTANCE:
             continue
+        if signatures is not None and (left not in signatures or right not in signatures):
+            continue
         left_group = required_assignments.get(left)
         right_group = required_assignments.get(right)
-        if left_group is None or right_group is None or str(left_group) == str(right_group):
+        # Compare as the Python constraint does: raw group values.
+        if left_group is None or right_group is None or left_group == right_group:
             continue
         pair = (left, right) if left <= right else (right, left)
         if conflict is None or pair < conflict:

@@ -336,3 +336,27 @@ def test_bulk_accepts_a_hard_distance_between_seed_groups(tmp_path, route):
                 name_tuples=frozenset(),
             )
     assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"]]
+
+
+def test_predict_helper_rejects_a_caller_distance_that_joins_two_seed_groups():
+    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
+    with pytest.raises(ValueError, match="partial_supervision_joins_seed_groups"):
+        _clusterer(0.1).predict_helper({"probe": ["0", "1", "2"]}, dataset, partial_supervision={("0", "2"): 0.0})
+
+
+def test_python_seed_check_follows_the_default_constraint_switch():
+    # Without default constraints the Python route does not separate seed groups.
+    dataset = _dataset([("Ada", "", "Smith")] * 2, {"0": "profileA", "1": "profileB"})
+    clusterer = _clusterer(0.1)
+    clusterer.use_default_constraints_as_supervision = False
+    clusters, _ = clusterer.predict({"probe": ["0", "1"]}, dataset, partial_supervision={("0", "1"): 0.1})
+    assert sorted(len(members) for members in clusters.values()) == [2]
+
+
+def test_seed_check_skips_pairs_outside_the_requested_blocks():
+    # Residual clustering clusters queries only; seed pairs elsewhere are not its concern.
+    dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "profileA", "1": "profileB"})
+    clusters, _ = _clusterer(0.1).predict_helper(
+        {"probe": ["2", "3"]}, dataset, partial_supervision={("0", "1"): 0.0, ("2", "3"): 0.1}
+    )
+    assert sorted(len(members) for members in clusters.values()) == [2]

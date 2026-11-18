@@ -110,15 +110,22 @@ mod constraint_key_tests {
             let orcid = [None, None, Some("0000-0001"), Some("0000-0002")][rng.below(4)];
             let signature_id = format!("s{index}");
             let mut data = signature(first, middle, last, orcid);
-            // Some names stand for CJK-script given names, so the keyed CJK rule runs too.
-            if rng.below(3) == 0 {
-                data.cjk_given_name = Some(
-                    data.first_normalized()
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .chain(data.middle.as_deref().unwrap_or("").split_whitespace())
-                        .collect(),
-                );
+            // Some names stand for CJK-script given names (tag H) and some for joined initials
+            // (tag J), so the keyed CJK and joined-initials rules run too.
+            let tokens: Vec<String> = data
+                .first_normalized()
+                .unwrap_or("")
+                .split_whitespace()
+                .chain(data.middle.as_deref().unwrap_or("").split_whitespace())
+                .map(str::to_string)
+                .collect();
+            match rng.below(4) {
+                0 => data.cjk_given_name = Some(format!("H{}", tokens.concat())),
+                1 if !tokens.is_empty() => {
+                    let initials: String = tokens.iter().filter_map(|t| t.chars().next()).collect();
+                    data.cjk_given_name = Some(format!("J{initials}"));
+                }
+                _ => {}
             }
             signatures.insert(signature_id.clone(), data);
             signature_ids.push(signature_id);

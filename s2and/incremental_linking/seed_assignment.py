@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable, Hashable, Mapping, Sequence, Set
 from dataclasses import dataclass
 
-from s2and.text import first_names_name_compatible
+from s2and.text import CanonicalNameParts, first_names_name_compatible, is_joined_reading, joined_initials_match
 
 
 @dataclass(frozen=True)
@@ -82,6 +82,25 @@ def _seed_name_compatible(
     return first_names_name_compatible(seed_first, query_first, name_tuples)
 
 
+def _joined_initials_compatible(
+    query: str,
+    members: Sequence[str],
+    cjk_names: Mapping[str, str | None],
+    name_parts: Callable[[str], CanonicalNameParts],
+) -> bool:
+    # One side's joined-initials reading must spell the other side's name, as in
+    # canonical_names_conflict; two readings never reconcile.
+    query_value = cjk_names.get(query)
+    if is_joined_reading(query_value):
+        return any(
+            not is_joined_reading(cjk_names.get(member))
+            and joined_initials_match(query_value or "", name_parts(member))
+            for member in members
+        )
+    readings = [cjk_names.get(member) for member in members if is_joined_reading(cjk_names.get(member))]
+    return any(joined_initials_match(reading or "", name_parts(query)) for reading in readings)
+
+
 @dataclass
 class SeedLinkAssignment:
     """Owned clusters, residual signatures, and rejected links for diagnostics."""
@@ -103,6 +122,7 @@ def apply_seed_links(
     split_cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]] | None = None,
     forced_signature_ids: Set[str] = frozenset(),
     cjk_given_names: Mapping[str, str | None] | None = None,
+    name_parts: Callable[[str], CanonicalNameParts] | None = None,
 ) -> SeedLinkAssignment:
     """Apply links, restoring altered profiles and checking name compatibility.
 
@@ -115,11 +135,13 @@ def apply_seed_links(
         first_names: Prepared first names, accessed only for compatibility checks.
         name_tuples: Resolved canonical name-alias pairs.
         split_cluster_seeds_require_inverse: Members of individual altered-profile splits.
-        forced_signature_ids: Queries whose link a require constraint forced. The name
-            check skips them, because the constraint already decided the link.
-        cjk_given_names: Whole CJK given names (``cjk_given_name_for_constraint``). Two
-            complete names in one script are compatible only when equal, as in the hard
-            name rule; other pairs use the first-name rule.
+        forced_signature_ids: Queries whose link a require or ORCID constraint forced. The
+            name check skips them, because the constraint already decided the link.
+        cjk_given_names: ``given_name_for_constraint`` values. Two complete CJK names in
+            one script are compatible only when equal, as in the hard name rule; other
+            pairs use the first-name rule.
+        name_parts: Canonical name parts by signature, read only for a joined-initials
+            reading ("Ka" against "Kristan Allan"), which the first-name rule alone rejects.
 
     Returns:
         New cluster lists, queries needing residual clustering, and queries whose
@@ -152,13 +174,21 @@ def apply_seed_links(
                 linked_cluster_id, cluster_seeds_require_inverse.get(restored_cluster_id, [])
             )
             cjk_names: Mapping[str, str | None] = {} if cjk_given_names is None else cjk_given_names
-            seed_names = {(first_names[member], cjk_names.get(member)) for member in members}
-            seed_names = {(first, cjk) for first, cjk in seed_names if len(first) > 1}
+            # Full first names and CJK given names, whose first syllable can be one letter.
+            named = [
+                member
+                for member in members
+                if len(first_names[member]) > 1 or (cjk_names.get(member) or " ")[0] in "HKG"
+            ]
+            seed_names = {(first_names[member], cjk_names.get(member)) for member in named}
             if seed_names:
                 query_first, query_cjk = first_names[signature_id], cjk_names.get(signature_id)
-                if not any(
+                compatible = any(
                     _seed_name_compatible(first, cjk, query_first, query_cjk, name_tuples) for first, cjk in seed_names
-                ):
+                )
+                if not compatible and name_parts is not None:
+                    compatible = _joined_initials_compatible(signature_id, named, cjk_names, name_parts)
+                if not compatible:
                     residual_signature_ids.append(signature_id)
                     rejected_signature_ids.append(signature_id)
                     continue

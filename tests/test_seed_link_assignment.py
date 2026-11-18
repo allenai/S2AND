@@ -190,3 +190,51 @@ def test_restored_profile_name_check_applies_the_cjk_rule(query_first, query_cjk
     )
 
     assert (result.clusters == {"1": ["seed", "query"]}) is accepted
+
+
+@pytest.mark.parametrize(
+    ("seed", "query", "accepted"),
+    [
+        # A joined-initials reading that spells the other name exactly, on either side.
+        (("Kristan", "Allan"), ("Ka", ""), True),
+        (("Ka", ""), ("Kristan", "Allan"), True),
+        (("Marco Aurelio Lisboa", ""), ("Mal", ""), True),
+        (("Mohammad", "Arfan"), ("MArfan", ""), True),
+        # Other names keep the first-name rule.
+        (("Kristian", ""), ("Ka", ""), False),
+    ],
+)
+def test_restored_profile_name_check_applies_the_joined_initials_reading(seed, query, accepted):
+    from s2and.text import canonicalize_name_parts, given_name_for_constraint
+
+    names = {"seed": seed, "query": query}
+    parts = {key: canonicalize_name_parts(first, middle, "Leite") for key, (first, middle) in names.items()}
+    result = apply_seed_links(
+        unassigned_signature_ids=["query"],
+        linked_signature_to_cluster={"query": 10},
+        recluster_map={10: 1},
+        cluster_seeds_require_inverse={1: ["seed"]},
+        prevent_new_incompatibilities=True,
+        first_names={key: value.first for key, value in parts.items()},
+        name_tuples=set(),
+        cjk_given_names={key: given_name_for_constraint(*value) for key, value in names.items()},
+        name_parts=parts.__getitem__,
+    )
+
+    assert (result.clusters == {"1": ["seed", "query"]}) is accepted
+
+
+def test_restored_profile_name_check_keeps_one_letter_cjk_first_syllables():
+    # 阿明 has canonical first "a"; the CJK rule still vetoes 阿強.
+    result = apply_seed_links(
+        unassigned_signature_ids=["query"],
+        linked_signature_to_cluster={"query": 10},
+        recluster_map={10: 1},
+        cluster_seeds_require_inverse={1: ["seed"]},
+        prevent_new_incompatibilities=True,
+        first_names={"seed": "a", "query": "a"},
+        name_tuples=set(),
+        cjk_given_names={"seed": "Haming", "query": "Haqiang"},
+    )
+
+    assert result.rejected_signature_ids == ["query"]

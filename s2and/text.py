@@ -577,7 +577,8 @@ _RE_SHORT_GIVEN_NAME = re.compile(r"[A-Z][a-z]{1,2}")
 _RE_INITIAL_THEN_NAME = re.compile(r"[A-Z]([A-Z][a-z]{2,})")
 
 
-def _joined_reading(value: str | None) -> bool:
+def is_joined_reading(value: str | None) -> bool:
+    """Return whether a ``given_name_for_constraint`` value is a joined-initials reading."""
     return bool(value) and value[0] in "JW"  # type: ignore[index]
 
 
@@ -586,7 +587,7 @@ def joined_initials_for_constraint(first_raw: str | None, middle_raw: str | None
 
     "Ka" (no middle name) reads "Jka", meaning K. A.; "MArfan" reads "Wm arfan", meaning
     M. Arfan. Real short names ("Ka", "Mal", "Al") take the reading too; it only matters
-    when another name spells exactly these initials (see `_joined_initials_match`).
+    when another name spells exactly these initials (see `joined_initials_match`).
     Rust `joined_initials_for_constraint` mirrors it.
     """
     first = (first_raw or "").strip()
@@ -594,7 +595,12 @@ def joined_initials_for_constraint(first_raw: str | None, middle_raw: str | None
         return None
     if _RE_SHORT_GIVEN_NAME.fullmatch(first):
         lowered = first.lower()
-        if lowered in _MIXED_CASE_NON_INITIALS or lowered in NAME_PREFIXES:
+        # ED and MD stay given names, as in the canonical initials parser.
+        if (
+            lowered in _MIXED_CASE_NON_INITIALS
+            or lowered in NAME_PREFIXES
+            or first.upper() in _JOINED_INITIALS_GIVEN_NAMES
+        ):
             return None
         return "J" + lowered
     match = _RE_INITIAL_THEN_NAME.fullmatch(first)
@@ -612,7 +618,7 @@ def given_name_for_constraint(first_raw: str | None, middle_raw: str | None) -> 
     return cjk if cjk is not None else joined_initials_for_constraint(first_raw, middle_raw)
 
 
-def _joined_initials_match(reading: str, other: "CanonicalNameParts") -> bool:
+def joined_initials_match(reading: str, other: "CanonicalNameParts") -> bool:
     """Return whether a joined-initials reading spells the other name exactly.
 
     The other name needs a full first name. For "J" readings its first and middle tokens
@@ -1402,10 +1408,10 @@ def canonical_names_conflict(
         return False
     # A short given name may be joined initials ("Ka" for K. A.). It reconciles a
     # conflict only against a name whose initials it spells exactly.
-    if _joined_reading(given_a) and not _joined_reading(given_b):
-        return not _joined_initials_match(given_a or "", name_b)
-    if _joined_reading(given_b) and not _joined_reading(given_a):
-        return not _joined_initials_match(given_b or "", name_a)
+    if is_joined_reading(given_a) and not is_joined_reading(given_b):
+        return not joined_initials_match(given_a or "", name_b)
+    if is_joined_reading(given_b) and not is_joined_reading(given_a):
+        return not joined_initials_match(given_b or "", name_a)
     return True
 
 

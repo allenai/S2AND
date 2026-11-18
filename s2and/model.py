@@ -900,6 +900,31 @@ def _name_conflict_repair_from_dataset(
     )
 
 
+def _validate_python_seed_separations(
+    clusterer: Any,
+    block_dict: Mapping[str, Sequence[str]],
+    cluster_seeds_require: Mapping[str, int | str],
+    partial_supervision: Mapping[tuple[str, str], int | float],
+    incremental_dont_use_cluster_seeds: bool,
+) -> None:
+    """Reject caller distances that would join two seed groups the Python route keeps apart.
+
+    The Python constraint separates seed groups only with default constraints on.
+    """
+    if (
+        partial_supervision
+        and cluster_seeds_require
+        and not incremental_dont_use_cluster_seeds
+        and getattr(clusterer, "dont_merge_cluster_seeds", True)
+        and getattr(clusterer, "use_default_constraints_as_supervision", True)
+    ):
+        validate_seed_group_separations(
+            cluster_seeds_require,
+            partial_supervision,
+            {signature for signatures in block_dict.values() for signature in signatures},
+        )
+
+
 def _prediction_state_from_dataset(dataset: ANDData) -> PredictionState:
     """Snapshot prediction inputs without changing the dataset's collections."""
     return PredictionState(
@@ -3280,6 +3305,17 @@ class Clusterer:
         """
 
         partial_supervision = normalize_partial_supervision(partial_supervision)
+        if (
+            partial_supervision
+            and cluster_seeds_require
+            and not incremental_dont_use_cluster_seeds
+            and getattr(self, "dont_merge_cluster_seeds", True)
+        ):
+            validate_seed_group_separations(
+                cluster_seeds_require,
+                partial_supervision,
+                {str(signature) for signatures in block_dict.values() for signature in signatures},
+            )
         return Clusterer._predict_from_rust_featurizer(
             self,
             block_dict=block_dict,
@@ -4792,12 +4828,13 @@ class Clusterer:
             raise ValueError("Clusterer.predict operates on ANDData through Python; use predict_from_arrow for Rust")
 
         prediction_state = _prediction_state_from_dataset(dataset)
-        if (
-            partial_supervision
-            and not incremental_dont_use_cluster_seeds
-            and getattr(self, "dont_merge_cluster_seeds", True)
-        ):
-            validate_seed_group_separations(prediction_state.cluster_seeds_require, partial_supervision)
+        _validate_python_seed_separations(
+            self,
+            block_dict,
+            prediction_state.cluster_seeds_require,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds,
+        )
         exclusions = normalize_profile_exclusions(profile_exclusions)
         if exclusions:
             if dists is not None or use_s2_clusters:
@@ -5224,6 +5261,13 @@ class Clusterer:
         distances are built and clustered in the fused one-block-at-a-time path.
         """
         partial_supervision = normalize_partial_supervision(partial_supervision)
+        _validate_python_seed_separations(
+            self,
+            block_dict,
+            dataset.cluster_seeds_require if prediction_state is None else prediction_state.cluster_seeds_require,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds,
+        )
         return self._predict_with_normalized_supervision(
             block_dict,
             dataset,

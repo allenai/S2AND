@@ -8,9 +8,10 @@
   parser reads `Ka` as a given name. Incremental linking applies the same reading when it checks a link
   to a restored profile. Canonical names, features and count keys do not change. See "Canonical name
   contract" in `docs/canonical_names.md`.
-- Read a middle name of two or three joined capitals as initials in the hard name rule: `Johanna IP`
-  agrees with `Johanna Inge Petra` and `Johanna I. P.`, and `Jip` spells it. Canonical names, features
-  and count keys do not change.
+- Read a middle name of joined initials as initials in the hard name rule, by the D9 test (2-3
+  capitals, or vowel-less mixed case such as `Hg`), except suffixes, roman numerals and `Mc`:
+  `Johanna IP` agrees with `Johanna Inge Petra` and `Johanna I. P.`, and `Jip` spells it. Canonical
+  names, features and count keys do not change.
 - Rejoin pieces of a profile that a joined-initials reading keeps apart. One `Ec` mention beside
   `Edward C.` mentions vetoes every bare `Edward`, so linkage left 27 Edward C. Holmes mentions out of
   his 1,033-mention profile. Name-conflict repair now sets such vetoes aside when the other cluster

@@ -1942,6 +1942,9 @@ class _RustFeaturizerPredictDataset:
     name: str = "rust_featurizer_predict"
     # The stand-in has no signatures; name-conflict repair reads its facts from the featurizer.
     rust_featurizer: Any = None
+    # Every required seed group in the request, even when linkage ignores them, so the repair
+    # keeps them apart as it does on the Python route.
+    repair_cluster_seeds_require: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _cluster_seeds_require_from_rust_featurizer(rust_featurizer: Any) -> dict[str, int | str]:
@@ -3428,6 +3431,7 @@ class Clusterer:
             cluster_seeds_disallow=resolved_cluster_seeds_disallow,
             signatures={},
             rust_featurizer=rust_featurizer,
+            repair_cluster_seeds_require=resolved_cluster_seeds_require,
         )
         return Clusterer._predict_from_prepared_rust_featurizer(
             self,
@@ -4108,6 +4112,7 @@ class Clusterer:
                     cluster_seeds_require=effective_cluster_seeds_require,
                     cluster_seeds_disallow=cluster_seed_disallows,
                     signatures={},
+                    repair_cluster_seeds_require=dict(prediction_cluster_seeds_require or {}),
                 )
                 pred_clusters = self._predict_subblocked_multiple_letter_groups(
                     block_dict_multiple_letter,
@@ -5067,6 +5072,7 @@ class Clusterer:
         if not self.dont_merge_cluster_seeds:
             return None
         groups: dict[str, Any] = dict(dataset.cluster_seeds_require)
+        groups.update(getattr(dataset, "repair_cluster_seeds_require", None) or {})
         if prediction_state is not None:
             groups.update(prediction_state.cluster_seeds_require)
         return groups or None

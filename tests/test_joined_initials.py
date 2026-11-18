@@ -48,6 +48,13 @@ def test_joined_initials_reading(first, middle, expected):
         ("Johanna", "Ip", None),
         ("Edward", "ED", None),
         ("JOHANNA", "IP", None),
+        ("Лев", "IP", "Sip"),
+        ("Johanna IP", "", "Sip"),
+        # Vowel-less mixed case reads as initials as in D9; "Mc", suffixes and roman numerals do not.
+        ("Hendrik", "Hg", "Shg"),
+        ("Jeffrey", "Mc", None),
+        ("John", "III", None),
+        ("John", "JR", None),
         ("Johanna", "I. Petra", None),
         ("Ka", "", "Jka"),
     ],
@@ -152,3 +159,20 @@ def test_repair_rejoins_a_piece_that_a_joined_reading_keeps_apart(tmp_path: Path
     dataset = _dataset(names, {})
     found = _predict(tmp_path, dataset, {"block": [str(i) for i in range(len(names))]}, route, threshold=None)
     assert len(found) == 1
+
+
+@pytest.mark.parametrize("route", ["arrow", "python"])
+def test_reading_repair_keeps_required_seed_groups_apart_when_linkage_ignores_them(tmp_path: Path, route):
+    # Two Edward C. mentions in different required seed groups; linkage ignores the seeds, but
+    # the repair still may not join the groups, on either route.
+    names = [("Ec", "", "Holmes")] + [("Edward", "C.", "Holmes")] * 6 + [("Edward", "", "Holmes")] * 5
+    dataset = _dataset(names, {"1": "p1", "5": "p2"})
+    found = _predict(
+        tmp_path,
+        dataset,
+        {"block": [str(i) for i in range(len(names))]},
+        route,
+        threshold=None,
+        incremental_dont_use_cluster_seeds=True,
+    )
+    assert not any({"1", "5"} <= set(members) for members in found.values())

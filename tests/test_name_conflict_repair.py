@@ -1134,13 +1134,15 @@ def test_reading_step_hands_other_conflicts_to_the_odd_mention_tests() -> None:
         square[4, j] = square[j, 4] = LARGE_DISTANCE
     square[0, 7] = square[7, 0] = LARGE_DISTANCE
     labels = _labels(square)
-    assert _repair(square, NameConflictRepair(0.2, FULL)) == labels
-    repair = _reading_repair(readings={"a4": "Jec"})
+    assert _repair(square, NameConflictRepair(0.5, FULL)) == labels
+    # A limit of 0.5: the ten set-aside pairs count as far apart (1.0), and 15 pairs at 0.1
+    # bring the average after leaving out a0 to 0.46.
+    repair = NameConflictRepair(0.5, FULL, joined_readings={"a4": "Jec", "a5": "Jec"}, reading_spellers={"Jec": {"b0"}})
     assert _partition(_repair(square, repair, cut_height=0.5)) == {
         frozenset(SIGNATURES[:11]),
         frozenset(SIGNATURES[11:]),
     }
-    # At 0.3 the remaining conflict needs the odd-mention distance test, which fails.
+    # At 0.3 the odd-mention distance test fails: (10 * 1.0 + 15 * 0.3) / 25 is 0.58.
     square_far = square.copy()
     for i in A:
         for j in B:
@@ -1152,4 +1154,17 @@ def test_reading_step_hands_other_conflicts_to_the_odd_mention_tests() -> None:
 def test_reading_step_keeps_pairs_the_name_rules_do_not_explain() -> None:
     square = _square(cross=0.3)
     repair = _reading_repair(name_rules_alone_forbid=lambda pairs: [False for _ in pairs])
+    assert _repair(square, repair, cut_height=0.5) == _labels(square)
+
+
+def test_reading_step_counts_set_aside_pairs_as_far_apart() -> None:
+    # Every a mention reads "Jec"; b0 spells it and b1..b4 are bare names the readings conflict
+    # with. Only the six pairs to b0 carry a distance (0.35, under the cut). Counting the 24
+    # set-aside pairs as far apart keeps one speller from joining the two clusters.
+    square = _square(cross=0.35)
+    for i in A:
+        for j in range(7, 11):
+            square[i, j] = square[j, i] = LARGE_DISTANCE
+    readings = {f"a{i}": "Jec" for i in range(6)}
+    repair = NameConflictRepair(0.2, FULL, joined_readings=readings, reading_spellers={"Jec": {"b0"}})
     assert _repair(square, repair, cut_height=0.5) == _labels(square)

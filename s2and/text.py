@@ -613,21 +613,34 @@ def joined_initials_for_constraint(first_raw: str | None, middle_raw: str | None
     return None
 
 
+# A middle name of these letters is a suffix, a roman numeral or the surname prefix "Mc",
+# not initials, in any letter case.
+_MIDDLE_NON_INITIALS = frozenset({"jr", "sr", "ii", "iii", "iv", "vi", "vii", "viii", "mc"})
+
+
 def spelled_middle_initials_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
     """Return "S" plus the middle initials of a name with a joined-capitals middle, or None.
 
     "Johanna IP" gives "Sip". Canonical names keep "IP" as the one token "ip", so without
-    this value "Jip" could not spell "Johanna IP". The middle must pass the D9 initials test
-    on its own, and the first name needs a lowercase letter, since an all-capitals name
-    carries no case. Rust `spelled_middle_initials_for_constraint` mirrors it.
+    this value "Jip" could not spell "Johanna IP". The middle is the raw middle field, or the
+    last word of the raw first field when the middle field is empty. It must pass the D9
+    initials test (2-3 capitals, or vowel-less mixed case such as "Hg") and not be a suffix,
+    a roman numeral or "Mc". The
+    first name must pass the D9 letter-case test that last names use
+    (`last_name_allows_joined_initials`): an all-capitals name carries no case. That test
+    transliterates first, so "Лев IP" qualifies, and Python and Rust agree.
+    Rust `spelled_middle_initials_for_constraint` mirrors it.
     """
-    first = (first_raw or "").strip()
-    if not _RE_ASCII_LOWERCASE.search(first):
+    first, middle = first_raw or "", (middle_raw or "").strip()
+    if not middle:
+        words = first.split()
+        if len(words) < 2:
+            return None
+        first, middle = " ".join(words[:-1]), words[-1]
+    if not last_name_allows_joined_initials(first):
         return None
-    initials = _joined_initials(middle_raw)
-    if initials is None:
-        return None
-    return "S" + initials
+    initials = _joined_initials(middle)
+    return None if initials is None or initials in _MIDDLE_NON_INITIALS else "S" + initials
 
 
 def given_name_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
@@ -648,7 +661,7 @@ def spell_middle_initials(name: "CanonicalNameParts", value: str | None) -> "Can
 
     With an S value from `spelled_middle_initials_for_constraint`, "johanna ip" becomes
     "johanna i p", so it agrees with "Johanna I. P." and "Johanna Inge Petra". Other names
-    return unchanged. Rust `spelled_middle_tokens` mirrors it.
+    return unchanged. Rust `spell_middle_tokens` mirrors it.
     """
     if not value or value[0] != "S":
         return name

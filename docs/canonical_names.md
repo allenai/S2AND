@@ -282,8 +282,11 @@ least four letters. So `Ka` matches `Kristan Allan` and `Kristian A.`, `Mal` mat
 `Marco Aurelio Lisboa`, and `MArfan` matches `Mohammad Arfan`, while `Li` and `Lei`,
 `Ji` and `Jong In`, and `Ka` and `Kristian` still conflict. Two readings never clear a
 veto. Canonical names keep a middle of joined capitals as one token (`Johanna IP` gives
-middle `ip`), so `spelled_middle_initials_for_constraint` records its initials (`Sip`)
-when the middle passes the D9 initials test and the first name has a lowercase letter.
+middle `ip`), so `spelled_middle_initials_for_constraint` records its initials (`Sip`).
+The middle is the raw middle field, or the last word of the raw first field when the middle
+field is empty. It must pass the D9 initials test (2-3 capitals, or vowel-less mixed case
+such as `Hg`) and not be a suffix such as `JR` or `III` or the prefix `Mc`, and the first
+name must pass the D9 letter-case test.
 The name rule then reads the middle as initials: `Johanna IP` agrees with `Johanna Inge
 Petra`, and `Jip` spells `Johanna I P`. Like the CJK rule, the reading changes only the constraint, not canonical names
 or count keys.

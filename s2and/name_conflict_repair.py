@@ -55,9 +55,10 @@ Each round first runs a reading step. A short given name may be joined initials
 holds the bare "Edward". Incremental linking accepts a reading when any member of the
 profile spells it, so the step does the same: it sets aside each impossible pair between
 a reading mention and a mention without a reading, when the reading mention's opposite
-cluster holds a mention that spells the reading. Two clusters with no other impossible
-pair merge when their close-pair height is under the linkage cut, as linkage would have
-merged them. When other impossible pairs remain, at most ``MAX_ODD_MENTIONS`` mentions
+cluster holds a mention that spells the reading. A set-aside pair has no model distance,
+so it counts as the farthest possible pair. Two clusters with no other impossible pair
+merge when their close-pair height is under the linkage cut, as linkage would have merged
+them even with every set-aside pair far apart. When other impossible pairs remain, at most ``MAX_ODD_MENTIONS`` mentions
 must explain them, and the odd-mention tests above apply. Pair verdicts do not change.
 
 ``Clusterer.name_conflict_repair_max_distance`` sets the distance for every route
@@ -72,7 +73,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from itertools import product
 
@@ -385,78 +386,200 @@ def _codes_against(codes: np.ndarray, block_width: int, mention: int, others: np
     return codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
 
 
-def _block_codes(codes: np.ndarray, block_width: int, side_a: np.ndarray, side_b: np.ndarray) -> np.ndarray:
-    """Return the codes between two disjoint groups of mentions, one row per ``side_a`` mention."""
-    out = np.empty((len(side_a), len(side_b)), dtype=codes.dtype)
-    # Chunks of rows bound the index arrays for large clusters.
-    step = max(1, (1 << 22) // max(1, len(side_b)))
+# The code of the farthest possible pair, which a set-aside pair counts as.
+_FARTHEST_CODE = 254
+# Cells per tile when the reading step reads the codes between two clusters.
+_TILE_CELLS = 1 << 22
+
+
+def _tiles(
+    codes: np.ndarray, block_width: int, side_a: np.ndarray, side_b: np.ndarray
+) -> Iterator[tuple[int, np.ndarray]]:
+    """Yield (first row, codes) tiles of the codes between two disjoint groups of mentions."""
+    step = max(1, _TILE_CELLS // max(1, len(side_b)))
     for start in range(0, len(side_a), step):
         rows = side_a[start : start + step, None]
         low, high = np.minimum(rows, side_b[None, :]), np.maximum(rows, side_b[None, :])
-        out[start : start + step] = codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
-    return out
+        yield start, codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
 
 
-def _smallest_covers(residual: np.ndarray) -> list[tuple[tuple[int, int], ...]]:
-    """Return every smallest set of at most ``MAX_ODD_MENTIONS`` rows or columns holding all true cells.
+def _smallest_covers(cells: Sequence[tuple[int, int]]) -> list[tuple[tuple[int, int], ...]]:
+    """Return every smallest set of at most ``MAX_ODD_MENTIONS`` rows or columns holding all cells.
 
     Each entry is (0, row) or (1, column); the covers come sorted, and none fit returns [].
-    Every cover holds an end of the first true cell, so branching on that choice finds them.
+    Every cover holds an end of the first cell, so branching on that choice finds them.
     """
 
-    def search(mask: np.ndarray, depth: int) -> list[tuple[tuple[int, int], ...]]:
-        cells = np.argwhere(mask)
-        if len(cells) == 0:
+    def search(rest: Sequence[tuple[int, int]], depth: int) -> list[tuple[tuple[int, int], ...]]:
+        if not rest:
             return [()]
         if depth == 0:
             return []
-        row, column = int(cells[0][0]), int(cells[0][1])
+        row, column = rest[0]
         found: list[tuple[tuple[int, int], ...]] = []
         for axis, index in ((0, row), (1, column)):
-            rest = mask.copy()
-            if axis == 0:
-                rest[index, :] = False
-            else:
-                rest[:, index] = False
-            found.extend(((axis, index), *tail) for tail in search(rest, depth - 1))
+            left = [cell for cell in rest if cell[axis] != index]
+            found.extend(((axis, index), *tail) for tail in search(left, depth - 1))
         return found
 
     for size in range(MAX_ODD_MENTIONS + 1):
-        covers = search(residual, size)
+        covers = search(cells, size)
         if covers:
             return sorted({tuple(sorted(cover)) for cover in covers})
     return []
 
 
+@dataclass
+class _PairEvidence:
+    """Codes between two clusters, summed per row and per column over possible pairs."""
+
+    row_sum: np.ndarray
+    row_count: np.ndarray
+    row_close: np.ndarray
+    column_sum: np.ndarray
+    column_count: np.ndarray
+    column_close: np.ndarray
+    row_aside: np.ndarray
+    column_aside: np.ndarray
+    residual: list[tuple[int, int]]
+    aside: tuple[np.ndarray, np.ndarray]
+    plain: tuple[np.ndarray, np.ndarray]
+
+    @property
+    def set_aside(self) -> int:
+        """Return the number of set-aside cells."""
+        return int(self.row_aside.sum())
+
+
+def _pair_evidence(
+    codes: np.ndarray,
+    block_width: int,
+    sides: tuple[np.ndarray, np.ndarray],
+    aside: tuple[np.ndarray, np.ndarray],
+    plain: tuple[np.ndarray, np.ndarray],
+    close_code: int,
+) -> _PairEvidence | None:
+    """Read two clusters tile by tile; None when no small cover can explain the other conflicts.
+
+    An impossible cell is set aside when its row is a spelled reading and its column has no
+    reading, or the reverse. A cover of at most two rows or columns holds at most two full
+    lines, so more remaining cells than that ends the read early and bounds the memory.
+    """
+    side_a, side_b = sides
+    aside_rows, aside_columns = aside
+    plain_rows, plain_columns = plain
+    limit = MAX_ODD_MENTIONS * max(len(side_a), len(side_b))
+    evidence = _PairEvidence(
+        *(np.zeros(len(side_a), dtype=np.int64) for _ in range(3)),
+        *(np.zeros(len(side_b), dtype=np.int64) for _ in range(3)),
+        row_aside=np.zeros(len(side_a), dtype=np.int64),
+        column_aside=np.zeros(len(side_b), dtype=np.int64),
+        residual=[],
+        aside=aside,
+        plain=plain,
+    )
+    for start, tile in _tiles(codes, block_width, side_a, side_b):
+        stop = start + len(tile)
+        impossible = tile == 255
+        possible = ~impossible
+        values = np.where(possible, tile, 0).astype(np.int64)
+        close = possible & (tile <= close_code) if close_code >= 0 else np.zeros_like(possible)
+        evidence.row_sum[start:stop] = values.sum(axis=1)
+        evidence.row_count[start:stop] = possible.sum(axis=1)
+        evidence.row_close[start:stop] = close.sum(axis=1)
+        evidence.column_sum += values.sum(axis=0)
+        evidence.column_count += possible.sum(axis=0)
+        evidence.column_close += close.sum(axis=0)
+        set_aside = impossible & (
+            (aside_rows[start:stop, None] & plain_columns[None, :])
+            | (plain_rows[start:stop, None] & aside_columns[None, :])
+        )
+        evidence.row_aside[start:stop] = set_aside.sum(axis=1)
+        evidence.column_aside += set_aside.sum(axis=0)
+        rows, columns = np.nonzero(impossible & ~set_aside)
+        if len(evidence.residual) + len(rows) > limit:
+            return None
+        evidence.residual.extend(zip((rows + start).tolist(), columns.tolist(), strict=True))
+    return evidence
+
+
 def _reading_merge_bound(
-    block: np.ndarray,
-    side_a: np.ndarray,
-    side_b: np.ndarray,
-    odd: tuple[int, ...],
+    evidence: _PairEvidence,
+    odd: tuple[list[int], list[int]],
+    sides: tuple[np.ndarray, np.ndarray],
+    codes: np.ndarray,
     block_signatures: Sequence[str],
     repair: NameConflictRepair,
     cut_height: float,
     close_code: int,
 ) -> float | None:
-    """Return the merge height of a reading-step pair once ``odd`` is left out, or None."""
-    keep_a, keep_b = ~np.isin(side_a, odd), ~np.isin(side_b, odd)
-    kept = block[np.ix_(keep_a, keep_b)]
-    allowed = kept[kept != 255].astype(np.int64)
-    if allowed.size == 0:
+    """Return the merge height of a reading-step pair once the odd rows and columns are left out."""
+    side_a, side_b = sides
+    odd_rows, odd_columns = odd
+    code_sum = int(evidence.row_sum.sum() - evidence.row_sum[odd_rows].sum() - evidence.column_sum[odd_columns].sum())
+    count = int(
+        evidence.row_count.sum() - evidence.row_count[odd_rows].sum() - evidence.column_count[odd_columns].sum()
+    )
+    close_count = int(
+        evidence.row_close.sum() - evidence.row_close[odd_rows].sum() - evidence.column_close[odd_columns].sum()
+    )
+    aside = int(
+        evidence.row_aside.sum() - evidence.row_aside[odd_rows].sum() - evidence.column_aside[odd_columns].sum()
+    )
+    if odd_rows and odd_columns:
+        # Cells in an odd row and an odd column were taken away twice.
+        for row in odd_rows:
+            cross = _codes_against(codes, len(block_signatures), int(side_a[row]), side_b[odd_columns])
+            possible = cross != 255
+            code_sum += int(cross[possible].astype(np.int64).sum())
+            count += int(np.count_nonzero(possible))
+            close_count += int(np.count_nonzero(possible & (cross <= close_code))) if close_code >= 0 else 0
+            columns = np.asarray(odd_columns)
+            aside += int(
+                np.count_nonzero(
+                    ~possible
+                    & (
+                        (evidence.aside[0][row] & evidence.plain[1][columns])
+                        | (evidence.plain[0][row] & evidence.aside[1][columns])
+                    )
+                )
+            )
+    # A set-aside pair has no model distance. It counts as the farthest possible pair, so the
+    # merge holds even if every such pair is far apart, and a few spellers cannot carry two
+    # clusters whose pairs are mostly set aside.
+    code_sum += _FARTHEST_CODE * aside
+    count += aside
+    if count == 0:
         return None
-    code_sum, close_count = int(allowed.sum()), int(np.count_nonzero(allowed <= close_code))
-    if odd:
+    if odd_rows or odd_columns:
         # Other impossible pairs remain, so the odd-mention tests apply.
-        ids_a = [block_signatures[m] for m in side_a[keep_a].tolist()]
-        ids_b = [block_signatures[m] for m in side_b[keep_b].tolist()]
-        smaller = min(len(ids_a), len(ids_b))
-        if smaller < MIN_SIDE or repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
+        rows, columns = set(odd_rows), set(odd_columns)
+        kept_a = [block_signatures[m] for i, m in enumerate(side_a.tolist()) if i not in rows]
+        kept_b = [block_signatures[m] for j, m in enumerate(side_b.tolist()) if j not in columns]
+        smaller = min(len(kept_a), len(kept_b))
+        if smaller < MIN_SIDE or repair.lacks_full_name(kept_a) or repair.lacks_full_name(kept_b):
             return None
-        bound = _height_bound(code_sum, close_count, int(allowed.size), repair, smaller)
+        bound = _height_bound(code_sum, close_count, count, repair, smaller)
         return bound if bound <= repair.max_average_distance else None
     # Only set-aside pairs kept the clusters apart: merge where linkage would have.
-    bound = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / allowed.size + 1) / _SCALE
+    bound = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
     return bound if bound <= cut_height else None
+
+
+def _name_rules_explain_every_pair(
+    codes: np.ndarray, block_signatures: Sequence[str], sides: tuple[np.ndarray, np.ndarray], repair: NameConflictRepair
+) -> bool:
+    """Ask the name-rule test about every impossible pair between two clusters, one tile at a time."""
+    if repair.name_rules_alone_forbid is None:
+        return True
+    side_a, side_b = sides
+    for start, tile in _tiles(codes, len(block_signatures), side_a, side_b):
+        rows, columns = np.nonzero(tile == 255)
+        left, right = side_a[rows + start].tolist(), side_b[columns].tolist()
+        batch = [(block_signatures[x], block_signatures[y]) for x, y in zip(left, right, strict=True)]
+        if batch and not all(repair.name_rules_alone_forbid(batch)):
+            return False
+    return True
 
 
 def _reading_round(
@@ -480,72 +603,80 @@ def _reading_round(
         return labels
     width = len(block_signatures)
     is_reading = np.fromiter((s in readings for s in block_signatures), dtype=bool, count=width)
+    if not is_reading.any():
+        return labels
     label_array = np.asarray(labels)
     unique, inverse = np.unique(label_array, return_inverse=True)
+    order = np.argsort(inverse, kind="stable")
+    bounds = np.searchsorted(inverse[order], np.arange(len(unique) + 1))
+
+    def members(cluster: int) -> np.ndarray:
+        return order[bounds[cluster] : bounds[cluster + 1]]
+
     position = {signature: index for index, signature in enumerate(block_signatures)}
-    # Clusters that hold a mention spelling each reading of the block.
-    spelling_clusters: dict[str, set[int]] = {}
+    # Reading mentions by reading, and the clusters that hold a mention spelling each reading.
+    by_value: dict[str, list[int]] = {}
     for mention in np.flatnonzero(is_reading).tolist():
-        value = readings[block_signatures[mention]]
-        if value not in spelling_clusters:
-            spelling_clusters[value] = {int(inverse[position[s]]) for s in spellers.get(value, ()) if s in position}
-    everyone = np.arange(width)
-    # Candidates: a reading mention's cluster and each other cluster that it has an impossible
-    # pair with and that spells its reading. Readings that nothing spells cost nothing.
-    facing: set[tuple[int, int]] = set()
-    for mention in np.flatnonzero(is_reading).tolist():
-        own = int(inverse[mention])
-        spelling = spelling_clusters[readings[block_signatures[mention]]] - {own}
-        if not spelling:
+        by_value.setdefault(readings[block_signatures[mention]], []).append(mention)
+    spelling_clusters = {
+        value: {int(inverse[position[s]]) for s in spellers.get(value, ()) if s in position} for value in by_value
+    }
+    # Candidates: a reading mention's cluster and each other cluster that spells its reading and
+    # holds a mention it has an impossible pair with. Only the spelling clusters are read.
+    pairs: set[tuple[int, int]] = set()
+    for value, mentions in by_value.items():
+        if not spelling_clusters[value]:
             continue
-        others = everyone[everyone != mention]
-        partners = others[_codes_against(codes, width, mention, others) == 255]
-        facing.update((mention, c) for c in np.unique(inverse[partners]).tolist() if c in spelling)
-    if not facing:
+        targets = np.concatenate([members(c) for c in sorted(spelling_clusters[value])])
+        for mention in mentions:
+            own = int(inverse[mention])
+            others = targets[inverse[targets] != own]
+            if len(others):
+                partners = others[_codes_against(codes, width, mention, others) == 255]
+                pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[partners]).tolist())
+    if not pairs:
         return labels
-    members = {c: np.flatnonzero(inverse == c) for c in {int(inverse[m]) for m, _ in facing} | {c for _, c in facing}}
 
-    def is_spelled(mention: int, cluster: int) -> bool:
-        # Whether a mention without a reading in the cluster spells this mention's reading.
-        return cluster in spelling_clusters.get(readings[block_signatures[mention]], ())
+    def spelled_by(side: np.ndarray, other_cluster: int) -> np.ndarray:
+        # Reading mentions of this side whose reading the other cluster spells.
+        return np.fromiter(
+            (
+                bool(is_reading[m]) and other_cluster in spelling_clusters[readings[block_signatures[m]]]
+                for m in side.tolist()
+            ),
+            dtype=bool,
+            count=len(side),
+        )
 
-    pairs = sorted({(min(int(inverse[m]), c), max(int(inverse[m]), c)) for m, c in facing})
     close_code = _close_code(repair)
     accepted: list[tuple[float, int, int, tuple[int, ...]]] = []
-    for a, b in pairs:
-        side_a, side_b = members[a], members[b]
-        block = _block_codes(codes, width, side_a, side_b)
-        impossible = block == 255
-        set_aside = np.zeros_like(impossible)
-        for row, mention in enumerate(side_a.tolist()):
-            if is_reading[mention] and is_spelled(mention, b):
-                set_aside[row, ~is_reading[side_b]] = True
-        for column, mention in enumerate(side_b.tolist()):
-            if is_reading[mention] and is_spelled(mention, a):
-                set_aside[~is_reading[side_a], column] = True
-        set_aside &= impossible
-        if not set_aside.any():
+    for a, b in sorted(pairs):
+        sides = (members(a), members(b))
+        all_a = [block_signatures[m] for m in sides[0].tolist()]
+        all_b = [block_signatures[m] for m in sides[1].tolist()]
+        # The cheap guards first; the name-rule test reads every impossible pair, so it runs last.
+        if not _passes_merge_guards(all_a, all_b, tuple, block_signatures, repair, forbidden, seed_groups):
+            continue
+        evidence = _pair_evidence(
+            codes,
+            width,
+            sides,
+            (spelled_by(sides[0], b), spelled_by(sides[1], a)),
+            (~is_reading[sides[0]], ~is_reading[sides[1]]),
+            close_code,
+        )
+        if evidence is None or evidence.set_aside == 0:
             continue
         found = None
-        # Try each smallest cover of the remaining conflicts; none means no other conflict.
-        for cover in _smallest_covers(impossible & ~set_aside):
-            odd = tuple(sorted(int(side_a[i]) if axis == 0 else int(side_b[i]) for axis, i in cover))
-            bound = _reading_merge_bound(block, side_a, side_b, odd, block_signatures, repair, cut_height, close_code)
+        # Try each smallest cover of the remaining conflicts; an empty cover means none remain.
+        for cover in _smallest_covers(evidence.residual):
+            odd = ([i for axis, i in cover if axis == 0], [j for axis, j in cover if axis == 1])
+            bound = _reading_merge_bound(evidence, odd, sides, codes, block_signatures, repair, cut_height, close_code)
             if bound is not None:
-                found = (bound, odd)
+                found = (bound, tuple(sorted([int(sides[0][i]) for i in odd[0]] + [int(sides[1][j]) for j in odd[1]])))
                 break
-        if found is None:
-            continue
-        bound, odd = found
-        rows, columns = np.nonzero(impossible)
-        positions = [
-            (min(int(side_a[i]), int(side_b[j])), max(int(side_a[i]), int(side_b[j])))
-            for i, j in zip(rows.tolist(), columns.tolist(), strict=True)
-        ]
-        all_a = [block_signatures[m] for m in side_a.tolist()]
-        all_b = [block_signatures[m] for m in side_b.tolist()]
-        if _passes_merge_guards(all_a, all_b, lambda p=positions: p, block_signatures, repair, forbidden, seed_groups):
-            accepted.append((bound, a, b, odd))
+        if found is not None and _name_rules_explain_every_pair(codes, block_signatures, sides, repair):
+            accepted.append((found[0], a, b, found[1]))
     if not accepted:
         return labels
     merged = label_array.copy()
@@ -554,13 +685,13 @@ def _reading_round(
         if a in used or b in used:
             continue
         used.update((a, b))
-        merged[members[b]] = unique[a]
+        merged[members(b)] = unique[a]
         logger.info(
             "Name-conflict repair: block %s merges clusters of %d and %d mentions over joined-initials "
             "readings, height %.3f, odd mentions %s",
             block_key,
-            len(members[a]),
-            len(members[b]),
+            len(members(a)),
+            len(members(b)),
             bound,
             ", ".join(block_signatures[m] for m in odd),
         )

@@ -245,7 +245,7 @@ pub(crate) fn is_joined_reading(value: Option<&str>) -> bool {
 }
 
 /// Whether a joined-initials reading spells the other name exactly (mirrors Python
-/// `_joined_initials_match`). The other name needs a full first name. For J readings its
+/// `joined_initials_match`). The other name needs a full first name. For J readings its
 /// first and middle tokens must have exactly these initials in order, and every later
 /// token must be an initial or at least four letters, so "Ji" does not match "Jong In".
 /// For W readings it must be the initial and then exactly that word. An `other_value`

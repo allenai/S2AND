@@ -26,6 +26,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 
 - [Install and setup](install.md)
 - [Large blocks and subblocking](subblocking.md)
+- [Known clustering problems after 1.0.0b12](clustering_known_issues.md)
 - [Thread and memory controls](threading.md)
 - [Environment variables](environment.md)
 - [Canonical name rules](canonical_names.md)

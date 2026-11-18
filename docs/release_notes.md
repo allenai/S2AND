@@ -7,10 +7,31 @@
   (`zhong xi`) matched `重郷` (`zhong xiang`) and `孝` matched `孝徳`. Production merged such authors in
   the `重 鈴木`, `勝 井上`, and `孝 清水` blocks. When both raw given names use only these scripts, their
   complete transliterations must agree. Compare the combined first and middle fields after normalizing
-  equivalent Unicode characters and expanding `々`. Incomplete transliterations cannot veto a merge.
-  A pair with a romanized name uses the ordinary rules. See "Canonical name contract" in
+  equivalent Unicode characters and expanding `々`. The rule needs both names complete and in one script
+  (Han, kana, or hangul): a pair with a romanized name, a pair in two scripts, and a pair with an
+  incomplete transliteration (such as the long-vowel mark `ー`) use the ordinary rules. Incremental
+  linking applies the same rule when it checks a link to a restored profile. See "Canonical name contract" in
   `docs/canonical_names.md`.
-- Add seven opt-in name-conflict repair settings on `Clusterer`, all off by default:
+- Turn on the bounded close-pair name-conflict repair by default: close-pair height, 5 rounds, at least
+  10% certainly close pairs, a plain average of at most 0.40 and at least 10 mentions on each side for a
+  pair the bonus carries. On 40 fresh production blocks it made 16 joins (11 judged right, 5 onto
+  already mixed clusters) and no merge of two clean people. Set
+  `name_conflict_repair_uses_close_pair_bonus = False` and `name_conflict_repair_rounds = 1` for the
+  `1.0.0b11` rule. Repair now also treats tied leading ORCIDs alike, so input order no longer decides a
+  merge. Bundle export refuses non-default values of the seven repair settings, which a bundle does not
+  record, and the altered-profile pre-split cache now keys on them.
+- Incremental prediction keeps a forced link (an exact-zero caller distance or a shared ORCID) to an
+  altered profile through the final name check, and reports `phase_b_residual_count` after that check.
+  Residual grouping now gives a CJK given name the initial of its whole transliteration, so two mentions
+  that full-block clustering merges (such as the compatibility kanji U+FA45 and 海) are no longer split.
+- Reject caller distances that would silently turn hard: soft values within `1e-6` of 0 or `10000`, and,
+  in bulk prediction, values below `10000` between two different required seed groups.
+- Fix tooling edge cases: fixed-pair CSVs keep signature IDs as text (`00` no longer becomes `0`); seed ID `-1` no
+  longer matches unseeded signatures; `rebind_name_counts_index.py` rejects an output inside its source;
+  `generate_name_counts_from_parquet.py --resume` adopts an index published just before a stop; EPS
+  review requires `--route production` curves with the current distance-policy version (now 2, for the
+  CJK rule), which sweep plans now record; an EPS retry reuses an ORCID-free dataset copy only for the same source.
+- Add seven name-conflict repair settings on `Clusterer`:
   `name_conflict_repair_uses_close_pair_bonus` tests the close-pair linkage height instead of the
   plain average, `name_conflict_repair_requires_full_first_names` can drop the full-first-name test,
   `name_conflict_repair_rounds` repeats the repair,

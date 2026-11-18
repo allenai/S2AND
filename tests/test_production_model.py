@@ -1111,6 +1111,30 @@ def test_bundle_export_rejects_a_changed_orcid_name_waiver(
         )
 
 
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [("name_conflict_repair_rounds", 1), ("name_conflict_repair_uses_close_pair_bonus", False)],
+)
+def test_bundle_export_rejects_a_changed_repair_height_setting(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    setting: str,
+    value: object,
+) -> None:
+    # A loaded model gets the class default back, so export refuses a setting it cannot record.
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
+    source_clusterer.orcid_name_waiver = Clusterer.orcid_name_waiver
+    setattr(source_clusterer, setting, value)
+    try:
+        with pytest.raises(ValueError, match=f"cannot record {setting}"):
+            write_pairwise_production_bundle(
+                source_clusterer, tmp_path / "repair" / "production_model_v9.9", release_version="9.9"
+            )
+    finally:
+        delattr(source_clusterer, setting)
+
+
 def test_pending_pairwise_loader_requires_placeholder_eps(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
@@ -1480,3 +1504,20 @@ def test_rebinding_the_name_count_index_changes_only_the_bound_metadata(
             output_model=output,
             release_version="9.10",
         )
+
+
+def test_rebinding_rejects_an_output_inside_the_source(tmp_path: Path) -> None:
+    from scripts.production.model.rebind_name_counts_index import rebind_name_counts_index
+    from tests.helpers import tiny_name_counts_index_path
+
+    # The check runs before any loading, so an empty source directory is enough.
+    source = tmp_path / "production_model_v9.9"
+    source.mkdir()
+    with pytest.raises(ValueError, match="inside the source"):
+        rebind_name_counts_index(
+            source_model=source,
+            name_counts_index=Path(tiny_name_counts_index_path()),
+            output_model=source / "rebound",
+            release_version="9.10",
+        )
+    assert list(source.iterdir()) == []

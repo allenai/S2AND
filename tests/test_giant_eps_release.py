@@ -20,7 +20,14 @@ from scripts.eps_sweep import apply_reviewed_eps as apply_reviewed_eps_module
 from scripts.eps_sweep import build_linking_eps_gold, orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
 from scripts.eps_sweep.apply_reviewed_eps import apply_reviewed_eps
 from scripts.eps_sweep.build_linking_eps_gold import _build_dataset_constraints, parse_args
-from scripts.eps_sweep.common import CLUSTERING_SOURCE, arrow_dataset_dir, read_sweep_curve, write_json
+from scripts.eps_sweep.common import (
+    CLUSTERING_SOURCE,
+    DISTANCE_POLICY_VERSION,
+    RELEASE_ROUTE,
+    arrow_dataset_dir,
+    read_sweep_curve,
+    write_json,
+)
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
@@ -69,6 +76,8 @@ def _curve(
         "score_mode": mode,
         "limited_run": limited,
         "clustering_source": CLUSTERING_SOURCE,
+        "route": RELEASE_ROUTE,
+        "distance_policy_version": DISTANCE_POLICY_VERSION,
         "eps_values": [0.55, 0.65],
         "use_orcid_subblocking": False,
         "suppress_orcid_constraints": True,
@@ -302,6 +311,36 @@ def test_review_rejects_a_sweep_from_before_production_block_clustering(tmp_path
     write_json(dataset / "summary.json", summary)
 
     with pytest.raises(ValueError, match="production block clustering"):
+        _apply(tmp_path, source)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("route", "bulk", "attachment passes"),
+        ("route", None, "attachment passes"),
+        ("distance_policy_version", DISTANCE_POLICY_VERSION - 1, "another distance policy"),
+        ("distance_policy_version", None, "another distance policy"),
+    ],
+)
+def test_review_rejects_a_bulk_route_or_old_policy_curve(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
+    if value is None:
+        del plan[field]
+    else:
+        plan[field] = value
+    write_json(dataset / "plan.json", plan)
+    summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
+    summary["plan_sha256"] = sha256_file(dataset / "plan.json")
+    write_json(dataset / "summary.json", summary)
+
+    with pytest.raises(ValueError, match=message):
         _apply(tmp_path, source)
 
 

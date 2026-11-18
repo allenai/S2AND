@@ -1104,3 +1104,13 @@ def test_eps_sweep_orcid_free_copy_plans_like_hidden_orcid_sweep(tmp_path, monke
     production_on_copy, _, _ = _eps_sweep_and_production_subblocks(copy, monkeypatch, batching_threshold=3)
     copy.close()
     assert production_on_copy == swept[False]
+    # A retry reuses the copy of the same source and refuses a copy of another source.
+    assert _write_orcid_free_dataset(source_root, tmp_path / "copy") == copy_root
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    _hui_wang_graph_arrow_dataset(
+        other_root, first_names=("hui", "hao", "hong", "hung"), orcids=(shared_orcid, None, shared_orcid, None)
+    ).close()
+    with pytest.raises(ValueError, match="another source"):
+        _write_orcid_free_dataset(other_root, tmp_path / "copy")
+    assert not (tmp_path / "copy.partial").exists()

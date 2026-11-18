@@ -24,6 +24,12 @@ SINGLETON_INCLUSIVE_CURVE = "eps_b3_with_singletons.tsv"
 # How a sweep clustered its cached distances. Sweeps from before this value cut their own
 # linkage trees and skipped later production steps such as name-conflict repair.
 CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
+# Bump when a distance rule changes within the same package version. Distance caches and
+# sweep plans record it, and release EPS review rejects curves from another policy.
+# 1: version field added; 2: CJK given-name veto (same-script, complete names only).
+DISTANCE_POLICY_VERSION = 2
+# Release EPS needs curves that ran the production attachment passes.
+RELEASE_ROUTE = "production"
 
 
 def write_json(path: Path, payload: Any) -> None:

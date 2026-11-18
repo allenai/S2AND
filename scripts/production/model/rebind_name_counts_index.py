@@ -62,12 +62,16 @@ def rebind_name_counts_index(
 
     Raises:
         FileExistsError: If ``output_model`` exists.
-        ValueError: If the index is the one the source already names.
+        ValueError: If ``output_model`` lies inside ``source_model``, or the index is
+            the one the source already names.
         RuntimeError: If a file outside the bound metadata changes.
     """
     source, output = source_model.resolve(), output_model.resolve()
     if output.exists():
         raise FileExistsError(f"Output model already exists: {output}")
+    # The copy would recurse into its own staging directory.
+    if output.is_relative_to(source):
+        raise ValueError(f"Output model must not lie inside the source model: {output}")
     load_production_model(source)
     new_hash = NameCountsIndex.open(name_counts_index, verify=True).manifest_sha256
     manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))

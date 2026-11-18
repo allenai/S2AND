@@ -239,3 +239,32 @@ def test_failed_binary_stage_resumes_existing_checkpoints(tmp_path: Path, monkey
     restored = output / "name_counts_index/first.bin"
     assert (restored.read_bytes(), restored.stat().st_mtime_ns) == (first_bytes, first_mtime)
     assert json.loads((output / "run.json").read_text(encoding="utf-8"))["status"] == "complete"
+
+
+def test_resume_adopts_an_index_published_before_the_run_record_completed(tmp_path: Path) -> None:
+    manifest = _source(tmp_path / "source")
+    output = tmp_path / "actual"
+    completed = _build(manifest, output)
+    # Simulate a stop between the directory rename and the completion record.
+    record = output / "run.json"
+    interrupted = {
+        key: value
+        for key, value in completed.items()
+        if key not in {"exit_code", "finished_utc", "index_path", "index_manifest_sha256"}
+    }
+    record.write_text(json.dumps({**interrupted, "status": "active"}), encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in (output / "name_counts_index").iterdir()}
+
+    adopted = _build(manifest, output, resume=True)
+
+    assert adopted["status"] == "complete"
+    assert adopted["index_manifest_sha256"] == completed["index_manifest_sha256"]
+    assert json.loads(record.read_text(encoding="utf-8"))["status"] == "complete"
+    assert {path.name: path.read_bytes() for path in (output / "name_counts_index").iterdir()} == before
+
+    # An index that differs from the recorded files is not adopted.
+    stages = dict(interrupted["stages"])
+    stages["first"] = {**stages["first"], "sha256": "0" * 64}
+    record.write_text(json.dumps({**interrupted, "status": "active", "stages": stages}), encoding="utf-8")
+    with pytest.raises(FileExistsError, match="does not match"):
+        _build(manifest, output, resume=True)

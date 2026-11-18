@@ -24,7 +24,9 @@ from s2and.production_bundle import _staged_production_bundle
 from s2and.production_model import load_production_model
 from scripts.eps_sweep.common import (
     CLUSTERING_SOURCE,
+    DISTANCE_POLICY_VERSION,
     RELEASE_GIANT_DATASETS,
+    RELEASE_ROUTE,
     SINGLETON_INCLUSIVE_CURVE,
     read_singleton_inclusive_curve,
     read_sweep_curve,
@@ -89,6 +91,12 @@ def _validated_sweep_plans(
             raise ValueError(f"A bounded smoke curve cannot select release EPS: {dataset}")
         if plan.get("clustering_source") != CLUSTERING_SOURCE:
             raise ValueError(f"The EPS sweep did not cluster with production block clustering; rerun it: {dataset}")
+        if plan.get("route") != RELEASE_ROUTE:
+            raise ValueError(
+                f"The EPS sweep skipped the production attachment passes; rerun with --route production: {dataset}"
+            )
+        if plan.get("distance_policy_version") != DISTANCE_POLICY_VERSION:
+            raise ValueError(f"The EPS sweep used another distance policy; rerun it: {dataset}")
         if plan["use_orcid_subblocking"] or not plan["suppress_orcid_constraints"]:
             raise ValueError(f"EPS reference labels must remain hidden from prediction: {dataset}")
         if not any(math.isclose(eps, float(value), abs_tol=1e-10, rel_tol=0) for value in plan["eps_values"]):

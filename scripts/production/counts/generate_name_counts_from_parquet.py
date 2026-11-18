@@ -110,6 +110,44 @@ def _sorted_records(reader: pa.RecordBatchReader) -> Iterator[tuple[int, int, by
             yield h1, h2, key.encode("utf-8"), float(value)
 
 
+def _adopt_published_index(index_dir: Path, previous: dict[str, Any], report_path: Path) -> dict[str, Any]:
+    """Complete an interrupted run whose verified index matches the run record.
+
+    Args:
+        index_dir: Published index directory.
+        previous: Run record of the interrupted run.
+        report_path: Path of the run record to rewrite.
+
+    Returns:
+        The completed run record.
+
+    Raises:
+        FileExistsError: If the index files differ from the files the run recorded.
+    """
+    published = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))["files"]
+    stages = previous.get("stages", {})
+    recorded = {
+        kind: {"byte_count": stages[kind]["byte_count"], "sha256": stages[kind]["sha256"]}
+        for kind in KINDS
+        if kind in stages
+    }
+    if recorded != published:
+        raise FileExistsError(f"Published index does not match the interrupted run: {index_dir}")
+    index = NameCountsIndex.open(index_dir, verify=True)
+    previous.update(
+        status="complete",
+        exit_code=0,
+        finished_utc=datetime.now(UTC).isoformat(),
+        index_path=str(index_dir),
+        index_manifest_sha256=index.manifest_sha256,
+    )
+    temporary_report = report_path.with_suffix(".partial")
+    temporary_report.write_text(json.dumps(previous, indent=2) + "\n", encoding="utf-8")
+    temporary_report.replace(report_path)
+    emit_jsonl({"event": "name_counts_adopted", "index": str(index_dir)})
+    return previous
+
+
 def build_name_counts_from_parquet(
     input_manifest: Path,
     output_dir: Path,
@@ -142,8 +180,11 @@ def build_name_counts_from_parquet(
     files = _source_files(manifest, expected_source_rows)
     index_dir = output / "name_counts_index"
     if index_dir.exists():
-        if not resume or previous.get("status") != "complete":
+        if not resume:
             raise FileExistsError(f"Published index already exists: {index_dir}")
+        if previous.get("status") != "complete":
+            # The run stopped after publishing the index but before recording completion.
+            return _adopt_published_index(index_dir, previous, report_path)
         index = NameCountsIndex.open(index_dir)
         if index.manifest_sha256 != previous["index_manifest_sha256"]:
             raise ValueError("Published index manifest differs from the completed run")

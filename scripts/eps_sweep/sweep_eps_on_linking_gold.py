@@ -44,15 +44,13 @@ from scripts.eps_sweep.common import (
     CLUSTERING_SOURCE,
     DEFAULT_GOLD_ROOT,
     DEFAULT_OUTPUT_ROOT,
+    DISTANCE_POLICY_VERSION,
     SINGLETON_INCLUSIVE_CURVE,
     arrow_dataset_dir,
     sha1_text,
     write_json,
 )
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
-
-# Bump when a distance rule changes within the same package version.
-DISTANCE_POLICY_VERSION = 1
 
 WEIGHT_COLUMNS = [
     "weight_pair",
@@ -899,14 +897,29 @@ def _write_orcid_free_dataset(source_dir: Path, target_dir: Path) -> Path:
     """Write a dataset copy whose signatures carry no ORCID; link every other table.
 
     Production code reads ORCIDs in several native ingest paths. Removing them from the data hides them
-    from every path at once, as ORCID-B3 scoring requires.
+    from every path at once, as ORCID-B3 scoring requires. The copy records the source manifest digest,
+    and a retry reuses it only for the same source. It is built beside the target and renamed into
+    place, so a stopped build never looks complete.
     """
     from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
     from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
 
-    if (target_dir / "manifest.json").is_file():
-        return target_dir
-    target_dir.mkdir(parents=True, exist_ok=True)
+    source_digest = _hash_file(source_dir / "manifest.json")
+    marker_name = "source_manifest.sha256"
+    if target_dir.exists():
+        marker = target_dir / marker_name
+        if marker.is_file() and marker.read_text(encoding="utf-8").strip() == source_digest:
+            return target_dir
+        raise ValueError(
+            f"ORCID-free dataset copy was made from another source or is incomplete: {target_dir}; "
+            "remove it or use a new output directory"
+        )
+    final_dir = target_dir
+    target_dir = final_dir.with_name(final_dir.name + ".partial")
+    if target_dir.exists():
+        # Only this function writes the staging directory; a leftover is an interrupted build.
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True)
     manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
     paths: dict[str, Path] = {key: (source_dir / value).resolve() for key, value in manifest["paths"].items()}
     for key, path in list(paths.items()):
@@ -942,9 +955,15 @@ def _write_orcid_free_dataset(source_dir: Path, target_dir: Path) -> Path:
     write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, target_dir), target_dir)
     with pa.memory_map(str(signatures_path), "r") as written:
         table = ipc.open_file(written).read_all()
-    if table.num_rows != rows or ("author_orcid" in table.column_names and table["author_orcid"].null_count != rows):
+        keeps_rows_without_orcids = table.num_rows == rows and (
+            "author_orcid" not in table.column_names or table["author_orcid"].null_count == rows
+        )
+    del table
+    if not keeps_rows_without_orcids:
         raise ValueError(f"ORCID-free dataset copy kept ORCID values or lost rows: {target_dir}")
-    return target_dir
+    (target_dir / marker_name).write_text(source_digest + "\n", encoding="utf-8", newline="\n")
+    target_dir.rename(final_dir)
+    return final_dir
 
 
 def _production_assignments_for_eps(
@@ -1259,6 +1278,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["planning_source"] = "Arrow signatures with production native graph subblocking"
         plan["clustering_source"] = CLUSTERING_SOURCE
         plan["route"] = args.route
+        plan["distance_policy_version"] = DISTANCE_POLICY_VERSION
         write_json(output_dir / "plan.json", plan)
         pd.DataFrame(plan["subblocks"]).to_csv(output_dir / "target_subblocks.tsv", sep="\t", index=False)
 

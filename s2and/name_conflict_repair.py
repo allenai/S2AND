@@ -445,7 +445,9 @@ def _repair_round(
         return labels
 
     # Closest pair first. A cluster takes part in one merge per block, so no
-    # merge rests on a cluster that an earlier merge changed.
+    # merge rests on a cluster that an earlier merge changed. The close-pair height
+    # can fall below zero, where linkage would clamp it; the order keeps the
+    # unclamped value, so the pair with more close evidence goes first.
     merged = label_array.copy()
     used: set[int] = set()
     selected: list[_RepairCandidate] = []

@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
+from s2and.incremental_linking.policy import NAME_COUNTS_MANIFEST_SHA256_FIELD  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
 from scripts.production.data.hash_release_emails import hash_release_emails  # noqa: E402
@@ -212,7 +213,8 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
 
     Raises:
         FileExistsError: If ``output_root`` exists.
-        ValueError: If the Arrow data does not rebuild the prepared populations.
+        ValueError: If the model is bound to another name-count index, or the Arrow data
+            does not rebuild the prepared populations.
     """
 
     snapshot = snapshot.resolve()
@@ -224,7 +226,16 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
     inference, dataset, source = (output_root / name for name in ("inference", "dataset", "source"))
 
     # Runtime opens skip the full digest and record checks, so check the index before publishing it.
-    NameCountsIndex.open(snapshot / "name_counts_index", verify=True)
+    index = NameCountsIndex.open(snapshot / "name_counts_index", verify=True)
+    if model is not None:
+        # A model bound to another index fails at its first prediction; refuse it before writing.
+        contract = _read_json(model.resolve() / "clusterer.json")["feature_contract"]
+        bound = contract.get(NAME_COUNTS_MANIFEST_SHA256_FIELD)
+        if bound != index.manifest_sha256:
+            raise ValueError(
+                f"Model {model} is bound to name-count index {bound}, not the packaged {index.manifest_sha256}; "
+                "rebind it with scripts/production/model/rebind_name_counts_index.py"
+            )
     _place_tree(snapshot / "name_counts_index", inference / "name_counts_index")
     _place(snapshot / "LICENSE.txt", inference / "LICENSE.txt")
     if model is not None:

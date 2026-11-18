@@ -272,3 +272,13 @@ def test_bundles_require_a_fresh_output(snapshot: Path, tmp_path: Path) -> None:
     (tmp_path / "bundles").mkdir()
     with pytest.raises(FileExistsError):
         write_release_bundles(snapshot, tmp_path / "bundles")
+
+
+def test_bundles_reject_a_model_bound_to_another_index(snapshot: Path, tmp_path: Path) -> None:
+    model = tmp_path / "production_model_v9.9"
+    _write(model / "clusterer.json", {"feature_contract": {"name_counts_manifest_sha256": "0" * 64}})
+    output = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="bound to name-count index"):
+        write_release_bundles(snapshot, output, model=model)
+    assert not output.exists()

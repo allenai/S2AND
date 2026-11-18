@@ -982,28 +982,33 @@ impl RustFeaturizer {
                 return (given1 != given2).then_some(high_value);
             }
         }
-        if !first1.is_empty() && !first2.is_empty() {
-            if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
-                if c1 != c2 {
-                    return Some(high_value);
+        let middle1 = s1.middle.as_deref().unwrap_or("");
+        let middle2 = s2.middle.as_deref().unwrap_or("");
+        let ordinary = || {
+            if !first1.is_empty() && !first2.is_empty() {
+                if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
+                    if c1 != c2 {
+                        return true;
+                    }
                 }
             }
-        }
-
-        if !first_names_name_compatible(first1, first2, &self.name_tuples) {
-            return Some(high_value);
-        }
-
-        let (middle1_tokens, middle2_tokens) = constraint_middle_tokens(
-            first1,
-            s1.middle.as_deref().unwrap_or(""),
-            first2,
-            s2.middle.as_deref().unwrap_or(""),
-        );
-        if middle_names_conflict(&middle1_tokens, &middle2_tokens) {
-            return Some(high_value);
-        }
-        None
+            if !first_names_name_compatible(first1, first2, &self.name_tuples) {
+                return true;
+            }
+            let (middle1_tokens, middle2_tokens) =
+                constraint_middle_tokens(first1, middle1, first2, middle2);
+            middle_names_conflict(&middle1_tokens, &middle2_tokens)
+        };
+        // A short given name may be joined initials ("Ka" for K. A.); see
+        // `constraints::joined_initials_reconcile`.
+        crate::constraints::joined_initials_reconcile(
+            ordinary(),
+            s1.cjk_given_name.as_deref(),
+            s2.cjk_given_name.as_deref(),
+            first1.split_whitespace().chain(middle1.split_whitespace()),
+            first2.split_whitespace().chain(middle2.split_whitespace()),
+        )
+        .then_some(high_value)
     }
 
     /// Split the constraint inputs of `entries` once, for pairs among them.

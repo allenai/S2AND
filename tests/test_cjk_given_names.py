@@ -130,6 +130,10 @@ def test_full_block_prediction_keeps_different_cjk_given_names_apart(
         (("しけ", "\u3099る"), ("しげる", ""), 1),
         # U+323B0 is unassigned in some Unicode versions; both routes treat it as incomplete.
         (("孝𲎰", ""), ("孝徳", ""), 1),
+        # Halfwidth katakana and spacing voicing marks compose like the fullwidth forms.
+        (("ｶﾞｸ", ""), ("ガク", ""), 1),
+        (("しか゛", ""), ("しが", ""), 1),
+        (("ｶﾞｸ", ""), ("ヒロシ", ""), 2),
     ],
 )
 def test_whole_given_name_orthography(tmp_path: Path, route, left, right, cluster_count):

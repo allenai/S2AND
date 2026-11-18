@@ -212,7 +212,68 @@ fn middle_summaries_conflict(
 /// Whether two `cjk_given_name_for_constraint` values are compared whole: both complete,
 /// with the same script tag as their first byte.
 pub(crate) fn cjk_given_names_comparable(given_1: &str, given_2: &str) -> bool {
-    !given_1.is_empty() && !given_2.is_empty() && given_1.as_bytes()[0] == given_2.as_bytes()[0]
+    !given_1.is_empty()
+        && !given_2.is_empty()
+        && given_1.as_bytes()[0] == given_2.as_bytes()[0]
+        && matches!(given_1.as_bytes()[0], b'H' | b'K' | b'G')
+}
+
+/// Whether a value is a joined-initials reading (tag J or W).
+pub(crate) fn is_joined_reading(value: Option<&str>) -> bool {
+    matches!(value.and_then(|v| v.as_bytes().first()), Some(b'J' | b'W'))
+}
+
+/// Whether a joined-initials reading spells the other name exactly (mirrors Python
+/// `_joined_initials_match`). The other name needs a full first name. For J readings its
+/// first and middle tokens must have exactly these initials in order, and every later
+/// token must be an initial or at least four letters, so "Ji" does not match "Jong In".
+/// For W readings it must be the initial and then exactly that word.
+pub(crate) fn joined_initials_match<'t>(
+    reading: &str,
+    tokens: impl Iterator<Item = &'t str>,
+) -> bool {
+    let tokens: Vec<&str> = tokens.collect();
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    if first.chars().count() < 2 {
+        return false;
+    }
+    if let Some(rest) = reading.strip_prefix('W') {
+        let Some((initial, word)) = rest.split_once(' ') else {
+            return false;
+        };
+        return tokens.len() == 2 && first.starts_with(initial) && tokens[1] == word;
+    }
+    let letters: Vec<char> = reading[1..].chars().collect();
+    tokens.len() == letters.len()
+        && tokens
+            .iter()
+            .zip(&letters)
+            .all(|(token, letter)| token.starts_with(*letter))
+        && tokens[1..].iter().all(|token| {
+            let length = token.chars().count();
+            length == 1 || length >= 4
+        })
+}
+
+/// Apply the joined-initials reading to an ordinary conflict verdict. Only one side may
+/// use its reading; two readings keep the ordinary verdict.
+pub(crate) fn joined_initials_reconcile<'t>(
+    ordinary_conflict: bool,
+    given_1: Option<&str>,
+    given_2: Option<&str>,
+    tokens_1: impl Iterator<Item = &'t str>,
+    tokens_2: impl Iterator<Item = &'t str>,
+) -> bool {
+    if !ordinary_conflict {
+        return false;
+    }
+    match (is_joined_reading(given_1), is_joined_reading(given_2)) {
+        (true, false) => !joined_initials_match(given_1.unwrap_or(""), tokens_2),
+        (false, true) => !joined_initials_match(given_2.unwrap_or(""), tokens_1),
+        _ => true,
+    }
 }
 
 pub(crate) fn constraint_names_conflict(
@@ -229,6 +290,29 @@ pub(crate) fn constraint_names_conflict(
             return given_1 != given_2;
         }
     }
+    joined_initials_reconcile(
+        ordinary_names_conflict(key_1, key_2, first_aliases),
+        key_1.cjk_given_name,
+        key_2.cjk_given_name,
+        key_1
+            .first_tokens
+            .iter()
+            .chain(&key_1.middle_tokens)
+            .copied(),
+        key_2
+            .first_tokens
+            .iter()
+            .chain(&key_2.middle_tokens)
+            .copied(),
+    )
+}
+
+/// The first-initial, first-name and middle-name part of `constraint_names_conflict`.
+fn ordinary_names_conflict(
+    key_1: &ConstraintNameKey<'_>,
+    key_2: &ConstraintNameKey<'_>,
+    first_aliases: impl FnOnce() -> bool,
+) -> bool {
     if let (Some(c1), Some(c2)) = (key_1.first_initial, key_2.first_initial) {
         if c1 != c2 {
             return true;
@@ -556,6 +640,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn joined_initials_reconcile_only_exact_spellings() {
+        let conflict = |a: (&str, &str, Option<&str>), b: (&str, &str, Option<&str>)| {
+            let key_a = ConstraintNameKey::new(a.0, a.1, "hahn", a.2);
+            let key_b = ConstraintNameKey::new(b.0, b.1, "hahn", b.2);
+            constraint_names_conflict(&key_a, &key_b, || false)
+        };
+        // "Ka" against "Kristan Allan" and "Kristian A.".
+        assert!(!conflict(
+            ("ka", "", Some("Jka")),
+            ("kristan", "allan", None)
+        ));
+        assert!(!conflict(("kristian", "a", None), ("ka", "", Some("Jka"))));
+        // "MArfan" against "Mohammad Arfan" but not "Mohammad Arif".
+        assert!(!conflict(
+            ("marfan", "", Some("Wm arfan")),
+            ("mohammad", "arfan", None)
+        ));
+        assert!(conflict(
+            ("marfan", "", Some("Wm arfan")),
+            ("mohammad", "arif", None)
+        ));
+        // Too few names, short romanized syllables, and two readings keep the veto.
+        assert!(conflict(("ka", "", Some("Jka")), ("kristian", "", None)));
+        assert!(conflict(("ji", "", Some("Jji")), ("jong", "in", None)));
+        assert!(conflict(("ka", "", Some("Jka")), ("ki", "", Some("Jki"))));
+    }
+
+    #[test]
     fn surname_family_matches_shared_fixture() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/surname_family_examples.json"
@@ -580,14 +692,22 @@ mod tests {
     fn different_cjk_given_names_conflict_and_equal_ones_do_not() {
         let name_tuples: HashMap<String, HashSet<String>> = HashMap::default();
         let conflict = |a: (&str, &str, bool), b: (&str, &str, bool)| {
-            let given_a: String = [a.0, a.1]
-                .into_iter()
-                .flat_map(str::split_whitespace)
-                .collect();
-            let given_b: String = [b.0, b.1]
-                .into_iter()
-                .flat_map(str::split_whitespace)
-                .collect();
+            // Values carry a script tag; these names stand for Han given names. A name
+            // without letters stands for an incomplete transliteration, an empty value.
+            let given_a: String = if a.0.is_empty() && a.1.is_empty() {
+                String::new()
+            } else {
+                std::iter::once("H")
+                    .chain([a.0, a.1].into_iter().flat_map(str::split_whitespace))
+                    .collect()
+            };
+            let given_b: String = if b.0.is_empty() && b.1.is_empty() {
+                String::new()
+            } else {
+                std::iter::once("H")
+                    .chain([b.0, b.1].into_iter().flat_map(str::split_whitespace))
+                    .collect()
+            };
             let key_a = ConstraintNameKey::new(a.0, a.1, "ling mu", a.2.then_some(&given_a));
             let key_b = ConstraintNameKey::new(b.0, b.1, "ling mu", b.2.then_some(&given_b));
             constraint_names_conflict(&key_a, &key_b, || {

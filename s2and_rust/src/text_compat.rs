@@ -494,6 +494,17 @@ const HANGUL_NAME_RANGES: [(u32, u32); 5] = [
 ];
 const KANA_NAME_RANGES: [(u32, u32); 3] = [(0x3040, 0x30FF), (0x31F0, 0x31FF), (0xFF66, 0xFF9F)];
 
+/// Write halfwidth katakana and spacing voicing marks as their composable forms (mirrors
+/// Python `_widen_kana`). NFC alone keeps them apart from the fullwidth and voiced kana.
+fn widen_kana(ch: char) -> Vec<char> {
+    match ch {
+        '\u{ff61}'..='\u{ff9f}' => std::iter::once(ch).nfkc().collect(),
+        '\u{309b}' => vec!['\u{3099}'],
+        '\u{309c}' => vec!['\u{309a}'],
+        _ => vec![ch],
+    }
+}
+
 fn cjk_script_tag(given: &str) -> char {
     let in_ranges = |ranges: &[(u32, u32)]| {
         given.chars().any(|ch| {
@@ -562,6 +573,7 @@ pub(crate) fn cjk_given_name_for_constraint(
     for mut ch in raw
         .chars()
         .filter(|&ch| !is_python_whitespace_compat(ch))
+        .flat_map(widen_kana)
         .nfc()
     {
         if ch == '々' {
@@ -593,6 +605,55 @@ pub(crate) fn cjk_given_name_for_constraint(
         previous = Some(ch);
     }
     Some(given)
+}
+
+/// Joined-initials reading of a raw given name for constraints (mirrors Python
+/// `joined_initials_for_constraint`): "Ka" with no middle name reads "Jka" (K. A.), and
+/// "MArfan" reads "Wm arfan" (M. Arfan). It only matters when another name spells exactly
+/// these initials; see `constraints::joined_initials_match`.
+pub(crate) fn joined_initials_for_constraint(first_raw: &str, middle_raw: &str) -> Option<String> {
+    let first = first_raw.trim_matches(is_python_whitespace_compat);
+    if !middle_raw
+        .trim_matches(is_python_whitespace_compat)
+        .is_empty()
+    {
+        return None;
+    }
+    let bytes = first.as_bytes();
+    let all = |range: &[u8], test: fn(&u8) -> bool| range.iter().all(test);
+    if (2..=3).contains(&bytes.len())
+        && bytes[0].is_ascii_uppercase()
+        && all(&bytes[1..], u8::is_ascii_lowercase)
+    {
+        let lowered = first.to_ascii_lowercase();
+        if MIXED_CASE_NON_INITIALS.contains(&lowered.as_str())
+            || crate::name_normalization::NAME_PREFIXES.contains(&lowered.as_str())
+        {
+            return None;
+        }
+        return Some(format!("J{lowered}"));
+    }
+    if bytes.len() >= 4
+        && bytes[0].is_ascii_uppercase()
+        && bytes[1].is_ascii_uppercase()
+        && all(&bytes[2..], u8::is_ascii_lowercase)
+    {
+        let lowered = first.to_ascii_lowercase();
+        return Some(format!("W{} {}", &lowered[..1], &lowered[1..]));
+    }
+    None
+}
+
+/// The CJK given-name value, else the joined-initials reading (mirrors Python
+/// `given_name_for_constraint`). CJK given names are not ASCII and joined initials are,
+/// so the two never apply to one name.
+pub(crate) fn given_name_for_constraint(
+    first_raw: &str,
+    middle_raw: &str,
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> Option<String> {
+    cjk_given_name_for_constraint(first_raw, middle_raw, unidecode_char_map)
+        .or_else(|| joined_initials_for_constraint(first_raw, middle_raw))
 }
 
 // D9 (mirrors Python `_JOINED_INITIALS_GIVEN_NAMES`): ED is a frequent given
@@ -857,6 +918,9 @@ mod tests {
         assert_eq!(value("ひろし").as_deref(), Some("Khirosi"));
         assert_eq!(value("ヒロシ").as_deref(), Some("Khirosi"));
         assert_eq!(value("민수").as_deref(), Some("Gminsu"));
+        // Halfwidth katakana and spacing voicing marks compose like their fullwidth forms.
+        assert_eq!(value("ｶﾞｸ").as_deref(), Some("Kgaku"));
+        assert_eq!(value("しか゛").as_deref(), value("しが").as_deref());
         // A long-vowel mark has no letters, so the name keeps the ordinary rules.
         assert_eq!(value("ピーター").as_deref(), Some(""));
         assert_eq!(value("Wei"), None);

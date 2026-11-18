@@ -88,9 +88,8 @@ pub(crate) use retrieval::*;
 pub(crate) use rust_featurizer::{RawFeaturizerRows, RustFeaturizer};
 use subblocking::*;
 use text_compat::{
-    canonical_name_count_keys_compat, canonicalize_name_parts_compat,
-    cjk_given_name_for_constraint, ensure_unidecode_for_text, normalize_text_compat_from_map,
-    normalize_title_compat_from_map,
+    canonical_name_count_keys_compat, canonicalize_name_parts_compat, ensure_unidecode_for_text,
+    given_name_for_constraint, normalize_text_compat_from_map, normalize_title_compat_from_map,
 };
 
 fn py_len(s: &str) -> usize {
@@ -245,7 +244,8 @@ struct SignatureData {
     /// Counts of the middle name's initials, sorted by initial; pair features
     /// merge two of these instead of counting both names per pair.
     middle_initial_counts: Vec<(char, u32)>,
-    /// Whole given name for the CJK constraint. An empty string is incomplete evidence.
+    /// Given-name value for constraints (`given_name_for_constraint`): a whole CJK given
+    /// name (tags H, K, G; empty when incomplete) or a joined-initials reading (J, W).
     cjk_given_name: Option<String>,
 }
 

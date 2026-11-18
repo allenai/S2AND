@@ -2,6 +2,11 @@
 
 ## Unreleased runtime changes
 
+- Read a short given name as joined initials in the hard name rule when another name spells exactly
+  those initials: `Ka` Hahn matches `Kristan Allan` Hahn, `Mal` Leite matches `Marco Aurelio Lisboa`
+  Leite, and `MArfan` Ikram matches `Mohammad Arfan` Ikram. Production split such profiles because the
+  parser reads `Ka` as a given name. Canonical names, features and count keys do not change. See
+  "Canonical name contract" in `docs/canonical_names.md`.
 - Veto merges between two different given names written in Han, kana, or hangul. Transliteration made
   each Han character a pinyin syllable and the name rules matched the syllables by prefix, so `重喜`
   (`zhong xi`) matched `重郷` (`zhong xiang`) and `孝` matched `孝徳`. Production merged such authors in
@@ -29,8 +34,8 @@
 - Fix tooling edge cases: fixed-pair CSVs keep signature IDs as text (`00` no longer becomes `0`); seed ID `-1` no
   longer matches unseeded signatures; `rebind_name_counts_index.py` rejects an output inside its source;
   `generate_name_counts_from_parquet.py --resume` adopts an index published just before a stop; EPS
-  review requires `--route production` curves with the current distance-policy version (now 2, for the
-  CJK rule), which sweep plans now record; an EPS retry reuses an ORCID-free dataset copy only for the same source.
+  review requires `--route production` curves with the current distance-policy version (now 3, for the
+  CJK and joined-initials rules), which sweep plans now record; an EPS retry reuses an ORCID-free dataset copy only for the same source.
 - Add seven name-conflict repair settings on `Clusterer`:
   `name_conflict_repair_uses_close_pair_bonus` tests the close-pair linkage height instead of the
   plain average, `name_conflict_repair_requires_full_first_names` can drop the full-first-name test,

@@ -41,11 +41,11 @@ from s2and.text import (
     canonical_names_conflict,
     canonicalize_name_parts,
     canonicalize_name_text,
-    cjk_given_name_for_constraint,
     compute_block,
     detect_language,
     get_text_ngrams,
     get_text_ngrams_words,
+    given_name_for_constraint,
     normalize_orcid_compact,
     normalize_text,
     normalize_title,
@@ -1529,8 +1529,8 @@ class ANDData:
             CanonicalNameParts(first_2, middle_2_text, _materialize_constraint_last_normalized(signature_2)),
             self.name_tuples,
             cjk_given_names=(
-                cjk_given_name_for_constraint(signature_1.author_info_first, signature_1.author_info_middle),
-                cjk_given_name_for_constraint(signature_2.author_info_first, signature_2.author_info_middle),
+                given_name_for_constraint(signature_1.author_info_first, signature_1.author_info_middle),
+                given_name_for_constraint(signature_2.author_info_first, signature_2.author_info_middle),
             ),
         ):
             return high_value

@@ -40,7 +40,7 @@ from s2and.text import (
     CanonicalNameParts,
     canonical_names_conflict,
     canonicalize_name_parts,
-    cjk_given_name_for_constraint,
+    given_name_for_constraint,
     normalize_orcid,
 )
 from s2and.thread_config import resolve_n_jobs
@@ -426,7 +426,7 @@ def _new_link_name_conflict(
                 canonicalize_name_parts(
                     signature.author_info_first, signature.author_info_middle, signature.author_info_last
                 ),
-                cjk_given_name_for_constraint(signature.author_info_first, signature.author_info_middle),
+                given_name_for_constraint(signature.author_info_first, signature.author_info_middle),
             )
             names[signature_id] = entry
         return entry

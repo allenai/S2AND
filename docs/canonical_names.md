@@ -271,6 +271,19 @@ pinyin and hangul romanization differ; and a pair where transliteration loses a
 name character, such as the long-vowel mark in `ピーター` or `𠮷` in `𠮷秀`. This normalization
 applies only to the constraint. Feature and count keys use canonical_v2.
 
+A short given name can be joined initials: `Ka` for K. A., `Mal` for M. A. L.
+`joined_initials_for_constraint` reads a raw title-case given name of two or three
+letters with no middle name as initials (`Ka` gives `Jka`), and a capital run into a
+name as an initial and a name (`MArfan` gives `Wm arfan`). Words in
+`_MIXED_CASE_NON_INITIALS` and `NAME_PREFIXES` take no reading. When the ordinary rules
+veto a pair, the reading clears the veto only if the other name has a full first name
+and spells exactly these initials in order, with every later token an initial or at
+least four letters. So `Ka` matches `Kristan Allan` and `Kristian A.`, `Mal` matches
+`Marco Aurelio Lisboa`, and `MArfan` matches `Mohammad Arfan`, while `Li` and `Lei`,
+`Ji` and `Jong In`, and `Ka` and `Kristian` still conflict. Two readings never clear a
+veto. Like the CJK rule, the reading changes only the constraint, not canonical names
+or count keys.
+
 Full middle names also use `same_prefix_tokens` before a full-token conflict
 causes a veto. For example, `meg` matches `megan`, and `ch` matches `charles`.
 The rule compares aligned tokens up to the shorter list, as for first names.

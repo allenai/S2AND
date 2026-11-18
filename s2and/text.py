@@ -549,6 +549,91 @@ def _is_cjk_name_character(character: str) -> bool:
     return any(start <= code <= end for start, end in _CJK_NAME_RANGES)
 
 
+def _widen_kana(text: str) -> str:
+    """Write halfwidth katakana and spacing voicing marks as their composable forms.
+
+    NFC alone keeps halfwidth katakana apart from its fullwidth form, and a spacing voicing
+    mark apart from the voiced kana. The halfwidth compatibility mappings have not changed
+    since Unicode 1.1, so Python and Rust agree. Rust `widen_kana` mirrors it.
+    """
+    out: list[str] = []
+    for character in text:
+        if "｡" <= character <= "ﾟ":
+            out.append(unicodedata.normalize("NFKC", character))
+        elif character == "゛":
+            out.append("゙")
+        elif character == "゜":
+            out.append("゚")
+        else:
+            out.append(character)
+    return "".join(out)
+
+
+# Tags of `given_name_for_constraint` values. H, K and G mark whole CJK given names.
+# J marks a short title-case given name that may be joined initials ("Ka", "Mal"), and
+# W a capital initial run into a given name ("MArfan"). Rust `text_compat` mirrors them.
+_CJK_SCRIPT_TAGS = frozenset("HKG")
+_RE_SHORT_GIVEN_NAME = re.compile(r"[A-Z][a-z]{1,2}")
+_RE_INITIAL_THEN_NAME = re.compile(r"[A-Z]([A-Z][a-z]{2,})")
+
+
+def _joined_reading(value: str | None) -> bool:
+    return bool(value) and value[0] in "JW"  # type: ignore[index]
+
+
+def joined_initials_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
+    """Return the joined-initials reading of a raw given name, or None.
+
+    "Ka" (no middle name) reads "Jka", meaning K. A.; "MArfan" reads "Wm arfan", meaning
+    M. Arfan. Real short names ("Ka", "Mal", "Al") take the reading too; it only matters
+    when another name spells exactly these initials (see `_joined_initials_match`).
+    Rust `joined_initials_for_constraint` mirrors it.
+    """
+    first = (first_raw or "").strip()
+    if (middle_raw or "").strip():
+        return None
+    if _RE_SHORT_GIVEN_NAME.fullmatch(first):
+        lowered = first.lower()
+        if lowered in _MIXED_CASE_NON_INITIALS or lowered in NAME_PREFIXES:
+            return None
+        return "J" + lowered
+    match = _RE_INITIAL_THEN_NAME.fullmatch(first)
+    if match:
+        return "W" + first[0].lower() + " " + match.group(1).lower()
+    return None
+
+
+def given_name_for_constraint(first_raw: str | None, middle_raw: str | None) -> str | None:
+    """Return the CJK given-name value, else the joined-initials reading, else None.
+
+    The two never apply to one name: CJK given names are not ASCII, joined initials are.
+    """
+    cjk = cjk_given_name_for_constraint(first_raw, middle_raw)
+    return cjk if cjk is not None else joined_initials_for_constraint(first_raw, middle_raw)
+
+
+def _joined_initials_match(reading: str, other: "CanonicalNameParts") -> bool:
+    """Return whether a joined-initials reading spells the other name exactly.
+
+    The other name needs a full first name. For "J" readings its first and middle tokens
+    must have exactly these initials in order, and every later token must be an initial
+    or at least four letters, so "Ji" does not match "Jong In" and "Li" does not match
+    "Lei". For "W" readings it must be the initial and then exactly that word.
+    """
+    tokens = other.first.split() + other.middle.split()
+    if not tokens or len(tokens[0]) < 2:
+        return False
+    if reading[0] == "W":
+        initial, word = reading[1:].split(" ", 1)
+        return len(tokens) == 2 and tokens[0][0] == initial and tokens[1] == word
+    letters = reading[1:]
+    return (
+        len(tokens) == len(letters)
+        and all(token[0] == letter for token, letter in zip(tokens, letters, strict=True))
+        and all(len(token) == 1 or len(token) >= 4 for token in tokens[1:])
+    )
+
+
 def _cjk_script_tag(given: str) -> str:
     """Return "G" for a given name with hangul, else "K" with kana, else "H" (Han only)."""
     codes = [ord(character) for character in given]
@@ -599,7 +684,7 @@ def cjk_given_name_for_constraint(first_raw: str | None, middle_raw: str | None)
         return None
 
     raw = _canonical_name_pretranslate((first_raw or "") + (middle_raw or ""))
-    given = unicodedata.normalize("NFC", "".join(raw.split()))
+    given = unicodedata.normalize("NFC", _widen_kana("".join(raw.split())))
     previous = ""
     parts: list[str] = []
     for character in given:
@@ -1300,7 +1385,8 @@ def canonical_names_conflict(
         name_a: Canonical name parts of one record.
         name_b: Canonical name parts of the other record.
         name_tuples: Canonical first-name alias pairs.
-        cjk_given_names: Results of ``cjk_given_name_for_constraint`` in pair order.
+        cjk_given_names: Results of ``given_name_for_constraint`` in pair order: whole
+            CJK given names or joined-initials readings.
 
     Returns:
         True when the two names cannot belong to the same person.
@@ -1310,8 +1396,23 @@ def canonical_names_conflict(
         return True
     given_a, given_b = cjk_given_names
     # Incomplete or cross-script CJK given names keep the ordinary rules below.
-    if given_a and given_b and given_a[0] == given_b[0]:
+    if given_a and given_b and given_a[0] == given_b[0] and given_a[0] in _CJK_SCRIPT_TAGS:
         return given_a != given_b
+    if not _ordinary_names_conflict(name_a, name_b, name_tuples):
+        return False
+    # A short given name may be joined initials ("Ka" for K. A.). It reconciles a
+    # conflict only against a name whose initials it spells exactly.
+    if _joined_reading(given_a) and not _joined_reading(given_b):
+        return not _joined_initials_match(given_a or "", name_b)
+    if _joined_reading(given_b) and not _joined_reading(given_a):
+        return not _joined_initials_match(given_b or "", name_a)
+    return True
+
+
+def _ordinary_names_conflict(
+    name_a: CanonicalNameParts, name_b: CanonicalNameParts, name_tuples: Set[tuple[str, str]]
+) -> bool:
+    """Return the first-initial, first-name and middle-name part of the hard rule."""
     if name_a.first and name_b.first and name_a.first[0] != name_b.first[0]:
         return True
     if not first_names_name_compatible(name_a.first, name_b.first, name_tuples):

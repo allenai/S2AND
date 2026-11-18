@@ -77,7 +77,7 @@ def _seed_name_compatible(
     name_tuples: Set[tuple[str, str]],
 ) -> bool:
     # Complete CJK names with one script tag compare whole, as in canonical_names_conflict.
-    if seed_cjk and query_cjk and seed_cjk[0] == query_cjk[0]:
+    if seed_cjk and query_cjk and seed_cjk[0] == query_cjk[0] and seed_cjk[0] in "HKG":
         return seed_cjk == query_cjk
     return first_names_name_compatible(seed_first, query_first, name_tuples)
 

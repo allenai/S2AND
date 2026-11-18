@@ -388,7 +388,7 @@ pub(crate) fn preprocess_stage_signatures(
                 &canonical_last,
             );
             let middle_initial_counts = middle_initial_counts(&canonical_middle);
-            let cjk_given_name = cjk_given_name_for_constraint(
+            let cjk_given_name = given_name_for_constraint(
                 &entry.raw_first,
                 &entry.raw_middle,
                 Some(unidecode_char_map),

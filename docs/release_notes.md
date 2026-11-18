@@ -19,6 +19,18 @@
   called 16 of 19 such merges right; the 3 wrong ones moved 2 to 4 mentions each. Held-out
   signature-weighted F1 rose from 0.969738 to 0.969970 with precision unchanged. See "Name-conflict
   repair" in `docs/production_inference.md`.
+- Split a cluster where its papers leave an empty stretch of more than 50 years. The pair model sees the
+  years between two papers capped at 50, so topic overlap put a 1928 Lancet paper by `K. Turner` in the
+  profile of Katherine M. E. Turner, who began publishing in 2000. After name-conflict repair, each
+  cluster is cut at such a stretch unless some pair across it is a certain close pair (under the
+  close-pair distance), or the parts share an ORCID or a required seed group. A long career has papers
+  all along and is never cut. On 128 production blocks it split 708 clusters and moved 956 mentions;
+  clusters spanning 70 or more years fell from 1,215 to 785, and all 9 such clusters that blind judges
+  had called one person stayed whole. Both blind judges called 32 of 40 sampled splits right and 4
+  wrong (reprints and re-dated records of one or two mentions). The held-out
+  benchmark has no cluster with such a stretch and is unchanged. Set `Clusterer.year_gap_split = False`
+  for the old behavior; bundle export refuses that value, which a bundle does not record. See "Name-conflict repair" in
+  `docs/production_inference.md`.
 - Veto merges between two different given names written in Han, kana, or hangul. Transliteration made
   each Han character a pinyin syllable and the name rules matched the syllables by prefix, so `重喜`
   (`zhong xi`) matched `重郷` (`zhong xiang`) and `孝` matched `孝徳`. Production merged such authors in

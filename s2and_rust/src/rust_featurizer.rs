@@ -2920,6 +2920,19 @@ impl RustFeaturizer {
         (full_first_names, orcids)
     }
 
+    /// Paper year per signature, for years above zero, as the featurizer reads years.
+    /// The year-gap split after name-conflict repair needs them.
+    fn signature_years(&self) -> Vec<(String, i64)> {
+        self.signature_id_order()
+            .iter()
+            .filter_map(|signature_id| {
+                let signature = self.signatures.get(signature_id)?;
+                let year = self.papers.get(&signature.paper_id)?.year?;
+                (year > 0).then(|| (signature_id.clone(), year))
+            })
+            .collect()
+    }
+
     /// Facts for the repair's reading step: `(signature_id, reading)` for signatures whose
     /// given name has a joined-initials reading (tag J or W), and `(signature_id, reading)`
     /// for signatures without one whose name spells a reading that some signature has

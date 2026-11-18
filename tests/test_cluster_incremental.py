@@ -262,6 +262,7 @@ def test_model_presplit_cache_fingerprint_hashes_complete_fitted_state(kind) -> 
         ("name_conflict_repair_rounds", 2),
         ("name_conflict_repair_uses_close_pair_bonus", False),
         ("name_conflict_repair_bonus_min_side_mentions", 5),
+        ("year_gap_split", False),
     ],
 )
 def test_model_presplit_cache_fingerprint_follows_the_repair_settings(setting, value) -> None:

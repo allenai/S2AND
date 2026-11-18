@@ -115,7 +115,7 @@ class _RepairCandidate:
     close_count: int = 0
 
 
-def _close_code(repair: NameConflictRepair) -> int:
+def repair_close_code(repair: NameConflictRepair) -> int:
     """Return the largest code whose whole range lies under the close distance, or -1.
 
     Code ``c`` holds distances in ``[c, c + 1) / _SCALE``.
@@ -173,7 +173,7 @@ def _common_odd_average_bound(
     extra_a = original_a[np.isin(original_a, odd)]
     extra_b = original_b[np.isin(original_b, odd)]
     code_sum, close_count = candidate.code_sum, candidate.close_count
-    close_code = _close_code(repair)
+    close_code = repair_close_code(repair)
 
     def row_sum(mention: int, others: np.ndarray) -> tuple[int, int]:
         low, high = np.minimum(mention, others), np.maximum(mention, others)
@@ -230,6 +230,8 @@ class NameConflictRepair:
             per signature id, for signatures that have one.
         reading_spellers: Per reading, the signature ids without a reading whose name spells
             it (``spelled_reading_forms``). The reading step needs both mappings.
+        years: Paper year per signature id, for years above zero. The year-gap split
+            (``s2and.year_gap_split``) reads it after the repair.
     """
 
     max_average_distance: float
@@ -248,6 +250,7 @@ class NameConflictRepair:
     bonus_min_side_mentions: int | None = None
     joined_readings: Mapping[str, str] = field(default_factory=dict)
     reading_spellers: Mapping[str, Set[str]] = field(default_factory=dict)
+    years: Mapping[str, int] = field(default_factory=dict)
 
     def lacks_full_name(self, side: Sequence[str]) -> bool:
         """Whether a side fails the full-first-name test."""
@@ -648,7 +651,7 @@ def _reading_round(
             count=len(side),
         )
 
-    close_code = _close_code(repair)
+    close_code = repair_close_code(repair)
     accepted: list[tuple[float, int, int, tuple[int, ...]]] = []
     for a, b in sorted(pairs):
         sides = (members(a), members(b))
@@ -781,7 +784,7 @@ def _repair_round(
         MIN_SIDE,
         repair.max_average_distance * _SCALE,
         MAX_ODD_MENTIONS,
-        _close_code(repair),
+        repair_close_code(repair),
         repair.close_pair_bonus * _SCALE,
     )
     if not candidates:

@@ -1,0 +1,197 @@
+"""Tests for the year-gap split after name-conflict repair."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+from scipy.spatial.distance import squareform
+
+import s2and.model as model_module
+from s2and.consts import YEAR_DIFF_CAP
+from s2and.data import ANDData
+from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+from s2and.featurizer import FeaturizationInfo
+from s2and.model import Clusterer
+from s2and.model_pairwise import FastCluster
+from s2and.name_conflict_repair import quantize_distances
+from s2and.year_gap_split import split_year_gaps
+from tests.helpers import build_arrow_training_dataset
+from tests.incremental_test_helpers import _dataset
+from tests.model_helpers import ConstantDistanceClassifier
+
+# Mentions o0 and o1 are old papers; n0..n9 are one modern career. x is an undated stranger
+# whose name conflicts with o0, which keeps the codes non-empty, as in any block the repair reads.
+SIGNATURES = ["o0", "o1"] + [f"n{i}" for i in range(10)] + ["x"]
+OLD, NEW, X = [0, 1], list(range(2, 12)), 12
+# The stranger is its own cluster from the start.
+LABELS = [0] * 12 + [1]
+# Close-pair distance 0.05: codes up to 11 are certainly close.
+CLOSE_CODE = 11
+
+
+def _square(old_new: float = 0.3) -> np.ndarray:
+    square = np.full((13, 13), 0.2)
+    for i in OLD:
+        for j in NEW:
+            square[i, j] = square[j, i] = old_new
+    square[X, :] = square[:, X] = 0.9
+    square[0, X] = square[X, 0] = 1e4
+    np.fill_diagonal(square, 0.0)
+    return square
+
+
+def _codes(square: np.ndarray) -> np.ndarray:
+    codes = quantize_distances(squareform(square))
+    assert codes is not None
+    return codes
+
+
+def _years(old: int = 1928, new: tuple[int, int] = (2000, 2023)) -> dict[str, int]:
+    years = {"o0": old, "o1": old + 2}
+    for k, signature_id in enumerate(SIGNATURES[2:]):
+        years[signature_id] = new[0] + (new[1] - new[0]) * k // 9
+    return years
+
+
+def _split(square: np.ndarray, years: dict[str, int], **kwargs: Any) -> set[frozenset[str]]:
+    return _partition(split_year_gaps(SIGNATURES, LABELS, _codes(square), years, CLOSE_CODE, **kwargs))
+
+
+def _partition(labels: Any) -> set[frozenset[str]]:
+    """Return the clusters other than the stranger's."""
+    groups: dict[int, set[str]] = {}
+    for signature_id, label in zip(SIGNATURES, np.asarray(labels).tolist(), strict=True):
+        groups.setdefault(label, set()).add(signature_id)
+    assert {"x"} in groups.values()
+    return {frozenset(group) for group in groups.values() if group != {"x"}}
+
+
+WHOLE = {frozenset(SIGNATURES[:12])}
+SPLIT = {frozenset(SIGNATURES[:2]), frozenset(SIGNATURES[2:12])}
+
+
+def test_split_separates_papers_across_an_empty_stretch_beyond_the_cap() -> None:
+    assert _split(_square(), _years()) == SPLIT
+
+
+def test_split_keeps_the_largest_part_on_the_original_label() -> None:
+    labels = split_year_gaps(SIGNATURES, [7] * 12 + [1], _codes(_square()), _years(), CLOSE_CODE)
+    assert np.asarray(labels).tolist() == [8, 8] + [7] * 10 + [1]
+
+
+@pytest.mark.parametrize(("old", "splits"), [(2000 - YEAR_DIFF_CAP, False), (2000 - YEAR_DIFF_CAP - 1, True)])
+def test_split_needs_a_gap_longer_than_the_cap(old: int, splits: bool) -> None:
+    # o1 is two years after o0, so the gap that counts is from o1 to the first new paper.
+    assert (_split(_square(), _years(old - 2)) == SPLIT) is splits
+
+
+def test_split_leaves_a_continuous_long_career_whole() -> None:
+    # 1900 to 2023 with no empty stretch over the cap: a long career, not a gap.
+    years = {signature_id: 1900 + 12 * k for k, signature_id in enumerate(SIGNATURES)}
+    assert _split(_square(), years) == WHOLE
+
+
+def test_split_keeps_parts_that_a_close_pair_bridges() -> None:
+    # A reprint: the model is certain of one pair across the gap.
+    square = _square()
+    square[0, 5] = square[5, 0] = 0.01
+    assert _split(square, _years()) == WHOLE
+
+
+def test_split_does_not_count_a_pair_at_the_close_distance_as_close() -> None:
+    square = _square()
+    square[0, 5] = square[5, 0] = 0.05
+    assert _split(square, _years()) == SPLIT
+
+
+def test_split_keeps_parts_that_share_an_orcid() -> None:
+    assert _split(_square(), _years(), orcids={"o0": "x", "n4": "x"}) == WHOLE
+
+
+def test_split_keeps_parts_that_share_a_required_seed_group() -> None:
+    assert _split(_square(), _years(), seed_groups={"o1": "P", "n9": "P"}) == WHOLE
+
+
+def test_undated_mentions_follow_the_closer_part() -> None:
+    square = _square()
+    years = _years()
+    del years["n0"]
+    square[2, OLD] = square[OLD, 2] = 0.1
+    assert _split(square, years) == {frozenset({"o0", "o1", "n0"}), frozenset(SIGNATURES[3:12])}
+
+
+def test_undated_mentions_follow_their_seed_group_first() -> None:
+    square = _square()
+    years = _years()
+    del years["n0"]
+    square[2, OLD] = square[OLD, 2] = 0.1
+    assert _split(square, years, seed_groups={"n0": "P", "n5": "P"}) == SPLIT
+
+
+def test_split_leaves_labels_alone_when_nothing_splits() -> None:
+    assert split_year_gaps(SIGNATURES, LABELS, _codes(_square()), {}, CLOSE_CODE) is LABELS
+
+
+def _model(close_pair_bonus: float) -> Clusterer:
+    cluster_model = FastCluster(eps=0.5)
+    if close_pair_bonus:
+        cluster_model.close_pair_bonus = close_pair_bonus
+        cluster_model.close_pair_distance = 0.05
+    return Clusterer(
+        featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
+        classifier=ConstantDistanceClassifier(0.4),
+        cluster_model=cluster_model,
+        n_jobs=1,
+        use_default_constraints_as_supervision=False,
+    )
+
+
+def _dated_dataset() -> ANDData:
+    """Thirteen "Ada Smith" mentions with SIGNATURES' years; signature i is SIGNATURES[i]."""
+    dataset = _dataset([("Ada", "", "Smith")] * 13, {})
+    for index, signature_id in enumerate(SIGNATURES):
+        paper_id = str(100 + index)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=_years().get(signature_id))
+    return dataset
+
+
+def test_both_routes_read_the_same_years(tmp_path: Path) -> None:
+    dataset = _dated_dataset()
+    ids = [str(i) for i in range(13)]
+    model = _model(8.0)
+    python_repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
+    assert arrow_dataset is not None
+    featurizer = build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
+    )
+    rust_repair = model_module._name_conflict_repair_from_rust_featurizer(model, {"b": ids}, featurizer)
+
+    assert python_repair is not None and rust_repair is not None
+    assert (
+        dict(python_repair.years) == dict(rust_repair.years) == {str(i): _years()[s] for i, s in enumerate(SIGNATURES)}
+    )
+
+
+@pytest.mark.parametrize(("close_pair_bonus", "enabled", "parts"), [(8.0, True, 2), (8.0, False, 1), (0.0, True, 1)])
+def test_block_clustering_splits_year_gaps_after_the_repair(close_pair_bonus: float, enabled: bool, parts: int) -> None:
+    dataset = _dated_dataset()
+    ids = [str(i) for i in range(13)]
+    model = _model(close_pair_bonus)
+    model.year_gap_split = enabled
+    repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+
+    labels = model._cluster_one_block(ids, squareform(_square(0.25)), None, dataset, {}, name_conflict_repair=repair)
+
+    assert len(_partition(labels)) == parts
+
+
+def test_eps_grid_splits_as_block_clustering_does() -> None:
+    dataset = _dated_dataset()
+    ids = [str(i) for i in range(13)]
+    signatures, ids_by_eps = _model(8.0).predict_eps_grid({"b": ids}, dataset, {"b": squareform(_square(0.25))}, [0.5])
+    assert signatures == ids
+    assert _partition(ids_by_eps[0.5]) == SPLIT

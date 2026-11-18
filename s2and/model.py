@@ -82,6 +82,7 @@ from s2and.name_conflict_repair import (
     NameConflictRepair,
     has_full_first_name,
     quantize_distances,
+    repair_close_code,
     repair_name_conflicts_in_block,
 )
 from s2and.prediction_state import PredictionState
@@ -132,6 +133,7 @@ from s2and.text import (
     spelled_reading_forms,
 )
 from s2and.thread_config import resolve_n_jobs
+from s2and.year_gap_split import split_year_gaps
 
 if TYPE_CHECKING:
     from hyperopt import Trials
@@ -360,6 +362,7 @@ def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
         getattr(clusterer, "name_conflict_repair_max_distance", None),
         # The repair's height rule and rounds change the pre-split partition too.
         _cacheable_value(_repair_height_settings(clusterer)),
+        _wants_year_gap_split(clusterer),
         _orcid_name_waiver_setting(clusterer),
     )
 
@@ -828,6 +831,33 @@ def _reading_facts(readings: Sequence[tuple[str, str]], spellers: Sequence[tuple
     return {"joined_readings": dict(readings), "reading_spellers": by_reading}
 
 
+def _split_year_gaps(
+    block_signatures: Sequence[str],
+    labels: np.ndarray | Sequence[int],
+    codes: np.ndarray,
+    repair: NameConflictRepair,
+    seed_groups: Mapping[str, Any] | None,
+    block_key: str,
+) -> np.ndarray | Sequence[int]:
+    """Split repaired labels at year gaps when the repair carries years and a close-pair distance.
+
+    A split never separates a required seed group, so it reads every seed in sight.
+    """
+    close_code = repair_close_code(repair)
+    if not repair.years or close_code < 0:
+        return labels
+    return split_year_gaps(
+        block_signatures,
+        labels,
+        codes,
+        repair.years,
+        close_code,
+        orcids=repair.orcids,
+        seed_groups=seed_groups,
+        block_key=block_key,
+    )
+
+
 def _average_linkage_cut(cluster_model: Any, params: Mapping[str, Any] | None) -> float | None:
     """Return the EPS cut of an average-linkage FastCluster, else None.
 
@@ -839,6 +869,15 @@ def _average_linkage_cut(cluster_model: Any, params: Mapping[str, Any] | None) -
     if settings.get("linkage") != "average" or settings.get("eps") is None:
         return None
     return float(settings["eps"])
+
+
+def _wants_year_gap_split(clusterer: Any) -> bool:
+    """Return whether the clusterer splits clusters at year gaps; the split needs a close-pair distance."""
+    cluster_model = getattr(clusterer, "cluster_model", None)
+    return (
+        bool(getattr(clusterer, "year_gap_split", True))
+        and float(getattr(cluster_model, "close_pair_bonus", 0.0) or 0.0) > 0
+    )
 
 
 def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
@@ -886,6 +925,7 @@ def _name_conflict_repair_from_rust_featurizer(
         _rust_name_rules_alone_forbid(rust_featurizer),
         **_repair_height_settings(clusterer),
         **_reading_facts(*featurizer.joined_reading_facts()),
+        years=dict(featurizer.signature_years()) if _wants_year_gap_split(clusterer) else {},
     )
 
 
@@ -902,6 +942,8 @@ def _name_conflict_repair_from_dataset(
     full_first_names: set[str] = set()
     orcids: dict[str, str] = {}
     values: dict[str, str | None] = {}
+    years: dict[str, int] = {}
+    wants_years = _wants_year_gap_split(clusterer)
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
     for members in block_dict.values():
         for signature_id in members:
@@ -919,6 +961,9 @@ def _name_conflict_repair_from_dataset(
             orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
             if orcid is not None:
                 orcids[signature_id] = orcid
+            paper = dataset.papers.get(str(signature.paper_id)) if wants_years else None
+            if paper is not None and paper.year is not None and paper.year > 0:
+                years[signature_id] = int(paper.year)
     # The same facts as the Rust featurizer's joined_reading_facts, for the block's signatures.
     readings = [(s, value) for s, value in values.items() if value is not None and is_joined_reading(value)]
     reading_values = {value for _, value in readings}
@@ -941,6 +986,7 @@ def _name_conflict_repair_from_dataset(
         _dataset_name_rules_alone_forbid(dataset),
         **_repair_height_settings(clusterer),
         **_reading_facts(readings, spellers),
+        years=years,
     )
 
 
@@ -2105,6 +2151,12 @@ class Clusterer:
     # so a profile split into several parts needs several rounds. A class attribute, like
     # the repair distance.
     name_conflict_repair_rounds: int = DEFAULT_REPAIR_ROUNDS
+
+    # Whether a block's clusters are split, after name-conflict repair, at empty stretches of
+    # more than YEAR_DIFF_CAP years that no close pair, ORCID or seed group bridges. It needs
+    # the repair's codes and the cluster model's close-pair distance. A class attribute, like
+    # the repair distance. See s2and.year_gap_split.
+    year_gap_split: bool = True
 
     # A repair side with no full first name passes the full-name test when it keeps at least
     # this many mentions; None exempts no side. A class attribute, like the repair distance.
@@ -5010,17 +5062,25 @@ class Clusterer:
                 for signature_id in excluded:
                     both_ways.setdefault(signature_id, set()).add(anchor)
             forbidden = both_ways
+        labels = repair_name_conflicts_in_block(
+            block_signatures,
+            labels,
+            repair_codes,
+            name_conflict_repair,
+            forbidden=forbidden,
+            seed_groups=self._repair_seed_groups(dataset, prediction_state),
+            block_key=block_key,
+            cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
+        )
         return cast(
             "np.ndarray | list[int]",
-            repair_name_conflicts_in_block(
+            _split_year_gaps(
                 block_signatures,
                 labels,
                 repair_codes,
                 name_conflict_repair,
-                forbidden=forbidden,
-                seed_groups=self._repair_seed_groups(dataset, prediction_state),
-                block_key=block_key,
-                cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
+                self._seeds_in_sight(dataset, prediction_state),
+                block_key,
             ),
         )
 
@@ -5071,6 +5131,11 @@ class Clusterer:
         """
         if not self.dont_merge_cluster_seeds:
             return None
+        return self._seeds_in_sight(dataset, prediction_state)
+
+    @staticmethod
+    def _seeds_in_sight(dataset: ANDData, prediction_state: PredictionState | None) -> Mapping[str, Any] | None:
+        """Return every required seed group in sight, whether or not block labels enforce it."""
         groups: dict[str, Any] = dict(dataset.cluster_seeds_require)
         groups.update(getattr(dataset, "repair_cluster_seeds_require", None) or {})
         if prediction_state is not None:
@@ -5170,6 +5235,7 @@ class Clusterer:
         )
         name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
         seed_groups = self._repair_seed_groups(dataset, prediction_state)
+        split_seed_groups = self._seeds_in_sight(dataset, prediction_state)
         signatures: list[str] = []
         ids_by_eps: dict[float, list[np.ndarray]] = {float(eps): [] for eps in eps_grid}
         next_id = 0
@@ -5219,6 +5285,9 @@ class Clusterer:
                         seed_groups=seed_groups,
                         block_key=block_key,
                         cut_height=float(eps) if self.cluster_model.linkage == "average" else None,
+                    )
+                    labels = _split_year_gaps(
+                        block_signatures, labels, repair_codes, name_conflict_repair, split_seed_groups, block_key
                     )
                 _, block_ids = np.unique(np.asarray(labels), return_inverse=True)
                 ids.append(next_id + block_ids.astype(np.int64))

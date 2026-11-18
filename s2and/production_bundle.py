@@ -130,6 +130,7 @@ _UNRECORDED_REPAIR_SETTINGS: dict[str, object] = {
     "name_conflict_repair_bonus_min_close_share": DEFAULT_BONUS_MIN_CLOSE_SHARE,
     "name_conflict_repair_bonus_max_plain_average": DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
     "name_conflict_repair_bonus_min_side_mentions": DEFAULT_BONUS_MIN_SIDE_MENTIONS,
+    "year_gap_split": True,
 }
 
 

@@ -16,6 +16,7 @@ from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
     LARGE_INTEGER,
     NUMPY_NAN,
+    YEAR_DIFF_CAP,
 )
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_schema import (
@@ -627,7 +628,7 @@ def _single_pair_featurize(
                 paper_1.year if paper_1.year is not None and paper_1.year > 0 else None,
                 paper_2.year if paper_2.year is not None and paper_2.year > 0 else None,
             ),
-            50,
+            YEAR_DIFF_CAP,
         )
     )
 

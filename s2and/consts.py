@@ -128,6 +128,8 @@ PUBLIC_DATA_FORMAT_VERSION = 1
 NUMPY_NAN = np.nan
 DEFAULT_CHUNK_SIZE = 100
 LARGE_DISTANCE = 1e4
+# The pair model sees at most this many years between two papers (Rust features.rs year_diff too).
+YEAR_DIFF_CAP = 50
 LARGE_INTEGER = 10 * LARGE_DISTANCE
 CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
 # Average linkage dilutes a hard pair below EPS once two clusters exceed about

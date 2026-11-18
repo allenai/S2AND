@@ -399,6 +399,18 @@ exclusion and name-rule tests apply to every merge. Pair verdicts and linkage do
 The step runs only for an average-linkage `FastCluster`. Like the rest of the repair, it
 runs only on blocks of at least 11 mentions, so a smaller block keeps a reading split.
 
+After the repair, a year-gap split (`s2and/year_gap_split.py`) cuts each cluster wherever
+its dated mentions leave an empty stretch of more than 50 years. The pair model sees the
+years between two papers capped at 50, so it cannot tell 50 years from 80, and topic overlap
+can pull a 1928 paper into a profile that starts in 2000. A real career has papers all along,
+so a long career has no such stretch. Two parts across a cut stay together when some pair
+between them is certainly under the close-pair distance, as a reprint with the same title and
+coauthors usually is, or when they share an ORCID or a required seed group. Undated mentions
+follow a part that shares their ORCID or seed group, else the part with the lowest average
+distance. The split only separates, so no other cluster changes. It runs with the repair, on
+the repair's distance copy, so it needs a cluster model with a close-pair bonus and skips
+blocks under 11 mentions. `Clusterer.year_gap_split = False` turns it off.
+
 The repair keeps a one-byte-per-pair copy of each block's distances while the
 block clusters, about one eighth of the matrix. Extending a pair reuses the
 original pair sums and reads only the additional excluded rows.

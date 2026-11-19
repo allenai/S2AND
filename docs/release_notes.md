@@ -18,8 +18,8 @@
   does not count as a small block. On 480 small production blocks,
   most sampled for a gap of over 50 years, the two changes rejoined 63 cuts and changed nothing else.
   Earlier blind judging had called 38 of those cuts wrong, 19 right and 6 undecided. On 128 large
-  production blocks (968,353 mentions) they moved one mention: a real 1800 paper, now undated, went
-  to the wrong piece of its profile.
+  production blocks (968,353 mentions) and on 68 edited profiles run as the altered-profile
+  pre-split runs them, they changed nothing.
 - Fix the year-gap split. It now also runs on blocks of 11 or more mentions without a name
   conflict, which it skipped, and with `name_conflict_repair_uses_close_pair_bonus = False`, which
   turned it off. Undated mentions that share an ORCID or a required seed group now move as one

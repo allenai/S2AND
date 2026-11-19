@@ -650,6 +650,10 @@ def _reading_round(
         speller_positions = np.asarray(
             sorted(position[s] for s in spellers.get(value, ()) if s in position), dtype=np.int64
         )
+        # Whether some own-cluster speller agrees with a mention, read once per mention and cluster.
+        # Reading the spellers per reading mention costs readings x spellers x block width.
+        checked: dict[int, np.ndarray] = {}
+        agreed: dict[int, np.ndarray] = {}
         for mention in mentions:
             own = int(inverse[mention])
             others = targets[inverse[targets] != own]
@@ -658,14 +662,22 @@ def _reading_round(
                 pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[partners]).tolist())
             if own not in spelling_clusters[value]:
                 continue
+            if own not in checked:
+                checked[own] = np.zeros(width, dtype=bool)
+                agreed[own] = np.zeros(width, dtype=bool)
             outside = everyone[inverse != own]
             vetoed = outside[_codes_against(codes, width, mention, outside) == 255]
-            agreed = np.zeros(len(vetoed), dtype=bool)
+            unread = vetoed[~checked[own][vetoed]]
+            checked[own][unread] = True
+            # Each speller reads only the mentions no earlier speller agreed with.
             for speller in speller_positions[inverse[speller_positions] == own].tolist():
-                agreed |= _codes_against(codes, width, speller, vetoed) != 255
-                if agreed.all():
+                if not len(unread):
                     break
-            pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[vetoed[agreed]]).tolist())
+                agrees = _codes_against(codes, width, speller, unread) != 255
+                agreed[own][unread[agrees]] = True
+                unread = unread[~agrees]
+            joinable = vetoed[agreed[own][vetoed]]
+            pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[joinable]).tolist())
     if not pairs:
         return labels
 

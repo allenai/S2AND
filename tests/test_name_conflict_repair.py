@@ -1221,3 +1221,12 @@ def test_reading_step_accepts_a_speller_in_the_reading_mentions_own_cluster(spel
     merged = _repair(square, _reading_repair(frozenset(spellers)), cut_height=0.5)
     expected = {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
     assert (_partition(merged) == expected) is merges
+
+
+def test_reading_step_skips_a_partner_every_own_cluster_speller_conflicts_with() -> None:
+    # a5 reads "Jec" and only a0 spells it, but a0 also conflicts with every b mention. The
+    # reading is then not a5's only veto, so the clusters stay apart.
+    square = _square(cross=0.3)
+    for j in B:
+        square[0, j] = square[j, 0] = LARGE_DISTANCE
+    assert _repair(square, _reading_repair(frozenset({"a0"})), cut_height=0.5) == _labels(square)

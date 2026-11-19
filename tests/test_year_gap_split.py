@@ -10,6 +10,7 @@ import pytest
 from scipy.spatial.distance import squareform
 
 import s2and.model as model_module
+from s2and import year_gap_split
 from s2and.consts import YEAR_DIFF_CAP
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
@@ -244,3 +245,19 @@ def test_block_clustering_ignores_seeds_the_caller_turned_off(seeds_off: bool, e
     dataset.cluster_seeds_require = {"0": "P", "7": "P"}
     labels = _cluster(_model(8.0), dataset, _square(0.25), incremental_dont_use_cluster_seeds=seeds_off)
     assert labels == expected
+
+
+def test_block_clustering_splits_when_no_code_is_certainly_close() -> None:
+    # A close-pair distance under every code leaves the split on, with no pair to bridge a gap.
+    model = _model(8.0)
+    model.cluster_model.close_pair_distance = 0.001
+    assert _cluster(model, _dated_dataset(), _square(0.25)) == SPLIT
+
+
+def test_mean_cross_code_reads_in_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    codes = quantize_distances(squareform(_square(0.25)), require_hard=False)
+    assert codes is not None
+    rows, cols = np.arange(0, 5), np.arange(5, 13)
+    expected = float(year_gap_split._cross_codes(codes, 13, rows, cols).mean())
+    monkeypatch.setattr(year_gap_split, "_BATCH_CELLS", 9)
+    assert year_gap_split._mean_cross_code(codes, 13, rows, cols) == expected

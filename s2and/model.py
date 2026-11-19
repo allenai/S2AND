@@ -836,15 +836,15 @@ def _split_year_gaps(
     labels: np.ndarray | Sequence[int],
     codes: np.ndarray,
     repair: NameConflictRepair,
-    close_code: int,
+    close_code: int | None,
     seed_groups: Mapping[str, Any] | None,
     block_key: str,
 ) -> np.ndarray | Sequence[int]:
     """Split repaired labels at year gaps when the repair carries years.
 
-    ``close_code`` comes from ``_year_gap_close_code``; negative skips the split.
+    ``close_code`` comes from ``_year_gap_close_code``; None skips the split.
     """
-    if not repair.years or close_code < 0:
+    if not repair.years or close_code is None:
         return labels
     return split_year_gaps(
         block_signatures,
@@ -880,13 +880,14 @@ def _wants_year_gap_split(clusterer: Any) -> bool:
     )
 
 
-def _year_gap_close_code(clusterer: Any) -> int:
-    """Return the cluster model's certain close-pair code for the year-gap split, or -1 when off.
+def _year_gap_close_code(clusterer: Any) -> int | None:
+    """Return the cluster model's certain close-pair code for the year-gap split, or None when off.
 
     It reads the cluster model, not the repair, so the repair's height setting leaves the split on.
+    A close-pair distance under every code gives -1: the split runs and no pair bridges a gap.
     """
     if not _wants_year_gap_split(clusterer):
-        return -1
+        return None
     return certain_close_code(float(getattr(clusterer.cluster_model, "close_pair_distance", 0.0)))
 
 
@@ -5049,9 +5050,9 @@ class Clusterer:
         # One thread: the copy then runs on this thread. A pool job would wait behind the
         # next block's scoring, which measured 270 times slower on a giant block.
         # The year-gap split also reads blocks without an impossible pair.
-        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else -1
+        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else None
         repair_codes = (
-            quantize_distances(dist_matrix, num_threads=1, require_hard=year_gap_close_code < 0)
+            quantize_distances(dist_matrix, num_threads=1, require_hard=year_gap_close_code is None)
             if name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
             else None
         )
@@ -5261,7 +5262,7 @@ class Clusterer:
             prediction_state.cluster_seeds_disallow, normalize_partial_supervision(None)
         )
         name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
-        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else -1
+        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else None
         seed_groups = self._repair_seed_groups(dataset, prediction_state)
         split_seed_groups = self._seeds_in_sight(dataset, prediction_state)
         signatures: list[str] = []
@@ -5288,7 +5289,7 @@ class Clusterer:
                 quantize_distances(
                     np.asarray(block_distances),
                     num_threads=resolve_n_jobs(self.n_jobs),
-                    require_hard=year_gap_close_code < 0,
+                    require_hard=year_gap_close_code is None,
                 )
                 if name_conflict_repair is not None and block_width >= MIN_BLOCK_SIZE
                 else None

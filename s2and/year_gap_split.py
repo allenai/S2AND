@@ -49,6 +49,16 @@ def _has_close_pair(codes: np.ndarray, block_width: int, a: np.ndarray, b: np.nd
     )
 
 
+def _mean_cross_code(codes: np.ndarray, block_width: int, rows: np.ndarray, cols: np.ndarray) -> float:
+    """Return the mean code between two disjoint groups, read in batches to bound memory."""
+    step = max(1, _BATCH_CELLS // max(1, len(cols)))
+    total = sum(
+        int(_cross_codes(codes, block_width, rows[start : start + step], cols).sum(dtype=np.int64))
+        for start in range(0, len(rows), step)
+    )
+    return total / (len(rows) * len(cols))
+
+
 def _shared(values: Mapping[str, object], a: Sequence[str], b: Sequence[str]) -> bool:
     """Return whether two groups of signatures share a value of ``values``."""
     if not values:
@@ -157,7 +167,7 @@ def _place_undated(
     for group in loose.values():
         # Impossible pairs count as code 255, so a name conflict pushes the group away.
         rows = np.asarray(group, dtype=np.int64)
-        means = [float(_cross_codes(codes, width, rows, part).mean()) for part in part_arrays]
+        means = [_mean_cross_code(codes, width, rows, part) for part in part_arrays]
         new_parts[int(np.argmin(means))].extend(group)
     return new_parts
 

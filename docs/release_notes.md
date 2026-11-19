@@ -8,6 +8,11 @@
   group, so the split no longer separates them; an undated mention that shares one with two parts
   keeps the parts together. The altered-profile pre-split ignores seeds on the Python route too, as
   the Arrow route already did. The EPS distance-policy version is now 6.
+- Let the name-conflict repair's reading step count a speller in the reading mention's own
+  cluster. "Ec" beside "Edward C." no longer keeps its profile away from a profile of bare
+  "Edward", the case the step was built for. Only clusters holding a mention that such a speller
+  agrees with are read, so the step stays within about 2% of block time. On 128 production blocks
+  it made 2 more joins (132 mentions).
 - Read the last word of a middle name as joined initials when other middle words come first:
   `Johanna A IP` now matches `Johanna A. Inge Petra`. A middle such as `IP A` stays unspelled.
 - In the name-conflict repair's reading step, use the lowest-height odd-mention set, as the pair

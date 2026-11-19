@@ -54,12 +54,13 @@ Each round first runs a reading step. A short given name may be joined initials
 "Ec" beside "Edward C." mentions, that veto keeps the piece away from the profile that
 holds the bare "Edward". Incremental linking accepts a reading when any member of the
 profile spells it, so the step does the same: it sets aside each impossible pair between
-a reading mention and a mention without a reading, when the reading mention's opposite
-cluster holds a mention that spells the reading. A set-aside pair has no model distance,
-so it counts as the farthest possible pair. Two clusters with no other impossible pair
-merge when their close-pair height is under the linkage cut, as linkage would have merged
-them even with every set-aside pair far apart. When other impossible pairs remain, at most ``MAX_ODD_MENTIONS`` mentions
-must explain them, and the odd-mention tests above apply. Pair verdicts do not change.
+a reading mention and a mention without a reading, when either of the two clusters
+holds a mention that spells the reading; the reading mention's own cluster counts. A
+set-aside pair has no model distance, so it counts as the farthest possible pair. Two
+clusters with no other impossible pair merge when their close-pair height is under the
+linkage cut, as linkage would have merged them even with every set-aside pair far apart.
+When other impossible pairs remain, at most ``MAX_ODD_MENTIONS`` mentions must explain
+them, and the odd-mention tests above apply. Pair verdicts do not change.
 
 ``Clusterer.name_conflict_repair_max_distance`` sets the distance for every route
 that clusters blocks; ``None`` turns the repair off.
@@ -636,26 +637,43 @@ def _reading_round(
         value: {int(inverse[position[s]]) for s in spellers.get(value, ()) if s in position} for value in by_value
     }
     # Candidates: a reading mention's cluster and each other cluster that spells its reading and
-    # holds a mention it has an impossible pair with. Only the spelling clusters are read.
+    # holds a mention it has an impossible pair with. When the reading mention's own cluster
+    # spells the reading, also each cluster holding such a mention that an own-cluster speller
+    # agrees with: the reading is then that mention's only veto ("Ec" beside "Edward C.", against
+    # a bare "Edward"). The speller test keeps the block scan to clusters that can merge.
     pairs: set[tuple[int, int]] = set()
+    everyone = np.arange(width)
     for value, mentions in by_value.items():
         if not spelling_clusters[value]:
             continue
         targets = np.concatenate([members(c) for c in sorted(spelling_clusters[value])])
+        speller_positions = np.asarray(
+            sorted(position[s] for s in spellers.get(value, ()) if s in position), dtype=np.int64
+        )
         for mention in mentions:
             own = int(inverse[mention])
             others = targets[inverse[targets] != own]
             if len(others):
                 partners = others[_codes_against(codes, width, mention, others) == 255]
                 pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[partners]).tolist())
+            if own not in spelling_clusters[value]:
+                continue
+            outside = everyone[inverse != own]
+            vetoed = outside[_codes_against(codes, width, mention, outside) == 255]
+            agreed = np.zeros(len(vetoed), dtype=bool)
+            for speller in speller_positions[inverse[speller_positions] == own].tolist():
+                agreed |= _codes_against(codes, width, speller, vetoed) != 255
+                if agreed.all():
+                    break
+            pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[vetoed[agreed]]).tolist())
     if not pairs:
         return labels
 
-    def spelled_by(side: np.ndarray, other_cluster: int) -> np.ndarray:
-        # Reading mentions of this side whose reading the other cluster spells.
+    def spelled_by(side: np.ndarray, pair: tuple[int, int]) -> np.ndarray:
+        # Reading mentions of this side whose reading one of the two clusters spells.
         return np.fromiter(
             (
-                bool(is_reading[m]) and other_cluster in spelling_clusters[readings[block_signatures[m]]]
+                bool(is_reading[m]) and not spelling_clusters[readings[block_signatures[m]]].isdisjoint(pair)
                 for m in side.tolist()
             ),
             dtype=bool,
@@ -675,7 +693,7 @@ def _reading_round(
             codes,
             width,
             sides,
-            (spelled_by(sides[0], b), spelled_by(sides[1], a)),
+            (spelled_by(sides[0], (a, b)), spelled_by(sides[1], (a, b))),
             (~is_reading[sides[0]], ~is_reading[sides[1]]),
             close_code,
         )

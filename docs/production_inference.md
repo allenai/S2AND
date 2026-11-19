@@ -388,8 +388,9 @@ Each repair round first runs a reading step for joined-initials readings (see
 a bare "Edward", although "Ec" agrees with "Edward C.". When linkage puts "Ec" beside
 "Edward C." mentions, that one veto keeps the piece away from the profile that holds the
 bare "Edward". The step sets aside each impossible pair between a reading mention and a
-mention without a reading when the reading mention's opposite cluster holds a mention that
-spells the reading, as incremental linking does for restored profiles. A set-aside pair has
+mention without a reading when either cluster, the reading mention's own included, holds a
+mention that spells the reading; the merged profile then spells it, which incremental linking
+accepts for restored profiles. A set-aside pair has
 no model distance, so it counts as the farthest possible pair; one speller then cannot carry
 two clusters whose pairs are mostly set aside. Two clusters with no other impossible pair
 merge when their close-pair height is under the linkage EPS, where linkage would have merged

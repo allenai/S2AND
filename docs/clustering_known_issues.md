@@ -54,5 +54,6 @@ separate real namesakes, such as physicists with the same initials. The known wr
   two (K. M. E. Turner, P. E. M. Phillips) remain.
 - **Knock-on splits.** One reading mention, such as "Ec", vetoes every bare "Edward" in its cluster.
   Before the reading step, judges found these splits wrong for 147 mentions and right for 55. The
-  reading step rejoins the pieces when the other cluster spells the reading; pieces under the
-  repair's 5-mention minimum stay apart, and the remaining count was not re-measured.
+  reading step rejoins the pieces when either cluster spells the reading; pieces under the
+  repair's 5-mention minimum stay apart when other conflicts remain. The remaining count was
+  not re-measured.

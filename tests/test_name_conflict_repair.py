@@ -1211,3 +1211,13 @@ def test_reading_step_takes_the_lowest_height_cover(b_label_first: bool, caplog:
     assert _partition([int(x) for x in merged], signatures) == {frozenset(signatures[:12]), frozenset(signatures[12:])}
     assert "joined-initials readings, height 0.40" in caplog.text
     assert "odd mentions b1" in caplog.text
+
+
+@pytest.mark.parametrize(("spellers", "merges"), [({"a0"}, True), ({"b0"}, True), ({"c0"}, False)])
+def test_reading_step_accepts_a_speller_in_the_reading_mentions_own_cluster(spellers: set[str], merges: bool) -> None:
+    # a5 reads "Jec" and its own cluster spells it ("Edward C." beside "Ec"); the b cluster holds
+    # bare names. A speller in a third cluster does not count.
+    square = _square(cross=0.3)
+    merged = _repair(square, _reading_repair(frozenset(spellers)), cut_height=0.5)
+    expected = {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
+    assert (_partition(merged) == expected) is merges

@@ -80,9 +80,9 @@ from s2and.name_conflict_repair import (
     DEFAULT_REPAIR_ROUNDS,
     MIN_BLOCK_SIZE,
     NameConflictRepair,
+    certain_close_code,
     has_full_first_name,
     quantize_distances,
-    repair_close_code,
     repair_name_conflicts_in_block,
 )
 from s2and.prediction_state import PredictionState
@@ -836,14 +836,14 @@ def _split_year_gaps(
     labels: np.ndarray | Sequence[int],
     codes: np.ndarray,
     repair: NameConflictRepair,
+    close_code: int,
     seed_groups: Mapping[str, Any] | None,
     block_key: str,
 ) -> np.ndarray | Sequence[int]:
-    """Split repaired labels at year gaps when the repair carries years and a close-pair distance.
+    """Split repaired labels at year gaps when the repair carries years.
 
-    A split never separates a required seed group, so it reads every seed in sight.
+    ``close_code`` comes from ``_year_gap_close_code``; negative skips the split.
     """
-    close_code = repair_close_code(repair)
     if not repair.years or close_code < 0:
         return labels
     return split_year_gaps(
@@ -878,6 +878,21 @@ def _wants_year_gap_split(clusterer: Any) -> bool:
         bool(getattr(clusterer, "year_gap_split", True))
         and float(getattr(cluster_model, "close_pair_bonus", 0.0) or 0.0) > 0
     )
+
+
+def _year_gap_close_code(clusterer: Any) -> int:
+    """Return the cluster model's certain close-pair code for the year-gap split, or -1 when off.
+
+    It reads the cluster model, not the repair, so the repair's height setting leaves the split on.
+    """
+    if not _wants_year_gap_split(clusterer):
+        return -1
+    return certain_close_code(float(getattr(clusterer.cluster_model, "close_pair_distance", 0.0)))
+
+
+def _has_impossible_pair(codes: np.ndarray) -> bool:
+    """Return whether one-byte codes hold an impossible pair, which any repair needs."""
+    return bool(len(codes)) and int(codes.max()) == 255
 
 
 def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
@@ -4309,7 +4324,9 @@ class Clusterer:
             and getattr(self, "dont_merge_cluster_seeds", True)
         ):
             validate_seed_group_separations(
-                _normalize_cluster_seeds_require(cluster_seeds_require), partial_supervision
+                _normalize_cluster_seeds_require(cluster_seeds_require),
+                partial_supervision,
+                {signature for signatures in block_dict.values() for signature in signatures},
             )
         exclusions = normalize_profile_exclusions(profile_exclusions)
         prediction_state: PredictionState | None = None
@@ -5031,8 +5048,10 @@ class Clusterer:
         # Linkage may overwrite the matrix, so the repair keeps a one-byte-per-pair copy.
         # One thread: the copy then runs on this thread. A pool job would wait behind the
         # next block's scoring, which measured 270 times slower on a giant block.
+        # The year-gap split also reads blocks without an impossible pair.
+        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else -1
         repair_codes = (
-            quantize_distances(dist_matrix, num_threads=1)
+            quantize_distances(dist_matrix, num_threads=1, require_hard=year_gap_close_code < 0)
             if name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
             else None
         )
@@ -5053,24 +5072,31 @@ class Clusterer:
             )
         if repair_codes is None or name_conflict_repair is None:
             return labels
-        forbidden: Mapping[str, Set[str]] = disallow_adjacency
-        if block_exclusions:
-            # A repair may not bring an excluded mention back to its anchor.
-            both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
-            for anchor, excluded in block_exclusions.items():
-                both_ways.setdefault(anchor, set()).update(excluded)
-                for signature_id in excluded:
-                    both_ways.setdefault(signature_id, set()).add(anchor)
-            forbidden = both_ways
-        labels = repair_name_conflicts_in_block(
-            block_signatures,
-            labels,
-            repair_codes,
-            name_conflict_repair,
-            forbidden=forbidden,
-            seed_groups=self._repair_seed_groups(dataset, prediction_state),
-            block_key=block_key,
-            cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
+        # Without an impossible pair no repair applies; only the year-gap split reads the codes.
+        if _has_impossible_pair(repair_codes):
+            forbidden: Mapping[str, Set[str]] = disallow_adjacency
+            if block_exclusions:
+                # A repair may not bring an excluded mention back to its anchor.
+                both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
+                for anchor, excluded in block_exclusions.items():
+                    both_ways.setdefault(anchor, set()).update(excluded)
+                    for signature_id in excluded:
+                        both_ways.setdefault(signature_id, set()).add(anchor)
+                forbidden = both_ways
+            labels = repair_name_conflicts_in_block(
+                block_signatures,
+                labels,
+                repair_codes,
+                name_conflict_repair,
+                forbidden=forbidden,
+                seed_groups=self._repair_seed_groups(dataset, prediction_state),
+                block_key=block_key,
+                cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
+            )
+        # A split never separates a required seed group, so it reads every seed in sight,
+        # unless the caller turned seeds off, as the altered-profile pre-split does.
+        split_seed_groups = (
+            None if incremental_dont_use_cluster_seeds else self._seeds_in_sight(dataset, prediction_state)
         )
         return cast(
             "np.ndarray | list[int]",
@@ -5079,7 +5105,8 @@ class Clusterer:
                 labels,
                 repair_codes,
                 name_conflict_repair,
-                self._seeds_in_sight(dataset, prediction_state),
+                year_gap_close_code,
+                split_seed_groups,
                 block_key,
             ),
         )
@@ -5234,6 +5261,7 @@ class Clusterer:
             prediction_state.cluster_seeds_disallow, normalize_partial_supervision(None)
         )
         name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
+        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else -1
         seed_groups = self._repair_seed_groups(dataset, prediction_state)
         split_seed_groups = self._seeds_in_sight(dataset, prediction_state)
         signatures: list[str] = []
@@ -5257,10 +5285,15 @@ class Clusterer:
             block_width = len(block_signatures)
             # The matrix is preserved, so one copy of its codes serves the repair at every EPS.
             repair_codes = (
-                quantize_distances(np.asarray(block_distances), num_threads=resolve_n_jobs(self.n_jobs))
+                quantize_distances(
+                    np.asarray(block_distances),
+                    num_threads=resolve_n_jobs(self.n_jobs),
+                    require_hard=year_gap_close_code < 0,
+                )
                 if name_conflict_repair is not None and block_width >= MIN_BLOCK_SIZE
                 else None
             )
+            has_impossible_pair = repair_codes is not None and _has_impossible_pair(repair_codes)
             del block_distances
             for eps_index, (eps, ids) in enumerate(ids_by_eps.items()):
                 if eps_index == 0 or cluster_dist is None:
@@ -5275,7 +5308,7 @@ class Clusterer:
                     disallow_adjacency,
                     prediction_state=prediction_state,
                 )
-                if repair_codes is not None and name_conflict_repair is not None:
+                if repair_codes is not None and name_conflict_repair is not None and has_impossible_pair:
                     labels = repair_name_conflicts_in_block(
                         block_signatures,
                         labels,
@@ -5286,8 +5319,15 @@ class Clusterer:
                         block_key=block_key,
                         cut_height=float(eps) if self.cluster_model.linkage == "average" else None,
                     )
+                if repair_codes is not None and name_conflict_repair is not None:
                     labels = _split_year_gaps(
-                        block_signatures, labels, repair_codes, name_conflict_repair, split_seed_groups, block_key
+                        block_signatures,
+                        labels,
+                        repair_codes,
+                        name_conflict_repair,
+                        year_gap_close_code,
+                        split_seed_groups,
+                        block_key,
                     )
                 _, block_ids = np.unique(np.asarray(labels), return_inverse=True)
                 ids.append(next_id + block_ids.astype(np.int64))

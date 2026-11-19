@@ -50,6 +50,10 @@ def test_joined_initials_reading(first, middle, expected):
         ("JOHANNA", "IP", None),
         ("Лев", "IP", "Sip"),
         ("Johanna IP", "", "Sip"),
+        # Only the middle's last word counts: the spell step splits only that token.
+        ("Johanna", "A IP", "Sip"),
+        ("Johanna", "A. IP", "Sip"),
+        ("Johanna", "IP A", None),
         # Vowel-less mixed case reads as initials as in D9; "Mc", suffixes and roman numerals do not.
         ("Hendrik", "Hg", "Shg"),
         ("Jeffrey", "Mc", None),
@@ -82,6 +86,9 @@ def _conflict(a: tuple[str, str], b: tuple[str, str], last: str = "Leite") -> bo
         # A joined-capitals middle is spelled out ("Johanna IP" is J. I. P.).
         (("Jip", ""), ("Johanna", "IP"), False),
         (("Jip", ""), ("Johanna", "I. P."), False),
+        # A joined-capitals last middle word after an initial is spelled out too.
+        (("Johanna", "A IP"), ("Johanna", "A. Inge Petra"), False),
+        (("Johanna", "A. IP"), ("Johanna", "A. Inge Petra"), False),
         # Too few names on the other side, or other initials, keep the veto.
         (("Ka", ""), ("Kristian", ""), True),
         (("Mal", ""), ("Mark", ""), True),

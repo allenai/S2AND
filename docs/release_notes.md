@@ -2,6 +2,19 @@
 
 ## Unreleased runtime changes
 
+- Fix the year-gap split. It now also runs on blocks of 11 or more mentions without a name
+  conflict, which it skipped, and with `name_conflict_repair_uses_close_pair_bonus = False`, which
+  turned it off. Undated mentions that share an ORCID or a required seed group now move as one
+  group, so the split no longer separates them; an undated mention that shares one with two parts
+  keeps the parts together. The altered-profile pre-split ignores seeds on the Python route too, as
+  the Arrow route already did. The EPS distance-policy version is now 6.
+- Read the last word of a middle name as joined initials when other middle words come first:
+  `Johanna A IP` now matches `Johanna A. Inge Petra`. A middle such as `IP A` stays unspelled.
+- In the name-conflict repair's reading step, use the lowest-height odd-mention set, as the pair
+  repair does, instead of the first that passes. The merge order no longer depends on cluster order.
+- `predict_from_arrow` checks caller distances between seed groups only within the request's blocks,
+  as the other bulk routes do.
+
 - Read a short given name as joined initials in the hard name rule when another name spells exactly
   those initials: `Ka` Hahn matches `Kristan Allan` Hahn, `Mal` Leite matches `Marco Aurelio Lisboa`
   Leite, and `MArfan` Ikram matches `Mohammad Arfan` Ikram. Production split such profiles because the

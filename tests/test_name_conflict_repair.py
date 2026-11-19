@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -432,9 +433,18 @@ def test_quantize_returns_none_without_impossible_pairs() -> None:
     assert codes.tolist() == [0, 127, 254, 255]
 
 
+def test_quantize_without_require_hard_returns_codes_without_impossible_pairs() -> None:
+    codes = quantize_distances(np.array([0.0, 0.5, 1.0]), require_hard=False)
+    assert codes is not None
+    assert codes.tolist() == [0, 127, 254]
+
+
+@pytest.mark.parametrize("require_hard", [True, False])
 @pytest.mark.parametrize("other", [1.0001, 5.0, 10 * LARGE_DISTANCE, np.nan, np.inf])
-def test_quantize_returns_none_for_a_value_that_is_neither_model_nor_impossible(other: float) -> None:
-    assert quantize_distances(np.array([0.1, other, LARGE_DISTANCE])) is None
+def test_quantize_returns_none_for_a_value_that_is_neither_model_nor_impossible(
+    other: float, require_hard: bool
+) -> None:
+    assert quantize_distances(np.array([0.1, other, LARGE_DISTANCE]), require_hard=require_hard) is None
 
 
 def test_block_clustering_does_not_repair_across_a_soft_distance_above_one() -> None:
@@ -1168,3 +1178,36 @@ def test_reading_step_counts_set_aside_pairs_as_far_apart() -> None:
     readings = {f"a{i}": "Jec" for i in range(6)}
     repair = NameConflictRepair(0.2, FULL, joined_readings=readings, reading_spellers={"Jec": {"b0"}})
     assert _repair(square, repair, cut_height=0.5) == _labels(square)
+
+
+@pytest.mark.parametrize("b_label_first", [False, True])
+def test_reading_step_takes_the_lowest_height_cover(b_label_first: bool, caplog: pytest.LogCaptureFixture) -> None:
+    # Six a and six b mentions. Readings a4 and a5 ("Jec", spelled by b0) conflict with every
+    # b mention, and a plain conflict a0-b1 remains. Leaving out a0 gives height 0.48 and
+    # leaving out b1 gives 0.40, whichever cluster comes first.
+    signatures = [f"a{i}" for i in range(6)] + [f"b{i}" for i in range(6)] + [f"c{i}" for i in range(5)]
+    a, b, c = range(0, 6), range(6, 12), range(12, 17)
+    square = np.full((17, 17), 0.9)
+    for group in (a, b, c):
+        for i in group:
+            for j in group:
+                square[i, j] = 0.05
+    for i in a:
+        for j in b:
+            square[i, j] = square[j, i] = 0.3 if j == 7 else 0.1
+    for i in (4, 5):
+        for j in b:
+            square[i, j] = square[j, i] = LARGE_DISTANCE
+    square[0, 7] = square[7, 0] = LARGE_DISTANCE
+    np.fill_diagonal(square, 0.0)
+    labels = [1 if b_label_first else 0] * 6 + [0 if b_label_first else 1] * 6 + [2] * 5
+    codes = quantize_distances(squareform(square))
+    assert codes is not None
+    repair = NameConflictRepair(
+        0.5, frozenset(signatures), joined_readings={"a4": "Jec", "a5": "Jec"}, reading_spellers={"Jec": {"b0"}}
+    )
+    with caplog.at_level(logging.INFO, logger="s2and"):
+        merged = repair_name_conflicts_in_block(signatures, labels, codes, repair, cut_height=0.5)
+    assert _partition([int(x) for x in merged], signatures) == {frozenset(signatures[:12]), frozenset(signatures[12:])}
+    assert "joined-initials readings, height 0.40" in caplog.text
+    assert "odd mentions b1" in caplog.text

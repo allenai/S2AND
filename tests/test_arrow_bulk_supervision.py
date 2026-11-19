@@ -338,6 +338,28 @@ def test_bulk_accepts_a_hard_distance_between_seed_groups(tmp_path, route):
     assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"]]
 
 
+@pytest.mark.parametrize("route", ["python", "arrow"])
+def test_bulk_ignores_a_caller_distance_outside_the_blocks(tmp_path, route):
+    # Pair (2, 3) joins two seed groups, but signature 3 is in no block of this request.
+    dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "profileA", "1": "profileA", "2": "profileB", "3": "profileA"})
+    blocks = {"probe": ["0", "2", "1"]}
+    supervision = {("2", "3"): 0.0, ("0", "1"): 0.2}
+    clusterer = _clusterer(0.1)
+    if route == "python":
+        clusters, _ = clusterer.predict(blocks, dataset, partial_supervision=supervision)
+    else:
+        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+        with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+            clusters, _ = clusterer.predict_from_arrow(
+                blocks,
+                arrow_dataset,
+                partial_supervision=supervision,
+                cluster_seeds_require=dataset.cluster_seeds_require,
+                name_tuples=frozenset(),
+            )
+    assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"]]
+
+
 def test_predict_helper_rejects_a_caller_distance_that_joins_two_seed_groups():
     dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
     with pytest.raises(ValueError, match="partial_supervision_joins_seed_groups"):

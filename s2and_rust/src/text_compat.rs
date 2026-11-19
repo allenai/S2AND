@@ -648,7 +648,9 @@ pub(crate) fn joined_initials_for_constraint(first_raw: &str, middle_raw: &str) 
 
 /// "S" plus the middle initials of a name whose middle is joined capitals (mirrors Python
 /// `spelled_middle_initials_for_constraint`): "Johanna IP" gives "Sip". Canonical names keep
-/// "IP" as one token. The first name must pass the D9 letter-case test that last names use,
+/// "IP" as one token. Only the last word of the middle counts, the token that
+/// `spell_middle_tokens` splits, so "A IP" gives "Sip" and "IP A" gives None.
+/// The first name must pass the D9 letter-case test that last names use,
 /// since an all-capitals name carries no case; it transliterates first, so "Лев IP" qualifies.
 pub(crate) fn spelled_middle_initials_for_constraint(
     first_raw: &str,
@@ -674,7 +676,10 @@ pub(crate) fn spelled_middle_initials_for_constraint(
     if !last_name_allows_joined_initials(&first, unidecode_char_map) {
         return None;
     }
-    joined_initials(&middle, crate::name_normalization::name_prefixes())
+    let last_word = middle
+        .split(is_python_whitespace_compat)
+        .rfind(|word| !word.is_empty())?;
+    joined_initials(last_word, crate::name_normalization::name_prefixes())
         .filter(|initials| !MIDDLE_NON_INITIALS.contains(&initials.as_str()))
         .map(|initials| format!("S{initials}"))
 }
@@ -962,6 +967,9 @@ mod tests {
         assert_eq!(value("JOHANNA", "IP"), None);
         assert_eq!(value("Лев", "IP").as_deref(), Some("Sip"));
         assert_eq!(value("Johanna IP", "").as_deref(), Some("Sip"));
+        assert_eq!(value("Johanna", "A IP").as_deref(), Some("Sip"));
+        assert_eq!(value("Johanna", "A. IP").as_deref(), Some("Sip"));
+        assert_eq!(value("Johanna", "IP A"), None);
         assert_eq!(value("Jeffrey", "Jm").as_deref(), Some("Sjm"));
         assert_eq!(value("Jeffrey", "Mc"), None);
         assert_eq!(value("John", "III"), None);

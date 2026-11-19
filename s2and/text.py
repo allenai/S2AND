@@ -622,10 +622,11 @@ def spelled_middle_initials_for_constraint(first_raw: str | None, middle_raw: st
     """Return "S" plus the middle initials of a name with a joined-capitals middle, or None.
 
     "Johanna IP" gives "Sip". Canonical names keep "IP" as the one token "ip", so without
-    this value "Jip" could not spell "Johanna IP". The middle is the raw middle field, or the
-    last word of the raw first field when the middle field is empty. It must pass the D9
-    initials test (2-3 capitals, or vowel-less mixed case such as "Hg") and not be a suffix,
-    a roman numeral or "Mc". The
+    this value "Jip" could not spell "Johanna IP". The middle is the last word of the raw
+    middle field, or of the raw first field when the middle field is empty, so "A IP" gives
+    "Sip". `spell_middle_initials` splits only the last middle token, so "IP A" gives None.
+    The word must pass the D9 initials test (2-3 capitals, or vowel-less mixed case such as
+    "Hg") and not be a suffix, a roman numeral or "Mc". The
     first name must pass the D9 letter-case test that last names use
     (`last_name_allows_joined_initials`): an all-capitals name carries no case. That test
     transliterates first, so "Лев IP" qualifies, and Python and Rust agree.
@@ -639,7 +640,7 @@ def spelled_middle_initials_for_constraint(first_raw: str | None, middle_raw: st
         first, middle = " ".join(words[:-1]), words[-1]
     if not last_name_allows_joined_initials(first):
         return None
-    initials = _joined_initials(middle)
+    initials = _joined_initials(middle.split()[-1])
     return None if initials is None or initials in _MIDDLE_NON_INITIALS else "S" + initials
 
 

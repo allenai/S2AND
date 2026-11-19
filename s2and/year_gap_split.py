@@ -8,8 +8,9 @@ whose dated mentions leave an empty stretch longer than the cap is cut there.
 Two parts across a cut stay together when the model is certain of some pair between them
 (a code under the close-pair distance), or they share an ORCID or a required seed group.
 A reprint or a re-dated record usually has such a pair: the same title and coauthors. The
-step only splits, so no other cluster changes. Undated mentions follow a part that shares
-their ORCID or seed group, else the part with the lowest average code.
+step only splits, so no other cluster changes. Undated mentions that share an ORCID or seed
+group move as one group. A group follows the part that shares its ORCID or seed group, else
+the part with the lowest average code. A group that shares one with two parts keeps them together.
 
 The split runs after name-conflict repair on the repair's codes, with the repair's
 ORCIDs and seed groups, so the repair cannot undo it.
@@ -98,30 +99,67 @@ def _parts(
     grouped: dict[int, list[int]] = {}
     for i, segment in enumerate(segments):
         grouped.setdefault(find(i), []).extend(segment)
-    parts = list(grouped.values())
-    if len(parts) == 1:
+    if len(grouped) == 1:
         return [list(members)]
-    part_ids = [[block_signatures[m] for m in part] for part in parts]
-    part_arrays = [np.asarray(part, dtype=np.int64) for part in parts]
-    for mention in members:
-        signature_id = block_signatures[mention]
-        if signature_id in years:
-            continue
-        home = next(
-            (
-                k
-                for k, ids_k in enumerate(part_ids)
-                if _shared(orcids, [signature_id], ids_k) or _shared(seed_groups, [signature_id], ids_k)
-            ),
-            None,
-        )
-        if home is None:
-            # Impossible pairs count as code 255, so a name conflict pushes the mention away.
-            row = np.asarray([mention], dtype=np.int64)
-            means = [float(_cross_codes(codes, width, row, part).mean()) for part in part_arrays]
-            home = int(np.argmin(means))
-        parts[home].append(mention)
-    return parts
+    return _place_undated(list(grouped.values()), members, block_signatures, years, codes, orcids, seed_groups)
+
+
+def _place_undated(
+    parts: list[list[int]],
+    members: Sequence[int],
+    block_signatures: Sequence[str],
+    years: Mapping[str, int],
+    codes: np.ndarray,
+    orcids: Mapping[str, str],
+    seed_groups: Mapping[str, object],
+) -> list[list[int]]:
+    """Add a cluster's undated mentions to its dated parts; one part when they tie all parts together.
+
+    Undated mentions that share an ORCID or a seed group move as one group, so no ORCID or
+    seed group is split. A group that shares one with two parts keeps those parts together.
+    A group that shares none goes to the part with the lowest average code.
+    """
+    undated = [m for m in members if block_signatures[m] not in years]
+    # Nodes: parts first, then undated mentions. Two nodes that share a value are joined.
+    parent = list(range(len(parts) + len(undated)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first_node: dict[tuple[str, object], int] = {}
+    node_mentions = [*parts, *([m] for m in undated)]
+    for node, mentions in enumerate(node_mentions):
+        for m in mentions:
+            signature_id = block_signatures[m]
+            keys = []
+            if signature_id in orcids:
+                keys.append(("orcid", orcids[signature_id]))
+            if signature_id in seed_groups:
+                keys.append(("seed", seed_groups[signature_id]))
+            for key in keys:
+                other = first_node.setdefault(key, node)
+                if find(other) != find(node):
+                    parent[find(node)] = find(other)
+    # Parts sharing no value stay apart: the segment step already joined any that did.
+    merged: dict[int, list[int]] = {}
+    loose: dict[int, list[int]] = {}
+    for node, mentions in enumerate(node_mentions):
+        target = merged if node < len(parts) or find(node) in merged else loose
+        target.setdefault(find(node), []).extend(mentions)
+    if len(merged) == 1:
+        return [list(members)]
+    new_parts = list(merged.values())
+    width = len(block_signatures)
+    part_arrays = [np.asarray(part, dtype=np.int64) for part in new_parts]
+    for group in loose.values():
+        # Impossible pairs count as code 255, so a name conflict pushes the group away.
+        rows = np.asarray(group, dtype=np.int64)
+        means = [float(_cross_codes(codes, width, rows, part).mean()) for part in part_arrays]
+        new_parts[int(np.argmin(means))].extend(group)
+    return new_parts
 
 
 def split_year_gaps(

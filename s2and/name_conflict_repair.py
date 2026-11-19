@@ -115,14 +115,19 @@ class _RepairCandidate:
     close_count: int = 0
 
 
-def repair_close_code(repair: NameConflictRepair) -> int:
-    """Return the largest code whose whole range lies under the close distance, or -1.
+def certain_close_code(close_pair_distance: float) -> int:
+    """Return the largest code whose whole range lies under ``close_pair_distance``.
 
     Code ``c`` holds distances in ``[c, c + 1) / _SCALE``.
     """
+    return math.floor(close_pair_distance * _SCALE - 1)
+
+
+def repair_close_code(repair: NameConflictRepair) -> int:
+    """Return the largest code certainly under the repair's close distance, or -1 without a bonus."""
     if repair.close_pair_bonus <= 0:
         return -1
-    return math.floor(repair.close_pair_distance * _SCALE - 1)
+    return certain_close_code(repair.close_pair_distance)
 
 
 def _height_bound(
@@ -292,24 +297,30 @@ def has_full_first_name(first: str | None) -> bool:
     return any(len(word) > 1 for word in (first or "").split())
 
 
-def quantize_distances(condensed: np.ndarray, *, num_threads: int | None = None) -> np.ndarray | None:
+def quantize_distances(
+    condensed: np.ndarray, *, num_threads: int | None = None, require_hard: bool = True
+) -> np.ndarray | None:
     """Return a one-byte-per-pair copy of condensed distances.
 
     Args:
         condensed: Condensed float64 distances in [0, 1], with exactly
             ``LARGE_DISTANCE`` for impossible pairs.
         num_threads: Rust pool size; None uses the default pool.
+        require_hard: Return ``None`` for a matrix without an impossible pair,
+            where no repair can apply. The year-gap split passes False.
 
     Returns:
         ``uint8`` codes: 255 for an impossible pair, else the distance times
-        254.999, rounded down. ``None`` when no repair can apply: the matrix has
-        no impossible pair, is not a condensed float64 matrix, or holds another
-        value above one. Such a value is a caller's soft "keep apart" distance,
-        which linkage honors and a one-byte code cannot carry.
+        254.999, rounded down. ``None`` when the matrix is not a condensed
+        float64 matrix, holds another value above one, or, with ``require_hard``,
+        has no impossible pair. A value above one is a caller's soft "keep apart"
+        distance, which linkage honors and a one-byte code cannot carry.
     """
     if condensed.ndim != 1 or condensed.dtype != np.float64 or not condensed.flags.c_contiguous:
         return None
-    return load_s2and_rust_extension().quantize_block_distances(condensed, float(LARGE_DISTANCE), num_threads)
+    return load_s2and_rust_extension().quantize_block_distances(
+        condensed, float(LARGE_DISTANCE), num_threads, require_hard
+    )
 
 
 def _top_orcids(signature_ids: Sequence[str], orcids: Mapping[str, str]) -> frozenset[str]:
@@ -671,13 +682,16 @@ def _reading_round(
         if evidence is None or evidence.set_aside == 0:
             continue
         found = None
-        # Try each smallest cover of the remaining conflicts; an empty cover means none remain.
+        # Take the lowest height over the smallest covers of the remaining conflicts, as the
+        # pair repair does, so which cluster comes first cannot change the merge order.
+        # An empty cover means no conflict remains.
         for cover in _smallest_covers(evidence.residual):
             odd = ([i for axis, i in cover if axis == 0], [j for axis, j in cover if axis == 1])
             bound = _reading_merge_bound(evidence, odd, sides, codes, block_signatures, repair, cut_height, close_code)
             if bound is not None:
-                found = (bound, tuple(sorted([int(sides[0][i]) for i in odd[0]] + [int(sides[1][j]) for j in odd[1]])))
-                break
+                odd_mentions = tuple(sorted([int(sides[0][i]) for i in odd[0]] + [int(sides[1][j]) for j in odd[1]]))
+                if found is None or (bound, odd_mentions) < found:
+                    found = (bound, odd_mentions)
         if found is not None and _name_rules_explain_every_pair(codes, block_signatures, sides, repair):
             accepted.append((found[0], a, b, found[1]))
     if not accepted:

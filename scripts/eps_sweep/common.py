@@ -28,8 +28,10 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # sweep plans record it, and release EPS review rejects curves from another policy.
 # 1: version field added; 2: CJK given-name veto (same-script, complete names only);
 # 3: joined-initials reading of short given names; 4: joined-capitals middles read as
-# initials, and the repair's reading step; 5: year-gap split after the repair.
-DISTANCE_POLICY_VERSION = 5
+# initials, and the repair's reading step; 5: year-gap split after the repair; 6: the
+# split also reads blocks without a name conflict, and a joined-capitals last middle word
+# after other middle words reads as initials.
+DISTANCE_POLICY_VERSION = 6
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

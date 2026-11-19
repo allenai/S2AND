@@ -53,14 +53,16 @@ fn quantize_chunk(distances: &[f64], hard_distance: f64, codes: &mut [u8]) -> u8
 /// A one-byte-per-pair copy of condensed distances, or None when no repair can apply.
 ///
 /// Model distances lie in [0, 1] and an impossible pair holds exactly `hard_distance`.
-/// None means the matrix has no impossible pair or holds some other value.
+/// None means the matrix holds some other value, or, with `require_hard`, has no
+/// impossible pair. The year-gap split reads codes of blocks without one.
 #[pyfunction]
-#[pyo3(signature = (condensed, hard_distance, num_threads = None))]
+#[pyo3(signature = (condensed, hard_distance, num_threads = None, require_hard = true))]
 pub(crate) fn quantize_block_distances<'py>(
     py: Python<'py>,
     condensed: PyReadonlyArray1<'py, f64>,
     hard_distance: f64,
     num_threads: Option<usize>,
+    require_hard: bool,
 ) -> PyResult<Option<Bound<'py, PyArray1<u8>>>> {
     if hard_distance.is_nan() || hard_distance <= 1.0 {
         return Err(PyValueError::new_err(
@@ -81,7 +83,12 @@ pub(crate) fn quantize_block_distances<'py>(
             })
         }
     });
-    Ok((saw == SAW_HARD).then(|| codes.into_pyarray(py)))
+    let usable = if require_hard {
+        saw == SAW_HARD
+    } else {
+        saw & SAW_OTHER == 0
+    };
+    Ok(usable.then(|| codes.into_pyarray(py)))
 }
 
 /// Start of row `i` in a condensed matrix of `n` items: the pair (i, i + 1).

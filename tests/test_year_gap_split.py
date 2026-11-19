@@ -131,6 +131,25 @@ def test_undated_mentions_follow_their_seed_group_first() -> None:
     assert _split(square, years, seed_groups={"n0": "P", "n5": "P"}) == SPLIT
 
 
+def test_undated_mentions_of_one_seed_group_move_together() -> None:
+    # Alone, n0 would follow the old part and n1 the new one.
+    square = _square()
+    years = _years()
+    del years["n0"], years["n1"]
+    square[2, OLD] = square[OLD, 2] = 0.15
+    assert _split(square, years) == {frozenset({"o0", "o1", "n0"}), frozenset(SIGNATURES[3:12])}
+    assert _split(square, years, seed_groups={"n0": "G", "n1": "G"}) == SPLIT
+    assert _split(square, years, orcids={"n0": "O", "n1": "O"}) == SPLIT
+
+
+def test_an_undated_mention_tied_to_both_parts_keeps_them_together() -> None:
+    # n0 shares an ORCID with the old part and a seed group with the new one.
+    years = _years()
+    del years["n0"]
+    seeds = {"n0": "G", "n5": "G"}
+    assert _split(_square(), years, orcids={"o0": "O", "n0": "O"}, seed_groups=seeds) == WHOLE
+
+
 def test_split_leaves_labels_alone_when_nothing_splits() -> None:
     assert split_year_gaps(SIGNATURES, LABELS, _codes(_square()), {}, CLOSE_CODE) is LABELS
 
@@ -195,3 +214,33 @@ def test_eps_grid_splits_as_block_clustering_does() -> None:
     signatures, ids_by_eps = _model(8.0).predict_eps_grid({"b": ids}, dataset, {"b": squareform(_square(0.25))}, [0.5])
     assert signatures == ids
     assert _partition(ids_by_eps[0.5]) == SPLIT
+
+
+def _cluster(model: Clusterer, dataset: ANDData, square: np.ndarray, **kwargs: Any) -> set[frozenset[str]]:
+    ids = [str(i) for i in range(13)]
+    repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, name_conflict_repair=repair, **kwargs)
+    return _partition(labels)
+
+
+def test_block_clustering_splits_a_block_without_an_impossible_pair() -> None:
+    # No name conflict anywhere, so no repair applies; the split still runs.
+    square = _square(0.25)
+    square[0, X] = square[X, 0] = 0.9
+    assert _cluster(_model(8.0), _dated_dataset(), square) == SPLIT
+
+
+def test_block_clustering_splits_when_the_repair_uses_the_plain_average() -> None:
+    # The 1.0.0b11 repair rule; the split reads the cluster model's close-pair distance.
+    model = _model(8.0)
+    model.name_conflict_repair_uses_close_pair_bonus = False
+    assert _cluster(model, _dated_dataset(), _square(0.25)) == SPLIT
+
+
+@pytest.mark.parametrize(("seeds_off", "expected"), [(False, WHOLE), (True, SPLIT)])
+def test_block_clustering_ignores_seeds_the_caller_turned_off(seeds_off: bool, expected: Any) -> None:
+    # The altered-profile pre-split turns seeds off: a seed group o0 + n5 may then split.
+    dataset = _dated_dataset()
+    dataset.cluster_seeds_require = {"0": "P", "7": "P"}
+    labels = _cluster(_model(8.0), dataset, _square(0.25), incremental_dont_use_cluster_seeds=seeds_off)
+    assert labels == expected

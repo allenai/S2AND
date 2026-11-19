@@ -406,10 +406,15 @@ can pull a 1928 paper into a profile that starts in 2000. A real career has pape
 so a long career has no such stretch. Two parts across a cut stay together when some pair
 between them is certainly under the close-pair distance, as a reprint with the same title and
 coauthors usually is, or when they share an ORCID or a required seed group. Undated mentions
-follow a part that shares their ORCID or seed group, else the part with the lowest average
-distance. The split only separates, so no other cluster changes. It runs with the repair, on
-the repair's distance copy, so it needs a cluster model with a close-pair bonus and skips
-blocks under 11 mentions. `Clusterer.year_gap_split = False` turns it off.
+that share an ORCID or seed group move as one group. A group follows the part that shares its
+ORCID or seed group, else the part with the lowest average distance; a group that shares one
+with two parts keeps them together. The split only separates, so no other cluster changes.
+It runs on the repair's distance copy, so it needs a cluster model with a close-pair bonus,
+skips blocks under 11 mentions, and is off when `name_conflict_repair_max_distance` is `None`.
+It also runs on blocks without a name conflict, where no repair applies, and with
+`name_conflict_repair_uses_close_pair_bonus = False`. A request with
+`incremental_dont_use_cluster_seeds=True`, such as the altered-profile pre-split, may split a
+seed group. `Clusterer.year_gap_split = False` turns it off.
 
 The repair keeps a one-byte-per-pair copy of each block's distances while the
 block clusters, about one eighth of the matrix. Extending a pair reuses the

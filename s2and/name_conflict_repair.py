@@ -238,8 +238,10 @@ class NameConflictRepair:
             per signature id, for signatures that have one.
         reading_spellers: Per reading, the signature ids without a reading whose name spells
             it (``spelled_reading_forms``). The reading step needs both mappings.
-        years: Paper year per signature id, for years above zero. The year-gap split
-            (``s2and.year_gap_split``) reads it after the repair.
+        years: Paper year per signature id from ``s2and.year_gap_split.split_years``. The
+            year-gap split reads it after the repair.
+        first_names: First word of the normalized first name per signature id, for words of
+            two or more characters. The year-gap split reads it in blocks under ``MIN_BLOCK_SIZE``.
     """
 
     max_average_distance: float
@@ -259,6 +261,7 @@ class NameConflictRepair:
     joined_readings: Mapping[str, str] = field(default_factory=dict)
     reading_spellers: Mapping[str, Set[str]] = field(default_factory=dict)
     years: Mapping[str, int] = field(default_factory=dict)
+    first_names: Mapping[str, str] = field(default_factory=dict)
 
     def lacks_full_name(self, side: Sequence[str]) -> bool:
         """Whether a side fails the full-first-name test."""

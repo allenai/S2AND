@@ -2,6 +2,17 @@
 
 ## Unreleased runtime changes
 
+- Treat the years 1601 and 1800 as undated in the year-gap split. The corpus gives these years to
+  papers whose real year it does not know: 1601 holds 1,002 papers against about 2 in the years around
+  it, and 1800 twice the papers of 1801. Judges found 10 of 50 gaps through these years right, against
+  16 of 26 through other years before 1801. About 2,900 production profiles had a gap only through
+  them. The EPS distance-policy version is now 9.
+- In blocks under 11 mentions, keep two parts of a cluster together when they share a first name
+  (the first word of the full first name). There the surname is rare, so a shared first name almost
+  always means one person. Judges found 9 of 28 such small-block cuts right, against 37 of 38 in
+  large blocks, where a first name is too common to bridge a gap. On 480 small production blocks,
+  most sampled for a gap of over 50 years, the two changes rejoined 63 cuts and changed nothing else.
+  Earlier blind judging had called 38 of those cuts wrong, 19 right and 6 undecided.
 - Fix the year-gap split. It now also runs on blocks of 11 or more mentions without a name
   conflict, which it skipped, and with `name_conflict_repair_uses_close_pair_bonus = False`, which
   turned it off. Undated mentions that share an ORCID or a required seed group now move as one

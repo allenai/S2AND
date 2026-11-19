@@ -410,7 +410,10 @@ years between two papers capped at 50, so it cannot tell 50 years from 80, and t
 can pull a 1928 paper into a profile that starts in 2000. A real career has papers all along,
 so a long career has no such stretch. Two parts across a cut stay together when some pair
 between them is certainly under the close-pair distance, as a reprint with the same title and
-coauthors usually is, or when they share an ORCID or a required seed group. Undated mentions
+coauthors usually is, or when they share an ORCID or a required seed group. In a block under
+11 mentions they also stay together when they share a first name, since a shared first name
+under a rare surname almost always means one person. The split treats the years 1601 and 1800
+as undated: the corpus gives them to papers whose real year it does not know. Undated mentions
 that share an ORCID or seed group move as one group. A group follows the part that shares its
 ORCID or seed group, else the part with the lowest average distance; a group that shares one
 with two parts keeps them together. The split only separates, so no other cluster changes.

@@ -31,8 +31,10 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # initials, and the repair's reading step; 5: year-gap split after the repair; 6: the
 # split also reads blocks without a name conflict, and a joined-capitals last middle word
 # after other middle words reads as initials; 7: the reading step counts a speller in the
-# reading mention's own cluster; 8: the year-gap split runs on blocks under 11 mentions.
-DISTANCE_POLICY_VERSION = 8
+# reading mention's own cluster; 8: the year-gap split runs on blocks under 11 mentions;
+# 9: the split treats 1601 and 1800 as undated and, in blocks under 11 mentions, keeps parts
+# that share a first name.
+DISTANCE_POLICY_VERSION = 9
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

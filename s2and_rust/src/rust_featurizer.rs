@@ -2933,6 +2933,23 @@ impl RustFeaturizer {
             .collect()
     }
 
+    /// First word of the normalized first name per signature, for words of two or more
+    /// characters. The year-gap split keeps two parts of a small block's cluster together
+    /// when they share one.
+    fn signature_first_names(&self) -> Vec<(String, String)> {
+        self.signature_id_order()
+            .iter()
+            .filter_map(|signature_id| {
+                let first = self.signatures.get(signature_id)?.first_normalized()?;
+                let word = first.split_whitespace().next()?;
+                word.chars()
+                    .nth(1)
+                    .is_some()
+                    .then(|| (signature_id.clone(), word.to_string()))
+            })
+            .collect()
+    }
+
     /// Facts for the repair's reading step: `(signature_id, reading)` for signatures whose
     /// given name has a joined-initials reading (tag J or W), and `(signature_id, reading)`
     /// for signatures without one whose name spells a reading that some signature has

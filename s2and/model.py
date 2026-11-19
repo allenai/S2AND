@@ -134,7 +134,7 @@ from s2and.text import (
     spelled_reading_forms,
 )
 from s2and.thread_config import resolve_n_jobs
-from s2and.year_gap_split import split_year_gaps
+from s2and.year_gap_split import split_year_gaps, split_years
 
 if TYPE_CHECKING:
     from hyperopt import Trials
@@ -858,7 +858,8 @@ def _split_year_gaps(
 ) -> np.ndarray | Sequence[int]:
     """Split repaired labels at year gaps when the repair carries years.
 
-    ``close_code`` comes from ``_year_gap_close_code``; None skips the split.
+    ``close_code`` comes from ``_year_gap_close_code``; None skips the split. A block under
+    ``MIN_BLOCK_SIZE`` mentions keeps parts that share a first name together.
     """
     if not repair.years or close_code is None:
         return labels
@@ -870,6 +871,7 @@ def _split_year_gaps(
         close_code,
         orcids=repair.orcids,
         seed_groups=seed_groups,
+        first_names=repair.first_names if len(block_signatures) < MIN_BLOCK_SIZE else None,
         block_key=block_key,
     )
 
@@ -948,6 +950,7 @@ def _name_conflict_repair_from_rust_featurizer(
         return None
     featurizer = cast(Any, rust_featurizer)
     full_first_names, orcids = featurizer.name_conflict_facts()
+    wants_years = _wants_year_gap_split(clusterer)
     # A clusterer that hides ORCIDs from its constraints hides them from the repair too.
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
     return NameConflictRepair(
@@ -957,7 +960,8 @@ def _name_conflict_repair_from_rust_featurizer(
         _rust_name_rules_alone_forbid(rust_featurizer),
         **_repair_height_settings(clusterer),
         **_reading_facts(*featurizer.joined_reading_facts()),
-        years=dict(featurizer.signature_years()) if _wants_year_gap_split(clusterer) else {},
+        years=split_years(featurizer.signature_years()) if wants_years else {},
+        first_names=dict(featurizer.signature_first_names()) if wants_years else {},
     )
 
 
@@ -974,7 +978,8 @@ def _name_conflict_repair_from_dataset(
     full_first_names: set[str] = set()
     orcids: dict[str, str] = {}
     values: dict[str, str | None] = {}
-    years: dict[str, int] = {}
+    year_pairs: list[tuple[str, int]] = []
+    first_names: dict[str, str] = {}
     wants_years = _wants_year_gap_split(clusterer)
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
     for members in block_dict.values():
@@ -990,12 +995,15 @@ def _name_conflict_repair_from_dataset(
                 ).first
             if has_full_first_name(first):
                 full_first_names.add(signature_id)
+            first_word = (first or "").split(maxsplit=1)[:1]
+            if wants_years and first_word and len(first_word[0]) > 1:
+                first_names[signature_id] = first_word[0]
             orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
             if orcid is not None:
                 orcids[signature_id] = orcid
             paper = dataset.papers.get(str(signature.paper_id)) if wants_years else None
-            if paper is not None and paper.year is not None and paper.year > 0:
-                years[signature_id] = int(paper.year)
+            if paper is not None and paper.year is not None:
+                year_pairs.append((signature_id, int(paper.year)))
     # The same facts as the Rust featurizer's joined_reading_facts, for the block's signatures.
     readings = [(s, value) for s, value in values.items() if value is not None and is_joined_reading(value)]
     reading_values = {value for _, value in readings}
@@ -1018,7 +1026,8 @@ def _name_conflict_repair_from_dataset(
         _dataset_name_rules_alone_forbid(dataset),
         **_repair_height_settings(clusterer),
         **_reading_facts(readings, spellers),
-        years=years,
+        years=split_years(year_pairs),
+        first_names=first_names,
     )
 
 

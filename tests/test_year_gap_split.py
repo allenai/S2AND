@@ -18,7 +18,7 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.model_pairwise import FastCluster
 from s2and.name_conflict_repair import quantize_distances
-from s2and.year_gap_split import split_year_gaps
+from s2and.year_gap_split import split_year_gaps, split_years
 from tests.helpers import build_arrow_training_dataset
 from tests.incremental_test_helpers import _dataset
 from tests.model_helpers import ConstantDistanceClassifier
@@ -116,6 +116,16 @@ def test_split_keeps_parts_that_share_a_required_seed_group() -> None:
     assert _split(_square(), _years(), seed_groups={"o1": "P", "n9": "P"}) == WHOLE
 
 
+def test_split_keeps_parts_that_share_a_first_name() -> None:
+    assert _split(_square(), _years(), first_names={"o1": "ada", "n7": "ada"}) == WHOLE
+    assert _split(_square(), _years(), first_names={"o1": "ada", "n7": "alan"}) == SPLIT
+
+
+def test_split_years_drops_placeholder_and_missing_years() -> None:
+    pairs = [("a", 1601), ("b", 1800), ("c", 0), ("d", -5), ("e", 1799), ("f", 1801), ("g", 2020)]
+    assert split_years(pairs) == {"e": 1799, "f": 1801, "g": 2020}
+
+
 def test_undated_mentions_follow_the_closer_part() -> None:
     square = _square()
     years = _years()
@@ -194,6 +204,7 @@ def test_both_routes_read_the_same_years(tmp_path: Path) -> None:
     assert (
         dict(python_repair.years) == dict(rust_repair.years) == {str(i): _years()[s] for i, s in enumerate(SIGNATURES)}
     )
+    assert dict(python_repair.first_names) == dict(rust_repair.first_names) == dict.fromkeys(ids, "ada")
 
 
 @pytest.mark.parametrize(("close_pair_bonus", "enabled", "parts"), [(8.0, True, 2), (8.0, False, 1), (0.0, True, 1)])
@@ -263,10 +274,10 @@ def test_mean_cross_code_reads_in_batches(monkeypatch: pytest.MonkeyPatch) -> No
     assert year_gap_split._mean_cross_code(codes, 13, rows, cols) == expected
 
 
-def test_block_clustering_splits_a_block_under_the_repair_size() -> None:
-    # Five mentions: too few for the repair, enough for the split.
-    dataset = _dataset([("Ada", "", "Smith")] * 5, {})
-    for index, year in enumerate([1928, 1930, 2001, 2010, 2020]):
+def _small_block_labels(old_first: str, years: list[int]) -> list[int]:
+    """Cluster five Smith mentions, two old ones named ``old_first`` and three "Ada", with ``years``."""
+    dataset = _dataset([(old_first, "", "Smith")] * 2 + [("Ada", "", "Smith")] * 3, {})
+    for index, year in enumerate(years):
         paper_id = str(100 + index)
         dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
     ids = [str(i) for i in range(5)]
@@ -275,8 +286,27 @@ def test_block_clustering_splits_a_block_under_the_repair_size() -> None:
     square = np.full((5, 5), 0.25)
     np.fill_diagonal(square, 0.0)
     labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, name_conflict_repair=repair)
-    labels = np.asarray(labels).tolist()
+    return np.asarray(labels).tolist()
+
+
+def test_block_clustering_splits_a_block_under_the_repair_size() -> None:
+    # Five mentions: too few for the repair, enough for the split.
+    labels = _small_block_labels("A.", [1928, 1930, 2001, 2010, 2020])
     assert labels[0] == labels[1] != labels[2] == labels[3] == labels[4]
+
+
+def test_small_block_keeps_parts_that_share_a_first_name() -> None:
+    assert len(set(_small_block_labels("Ada", [1928, 1930, 2001, 2010, 2020]))) == 1
+
+
+def test_large_block_splits_parts_that_share_a_first_name() -> None:
+    # Thirteen "Ada Smith" mentions: in a large block a first name is too common to bridge a gap.
+    assert _cluster(_model(8.0), _dated_dataset(), _square(0.25)) == SPLIT
+
+
+@pytest.mark.parametrize(("old_years", "parts"), [((1601, 1800), 1), ((1799, 1790), 2)])
+def test_block_clustering_treats_placeholder_years_as_undated(old_years: tuple[int, int], parts: int) -> None:
+    assert len(set(_small_block_labels("A.", [*old_years, 2001, 2010, 2020]))) == parts
 
 
 def test_short_spans_skip_the_split() -> None:

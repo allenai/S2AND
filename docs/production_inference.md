@@ -391,9 +391,10 @@ bare "Edward". The step sets aside each impossible pair between a reading mentio
 mention without a reading when either cluster, the reading mention's own included, holds a
 mention that spells the reading; the merged profile then spells it, which incremental linking
 accepts for restored profiles. When only the reading mention's own cluster spells it, the step
-reads another cluster only through a mention that some own-cluster speller has no impossible
-pair with. If every speller also conflicts with that mention ("Edward C." against "Edward D."),
-the reading is not the only veto, and the clusters stay apart. A set-aside pair has
+sets aside the reading mention's pair with another mention only when some own-cluster speller has
+no impossible pair with that mention. If every speller also conflicts with it ("Edward C."
+against "Edward D."), the reading is not the only veto: the pair stays impossible and goes to
+the odd-mention tests below. A set-aside pair has
 no model distance, so it counts as the farthest possible pair; one speller then cannot carry
 two clusters whose pairs are mostly set aside. Two clusters with no other impossible pair
 merge when their close-pair height is under the linkage EPS, where linkage would have merged
@@ -419,7 +420,8 @@ and is off when `name_conflict_repair_max_distance` is `None`.
 It also runs on blocks without a name conflict, where no repair applies, and with
 `name_conflict_repair_uses_close_pair_bonus = False`. A request with
 `incremental_dont_use_cluster_seeds=True`, such as the altered-profile pre-split, may split a
-seed group. `Clusterer.year_gap_split = False` turns it off.
+seed group. The pre-split's cut is temporary: incremental linking returns the altered profile
+whole and uses the pieces only to decide where a new mention links. `Clusterer.year_gap_split = False` turns it off.
 
 The repair keeps a one-byte-per-pair copy of each block's distances while the
 block clusters, about one eighth of the matrix. Extending a pair reuses the

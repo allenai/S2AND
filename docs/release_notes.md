@@ -10,18 +10,22 @@
   the Arrow route already did. The EPS distance-policy version is now 6.
 - Run the year-gap split on blocks under 11 mentions too, when their dated mentions span more
   than 50 years. Production holds about 73,000 such small-block profiles with an empty stretch
-  over 50 years. In two blind random samples (260 profiles), the split cut 183 gaps: both judges
-  called 131 of them two people or a mixture and 30 one person, and 22 were unsure or split, so
-  81% of decided cuts were right (95% interval 75% to 87%). Weighted by mention pairs, right cuts
-  separated 305 pairs and wrong ones 76. Most wrong cuts moved one old work with a modern reprint
-  or digitization year off its author. The altered-profile pre-split clusters each claimed profile
-  as its own block, so claimed profiles of 2 to 10 mentions with such a gap now split there too:
-  of the 68 such edited profiles in production, it cut 22, and judges found no wrong cut (19
-  right, 3 unsure). The EPS distance-policy version is now 8.
+  over 50 years. In two random samples judged blind to S2AND's output (259 profiles run), the split cut 183 gaps: both
+  judges called 131 of them two people or a mixture and 30 one person, and 22 were unsure or
+  split, so 81% of decided cuts were right (95% interval 75% to 87%; 72% if every undecided cut
+  is counted wrong). Weighted by mention pairs, right cuts separated 305 pairs and wrong ones 76.
+  The judges saw years; hiding them turned none of 30 re-judged "different" cuts into "same". In
+  the 200-profile sample every wrong cut moved one mention, 21 of 23 dated 2000 or later, mostly
+  an old work with a reprint or digitization year. The altered-profile pre-split clusters each
+  claimed profile as its own block, so it now also cuts claimed profiles of 2 to 10 mentions at
+  such a gap. That cut is temporary: it decides which piece a new mention links to, and the
+  profile is returned whole. Of the 68 such edited profiles in production (in one block, years
+  after 1800), it cut 22, and judges found no wrong cut (19 right, 3 undecided); how often a new
+  mention then links differently was not measured. The EPS distance-policy version is now 8.
 - Let the name-conflict repair's reading step count a speller in the reading mention's own
   cluster. "Ec" beside "Edward C." no longer keeps its profile away from a profile of bare
   "Edward", the case the step was built for. Only clusters holding a mention that such a speller
-  agrees with are read, so the step stays within about 2% of block time. On 128 production blocks
+  agrees with are read, so the step stays within about 3% of block time on the blocks timed. On 128 production blocks
   it made 2 more joins (132 mentions). The EPS distance-policy version is now 7.
 - Read the last word of a middle name as joined initials when other middle words come first:
   `Johanna A IP` now matches `Johanna A. Inge Petra`. A middle such as `IP A` stays unspelled.

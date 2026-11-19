@@ -10,8 +10,9 @@
   the Arrow route already did. The EPS distance-policy version is now 6.
 - Run the year-gap split on blocks under 11 mentions too, when their dated mentions span more
   than 50 years. Production holds about 73,000 such small-block profiles with an empty stretch
-  over 50 years; in a blind sample of 60 both judges called 38 wrong joins and 16 one person. The EPS
-  distance-policy version is now 8.
+  over 50 years. In a blind sample of 60 of them the split cut 45 (33 judged wrong joins, 7 one
+  person, 5 unsure) and kept 14 together (9 judged one person). The EPS distance-policy version
+  is now 8.
 - Let the name-conflict repair's reading step count a speller in the reading mention's own
   cluster. "Ec" beside "Edward C." no longer keeps its profile away from a profile of bare
   "Edward", the case the step was built for. Only clusters holding a mention that such a speller

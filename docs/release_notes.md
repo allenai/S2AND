@@ -3,14 +3,19 @@
 ## Unreleased runtime changes
 
 - Treat the years 1601 and 1800 as undated in the year-gap split. The corpus gives these years to
-  papers whose real year it does not know: 1601 holds 1,002 papers against about 2 in the years around
-  it, and 1800 twice the papers of 1801. Judges found 10 of 50 gaps through these years right, against
-  16 of 26 through other years before 1801. About 2,900 production profiles had a gap only through
-  them. The EPS distance-policy version is now 9.
-- In blocks under 11 mentions, keep two parts of a cluster together when they share a first name
-  (the first word of the full first name). There the surname is rare, so a shared first name almost
-  always means one person. Judges found 9 of 28 such small-block cuts right, against 37 of 38 in
-  large blocks, where a first name is too common to bridge a gap. On 480 small production blocks,
+  papers whose real year it does not know: 1601 holds 1,002 papers against 18 in 1600 and a handful
+  after it, and 1800 twice the papers of 1801. Judges found 10 of 50 decided gaps through these years
+  right, against 16 of 26 through other years before 1801. About 2,900 production profiles had a gap
+  only through them. Many 1800 papers are real, so a mention stamped 1601 or 1800 first follows the one
+  part of its cluster whose dated years span the stamp, else the closest part as before. The EPS
+  distance-policy version is now 9.
+- When the surname block has under 11 mentions, keep two parts of a cluster together when they
+  share a first name (the first word of the full first name); an undated mention with that name
+  follows them too. There the surname is rare, so a shared first name almost always means one person.
+  Judges found 9 of 28 decided small-block cuts right, against 37 of 38 in large blocks, where a first
+  name is too common to bridge a gap. The block size is counted in the request's dataset, so a claimed
+  profile in the altered-profile pre-split, an incremental residual or a subblock of a large block
+  does not count as a small block. On 480 small production blocks,
   most sampled for a gap of over 50 years, the two changes rejoined 63 cuts and changed nothing else.
   Earlier blind judging had called 38 of those cuts wrong, 19 right and 6 undecided. On 128 large
   production blocks (968,353 mentions) they moved one mention: a real 1800 paper, now undated, went
@@ -28,8 +33,8 @@
   split, so 81% of decided cuts were right (95% interval 75% to 87%; 72% if every undecided cut
   is counted wrong). Weighted by mention pairs, right cuts separated 305 pairs and wrong ones 76.
   The judges saw years; hiding them turned none of 30 re-judged "different" cuts into "same". In
-  the 200-profile sample every wrong cut moved one mention, 21 of 23 dated 2000 or later, mostly
-  an old work with a reprint or digitization year. The altered-profile pre-split clusters each
+  the 200-profile sample every wrong cut split off a single mention, and in 21 of 23 the newer side
+  was dated 2000 or later, mostly an old work beside a reprint or digitization record. The altered-profile pre-split clusters each
   claimed profile as its own block, so it now also cuts claimed profiles of 2 to 10 mentions at
   such a gap. That cut is temporary: it decides which piece a new mention links to, and the
   profile is returned whole. Of the 68 such edited profiles in production (in one block, years

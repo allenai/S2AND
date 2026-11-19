@@ -285,7 +285,7 @@ veto. Canonical names keep a middle of joined capitals as one token (`Johanna IP
 middle `ip`), so `spelled_middle_initials_for_constraint` records its initials (`Sip`).
 The middle is the last word of the raw middle field, or of the raw first field when the middle
 field is empty, so `Johanna A IP` reads `IP` and agrees with `Johanna A. Inge Petra`. Only
-that last word is spelled, so `IP A` stays one token. It must pass the D9 initials test (2-3 capitals, or vowel-less mixed case
+that last word is spelled, so in `IP A` the `IP` stays unspelled. It must pass the D9 initials test (2-3 capitals, or vowel-less mixed case
 such as `Hg`) and not be a suffix such as `JR` or `III` or the prefix `Mc`, and the first
 name must pass the D9 letter-case test.
 The name rule then reads the middle as initials: `Johanna IP` agrees with `Johanna Inge

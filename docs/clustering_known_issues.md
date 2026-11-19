@@ -25,13 +25,14 @@ ORCID or a required seed group bridges it (see "Name-conflict repair" in
   not certain of (an 1818 paper reprinted in 1931, a 1930s patent dated 2017).
 - **Blocks under 11 mentions** are not repaired. The year-gap split runs on them. The numbers
   below predate two later changes: parts that share a first name now stay together in these
-  blocks (9 of 28 such cuts were judged right), and the placeholder years 1601 and 1800 count
-  as undated (10 of 50 gaps through them were judged right). In two samples
+  blocks (9 of 28 decided such cuts were judged right), and the placeholder years 1601 and 1800
+  count as undated (10 of 50 decided gaps through them were judged right). In two samples
   of production profiles with such a gap (259 run), judged blind to S2AND's output, the split cut
   183: both judges called 131 of them two people or a mixture, 30 one person, and 22 were unsure
   or split. In the 200-profile
-  sample every wrong cut moved one mention, 21 of 23 dated 2000 or later (mostly reprints and
-  digitized old works). The first sample had two larger wrong cuts (3 of 8 and 1 of 10 mentions).
+  sample every wrong cut split off a single mention, and in 21 of 23 the newer side was dated 2000
+  or later (mostly reprints and digitized old works). The first sample had two wrong cuts in bigger
+  profiles: 3 of 8 mentions and 1 of 10.
 
 A lasting fix belongs in the model: lift the year cap and add old labeled pairs, or add a
 cluster-level year signal. A year-gap veto inside linkage was tested and rejected: it changed

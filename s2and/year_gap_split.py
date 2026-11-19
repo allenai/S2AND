@@ -7,29 +7,32 @@ whose dated mentions leave an empty stretch longer than the cap is cut there.
 
 Two parts across a cut stay together when the model is certain of some pair between them
 (a code under the close-pair distance), or they share an ORCID or a required seed group.
-A reprint or a re-dated record usually has such a pair: the same title and coauthors. In a
-block under 11 mentions (``s2and.name_conflict_repair.MIN_BLOCK_SIZE``), two parts that share
-a full first name also stay together: there the surname is rare, so a shared first name almost
-always means one person. Judges found 9 of 28 such cuts right in small blocks, against 37 of
-38 in large blocks.
+A reprint or a re-dated record usually has such a pair: the same title and coauthors. When
+the surname block has under 11 mentions (``s2and.name_conflict_repair.MIN_BLOCK_SIZE``), two
+parts that share the first word of a full first name also stay together: there the surname is
+rare, so a shared first name almost always means one person. Judges found 9 of 28 decided such
+cuts right in small blocks, against 37 of 38 in large blocks. The caller decides which
+signatures sit in a small surname block; a claimed profile or a subblock of a large block does not.
 
-The step only splits, so no other cluster changes. Undated mentions that share an ORCID or
-seed group move as one group. A group follows the part that shares its ORCID or seed group,
-else the part with the lowest average code. A group that shares one with two parts keeps
-them together.
+The step only splits, so no other cluster changes. Undated mentions that share an ORCID, a
+seed group or a bridging first name move as one group. A group follows the part that shares
+one with it, else the part with the lowest average code. A group that shares one with two
+parts keeps them together.
 
 The split runs after name-conflict repair on the repair's codes, with the repair's
 ORCIDs and seed groups, so the repair cannot undo it.
 
 ``PLACEHOLDER_YEARS`` count as undated. The corpus stamps 1601 and 1800 on modern papers
-whose year it does not know: 1601 has 1,002 papers against about 2 in the years around it,
-and 1800 twice the papers of 1801. Judges found 10 of 50 gaps through them right.
+whose year it does not know: 1601 has 1,002 papers against 18 in 1600 and a handful after,
+and 1800 twice the papers of 1801. Judges found 10 of 50 decided gaps through them right.
+Many 1800 papers are real, so a loose group with such a stamp first follows the one part
+whose dated years span the stamp.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
@@ -44,9 +47,9 @@ _BATCH_CELLS = 1 << 22
 PLACEHOLDER_YEARS = frozenset({1601, 1800})
 
 
-def split_years(pairs: Iterable[tuple[str, int]]) -> dict[str, int]:
-    """Return the year per signature id that the split reads: above zero and not a placeholder."""
-    return {signature_id: int(year) for signature_id, year in pairs if year > 0 and year not in PLACEHOLDER_YEARS}
+def split_years(years: Mapping[str, int]) -> dict[str, int]:
+    """Return the years that date a mention for the split: above zero and not a placeholder."""
+    return {signature_id: year for signature_id, year in years.items() if year > 0 and year not in PLACEHOLDER_YEARS}
 
 
 def _cross_codes(codes: np.ndarray, block_width: int, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
@@ -94,8 +97,12 @@ def _parts(
     orcids: Mapping[str, str],
     seed_groups: Mapping[str, object],
     first_names: Mapping[str, str],
+    stamps: Mapping[str, int],
 ) -> list[list[int]]:
-    """Return the parts of one cluster, as lists of block positions; one part when it stays whole."""
+    """Return the parts of one cluster, as lists of block positions; one part when it stays whole.
+
+    ``years`` holds dating years only; ``stamps`` holds the placeholder years of undated mentions.
+    """
     dated = sorted((years[block_signatures[m]], m) for m in members if block_signatures[m] in years)
     segments: list[list[int]] = [[dated[0][1]]] if dated else []
     for (previous, _), (year, mention) in zip(dated, dated[1:], strict=False):
@@ -131,7 +138,9 @@ def _parts(
         grouped.setdefault(find(i), []).extend(segment)
     if len(grouped) == 1:
         return [list(members)]
-    return _place_undated(list(grouped.values()), members, block_signatures, years, codes, orcids, seed_groups)
+    return _place_undated(
+        list(grouped.values()), members, block_signatures, years, codes, orcids, seed_groups, first_names, stamps
+    )
 
 
 def _place_undated(
@@ -142,12 +151,15 @@ def _place_undated(
     codes: np.ndarray,
     orcids: Mapping[str, str],
     seed_groups: Mapping[str, object],
+    first_names: Mapping[str, str],
+    stamps: Mapping[str, int],
 ) -> list[list[int]]:
     """Add a cluster's undated mentions to its dated parts; one part when they tie all parts together.
 
-    Undated mentions that share an ORCID or a seed group move as one group, so no ORCID or
-    seed group is split. A group that shares one with two parts keeps those parts together.
-    A group that shares none goes to the part with the lowest average code.
+    Undated mentions that share an ORCID, a seed group or a bridging first name move as one
+    group, so none of these is split. A group that shares one with two parts keeps those parts
+    together. A group that shares none and carries placeholder stamps goes to the one part whose
+    dated years span every stamp. Any other group goes to the part with the lowest average code.
     """
     undated = [m for m in members if block_signatures[m] not in years]
     # Nodes: parts first, then undated mentions. Two nodes that share a value are joined.
@@ -169,6 +181,8 @@ def _place_undated(
                 keys.append(("orcid", orcids[signature_id]))
             if signature_id in seed_groups:
                 keys.append(("seed", seed_groups[signature_id]))
+            if signature_id in first_names:
+                keys.append(("first", first_names[signature_id]))
             for key in keys:
                 other = first_node.setdefault(key, node)
                 if find(other) != find(node):
@@ -184,7 +198,21 @@ def _place_undated(
     new_parts = list(merged.values())
     width = len(block_signatures)
     part_arrays = [np.asarray(part, dtype=np.int64) for part in new_parts]
+    spans = []
+    for part in new_parts:
+        part_years = [years[block_signatures[m]] for m in part if block_signatures[m] in years]
+        spans.append((min(part_years), max(part_years)))
     for group in loose.values():
+        group_stamps = [stamps[block_signatures[m]] for m in group if block_signatures[m] in stamps]
+        # A real 1800 paper inside a 1786-1817 career belongs there; a placeholder spans no part.
+        holders = [
+            index
+            for index, (low, high) in enumerate(spans)
+            if group_stamps and all(low <= stamp <= high for stamp in group_stamps)
+        ]
+        if len(holders) == 1:
+            new_parts[holders[0]].extend(group)
+            continue
         # Impossible pairs count as code 255, so a name conflict pushes the group away.
         rows = np.asarray(group, dtype=np.int64)
         means = [_mean_cross_code(codes, width, rows, part) for part in part_arrays]
@@ -210,13 +238,15 @@ def split_year_gaps(
         block_signatures: Signature ids in matrix order.
         labels: Cluster label per signature.
         codes: One-byte condensed pair codes from ``quantize_distances``.
-        years: Paper year per signature id from ``split_years``; other signatures count as undated.
+        years: Paper year per signature id. Years at or below zero and ``PLACEHOLDER_YEARS``
+            count as undated; a placeholder still guides where its mention goes.
         close_code: Largest code that is certainly under the close-pair distance; a pair at
             or under it keeps two parts together. Negative keeps no parts together by distance.
         orcids: ORCID per signature id; two parts that share one stay together.
         seed_groups: Required seed group per signature id; two parts that share one stay together.
         first_names: First word of the full first name per signature id; two parts that share
-            one stay together. Pass it for blocks under ``MIN_BLOCK_SIZE`` mentions only.
+            one stay together. Give it only for signatures whose surname block has under
+            ``MIN_BLOCK_SIZE`` mentions.
         block_key: Block name for the log.
 
     Returns:
@@ -228,11 +258,21 @@ def split_year_gaps(
         clusters.setdefault(int(label), []).append(position)
     new_labels: np.ndarray | None = None
     next_label = max(clusters, default=-1) + 1
+    stamps = {signature_id: year for signature_id, year in years.items() if year in PLACEHOLDER_YEARS}
+    years = split_years(years)
     for members in clusters.values():
         if sum(block_signatures[m] in years for m in members) < 2:
             continue
         parts = _parts(
-            members, block_signatures, years, codes, close_code, orcids or {}, seed_groups or {}, first_names or {}
+            members,
+            block_signatures,
+            years,
+            codes,
+            close_code,
+            orcids or {},
+            seed_groups or {},
+            first_names or {},
+            stamps,
         )
         if len(parts) == 1:
             continue

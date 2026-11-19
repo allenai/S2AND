@@ -768,7 +768,8 @@ def _spans_a_year_gap(block_signatures: Sequence[str], years: Mapping[str, int],
     """
     if close_code is None or not years:
         return False
-    dated = [years[s] for s in block_signatures if s in years]
+    dating = split_years(years)
+    dated = [dating[s] for s in block_signatures if s in dating]
     return len(dated) >= 2 and max(dated) - min(dated) > YEAR_DIFF_CAP
 
 
@@ -858,8 +859,8 @@ def _split_year_gaps(
 ) -> np.ndarray | Sequence[int]:
     """Split repaired labels at year gaps when the repair carries years.
 
-    ``close_code`` comes from ``_year_gap_close_code``; None skips the split. A block under
-    ``MIN_BLOCK_SIZE`` mentions keeps parts that share a first name together.
+    ``close_code`` comes from ``_year_gap_close_code``; None skips the split. The repair's
+    first names cover only signatures of small surname blocks, so only those bridge on a name.
     """
     if not repair.years or close_code is None:
         return labels
@@ -871,7 +872,7 @@ def _split_year_gaps(
         close_code,
         orcids=repair.orcids,
         seed_groups=seed_groups,
-        first_names=repair.first_names if len(block_signatures) < MIN_BLOCK_SIZE else None,
+        first_names=repair.first_names,
         block_key=block_key,
     )
 
@@ -941,16 +942,111 @@ def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
     return settings
 
 
+def _request_small_block_signatures(block_dict: Mapping[str, Sequence[str]]) -> frozenset[str]:
+    """Return the signatures of request blocks under ``MIN_BLOCK_SIZE``, for callers that pass whole blocks."""
+    return frozenset(str(s) for members in block_dict.values() if len(members) < MIN_BLOCK_SIZE for s in members)
+
+
+def _count_small_blocks(
+    candidates: Mapping[str, str | None], block_sizes: Mapping[str, int], request_small: Set[str]
+) -> frozenset[str]:
+    """Return the candidates whose surname block is small; one with no block key keeps the request rule."""
+    return frozenset(
+        signature_id
+        for signature_id, block in candidates.items()
+        if (block_sizes.get(block, 0) < MIN_BLOCK_SIZE if block is not None else signature_id in request_small)
+    )
+
+
+def _dataset_small_block_signatures(block_dict: Mapping[str, Sequence[str]], dataset: Any) -> frozenset[str] | None:
+    """Return the request signatures whose ``author_info_block`` has under ``MIN_BLOCK_SIZE`` dataset mentions.
+
+    A claimed profile, an incremental residual or a subblock is smaller than its surname block,
+    so the block size comes from the dataset. None when the dataset holds no signatures to count.
+    """
+    signatures = getattr(dataset, "signatures", None)
+    if not signatures:
+        return None
+    request_small = _request_small_block_signatures(block_dict)
+    if not request_small:
+        return frozenset()
+    candidates = {
+        s: getattr(signatures[s], "author_info_block", None) if s in signatures else None for s in request_small
+    }
+    needed = {block for block in candidates.values() if block is not None}
+    sizes: dict[str, int] = defaultdict(int)
+    if needed:
+        for signature in signatures.values():
+            block = signature.author_info_block
+            if block in needed:
+                sizes[block] += 1
+    return _count_small_blocks(candidates, sizes, request_small)
+
+
+def _arrow_small_block_signatures(arrow_lease: Any, block_dict: Mapping[str, Sequence[str]]) -> frozenset[str] | None:
+    """Return the request signatures whose ``author_block`` has under ``MIN_BLOCK_SIZE`` rows in the dataset.
+
+    Reads two signature columns, and only when a request block is that small. None when the
+    signatures table has no ``author_block`` column.
+    """
+    request_small = _request_small_block_signatures(block_dict)
+    if not request_small:
+        return frozenset()
+    import pyarrow as pa
+
+    pc: Any = __import__("pyarrow.compute").compute
+    candidates: dict[str, str | None] = {}
+    sizes: dict[str, int] = defaultdict(int)
+    with arrow_lease.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
+        reader = pa.ipc.open_file(source)
+        if "author_block" not in reader.schema.names:
+            return None
+        id_index = reader.schema.get_field_index("signature_id")
+        block_index = reader.schema.get_field_index("author_block")
+        value_set = arrow_string_array(sorted(request_small))
+        block_columns = []
+        for batch_index in range(reader.num_record_batches):
+            batch = reader.get_batch(batch_index)
+            block_column = batch.column(block_index)
+            block_columns.append(block_column)
+            mask = pc.is_in(batch.column(id_index), value_set=value_set)
+            if bool(pc.any(mask).as_py()):
+                for signature_id, block in zip(
+                    pc.filter(batch.column(id_index), mask).to_pylist(),
+                    pc.filter(block_column, mask).to_pylist(),
+                    strict=True,
+                ):
+                    candidates[str(signature_id)] = block
+        needed = sorted({block for block in candidates.values() if block is not None})
+        if needed:
+            needed_set = arrow_string_array(needed)
+            for block_column in block_columns:
+                kept = pc.filter(block_column, pc.is_in(block_column, value_set=needed_set))
+                for entry in pc.value_counts(kept).to_pylist():
+                    sizes[entry["values"]] += int(entry["counts"])
+    for signature_id in request_small - candidates.keys():
+        candidates[signature_id] = None
+    return _count_small_blocks(candidates, sizes, request_small)
+
+
 def _name_conflict_repair_from_rust_featurizer(
-    clusterer: Any, block_dict: Mapping[str, Sequence[str]], rust_featurizer: object
+    clusterer: Any,
+    block_dict: Mapping[str, Sequence[str]],
+    rust_featurizer: object,
+    small_block_signatures: Set[str] | None = None,
 ) -> NameConflictRepair | None:
-    """Read the first-name and ORCID facts that name-conflict repair needs."""
+    """Read the first-name and ORCID facts that name-conflict repair needs.
+
+    ``small_block_signatures`` limits the year-gap split's first-name bridge to those
+    signatures; None treats each block of ``block_dict`` as a whole surname block.
+    """
     max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
     if max_average_distance is None:
         return None
     featurizer = cast(Any, rust_featurizer)
     full_first_names, orcids = featurizer.name_conflict_facts()
     wants_years = _wants_year_gap_split(clusterer)
+    small = _request_small_block_signatures(block_dict) if small_block_signatures is None else small_block_signatures
     # A clusterer that hides ORCIDs from its constraints hides them from the repair too.
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
     return NameConflictRepair(
@@ -960,8 +1056,10 @@ def _name_conflict_repair_from_rust_featurizer(
         _rust_name_rules_alone_forbid(rust_featurizer),
         **_repair_height_settings(clusterer),
         **_reading_facts(*featurizer.joined_reading_facts()),
-        years=split_years(featurizer.signature_years()) if wants_years else {},
-        first_names=dict(featurizer.signature_first_names()) if wants_years else {},
+        years=dict(featurizer.signature_years()) if wants_years else {},
+        first_names=(
+            {s: name for s, name in featurizer.signature_first_names() if s in small} if wants_years and small else {}
+        ),
     )
 
 
@@ -970,15 +1068,19 @@ def _name_conflict_repair_from_dataset(
 ) -> NameConflictRepair | None:
     """Read the same facts from ``ANDData`` signatures, or from a stand-in dataset's featurizer."""
     rust_featurizer = getattr(dataset, "rust_featurizer", None)
+    small_block_signatures = _dataset_small_block_signatures(block_dict, dataset)
     if rust_featurizer is not None:
-        return _name_conflict_repair_from_rust_featurizer(clusterer, block_dict, rust_featurizer)
+        return _name_conflict_repair_from_rust_featurizer(
+            clusterer, block_dict, rust_featurizer, small_block_signatures
+        )
     max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
     if max_average_distance is None:
         return None
+    small = _request_small_block_signatures(block_dict) if small_block_signatures is None else small_block_signatures
     full_first_names: set[str] = set()
     orcids: dict[str, str] = {}
     values: dict[str, str | None] = {}
-    year_pairs: list[tuple[str, int]] = []
+    years: dict[str, int] = {}
     first_names: dict[str, str] = {}
     wants_years = _wants_year_gap_split(clusterer)
     use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
@@ -996,14 +1098,15 @@ def _name_conflict_repair_from_dataset(
             if has_full_first_name(first):
                 full_first_names.add(signature_id)
             first_word = (first or "").split(maxsplit=1)[:1]
-            if wants_years and first_word and len(first_word[0]) > 1:
+            if wants_years and signature_id in small and first_word and len(first_word[0]) > 1:
                 first_names[signature_id] = first_word[0]
             orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
             if orcid is not None:
                 orcids[signature_id] = orcid
             paper = dataset.papers.get(str(signature.paper_id)) if wants_years else None
-            if paper is not None and paper.year is not None:
-                year_pairs.append((signature_id, int(paper.year)))
+            # A NaN year fails the comparison, so it stays undated.
+            if paper is not None and paper.year is not None and paper.year > 0:
+                years[signature_id] = int(paper.year)
     # The same facts as the Rust featurizer's joined_reading_facts, for the block's signatures.
     readings = [(s, value) for s, value in values.items() if value is not None and is_joined_reading(value)]
     reading_values = {value for _, value in readings}
@@ -1026,7 +1129,7 @@ def _name_conflict_repair_from_dataset(
         _dataset_name_rules_alone_forbid(dataset),
         **_repair_height_settings(clusterer),
         **_reading_facts(readings, spellers),
-        years=split_years(year_pairs),
+        years=years,
         first_names=first_names,
     )
 
@@ -3576,7 +3679,9 @@ class Clusterer:
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
             disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
-            name_conflict_repair = _name_conflict_repair_from_rust_featurizer(self, block_dict, rust_featurizer)
+            name_conflict_repair = _name_conflict_repair_from_rust_featurizer(
+                self, block_dict, rust_featurizer, prediction_state.small_block_signatures
+            )
             repair_kwargs: dict[str, Any] = (
                 {} if name_conflict_repair is None else {"name_conflict_repair": name_conflict_repair}
             )
@@ -4062,6 +4167,9 @@ class Clusterer:
             prediction_state = PredictionState()
         if bulk_clusters is not None and not needs_subblocking:
             raise ValueError("bulk_clusters applies only to subblocked Arrow prediction")
+        # Before subblocking: a subblock, a claimed profile or a residual is not its surname block.
+        if _wants_year_gap_split(self):
+            prediction_state.small_block_signatures = _arrow_small_block_signatures(arrow_lease, block_dict)
 
         arrow_subblocking_seconds = 0.0
         block_dict_multiple_letter: dict[str, list[str]] | None = None

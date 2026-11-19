@@ -122,8 +122,31 @@ def test_split_keeps_parts_that_share_a_first_name() -> None:
 
 
 def test_split_years_drops_placeholder_and_missing_years() -> None:
-    pairs = [("a", 1601), ("b", 1800), ("c", 0), ("d", -5), ("e", 1799), ("f", 1801), ("g", 2020)]
-    assert split_years(pairs) == {"e": 1799, "f": 1801, "g": 2020}
+    years = {"a": 1601, "b": 1800, "c": 0, "d": -5, "e": 1799, "f": 1801, "g": 2020}
+    assert split_years(years) == {"e": 1799, "f": 1801, "g": 2020}
+
+
+def _stamped_years(stamp: int) -> dict[str, int]:
+    """Old part 1790-1817, new part 2000-2023, and n0 stamped ``stamp``."""
+    years = _years()
+    years["o0"], years["o1"], years["n0"] = 1790, 1817, stamp
+    return years
+
+
+@pytest.mark.parametrize(("stamp", "joins_old"), [(1800, True), (1601, False)])
+def test_a_placeholder_stamp_follows_the_part_whose_years_span_it(stamp: int, joins_old: bool) -> None:
+    # n0 is closer to the new part, so the average code alone would put it there.
+    old_with_n0 = {frozenset({"o0", "o1", "n0"}), frozenset(SIGNATURES[3:12])}
+    assert (_split(_square(), _stamped_years(stamp)) == old_with_n0) is joins_old
+
+
+def test_an_undated_mention_bridges_parts_by_first_name() -> None:
+    # n0 is undated; its ORCID ties it to the old part and its first name to the new one.
+    years = _years()
+    del years["n0"]
+    orcids = {"n0": "O", "o0": "O"}
+    assert _split(_square(), years, orcids=orcids) == {frozenset({"o0", "o1", "n0"}), frozenset(SIGNATURES[3:12])}
+    assert _split(_square(), years, orcids=orcids, first_names={"n0": "ada", "n5": "ada"}) == WHOLE
 
 
 def test_undated_mentions_follow_the_closer_part() -> None:
@@ -204,7 +227,54 @@ def test_both_routes_read_the_same_years(tmp_path: Path) -> None:
     assert (
         dict(python_repair.years) == dict(rust_repair.years) == {str(i): _years()[s] for i, s in enumerate(SIGNATURES)}
     )
-    assert dict(python_repair.first_names) == dict(rust_repair.first_names) == dict.fromkeys(ids, "ada")
+    # Thirteen mentions: no small surname block, so neither route reads first names.
+    assert dict(python_repair.first_names) == dict(rust_repair.first_names) == {}
+
+
+def test_both_routes_read_the_same_first_names_in_a_small_block(tmp_path: Path) -> None:
+    names = ["Ada", "A.", "Jean-Pierre", "Ömer", "J. Robert", "Li"]
+    dataset = _dataset([(name, "", "Smith") for name in names], {})
+    ids = [str(i) for i in range(len(names))]
+    model = _model(8.0)
+    python_repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
+    assert arrow_dataset is not None
+    featurizer = build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
+    )
+    rust_repair = model_module._name_conflict_repair_from_rust_featurizer(model, {"b": ids}, featurizer)
+
+    assert python_repair is not None and rust_repair is not None
+    assert dict(python_repair.first_names) == dict(rust_repair.first_names)
+    assert dict(python_repair.first_names)["0"] == "ada"
+    assert "1" not in python_repair.first_names
+
+
+def test_both_routes_count_the_surname_block_not_the_request(tmp_path: Path) -> None:
+    # Five of thirteen Smith mentions, as a claimed profile or a residual would send them.
+    dataset = _dated_dataset()
+    part = {"profile": [str(i) for i in range(5)]}
+    assert model_module._dataset_small_block_signatures(part, dataset) == frozenset()
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
+    assert arrow_dataset is not None
+    with arrow_dataset.use() as lease:
+        assert model_module._arrow_small_block_signatures(lease, part) == frozenset()
+    whole = {"b": [str(i) for i in range(5)]}
+    small = _dataset([("Ada", "", "Smith")] * 5, {})
+    small_arrow = build_arrow_training_dataset(small, tmp_path / "small").arrow_dataset
+    assert small_arrow is not None
+    assert model_module._dataset_small_block_signatures(whole, small) == frozenset(whole["b"])
+    with small_arrow.use() as lease:
+        assert model_module._arrow_small_block_signatures(lease, whole) == frozenset(whole["b"])
+
+
+def test_python_route_reads_a_nan_year_as_undated() -> None:
+    dataset = _dated_dataset()
+    dataset.papers["100"] = dataset.papers["100"]._replace(year=float("nan"))
+    ids = [str(i) for i in range(13)]
+    repair = model_module._name_conflict_repair_from_dataset(_model(8.0), {"b": ids}, dataset)
+    assert repair is not None
+    assert "0" not in repair.years
 
 
 @pytest.mark.parametrize(("close_pair_bonus", "enabled", "parts"), [(8.0, True, 2), (8.0, False, 1), (0.0, True, 1)])
@@ -274,9 +344,13 @@ def test_mean_cross_code_reads_in_batches(monkeypatch: pytest.MonkeyPatch) -> No
     assert year_gap_split._mean_cross_code(codes, 13, rows, cols) == expected
 
 
-def _small_block_labels(old_first: str, years: list[int]) -> list[int]:
-    """Cluster five Smith mentions, two old ones named ``old_first`` and three "Ada", with ``years``."""
-    dataset = _dataset([(old_first, "", "Smith")] * 2 + [("Ada", "", "Smith")] * 3, {})
+def _small_block_labels(old_first: str, years: list[int], other_smiths: int = 0) -> list[int]:
+    """Cluster five Smith mentions, two old ones named ``old_first`` and three "Ada", with ``years``.
+
+    ``other_smiths`` more Smith mentions sit in the dataset but not in the clustered block.
+    """
+    names = [(old_first, "", "Smith")] * 2 + [("Ada", "", "Smith")] * 3 + [("Bo", "", "Smith")] * other_smiths
+    dataset = _dataset(names, {})
     for index, year in enumerate(years):
         paper_id = str(100 + index)
         dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
@@ -299,6 +373,12 @@ def test_small_block_keeps_parts_that_share_a_first_name() -> None:
     assert len(set(_small_block_labels("Ada", [1928, 1930, 2001, 2010, 2020]))) == 1
 
 
+def test_a_small_part_of_a_large_surname_block_splits_parts_that_share_a_first_name() -> None:
+    # A claimed profile, residual or subblock of five mentions from a block of eleven.
+    labels = _small_block_labels("Ada", [1928, 1930, 2001, 2010, 2020], other_smiths=6)
+    assert labels[0] == labels[1] != labels[2] == labels[3] == labels[4]
+
+
 def test_large_block_splits_parts_that_share_a_first_name() -> None:
     # Thirteen "Ada Smith" mentions: in a large block a first name is too common to bridge a gap.
     assert _cluster(_model(8.0), _dated_dataset(), _square(0.25)) == SPLIT
@@ -314,3 +394,28 @@ def test_short_spans_skip_the_split() -> None:
     assert model_module._spans_a_year_gap(["a", "b"], years, 11)
     assert not model_module._spans_a_year_gap(["a", "b"], {"a": 2010 - YEAR_DIFF_CAP, "b": 2010}, 11)
     assert not model_module._spans_a_year_gap(["a", "b"], years, None)
+
+
+@pytest.mark.parametrize("other_smiths", [0, 6])
+def test_bulk_routes_bridge_only_in_a_small_surname_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_smiths: int
+) -> None:
+    # Five mentions requested; with six more Smiths in the dataset, they are part of a larger block.
+    seen: list[dict[str, str]] = []
+    original = Clusterer._cluster_one_block
+
+    def spy(self: Clusterer, *args: Any, **kwargs: Any) -> Any:
+        repair = kwargs.get("name_conflict_repair")
+        seen.append(dict(repair.first_names) if repair is not None else {})
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Clusterer, "_cluster_one_block", spy)
+    dataset = _dataset([("Ada", "", "Smith")] * 5 + [("Bo", "", "Smith")] * other_smiths, {})
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
+    assert arrow_dataset is not None
+    blocks = {"profile": [str(i) for i in range(5)]}
+    model = _model(8.0)
+    model.predict_from_arrow(blocks, arrow_dataset, name_tuples=frozenset())
+    model.predict(blocks, dataset)
+    expected = {} if other_smiths else dict.fromkeys(blocks["profile"], "ada")
+    assert seen == [expected, expected]

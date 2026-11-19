@@ -410,13 +410,17 @@ years between two papers capped at 50, so it cannot tell 50 years from 80, and t
 can pull a 1928 paper into a profile that starts in 2000. A real career has papers all along,
 so a long career has no such stretch. Two parts across a cut stay together when some pair
 between them is certainly under the close-pair distance, as a reprint with the same title and
-coauthors usually is, or when they share an ORCID or a required seed group. In a block under
-11 mentions they also stay together when they share a first name, since a shared first name
-under a rare surname almost always means one person. The split treats the years 1601 and 1800
-as undated: the corpus gives them to papers whose real year it does not know. Undated mentions
-that share an ORCID or seed group move as one group. A group follows the part that shares its
-ORCID or seed group, else the part with the lowest average distance; a group that shares one
-with two parts keeps them together. The split only separates, so no other cluster changes.
+coauthors usually is, or when they share an ORCID or a required seed group. When the surname
+block has under 11 mentions they also stay together when they share the first word of a full
+first name, since a shared first name under a rare surname almost always means one person. The
+block size is counted in the request's dataset (`author_block` on the Arrow route,
+`author_info_block` on the Python route), so a claimed profile, an incremental residual or a
+subblock of a large block is not a small block. The split treats the years 1601 and 1800 as
+undated: the corpus gives them to papers whose real year it does not know. Undated mentions
+that share an ORCID, a seed group or such a first name move as one group. A group follows the
+part that shares one with it. Otherwise a group stamped 1601 or 1800 follows the one part whose
+dated years span the stamp, and any other group the part with the lowest average distance; a
+group that shares one with two parts keeps them together. The split only separates, so no other cluster changes.
 It runs on the repair's distance copy, so it needs a cluster model with a close-pair bonus,
 runs on blocks of any size from two mentions whose dated mentions span more than 50 years,
 and is off when `name_conflict_repair_max_distance` is `None`.

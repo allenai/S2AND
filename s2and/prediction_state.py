@@ -19,4 +19,7 @@ class PredictionState:
     altered_cluster_signatures: list[str] = field(default_factory=list)
     # Excluded mentions per anchor; see s2and.profile_exclusions.
     profile_exclusions: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Signatures whose surname block in the request's dataset has under MIN_BLOCK_SIZE mentions.
+    # The year-gap split's first-name bridge reads it; None treats each request block as whole.
+    small_block_signatures: frozenset[str] | None = None
     telemetry: dict[str, dict[str, Any]] = field(default_factory=dict)

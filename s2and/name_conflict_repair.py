@@ -238,10 +238,11 @@ class NameConflictRepair:
             per signature id, for signatures that have one.
         reading_spellers: Per reading, the signature ids without a reading whose name spells
             it (``spelled_reading_forms``). The reading step needs both mappings.
-        years: Paper year per signature id from ``s2and.year_gap_split.split_years``. The
-            year-gap split reads it after the repair.
+        years: Paper year per signature id, for years above zero. The year-gap split
+            (``s2and.year_gap_split``) reads it after the repair.
         first_names: First word of the normalized first name per signature id, for words of
-            two or more characters. The year-gap split reads it in blocks under ``MIN_BLOCK_SIZE``.
+            two or more characters, and only for signatures whose surname block has under
+            ``MIN_BLOCK_SIZE`` mentions. The year-gap split bridges parts that share one.
     """
 
     max_average_distance: float

@@ -24,9 +24,9 @@ ORCID or a required seed group bridges it (see "Name-conflict repair" in
   wrong. Each moved one or two mentions: a reprint or a record with the wrong year that the model was
   not certain of (an 1818 paper reprinted in 1931, a 1930s patent dated 2017).
 - **Blocks under 11 mentions** are not repaired. The year-gap split runs on them. In a blind
-  sample of 60 production profiles with such a gap, the split cut 45: both judges called 33 of
-  them wrong joins, 7 one person (old works with a modern digitization or reprint year) and 5
-  unsure. It kept 14 together, 9 of them judged one person.
+  sample of 60 production profiles with such a gap, the split cut 45: both judges called 30 of
+  them two people and 3 a mixture, 7 one person (old works with a modern digitization or reprint
+  year), and 5 were unsure or split. It kept 14 together, 9 of them judged one person.
 
 A lasting fix belongs in the model: lift the year cap and add old labeled pairs, or add a
 cluster-level year signal. A year-gap veto inside linkage was tested and rejected: it changed

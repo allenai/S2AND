@@ -390,7 +390,10 @@ a bare "Edward", although "Ec" agrees with "Edward C.". When linkage puts "Ec" b
 bare "Edward". The step sets aside each impossible pair between a reading mention and a
 mention without a reading when either cluster, the reading mention's own included, holds a
 mention that spells the reading; the merged profile then spells it, which incremental linking
-accepts for restored profiles. A set-aside pair has
+accepts for restored profiles. When only the reading mention's own cluster spells it, the step
+reads another cluster only through a mention that some own-cluster speller has no impossible
+pair with. If every speller also conflicts with that mention ("Edward C." against "Edward D."),
+the reading is not the only veto, and the clusters stay apart. A set-aside pair has
 no model distance, so it counts as the farthest possible pair; one speller then cannot carry
 two clusters whose pairs are mostly set aside. Two clusters with no other impossible pair
 merge when their close-pair height is under the linkage EPS, where linkage would have merged

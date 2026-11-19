@@ -55,7 +55,9 @@ Each round first runs a reading step. A short given name may be joined initials
 holds the bare "Edward". Incremental linking accepts a reading when any member of the
 profile spells it, so the step does the same: it sets aside each impossible pair between
 a reading mention and a mention without a reading, when either of the two clusters
-holds a mention that spells the reading; the reading mention's own cluster counts. A
+holds a mention that spells the reading; the reading mention's own cluster counts. An
+own-cluster speller counts against a mention only when some such speller has no impossible
+pair with it; otherwise the reading is not that mention's only veto. A
 set-aside pair has no model distance, so it counts as the farthest possible pair. Two
 clusters with no other impossible pair merge when their close-pair height is under the
 linkage cut, as linkage would have merged them even with every set-aside pair far apart.

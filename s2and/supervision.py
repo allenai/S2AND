@@ -1,7 +1,7 @@
 """Request-boundary policy for undirected caller distance overrides."""
 
 import math
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from itertools import chain
 
 from s2and.consts import LARGE_DISTANCE
@@ -127,7 +127,7 @@ def validate_incremental_seed_disallows(
 def validate_seed_group_separations(
     required_assignments: Mapping[str, int | str],
     partial_supervision: Mapping[tuple[str, str], int | float],
-    signatures: Container[str] | None = None,
+    block_of: Mapping[str, str] | None = None,
 ) -> None:
     """Reject caller distances that would join two different required seed groups.
 
@@ -139,7 +139,8 @@ def validate_seed_group_separations(
     Args:
         required_assignments: Signature-to-group assignments of the request.
         partial_supervision: Normalized caller distances.
-        signatures: Signatures the request clusters; pairs outside them are not checked.
+        block_of: Block key of each signature the request clusters. Blocks cluster
+            apart, so a pair outside one block cannot join groups and is not checked.
 
     Raises:
         ValueError: A caller distance below ``LARGE_DISTANCE`` connects members of
@@ -150,7 +151,7 @@ def validate_seed_group_separations(
     for (left, right), distance in partial_supervision.items():
         if distance >= LARGE_DISTANCE:
             continue
-        if signatures is not None and (left not in signatures or right not in signatures):
+        if block_of is not None and (left not in block_of or block_of[left] != block_of.get(right)):
             continue
         left_group = required_assignments.get(left)
         right_group = required_assignments.get(right)

@@ -339,10 +339,12 @@ def test_bulk_accepts_a_hard_distance_between_seed_groups(tmp_path, route):
 
 
 @pytest.mark.parametrize("route", ["python", "arrow"])
-def test_bulk_ignores_a_caller_distance_outside_the_blocks(tmp_path, route):
-    # Pair (2, 3) joins two seed groups, but signature 3 is in no block of this request.
+@pytest.mark.parametrize("other_block", [False, True])
+def test_bulk_ignores_a_caller_distance_outside_the_blocks(tmp_path, route, other_block):
+    # Pair (2, 3) joins two seed groups, but signature 3 is in no block of this request, or
+    # in another block, which clusters apart.
     dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "profileA", "1": "profileA", "2": "profileB", "3": "profileA"})
-    blocks = {"probe": ["0", "2", "1"]}
+    blocks = {"probe": ["0", "2", "1"], **({"other": ["3"]} if other_block else {})}
     supervision = {("2", "3"): 0.0, ("0", "1"): 0.2}
     clusterer = _clusterer(0.1)
     if route == "python":
@@ -357,7 +359,8 @@ def test_bulk_ignores_a_caller_distance_outside_the_blocks(tmp_path, route):
                 cluster_seeds_require=dataset.cluster_seeds_require,
                 name_tuples=frozenset(),
             )
-    assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"]]
+    expected = [["0", "1"], ["2"]] + ([["3"]] if other_block else [])
+    assert sorted(sorted(members) for members in clusters.values()) == expected
 
 
 def test_predict_helper_rejects_a_caller_distance_that_joins_two_seed_groups():

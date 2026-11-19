@@ -55,9 +55,9 @@ Each round first runs a reading step. A short given name may be joined initials
 holds the bare "Edward". Incremental linking accepts a reading when any member of the
 profile spells it, so the step does the same: it sets aside each impossible pair between
 a reading mention and a mention without a reading, when either of the two clusters
-holds a mention that spells the reading; the reading mention's own cluster counts. An
-own-cluster speller counts against a mention only when some such speller has no impossible
-pair with it; otherwise the reading is not that mention's only veto. A
+holds a mention that spells the reading; the reading mention's own cluster counts. When
+only the own cluster spells it, a pair is set aside only when some own-cluster speller has
+no impossible pair with the other mention; otherwise the reading is not the only veto. A
 set-aside pair has no model distance, so it counts as the farthest possible pair. Two
 clusters with no other impossible pair merge when their close-pair height is under the
 linkage cut, as linkage would have merged them even with every set-aside pair far apart.
@@ -306,21 +306,23 @@ def quantize_distances(
     """Return a one-byte-per-pair copy of condensed distances.
 
     Args:
-        condensed: Condensed float64 distances in [0, 1], with exactly
-            ``LARGE_DISTANCE`` for impossible pairs.
+        condensed: Condensed distances in [0, 1], with exactly ``LARGE_DISTANCE``
+            for impossible pairs. Another float dtype or a strided view is copied to
+            contiguous float64 first, as linkage accepts those too.
         num_threads: Rust pool size; None uses the default pool.
         require_hard: Return ``None`` for a matrix without an impossible pair,
             where no repair can apply. The year-gap split passes False.
 
     Returns:
         ``uint8`` codes: 255 for an impossible pair, else the distance times
-        254.999, rounded down. ``None`` when the matrix is not a condensed
-        float64 matrix, holds another value above one, or, with ``require_hard``,
-        has no impossible pair. A value above one is a caller's soft "keep apart"
+        254.999, rounded down. ``None`` when the matrix is not a condensed float
+        matrix, holds another value above one, or, with ``require_hard``, has no
+        impossible pair. A value above one is a caller's soft "keep apart"
         distance, which linkage honors and a one-byte code cannot carry.
     """
-    if condensed.ndim != 1 or condensed.dtype != np.float64 or not condensed.flags.c_contiguous:
+    if condensed.ndim != 1 or not np.issubdtype(condensed.dtype, np.floating):
         return None
+    condensed = np.ascontiguousarray(condensed, dtype=np.float64)
     return load_s2and_rust_extension().quantize_block_distances(
         condensed, float(LARGE_DISTANCE), num_threads, require_hard
     )
@@ -447,6 +449,35 @@ def _smallest_covers(cells: Sequence[tuple[int, int]]) -> list[tuple[tuple[int, 
 
 
 @dataclass
+class _AsideRule:
+    """Which impossible pairs between two clusters a joined-initials reading explains.
+
+    A pair is set aside when one mention is a spelled reading and the other has no reading.
+    A reading that only its own cluster spells explains a pair only when one of those
+    spellers has no impossible pair with the other mention. Otherwise the conflict is not
+    the reading's alone ("Ec" beside "Edward C." against "Edward D.").
+    """
+
+    aside: tuple[np.ndarray, np.ndarray]
+    plain: tuple[np.ndarray, np.ndarray]
+    # Per mention, an index into the agreement masks over the other side; row 0 is all True.
+    groups: tuple[np.ndarray, np.ndarray]
+    agree: tuple[np.ndarray, np.ndarray]
+
+    def explained(self, rows: np.ndarray, columns: np.ndarray) -> np.ndarray:
+        """Return the rows x columns cells the readings explain if the pair is impossible."""
+        aside_rows, aside_columns = self.aside
+        plain_rows, plain_columns = self.plain
+        row_groups, column_groups = self.groups
+        row_agree, column_agree = self.agree
+        rows_ok = row_agree[row_groups[rows]][:, columns]
+        columns_ok = column_agree[:, rows][column_groups[columns]].T
+        return (aside_rows[rows, None] & plain_columns[None, columns] & rows_ok) | (
+            plain_rows[rows, None] & aside_columns[None, columns] & columns_ok
+        )
+
+
+@dataclass
 class _PairEvidence:
     """Codes between two clusters, summed per row and per column over possible pairs."""
 
@@ -459,8 +490,7 @@ class _PairEvidence:
     row_aside: np.ndarray
     column_aside: np.ndarray
     residual: list[tuple[int, int]]
-    aside: tuple[np.ndarray, np.ndarray]
-    plain: tuple[np.ndarray, np.ndarray]
+    rule: _AsideRule
 
     @property
     def set_aside(self) -> int:
@@ -472,19 +502,17 @@ def _pair_evidence(
     codes: np.ndarray,
     block_width: int,
     sides: tuple[np.ndarray, np.ndarray],
-    aside: tuple[np.ndarray, np.ndarray],
-    plain: tuple[np.ndarray, np.ndarray],
+    rule: _AsideRule,
     close_code: int,
 ) -> _PairEvidence | None:
     """Read two clusters tile by tile; None when no small cover can explain the other conflicts.
 
-    An impossible cell is set aside when its row is a spelled reading and its column has no
-    reading, or the reverse. A cover of at most two rows or columns holds at most two full
-    lines, so more remaining cells than that ends the read early and bounds the memory.
+    ``rule`` says which impossible cells a reading explains; those are set aside. A cover of
+    at most two rows or columns holds at most two full lines, so more remaining cells than
+    that ends the read early and bounds the memory.
     """
     side_a, side_b = sides
-    aside_rows, aside_columns = aside
-    plain_rows, plain_columns = plain
+    all_columns = np.arange(len(side_b))
     limit = MAX_ODD_MENTIONS * max(len(side_a), len(side_b))
     evidence = _PairEvidence(
         *(np.zeros(len(side_a), dtype=np.int64) for _ in range(3)),
@@ -492,8 +520,7 @@ def _pair_evidence(
         row_aside=np.zeros(len(side_a), dtype=np.int64),
         column_aside=np.zeros(len(side_b), dtype=np.int64),
         residual=[],
-        aside=aside,
-        plain=plain,
+        rule=rule,
     )
     for start, tile in _tiles(codes, block_width, side_a, side_b):
         stop = start + len(tile)
@@ -507,10 +534,7 @@ def _pair_evidence(
         evidence.column_sum += values.sum(axis=0)
         evidence.column_count += possible.sum(axis=0)
         evidence.column_close += close.sum(axis=0)
-        set_aside = impossible & (
-            (aside_rows[start:stop, None] & plain_columns[None, :])
-            | (plain_rows[start:stop, None] & aside_columns[None, :])
-        )
+        set_aside = impossible & rule.explained(np.arange(start, stop), all_columns)
         evidence.row_aside[start:stop] = set_aside.sum(axis=1)
         evidence.column_aside += set_aside.sum(axis=0)
         rows, columns = np.nonzero(impossible & ~set_aside)
@@ -552,15 +576,7 @@ def _reading_merge_bound(
             count += int(np.count_nonzero(possible))
             close_count += int(np.count_nonzero(possible & (cross <= close_code))) if close_code >= 0 else 0
             columns = np.asarray(odd_columns)
-            aside += int(
-                np.count_nonzero(
-                    ~possible
-                    & (
-                        (evidence.aside[0][row] & evidence.plain[1][columns])
-                        | (evidence.plain[0][row] & evidence.aside[1][columns])
-                    )
-                )
-            )
+            aside += int(np.count_nonzero(~possible & evidence.rule.explained(np.asarray([row]), columns)[0]))
     # A set-aside pair has no model distance. It counts as the farthest possible pair, so the
     # merge holds even if every such pair is far apart, and a few spellers cannot carry two
     # clusters whose pairs are mostly set aside.
@@ -654,9 +670,10 @@ def _reading_round(
         )
         # Whether some own-cluster speller agrees with a mention, read once per mention and cluster.
         # Reading the spellers per reading mention costs readings x spellers x block width.
-        checked: dict[int, np.ndarray] = {}
-        agreed: dict[int, np.ndarray] = {}
-        for mention in mentions:
+        # Mentions go cluster by cluster, so only one cluster's masks are held at a time.
+        checked = agreed = np.zeros(0, dtype=bool)
+        current = -1
+        for mention in sorted(mentions, key=lambda m: (int(inverse[m]), m)):
             own = int(inverse[mention])
             others = targets[inverse[targets] != own]
             if len(others):
@@ -664,21 +681,22 @@ def _reading_round(
                 pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[partners]).tolist())
             if own not in spelling_clusters[value]:
                 continue
-            if own not in checked:
-                checked[own] = np.zeros(width, dtype=bool)
-                agreed[own] = np.zeros(width, dtype=bool)
+            if own != current:
+                current = own
+                checked = np.zeros(width, dtype=bool)
+                agreed = np.zeros(width, dtype=bool)
             outside = everyone[inverse != own]
             vetoed = outside[_codes_against(codes, width, mention, outside) == 255]
-            unread = vetoed[~checked[own][vetoed]]
-            checked[own][unread] = True
+            unread = vetoed[~checked[vetoed]]
+            checked[unread] = True
             # Each speller reads only the mentions no earlier speller agreed with.
             for speller in speller_positions[inverse[speller_positions] == own].tolist():
                 if not len(unread):
                     break
                 agrees = _codes_against(codes, width, speller, unread) != 255
-                agreed[own][unread[agrees]] = True
+                agreed[unread[agrees]] = True
                 unread = unread[~agrees]
-            joinable = vetoed[agreed[own][vetoed]]
+            joinable = vetoed[agreed[vetoed]]
             pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[joinable]).tolist())
     if not pairs:
         return labels
@@ -694,6 +712,31 @@ def _reading_round(
             count=len(side),
         )
 
+    def own_agreement(side: np.ndarray, other: np.ndarray, own: int, partner: int) -> tuple[np.ndarray, np.ndarray]:
+        # For reading mentions only their own cluster spells: which other-side mentions an
+        # own-cluster speller of that reading has no impossible pair with.
+        groups = np.zeros(len(side), dtype=np.int64)
+        masks = [np.ones(len(other), dtype=bool)]
+        group_of: dict[str, int] = {}
+        for i, m in enumerate(side.tolist()):
+            if not is_reading[m]:
+                continue
+            value = readings[block_signatures[m]]
+            if partner in spelling_clusters[value] or own not in spelling_clusters[value]:
+                continue
+            if value not in group_of:
+                own_spellers = np.asarray(
+                    [position[s] for s in spellers[value] if s in position and inverse[position[s]] == own],
+                    dtype=np.int64,
+                )
+                agrees = np.zeros(len(other), dtype=bool)
+                for _, tile in _tiles(codes, width, own_spellers, other):
+                    agrees |= (tile != 255).any(axis=0)
+                group_of[value] = len(masks)
+                masks.append(agrees)
+            groups[i] = group_of[value]
+        return groups, np.stack(masks)
+
     close_code = repair_close_code(repair)
     accepted: list[tuple[float, int, int, tuple[int, ...]]] = []
     for a, b in sorted(pairs):
@@ -703,14 +746,15 @@ def _reading_round(
         # The cheap guards first; the name-rule test reads every impossible pair, so it runs last.
         if not _passes_merge_guards(all_a, all_b, tuple, block_signatures, repair, forbidden, seed_groups):
             continue
-        evidence = _pair_evidence(
-            codes,
-            width,
-            sides,
-            (spelled_by(sides[0], (a, b)), spelled_by(sides[1], (a, b))),
-            (~is_reading[sides[0]], ~is_reading[sides[1]]),
-            close_code,
+        row_groups, row_agree = own_agreement(sides[0], sides[1], a, b)
+        column_groups, column_agree = own_agreement(sides[1], sides[0], b, a)
+        rule = _AsideRule(
+            aside=(spelled_by(sides[0], (a, b)), spelled_by(sides[1], (a, b))),
+            plain=(~is_reading[sides[0]], ~is_reading[sides[1]]),
+            groups=(row_groups, column_groups),
+            agree=(row_agree, column_agree),
         )
+        evidence = _pair_evidence(codes, width, sides, rule, close_code)
         if evidence is None or evidence.set_aside == 0:
             continue
         found = None

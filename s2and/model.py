@@ -1043,7 +1043,7 @@ def _validate_python_seed_separations(
         validate_seed_group_separations(
             cluster_seeds_require,
             partial_supervision,
-            {signature for signatures in block_dict.values() for signature in signatures},
+            {signature: key for key, signatures in block_dict.items() for signature in signatures},
         )
 
 
@@ -3445,7 +3445,7 @@ class Clusterer:
             validate_seed_group_separations(
                 cluster_seeds_require,
                 partial_supervision,
-                {str(signature) for signatures in block_dict.values() for signature in signatures},
+                {str(signature): key for key, signatures in block_dict.items() for signature in signatures},
             )
         return Clusterer._predict_from_rust_featurizer(
             self,
@@ -4343,7 +4343,7 @@ class Clusterer:
             validate_seed_group_separations(
                 _normalize_cluster_seeds_require(cluster_seeds_require),
                 partial_supervision,
-                {signature for signatures in block_dict.values() for signature in signatures},
+                {signature: key for key, signatures in block_dict.items() for signature in signatures},
             )
         exclusions = normalize_profile_exclusions(profile_exclusions)
         prediction_state: PredictionState | None = None

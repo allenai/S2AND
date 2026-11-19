@@ -439,6 +439,15 @@ def test_quantize_without_require_hard_returns_codes_without_impossible_pairs() 
     assert codes.tolist() == [0, 127, 254]
 
 
+def test_quantize_reads_float32_and_strided_matrices_as_float64() -> None:
+    # Linkage accepts these layouts, so the repair and the year-gap split must see them too.
+    condensed = np.array([0.0, 0.5, 1.0, LARGE_DISTANCE])
+    for layout in (condensed.astype(np.float32), np.repeat(condensed, 2)[::2]):
+        codes = quantize_distances(layout)
+        assert codes is not None
+        assert codes.tolist() == [0, 127, 254, 255]
+
+
 @pytest.mark.parametrize("require_hard", [True, False])
 @pytest.mark.parametrize("other", [1.0001, 5.0, 10 * LARGE_DISTANCE, np.nan, np.inf])
 def test_quantize_returns_none_for_a_value_that_is_neither_model_nor_impossible(
@@ -1230,3 +1239,25 @@ def test_reading_step_skips_a_partner_every_own_cluster_speller_conflicts_with()
     for j in B:
         square[0, j] = square[j, 0] = LARGE_DISTANCE
     assert _repair(square, _reading_repair(frozenset({"a0"})), cut_height=0.5) == _labels(square)
+
+
+def test_reading_step_keeps_conflicts_the_own_cluster_speller_shares() -> None:
+    # a4 and a5 read "Jec" and only a0 spells it ("Ec" beside "Edward C."). b0 and b1 are bare
+    # names a0 agrees with; b2..b4 are "Edward D.", which a0 and the readings conflict with.
+    # Those conflicts are not the readings' alone. Leaving out a0 would explain the rest only
+    # if they were set aside, and no cover of two mentions explains them all.
+    square = _square(cross=0.1)
+    for i in (0, 4):
+        for j in B if i == 4 else B[2:]:
+            square[i, j] = square[j, i] = LARGE_DISTANCE
+    for j in B[2:]:
+        square[ODD, j] = square[j, ODD] = LARGE_DISTANCE
+    repair = NameConflictRepair(0.5, FULL, joined_readings={"a4": "Jec", "a5": "Jec"}, reading_spellers={"Jec": {"a0"}})
+    assert _repair(square, repair, cut_height=0.5) == _labels(square)
+    # With b2..b4 bare names too, the readings are a4 and a5's only veto, and the clusters join.
+    for j in B[2:]:
+        square[0, j] = square[j, 0] = 0.1
+    assert _partition(_repair(square, repair, cut_height=0.5)) == {
+        frozenset(SIGNATURES[:11]),
+        frozenset(SIGNATURES[11:]),
+    }

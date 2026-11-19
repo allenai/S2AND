@@ -261,3 +261,26 @@ def test_mean_cross_code_reads_in_batches(monkeypatch: pytest.MonkeyPatch) -> No
     expected = float(year_gap_split._cross_codes(codes, 13, rows, cols).mean())
     monkeypatch.setattr(year_gap_split, "_BATCH_CELLS", 9)
     assert year_gap_split._mean_cross_code(codes, 13, rows, cols) == expected
+
+
+def test_block_clustering_splits_a_block_under_the_repair_size() -> None:
+    # Five mentions: too few for the repair, enough for the split.
+    dataset = _dataset([("Ada", "", "Smith")] * 5, {})
+    for index, year in enumerate([1928, 1930, 2001, 2010, 2020]):
+        paper_id = str(100 + index)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
+    ids = [str(i) for i in range(5)]
+    model = _model(8.0)
+    repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    square = np.full((5, 5), 0.25)
+    np.fill_diagonal(square, 0.0)
+    labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, name_conflict_repair=repair)
+    labels = np.asarray(labels).tolist()
+    assert labels[0] == labels[1] != labels[2] == labels[3] == labels[4]
+
+
+def test_short_spans_skip_the_split() -> None:
+    years = {"a": 2010 - YEAR_DIFF_CAP - 1, "b": 2010}
+    assert model_module._spans_a_year_gap(["a", "b"], years, 11)
+    assert not model_module._spans_a_year_gap(["a", "b"], {"a": 2010 - YEAR_DIFF_CAP, "b": 2010}, 11)
+    assert not model_module._spans_a_year_gap(["a", "b"], years, None)

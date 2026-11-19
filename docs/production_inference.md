@@ -411,7 +411,8 @@ that share an ORCID or seed group move as one group. A group follows the part th
 ORCID or seed group, else the part with the lowest average distance; a group that shares one
 with two parts keeps them together. The split only separates, so no other cluster changes.
 It runs on the repair's distance copy, so it needs a cluster model with a close-pair bonus,
-skips blocks under 11 mentions, and is off when `name_conflict_repair_max_distance` is `None`.
+runs on blocks of any size from two mentions whose dated mentions span more than 50 years,
+and is off when `name_conflict_repair_max_distance` is `None`.
 It also runs on blocks without a name conflict, where no repair applies, and with
 `name_conflict_repair_uses_close_pair_bonus = False`. A request with
 `incremental_dont_use_cluster_seeds=True`, such as the altered-profile pre-split, may split a

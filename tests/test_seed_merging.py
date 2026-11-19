@@ -309,6 +309,9 @@ def test_predict_eps_grid_matches_predict_at_each_eps(draw: int, close_pair: tup
         cluster_model=FastCluster(linkage="average", close_pair_bonus=close_pair[0], close_pair_distance=close_pair[1]),
         n_jobs=1,
     )
+    # predict(..., dists=...) skips the repair and the year-gap split; the grid runs both, and
+    # the split now reaches the six-mention block.
+    clusterer.year_gap_split = False
     grid = [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 1.0]
 
     signatures, ids_by_eps = clusterer.predict_eps_grid(blocks, dataset, dists, grid)

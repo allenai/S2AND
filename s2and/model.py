@@ -27,6 +27,7 @@ from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
     LARGE_DISTANCE,
     LARGE_INTEGER,
+    YEAR_DIFF_CAP,
 )
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_port import (
@@ -749,11 +750,26 @@ def _profile_exclusion_kwargs(prediction_state: PredictionState | None) -> dict[
 
 
 def _wants_name_conflict_repair(clusterer: Any, block_dict: Mapping[str, Sequence[str]]) -> float | None:
-    """Return the clusterer's repair distance when a block is large enough to repair."""
+    """Return the clusterer's repair distance when a block is large enough to repair or to split.
+
+    The year-gap split reads the repair's facts and runs on blocks of any size from two mentions.
+    """
     max_average_distance = getattr(clusterer, "name_conflict_repair_max_distance", None)
-    if max_average_distance is None or all(len(members) < MIN_BLOCK_SIZE for members in block_dict.values()):
+    smallest = 2 if _wants_year_gap_split(clusterer) else MIN_BLOCK_SIZE
+    if max_average_distance is None or all(len(members) < smallest for members in block_dict.values()):
         return None
     return float(max_average_distance)
+
+
+def _spans_a_year_gap(block_signatures: Sequence[str], years: Mapping[str, int], close_code: int | None) -> bool:
+    """Return whether a block's dated mentions span more than ``YEAR_DIFF_CAP`` years with the split on.
+
+    A shorter span has no empty stretch to cut, so the block skips the split and its code copy.
+    """
+    if close_code is None or not years:
+        return False
+    dated = [years[s] for s in block_signatures if s in years]
+    return len(dated) >= 2 and max(dated) - min(dated) > YEAR_DIFF_CAP
 
 
 # A name-rule conflict gets this value in the repair's own constraint calls. An explicit seed
@@ -5051,9 +5067,13 @@ class Clusterer:
         # next block's scoring, which measured 270 times slower on a giant block.
         # The year-gap split also reads blocks without an impossible pair.
         year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else None
+        repairable = name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
+        splittable = name_conflict_repair is not None and _spans_a_year_gap(
+            block_signatures, name_conflict_repair.years, year_gap_close_code
+        )
         repair_codes = (
-            quantize_distances(dist_matrix, num_threads=1, require_hard=year_gap_close_code is None)
-            if name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
+            quantize_distances(dist_matrix, num_threads=1, require_hard=not splittable)
+            if repairable or splittable
             else None
         )
 
@@ -5074,7 +5094,7 @@ class Clusterer:
         if repair_codes is None or name_conflict_repair is None:
             return labels
         # Without an impossible pair no repair applies; only the year-gap split reads the codes.
-        if _has_impossible_pair(repair_codes):
+        if repairable and _has_impossible_pair(repair_codes):
             forbidden: Mapping[str, Set[str]] = disallow_adjacency
             if block_exclusions:
                 # A repair may not bring an excluded mention back to its anchor.
@@ -5094,6 +5114,8 @@ class Clusterer:
                 block_key=block_key,
                 cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
             )
+        if not splittable:
+            return cast("np.ndarray | list[int]", labels)
         # A split never separates a required seed group, so it reads every seed in sight,
         # unless the caller turned seeds off, as the altered-profile pre-split does.
         split_seed_groups = (
@@ -5285,16 +5307,20 @@ class Clusterer:
             linkage_matrix = np.ascontiguousarray(cluster_model.linkage_matrix(block_distances), dtype=np.float64)
             block_width = len(block_signatures)
             # The matrix is preserved, so one copy of its codes serves the repair at every EPS.
+            repairable = name_conflict_repair is not None and block_width >= MIN_BLOCK_SIZE
+            splittable = name_conflict_repair is not None and _spans_a_year_gap(
+                block_signatures, name_conflict_repair.years, year_gap_close_code
+            )
             repair_codes = (
                 quantize_distances(
                     np.asarray(block_distances),
                     num_threads=resolve_n_jobs(self.n_jobs),
-                    require_hard=year_gap_close_code is None,
+                    require_hard=not splittable,
                 )
-                if name_conflict_repair is not None and block_width >= MIN_BLOCK_SIZE
+                if repairable or splittable
                 else None
             )
-            has_impossible_pair = repair_codes is not None and _has_impossible_pair(repair_codes)
+            has_impossible_pair = repairable and repair_codes is not None and _has_impossible_pair(repair_codes)
             del block_distances
             for eps_index, (eps, ids) in enumerate(ids_by_eps.items()):
                 if eps_index == 0 or cluster_dist is None:
@@ -5320,7 +5346,7 @@ class Clusterer:
                         block_key=block_key,
                         cut_height=float(eps) if self.cluster_model.linkage == "average" else None,
                     )
-                if repair_codes is not None and name_conflict_repair is not None:
+                if splittable and repair_codes is not None and name_conflict_repair is not None:
                     labels = _split_year_gaps(
                         block_signatures,
                         labels,

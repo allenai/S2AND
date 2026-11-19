@@ -8,18 +8,20 @@
   right, against 16 of 26 through other years before 1801. About 2,900 production profiles had a gap
   only through them. Many 1800 papers are real, so a mention stamped 1601 or 1800 first follows the one
   part of its cluster whose dated years span the stamp, else the closest part as before. The EPS
-  distance-policy version is now 9.
+  distance-policy version is now 10.
 - When the surname block has under 11 mentions, keep two parts of a cluster together when they
   share a first name (the first word of the full first name); an undated mention with that name
-  follows them too. There the surname is rare, so a shared first name almost always means one person.
+  follows them too. There the surname is rare, so a shared first name usually means one person.
   Judges found 9 of 28 decided small-block cuts right, against 37 of 38 in large blocks, where a first
   name is too common to bridge a gap. The block size is counted in the request's dataset, so a claimed
   profile in the altered-profile pre-split, an incremental residual or a subblock of a large block
-  does not count as a small block. On 480 small production blocks,
-  most sampled for a gap of over 50 years, the two changes rejoined 63 cuts and changed nothing else.
-  Earlier blind judging had called 38 of those cuts wrong, 19 right and 6 undecided. On 128 large
-  production blocks (968,353 mentions) and on 68 edited profiles run as the altered-profile
-  pre-split runs them, they changed nothing.
+  does not count as a small block. A request can hold only part of a block, as Scholar's reclustering
+  of excluded mentions does, so the bridge also needs the name's last-name-and-first-initial count
+  (from the name-count index, not the request) under 11. A few true small blocks have higher counts
+  and lose the bridge. On 480 small production blocks, most sampled for a gap of over 50 years, the two changes rejoined 59 cuts and changed nothing else.
+  Earlier blind judging had called 37 of those cuts wrong, 17 right and 5 undecided. On 128 large
+  production blocks (968,353 mentions) and on 68 edited profiles, run both with their real block size
+  and alone as a partial request, they changed nothing.
 - Fix the year-gap split. It now also runs on blocks of 11 or more mentions without a name
   conflict, which it skipped, and with `name_conflict_repair_uses_close_pair_bonus = False`, which
   turned it off. Undated mentions that share an ORCID or a required seed group now move as one

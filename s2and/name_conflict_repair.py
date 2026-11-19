@@ -242,7 +242,8 @@ class NameConflictRepair:
             (``s2and.year_gap_split``) reads it after the repair.
         first_names: First word of the normalized first name per signature id, for words of
             two or more characters, and only for signatures whose surname block has under
-            ``MIN_BLOCK_SIZE`` mentions. The year-gap split bridges parts that share one.
+            ``MIN_BLOCK_SIZE`` mentions and whose name count does not mark a common surname.
+            The year-gap split bridges parts that share one.
     """
 
     max_average_distance: float
@@ -324,7 +325,8 @@ def quantize_distances(
         impossible pair. A value above one is a caller's soft "keep apart"
         distance, which linkage honors and a one-byte code cannot carry.
     """
-    if condensed.ndim != 1 or not np.issubdtype(condensed.dtype, np.floating):
+    numeric = np.issubdtype(condensed.dtype, np.floating) or np.issubdtype(condensed.dtype, np.integer)
+    if condensed.ndim != 1 or not numeric:
         return None
     condensed = np.ascontiguousarray(condensed, dtype=np.float64)
     return load_s2and_rust_extension().quantize_block_distances(

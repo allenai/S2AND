@@ -10,7 +10,7 @@ Two parts across a cut stay together when the model is certain of some pair betw
 A reprint or a re-dated record usually has such a pair: the same title and coauthors. When
 the surname block has under 11 mentions (``s2and.name_conflict_repair.MIN_BLOCK_SIZE``), two
 parts that share the first word of a full first name also stay together: there the surname is
-rare, so a shared first name almost always means one person. Judges found 9 of 28 decided such
+rare, so a shared first name usually means one person. Judges found 9 of 28 decided such
 cuts right in small blocks, against 37 of 38 in large blocks. The caller decides which
 signatures sit in a small surname block; a claimed profile or a subblock of a large block does not.
 
@@ -258,6 +258,8 @@ def split_year_gaps(
         clusters.setdefault(int(label), []).append(position)
     new_labels: np.ndarray | None = None
     next_label = max(clusters, default=-1) + 1
+    # Read only this block's years: a multi-block request holds every block's years.
+    years = {s: years[s] for s in block_signatures if s in years}
     stamps = {signature_id: year for signature_id, year in years.items() if year in PLACEHOLDER_YEARS}
     years = split_years(years)
     for members in clusters.values():

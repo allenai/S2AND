@@ -768,8 +768,9 @@ def _spans_a_year_gap(block_signatures: Sequence[str], years: Mapping[str, int],
     """
     if close_code is None or not years:
         return False
-    dating = split_years(years)
-    dated = [dating[s] for s in block_signatures if s in dating]
+    # Read only this block's years: a multi-block request holds every block's years.
+    dating = split_years({s: years[s] for s in block_signatures if s in years})
+    dated = list(dating.values())
     return len(dated) >= 2 and max(dated) - min(dated) > YEAR_DIFF_CAP
 
 
@@ -942,6 +943,17 @@ def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
     return settings
 
 
+def _common_surname(count: float | None) -> bool:
+    """Return whether a last-name-and-first-initial name count marks the name as not rare.
+
+    The counts come from the name-count index, not the request, so they catch a request that
+    holds only part of a large block, such as Scholar's reclustering of excluded mentions. A
+    count of ``MIN_BLOCK_SIZE`` or more rules out the first-name bridge; a few true small blocks
+    have such counts and lose it. A missing count rules out nothing.
+    """
+    return count is not None and not math.isnan(count) and count >= MIN_BLOCK_SIZE
+
+
 def _request_small_block_signatures(block_dict: Mapping[str, Sequence[str]]) -> frozenset[str]:
     """Return the signatures of request blocks under ``MIN_BLOCK_SIZE``, for callers that pass whole blocks."""
     return frozenset(str(s) for members in block_dict.values() if len(members) < MIN_BLOCK_SIZE for s in members)
@@ -1058,7 +1070,13 @@ def _name_conflict_repair_from_rust_featurizer(
         **_reading_facts(*featurizer.joined_reading_facts()),
         years=dict(featurizer.signature_years()) if wants_years else {},
         first_names=(
-            {s: name for s, name in featurizer.signature_first_names() if s in small} if wants_years and small else {}
+            {
+                s: name
+                for s, name, count in featurizer.signature_first_names()
+                if s in small and not _common_surname(count)
+            }
+            if wants_years and small
+            else {}
         ),
     )
 
@@ -1098,7 +1116,9 @@ def _name_conflict_repair_from_dataset(
             if has_full_first_name(first):
                 full_first_names.add(signature_id)
             first_word = (first or "").split(maxsplit=1)[:1]
-            if wants_years and signature_id in small and first_word and len(first_word[0]) > 1:
+            counts = getattr(signature, "author_info_name_counts", None)
+            common = _common_surname(counts.last_first_initial if counts is not None else None)
+            if wants_years and signature_id in small and not common and first_word and len(first_word[0]) > 1:
                 first_names[signature_id] = first_word[0]
             orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
             if orcid is not None:

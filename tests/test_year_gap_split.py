@@ -12,7 +12,7 @@ from scipy.spatial.distance import squareform
 import s2and.model as model_module
 from s2and import year_gap_split
 from s2and.consts import YEAR_DIFF_CAP
-from s2and.data import ANDData
+from s2and.data import ANDData, NameCounts
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
@@ -344,13 +344,20 @@ def test_mean_cross_code_reads_in_batches(monkeypatch: pytest.MonkeyPatch) -> No
     assert year_gap_split._mean_cross_code(codes, 13, rows, cols) == expected
 
 
-def _small_block_labels(old_first: str, years: list[int], other_smiths: int = 0) -> list[int]:
+def _small_block_labels(
+    old_first: str, years: list[int], other_smiths: int = 0, name_count: float | None = None
+) -> list[int]:
     """Cluster five Smith mentions, two old ones named ``old_first`` and three "Ada", with ``years``.
 
     ``other_smiths`` more Smith mentions sit in the dataset but not in the clustered block.
+    ``name_count`` is every mention's last-name-and-first-initial name count.
     """
     names = [(old_first, "", "Smith")] * 2 + [("Ada", "", "Smith")] * 3 + [("Bo", "", "Smith")] * other_smiths
     dataset = _dataset(names, {})
+    if name_count is not None:
+        counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=name_count)
+        for signature_id, signature in dataset.signatures.items():
+            dataset.signatures[signature_id] = signature._replace(author_info_name_counts=counts)
     for index, year in enumerate(years):
         paper_id = str(100 + index)
         dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
@@ -371,6 +378,12 @@ def test_block_clustering_splits_a_block_under_the_repair_size() -> None:
 
 def test_small_block_keeps_parts_that_share_a_first_name() -> None:
     assert len(set(_small_block_labels("Ada", [1928, 1930, 2001, 2010, 2020]))) == 1
+
+
+@pytest.mark.parametrize(("name_count", "parts"), [(2194.0, 2), (3.0, 1), (float("nan"), 1)])
+def test_a_common_name_count_rules_out_the_bridge(name_count: float, parts: int) -> None:
+    # Scholar reclusters excluded mentions alone, so the request may hold only part of the block.
+    assert len(set(_small_block_labels("Ada", [1928, 1930, 2001, 2010, 2020], name_count=name_count))) == parts
 
 
 def test_a_small_part_of_a_large_surname_block_splits_parts_that_share_a_first_name() -> None:

@@ -412,10 +412,13 @@ so a long career has no such stretch. Two parts across a cut stay together when 
 between them is certainly under the close-pair distance, as a reprint with the same title and
 coauthors usually is, or when they share an ORCID or a required seed group. When the surname
 block has under 11 mentions they also stay together when they share the first word of a full
-first name, since a shared first name under a rare surname almost always means one person. The
+first name, since a shared first name under a rare surname usually means one person. The
 block size is counted in the request's dataset (`author_block` on the Arrow route,
 `author_info_block` on the Python route), so a claimed profile, an incremental residual or a
-subblock of a large block is not a small block. The split treats the years 1601 and 1800 as
+subblock of a large block is not a small block. A last-name-and-first-initial name count of
+11 or more in the name-count index also rules the bridge out, for requests that hold only part
+of a block. The split
+treats the years 1601 and 1800 as
 undated: the corpus gives them to papers whose real year it does not know. Undated mentions
 that share an ORCID, a seed group or such a first name move as one group. A group follows the
 part that shares one with it. Otherwise a group stamped 1601 or 1800 follows the one part whose

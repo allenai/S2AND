@@ -448,6 +448,12 @@ def test_quantize_reads_float32_and_strided_matrices_as_float64() -> None:
         assert codes.tolist() == [0, 127, 254, 255]
 
 
+def test_quantize_reads_integer_distances() -> None:
+    codes = quantize_distances(np.array([0, 1, int(LARGE_DISTANCE)], dtype=np.int64))
+    assert codes is not None
+    assert codes.tolist() == [0, 254, 255]
+
+
 @pytest.mark.parametrize("require_hard", [True, False])
 @pytest.mark.parametrize("other", [1.0001, 5.0, 10 * LARGE_DISTANCE, np.nan, np.inf])
 def test_quantize_returns_none_for_a_value_that_is_neither_model_nor_impossible(

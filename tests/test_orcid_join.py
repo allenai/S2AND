@@ -153,3 +153,72 @@ def test_same_orcid_mentions_of_one_block_end_in_one_cluster() -> None:
     clusters, _ = model.predict({"block": list(dataset.signatures)}, dataset)
     holding = [members for members in clusters.values() if {"0", "1", "3", "4"} & set(members)]
     assert len(holding) == 1 and {"0", "1", "3", "4"} <= set(holding[0])
+
+
+def _join(clusters, orcids, names, subblocks=None, single_letter=frozenset()):
+    from s2and.orcid_join import join_orcids_across_subblocks
+
+    return join_orcids_across_subblocks(
+        clusters,
+        orcids,
+        dict.fromkeys(orcids, "original"),
+        subblocks or {sid: sid[0] for sid in orcids},
+        lambda signature_ids: [names[sid] for sid in signature_ids],
+        forbidden={},
+        seed_groups=None,
+        single_letter_subblocks=single_letter,
+    )
+
+
+@pytest.mark.parametrize(("anchors", "joined"), [(2, False), (3, True)])
+def test_cross_subblock_join_takes_an_initial_only_cluster_with_enough_orcid_coverage(
+    anchors: int, joined: bool
+) -> None:
+    # "A. M." holds no full first name; 3 of 14 mentions carry the ORCID (21%), 2 of 14 do not (14%).
+    clusters = {"full": [f"f{i}" for i in range(20)], "initials": [f"i{i}" for i in range(14)]}
+    orcids = {**dict.fromkeys(("f0", "f1"), ORCID), **dict.fromkeys([f"i{i}" for i in range(anchors)], ORCID)}
+    names = {**dict.fromkeys(clusters["full"], ("ahsan", "mehmood")), **dict.fromkeys(clusters["initials"], ("a", "m"))}
+    assert (len(_join(clusters, orcids, names)) == 1) == joined
+
+
+def test_cross_subblock_join_measures_first_name_dominance_among_full_names_only() -> None:
+    # Half the big cluster is initials only; its full names are all "ahsan", so it still qualifies.
+    clusters = {"big": [f"b{i}" for i in range(20)], "small": ["s0", "s1", "s2"]}
+    orcids = dict.fromkeys(("b0", "b1", "s0", "s1"), ORCID)
+    names = {
+        **{f"b{i}": (("ahsan", "") if i < 10 else ("a", "")) for i in range(20)},
+        **dict.fromkeys(clusters["small"], ("ahsan", "")),
+    }
+    assert len(_join(clusters, orcids, names)) == 1
+
+
+def test_cross_subblock_join_leaves_initial_only_clusters_when_two_full_names_share_the_orcid() -> None:
+    clusters = {"ana": ["a0", "a1", "a2"], "anna": ["n0", "n1", "n2"], "initials": ["i0", "i1", "i2"]}
+    orcids = dict.fromkeys(("a0", "a1", "n0", "n1", "i0", "i1"), ORCID)
+    names = {
+        **dict.fromkeys(clusters["ana"], ("ana", "")),
+        **dict.fromkeys(clusters["anna"], ("anna", "")),
+        **dict.fromkeys(clusters["initials"], ("a", "")),
+    }
+    joined = _join(clusters, orcids, names, subblocks={sid: sid[0] for sid in orcids})
+    assert {frozenset(members) for members in joined.values()} >= {frozenset(clusters["initials"])}
+
+
+def test_cross_subblock_join_ignores_a_stray_conflicting_form_but_not_a_supported_one() -> None:
+    clusters = {"ana": [f"a{i}" for i in range(10)], "anac": ["c0", "c1", "c2"]}
+    orcids = dict.fromkeys(("a0", "a1", "c0", "c1"), ORCID)
+    names = {**dict.fromkeys(clusters["ana"], ("ana", "")), **dict.fromkeys(clusters["anac"], ("ana", "c"))}
+    names["a9"] = ("ana", "maria")  # one stray mention of ten
+    assert len(_join(clusters, orcids, names)) == 1
+    names.update(dict.fromkeys(("a7", "a8"), ("ana", "maria")))  # now 30% of the cluster
+    assert len(_join(clusters, orcids, names)) == 2
+
+
+def test_cross_subblock_join_does_not_count_the_single_letter_subblock_as_shared() -> None:
+    clusters = {"full": ["f0", "f1", "f2"], "initials": ["i0", "i1", "i2"]}
+    orcids = dict.fromkeys(("f0", "f1", "i0", "i1"), ORCID)
+    names = {**dict.fromkeys(clusters["full"], ("ana", "")), **dict.fromkeys(clusters["initials"], ("a", ""))}
+    # Both clusters hold anchors from the single-letter subblock "a".
+    subblocks = {"f0": "ana", "f1": "a", "i0": "a", "i1": "a"}
+    assert len(_join(clusters, orcids, names, subblocks)) == 2
+    assert len(_join(clusters, orcids, names, subblocks, single_letter=frozenset({"a"}))) == 1

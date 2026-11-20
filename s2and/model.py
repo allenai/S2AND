@@ -733,6 +733,7 @@ def _join_arrow_subblock_clusters(
     profile_exclusions: Mapping[str, Set[str]],
     seed_groups: Mapping[str, object] | None,
     name_tuples: Set[tuple[str, str]] = frozenset(),
+    single_letter_subblocks: Set[str] = frozenset(),
 ) -> dict[str, list[str]]:
     """Load ORCID anchors from oversized blocks and join with original-block scope."""
     rows = arrow_dataset.native.signature_orcids(
@@ -761,6 +762,7 @@ def _join_arrow_subblock_clusters(
         forbidden=forbidden,
         seed_groups=seed_groups,
         name_tuples=name_tuples,
+        single_letter_subblocks=single_letter_subblocks,
     )
 
 
@@ -4012,6 +4014,7 @@ class Clusterer:
                     profile_exclusions=prediction_state.profile_exclusions,
                     seed_groups=prediction_cluster_seeds_require if self.dont_merge_cluster_seeds else None,
                     name_tuples=prediction_name_tuples,
+                    single_letter_subblocks=frozenset(block_dict_single_letter),
                 )
             result = dict(pred_clusters), None
         else:

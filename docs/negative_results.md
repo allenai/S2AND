@@ -67,8 +67,12 @@ The one change that did help is the [close-pair bonus](eps_calibration.md#close-
 The archived ORCID join experiment gained +0.60 points on hidden-ORCID signatures.
 The [guarded bulk join](production_inference.md#orcid-joins) ships with `1.0.0b14`.
 With the 1.3.2 bundle, a half-ORCID holdout across four full giants and three samples
-scored 10,788 mentions. One join in `a_silva` left precision unchanged and added 0.0144
-points of recall and 0.0077 points of F1.
+scored 10,788 mentions. The first guard made one join in `a_silva`: precision unchanged,
+recall +0.0144 points, F1 +0.0077. Measuring first-name dominance among full-name mentions only,
+admitting initial-only clusters with 20% ORCID coverage, and ignoring the single-letter subblock
+as a shared source raised that to three joins and F1 +0.0927 (precision −0.00006 points). A second
+mask seed scored 10,840 mentions: two joins, F1 +0.0665, precision unchanged. All three distinct
+joins were judged the same person.
 
 An audit with all ORCIDs visible sampled 26,000 mentions from each of the seven giants.
 Of 51,757 clusters, 16 held two ORCIDs with at least three mentions each, and four held

@@ -405,9 +405,12 @@ clustering therefore joins final clusters that separate subblocks of one origina
 support with the same leading ORCID. The ORCID must account for at least 80% of each cluster's
 observed ORCIDs, a tie does not qualify, and each cluster needs two mentions with the ORCID and
 at least 5% coverage. The same canonical full first-name word must occur in at least 80% of
-each cluster's mentions. The clusters' name forms must not break the hard name rule, so
-different full middle names or different compound first names stay apart. Joined clusters
-can exceed the subblock size limit. The join skips seed disallows, profile exclusions, and
+each cluster's full-name mentions. A cluster of initials only joins when the ORCID covers at
+least 20% of it and only one full first name holds the ORCID's other clusters. Anchors in the
+single-letter subblock, whose mentions attach one at a time, do not count as a shared subblock.
+Name forms that hold at least 20% of a cluster must not break the hard name rule against those
+of the other clusters, so different full middle names or different compound first names stay
+apart; rarer forms are strays and do not veto. Joined clusters can exceed the subblock size limit. The join skips seed disallows, profile exclusions, and
 distinct required seed groups when `dont_merge_cluster_seeds` is on.
 
 Set `Clusterer.orcid_join = False` to turn the join off. It also skips ORCID-suppressed

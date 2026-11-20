@@ -21,6 +21,10 @@
 - Join final clusters of subblocked Arrow prediction when separate subblocks of the same
   original block agree on a well-supported ORCID and a full first name, and their name forms do
   not break the hard name rule (different full middle names or compound first names stay apart).
+  A cluster of initials only, such as "A. M." beside "Ahsan Mehmood", joins when the ORCID
+  covers 20% of it. On half-ORCID holdouts of the seven giant blocks, two mask seeds, F1 rose
+  0.093 and 0.067 points (0.008 for the first version of the guard); precision moved by under
+  0.0001 points.
   The join obeys seed and exclusion constraints and skips suppressed ORCIDs. Set
   `Clusterer.orcid_join = False` to turn it off. Existing model bundles use the package default.
   No join runs inside one distance matrix: equal ORCIDs get distance 0, so linkage already

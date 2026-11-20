@@ -32,6 +32,7 @@ from s2and.block_corrections import (
     corrections_from_dataset,
     corrections_from_rust_featurizer,
     orcid_join_enabled,
+    year_gap_split_enabled,
 )
 from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
@@ -731,6 +732,7 @@ def _join_arrow_subblock_clusters(
     forbidden: dict[str, set[str]],
     profile_exclusions: Mapping[str, Set[str]],
     seed_groups: Mapping[str, object] | None,
+    name_tuples: Set[tuple[str, str]] = frozenset(),
 ) -> dict[str, list[str]]:
     """Load ORCID anchors from oversized blocks and join with original-block scope."""
     rows = arrow_dataset.native.signature_orcids(
@@ -758,6 +760,7 @@ def _join_arrow_subblock_clusters(
         partial(_load_arrow_canonical_name_parts, arrow_lease),
         forbidden=forbidden,
         seed_groups=seed_groups,
+        name_tuples=name_tuples,
     )
 
 
@@ -3804,7 +3807,8 @@ class Clusterer:
         if bulk_clusters is not None and not needs_subblocking:
             raise ValueError("bulk_clusters applies only to subblocked Arrow prediction")
         # Before subblocking: a subblock, a claimed profile or a residual is not its surname block.
-        if getattr(self, "year_gap_split", True):
+        # Only the year-gap split reads them, and it runs only with a close-pair bonus.
+        if year_gap_split_enabled(self):
             prediction_state.small_block_signatures = arrow_small_block_signatures(arrow_lease, block_dict)
 
         arrow_subblocking_seconds = 0.0
@@ -4019,6 +4023,7 @@ class Clusterer:
                     ),
                     profile_exclusions=prediction_state.profile_exclusions,
                     seed_groups=prediction_cluster_seeds_require if self.dont_merge_cluster_seeds else None,
+                    name_tuples=prediction_name_tuples,
                 )
             result = dict(pred_clusters), None
         else:
@@ -5297,7 +5302,7 @@ class Clusterer:
                 fastcluster_fused_dtype = np.float64
 
         if dists is not None:
-            # precomputed dists (hyperopt path) Ã¢â‚¬â€ cluster from existing matrices
+            # precomputed dists (hyperopt path) — cluster from existing matrices
             for block_key in block_dict.keys():
                 if block_key not in dists:
                     raise KeyError(f"Missing precomputed distance matrix for block '{block_key}'")
@@ -5499,7 +5504,7 @@ class Clusterer:
                 prediction_state=prediction_state,
             )
 
-        # handle singleton blocks (0 or 1 signature Ã¢â‚¬â€ never appeared in generator)
+        # handle singleton blocks (0 or 1 signature — never appeared in generator)
         for block_key in block_dict.keys():
             if block_key not in seen_block_keys:
                 for signature in block_dict[block_key]:

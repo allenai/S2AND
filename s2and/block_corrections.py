@@ -243,6 +243,19 @@ def _spans_a_year_gap(block_signatures: Sequence[str], years: Mapping[str, int])
     return len(dated) >= 2 and max(dated) - min(dated) > YEAR_DIFF_CAP
 
 
+def _uses_average_linkage(cluster_model: Any) -> bool:
+    """Return whether ``cluster_model`` is a FastCluster that cuts an average-linkage tree.
+
+    The ORCID join needs such a tree; the EPS that cuts it can come later, from prediction
+    parameters or from each value of an EPS grid.
+    """
+    return (
+        isinstance(cluster_model, FastCluster)
+        and not cluster_model.input_as_observation_matrix
+        and cluster_model.get_params().get("linkage") == "average"
+    )
+
+
 def average_linkage_cut(cluster_model: Any, params: Mapping[str, Any] | None) -> float | None:
     """Return the EPS cut of an average-linkage FastCluster, else None.
 
@@ -274,6 +287,11 @@ def _split_close_code(clusterer: Any) -> int | None:
     if not getattr(clusterer, "year_gap_split", True) or bonus <= 0:
         return None
     return certain_close_code(distance)
+
+
+def year_gap_split_enabled(clusterer: Any) -> bool:
+    """Return whether prediction with ``clusterer`` runs the year-gap split."""
+    return _split_close_code(clusterer) is not None
 
 
 # Clusterer attributes that tuned the repair before 1.0.0b14. The repair now uses fixed settings,
@@ -484,10 +502,7 @@ def _wanted(
     """Return the repair settings and the split's close code, or None when no block can be corrected."""
     repair = _repair_settings(clusterer)
     split = _split_close_code(clusterer)
-    join = (
-        orcid_join_enabled(clusterer)
-        and average_linkage_cut(getattr(clusterer, "cluster_model", None), None) is not None
-    )
+    join = orcid_join_enabled(clusterer) and _uses_average_linkage(getattr(clusterer, "cluster_model", None))
     largest = max(map(len, block_dict.values()), default=0)
     if largest < MIN_BLOCK_SIZE:
         repair = None
@@ -668,10 +683,7 @@ def corrections_copy_codes(clusterer: Any) -> bool:
     return (
         _repair_settings(clusterer) is not None
         or _split_close_code(clusterer) is not None
-        or (
-            orcid_join_enabled(clusterer)
-            and average_linkage_cut(getattr(clusterer, "cluster_model", None), None) is not None
-        )
+        or (orcid_join_enabled(clusterer) and _uses_average_linkage(getattr(clusterer, "cluster_model", None)))
     )
 
 

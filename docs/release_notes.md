@@ -13,6 +13,14 @@
   `predict_from_arrow` decides them before subblocking; before, a subblock under 11 mentions
   counted as a small surname block, so the year-gap split could differ from production. The EPS
   distance-policy version is now 13.
+- The ORCID join across subblocks no longer joins clusters whose name forms break the hard name
+  rule, such as different full middle names ("Ana C." and "Ana M.") or different compound first
+  names ("Jean Pierre" and "Jean Luc"). Before, it compared only the first word of each
+  cluster's dominant first name.
+- The ORCID join runs in `predict_eps_grid` for a model that sets no EPS; each grid value
+  supplies the cut, as prediction parameters do for `predict`.
+- Arrow prediction reads the small surname blocks from the signatures table only when the
+  year-gap split can run, which needs a close-pair bonus.
 - The ORCID join reads the request's disallows and the join's own disallows through one view
   instead of copying both maps for every block that has a repeated ORCID.
 

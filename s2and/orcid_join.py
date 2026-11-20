@@ -12,6 +12,7 @@ import numpy as np
 
 from s2and.name_conflict_repair import leading_orcids
 from s2and.pair_codes import HARD_CODE, SCALE, certain_close_code, code_tiles
+from s2and.text import CanonicalNameParts, canonical_names_conflict
 
 logger = logging.getLogger(__name__)
 _Label = TypeVar("_Label", int, str)
@@ -139,6 +140,30 @@ def join_orcids_in_block(
     return labels if merged is None else merged
 
 
+def _names_conflict_across(
+    groups: Sequence[str],
+    clusters: Mapping[str, Sequence[str]],
+    names: Mapping[str, tuple[str, str]],
+    name_tuples: Set[tuple[str, str]],
+) -> bool:
+    """Return whether two clusters of ``groups`` hold name forms that the hard name rule keeps apart.
+
+    Compares each distinct (first, middle) form once; the clusters share their original block.
+    """
+    forms = [{names[s] for s in clusters[label]} for label in groups]
+    for index, left_forms in enumerate(forms):
+        for right_forms in forms[index + 1 :]:
+            for first_a, middle_a in left_forms:
+                for first_b, middle_b in right_forms:
+                    if canonical_names_conflict(
+                        CanonicalNameParts(first_a, middle_a, ""),
+                        CanonicalNameParts(first_b, middle_b, ""),
+                        name_tuples,
+                    ):
+                        return True
+    return False
+
+
 def join_orcids_across_subblocks(
     clusters: dict[str, list[str]],
     orcids: Mapping[str, str],
@@ -148,11 +173,15 @@ def join_orcids_across_subblocks(
     *,
     forbidden: Mapping[str, Set[str]],
     seed_groups: Mapping[str, object] | None,
+    name_tuples: Set[tuple[str, str]] = frozenset(),
 ) -> dict[str, list[str]]:
     """Join final clusters supported by matching ORCIDs in separate subblocks.
 
     Read names only for candidates. Group by original block, ORCID and dominant full
     first name. Check the whole group at once to avoid pair scans and transitive joins.
+    A group whose name forms break the hard name rule across clusters, such as different
+    full middle names or different compound first names, is not joined: linkage would
+    never put those mentions in one cluster.
     """
     candidates: dict[tuple[str, str], list[str]] = defaultdict(list)
     anchor_subblocks: dict[str, set[str]] = {}
@@ -182,7 +211,11 @@ def join_orcids_across_subblocks(
             if len(groups) < 2:
                 continue
             sources = [source for label in groups for source in anchor_subblocks[label]]
-            if len(set(sources)) == len(sources) and _can_join(groups, clusters, forbidden, seed_groups):
+            if (
+                len(set(sources)) == len(sources)
+                and _can_join(groups, clusters, forbidden, seed_groups)
+                and not _names_conflict_across(groups, clusters, names, name_tuples)
+            ):
                 parent.update((label, groups[0]) for label in groups[1:])
                 logger.info("ORCID join across subblocks of %s merged %d clusters", origin, len(groups))
 

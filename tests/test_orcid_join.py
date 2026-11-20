@@ -256,3 +256,71 @@ def test_adjacency_union_reads_both_maps_without_copying() -> None:
     assert union.get("z", ()) == ()
     assert sorted(union) == ["a", "c", "f"] and len(union) == 3
     assert bool(_AdjacencyUnion({}, {"a": {"b"}})) and not _AdjacencyUnion({}, {})
+
+
+@pytest.mark.parametrize(
+    ("left_name", "right_name", "joined"),
+    [
+        (("ana", ""), ("ana", "c"), True),
+        (("ana", "c"), ("ana", "m"), False),
+        (("jean pierre", ""), ("jean luc", ""), False),
+    ],
+)
+def test_cross_subblock_join_refuses_clusters_the_name_rule_keeps_apart(
+    left_name: tuple[str, str], right_name: tuple[str, str], joined: bool
+) -> None:
+    from s2and.orcid_join import join_orcids_across_subblocks
+
+    clusters = {"left": ["l0", "l1", "l2"], "right": ["r0", "r1", "r2"]}
+    orcids = dict.fromkeys(("l0", "l1", "r0", "r1"), ORCID)
+    names = {
+        sid: (left_name if sid.startswith("l") else right_name) for members in clusters.values() for sid in members
+    }
+    actual = join_orcids_across_subblocks(
+        clusters,
+        orcids,
+        dict.fromkeys(orcids, "original"),
+        {sid: sid[0] for sid in orcids},
+        lambda signature_ids: [names[sid] for sid in signature_ids],
+        forbidden={},
+        seed_groups=None,
+    )
+
+    assert (len(actual) == 1) == joined
+
+
+def test_eps_grid_joins_with_a_model_that_sets_no_eps() -> None:
+    # The grid supplies each EPS, so the join must not depend on the model's own EPS.
+    dataset, supervision = _within_block(dict.fromkeys("0134", ORCID))
+    supervision[("2", "5")] = 0.19
+    ids = list(dataset.signatures)
+    dists = {"block": np.asarray([supervision.get((a, b), 0.75) for i, a in enumerate(ids) for b in ids[i + 1 :]])}
+    model = _model(0.75)
+    model.orcid_join = True
+    model.cluster_model.eps = None
+    predicted, _ = model.predict(
+        {"block": ids}, dataset, cluster_model_params={"eps": 0.5}, partial_supervision=supervision
+    )
+    _, grid = model.predict_eps_grid({"block": ids}, dataset, dists, [0.5])
+    assert len(predicted) == len(set(grid[0.5])) == 1
+
+
+@pytest.mark.parametrize(("bonus", "scans"), [(0.0, 0), (8.0, 1)])
+def test_arrow_prediction_reads_small_blocks_only_for_the_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bonus: float, scans: int
+) -> None:
+    # The year-gap split needs a close-pair bonus; without one, nothing reads the small-block set.
+    import s2and.model as model_module
+
+    dataset = _dataset([("Ada", "", "Smith")] * 4, {})
+    prepare_seed_arrow_bundle(dataset, tmp_path)
+    model = _model(0.1)
+    model.year_gap_split = True
+    model.cluster_model.close_pair_bonus = bonus
+    model.cluster_model.close_pair_distance = 0.05 if bonus else 0.0
+    calls: list[object] = []
+    original = model_module.arrow_small_block_signatures
+    monkeypatch.setattr(model_module, "arrow_small_block_signatures", lambda *a: calls.append(a) or original(*a))
+    with ArrowDataset.open(tmp_path) as arrow:
+        model.predict_from_arrow({"b": list(dataset.signatures)}, arrow, name_tuples=frozenset())
+    assert len(calls) == scans

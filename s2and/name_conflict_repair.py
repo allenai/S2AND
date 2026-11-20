@@ -222,12 +222,8 @@ def has_full_first_name(first: str | None) -> bool:
     return any(len(word) > 1 for word in (first or "").split())
 
 
-def _top_orcids(signature_ids: Sequence[str], orcids: Mapping[str, str]) -> frozenset[str]:
-    """Return every ORCID tied for the most mentions in a cluster.
-
-    Keeping all tied ORCIDs makes the repair independent of mention order.
-    """
-    counts = Counter(orcids[s] for s in signature_ids if s in orcids)
+def leading_orcids(counts: Mapping[str, int]) -> frozenset[str]:
+    """Return every ORCID tied for the most mentions in a cluster."""
     if not counts:
         return frozenset()
     most = max(counts.values())
@@ -264,8 +260,8 @@ def _passes_merge_guards(
     if repair.orcids:
         # The odd mentions stay in the merged cluster, so their ORCIDs count. Two sides
         # with ORCIDs merge only when they share a leading ORCID.
-        orcids_a = _top_orcids(all_a, repair.orcids)
-        orcids_b = _top_orcids(all_b, repair.orcids)
+        orcids_a = leading_orcids(Counter(repair.orcids[s] for s in all_a if s in repair.orcids))
+        orcids_b = leading_orcids(Counter(repair.orcids[s] for s in all_b if s in repair.orcids))
         if orcids_a and orcids_b and orcids_a.isdisjoint(orcids_b):
             return False
     if seed_groups:

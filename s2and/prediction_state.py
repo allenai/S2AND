@@ -16,6 +16,8 @@ class PredictionState:
 
     cluster_seeds_require: dict[str, int | str] = field(default_factory=dict)
     cluster_seeds_disallow: set[tuple[str, str]] = field(default_factory=set)
+    # A join honors explicit disallows even when caller distances override them.
+    orcid_join_disallows: set[tuple[str, str]] = field(default_factory=set)
     altered_cluster_signatures: list[str] = field(default_factory=list)
     # Excluded mentions per anchor; see s2and.profile_exclusions.
     profile_exclusions: dict[str, frozenset[str]] = field(default_factory=dict)

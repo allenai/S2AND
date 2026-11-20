@@ -7,7 +7,12 @@
   name-conflict repair, then the year-gap split. The repair and the split read pair codes through
   `s2and/pair_codes.py`. On 128 large and 480 small production blocks, 68 edited profiles, 257
   captured giant-block repair calls, a seeded block under 184 seed and flag combinations, and the
-  held-out benchmark, the clusters are the same as `1.0.0b13`'s.
+  held-out benchmark, this consolidation kept the `1.0.0b13` clusters.
+- Join bulk clusters on a shared leading ORCID when model distances support the join, or
+  when separate Arrow subblocks of the same original block agree on a well-supported ORCID
+  and full first name. The join obeys seed and exclusion constraints and skips suppressed
+  ORCIDs. Set `Clusterer.orcid_join = False` to turn it off. Existing model bundles use the
+  package default. The EPS distance-policy version is now 12.
 - Read the corrections' facts from the Rust featurizer for an Arrow-backed `ANDData`, as production
   does. `calibrate-eps` keeps the featurizer that built the validation distances and clusters
   through `predict_eps_grid_from_rust_featurizer`. On the 7 random-block validation populations
@@ -18,20 +23,19 @@
   instead, testing the merged pair against it as one cluster. On 128 production blocks (5
   extensions) and 7 giant blocks the final clusters are the same. The two differ on constructed
   cases: the extension could join three clusters whose leading ORCIDs only pairwise agree, or
-  whose pairs pass the close-share floor only one by one; the rounds do not. The EPS
-  distance-policy version is now 11.
+  whose pairs pass the close-share floor only one by one; the rounds do not.
 - Remove seven `Clusterer` attributes that tuned the repair: `name_conflict_repair_uses_close_pair_bonus`,
   `name_conflict_repair_requires_full_first_names`, `name_conflict_repair_rounds`,
   `name_conflict_repair_initials_side_min_mentions`, `name_conflict_repair_bonus_min_close_share`,
   `name_conflict_repair_bonus_max_plain_average` and `name_conflict_repair_bonus_min_side_mentions`.
   They held A/B arms; the repair keeps their default values as fixed settings. Prediction refuses a
-  clusterer that still sets one, so an old setting cannot be silently ignored. Bundle export checks
-  only `name_conflict_repair_max_distance` and `year_gap_split` now.
+  clusterer that still sets one, so an old setting cannot be silently ignored. Bundle export
+  requires the default `name_conflict_repair_max_distance`, `year_gap_split` and `orcid_join`.
 - The year-gap split no longer turns off with the repair. With
-  `name_conflict_repair_max_distance = None` it still runs; set `year_gap_split = False` as well
-  for linkage-only clusters. The default configuration is unchanged.
-- The RAM guard counts the one-byte pair codes whenever either correction is on, also for blocks
-  under 11 mentions and split-only configurations.
+  `name_conflict_repair_max_distance = None` it still runs. For linkage-only clusters, also set
+  `year_gap_split = False` and `orcid_join = False`.
+- The RAM guard counts the one-byte pair codes whenever an in-block correction can use them,
+  including blocks under 11 mentions.
 
 - Treat the years 1601 and 1800 as undated in the year-gap split. The corpus gives these years to
   papers whose real year it does not know: 1601 holds 1,002 papers against 18 in 1600 and a handful

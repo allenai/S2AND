@@ -31,6 +31,7 @@ from s2and.block_corrections import (
     corrections_copy_codes,
     corrections_from_dataset,
     corrections_from_rust_featurizer,
+    orcid_join_enabled,
 )
 from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
@@ -82,6 +83,7 @@ from s2and.model_pairwise import (
 )
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
+from s2and.orcid_join import join_orcids_across_subblocks
 from s2and.prediction_state import PredictionState
 from s2and.profile_exclusions import (
     enforce_profile_exclusions_in_block,
@@ -123,6 +125,7 @@ from s2and.supervision import (
 )
 from s2and.text import (
     canonicalize_name_parts,
+    normalize_orcid,
     normalize_orcid_compact,
 )
 from s2and.thread_config import resolve_n_jobs
@@ -715,6 +718,47 @@ def _load_arrow_incremental_orcid_signature_info(
             author_info_orcid=orcid,
         )
     return info
+
+
+def _join_arrow_subblock_clusters(
+    clusters: dict[str, list[str]],
+    oversized_blocks: Mapping[str, Sequence[str]],
+    subblocked: Mapping[str, Sequence[str]],
+    arrow_dataset: ArrowDataset,
+    arrow_lease: Any,
+    *,
+    num_threads: int,
+    forbidden: dict[str, set[str]],
+    profile_exclusions: Mapping[str, Set[str]],
+    seed_groups: Mapping[str, object] | None,
+) -> dict[str, list[str]]:
+    """Load ORCID anchors from oversized blocks and join with original-block scope."""
+    rows = arrow_dataset.native.signature_orcids(
+        [signature for members in oversized_blocks.values() for signature in members], num_threads
+    )
+    if rows is None:
+        return clusters
+    signature_ids, positions, values = rows
+    orcids = {
+        signature_ids[position]: orcid
+        for position, value in zip(positions, values, strict=True)
+        if (orcid := normalize_orcid(value)) is not None
+    }
+    if len(orcids) < 4:
+        return clusters
+    origins = {s: key for key, members in oversized_blocks.items() for s in members if s in orcids}
+    subblocks = {s: key for key, members in subblocked.items() for s in members if s in orcids}
+    for anchor, excluded in profile_exclusions.items():
+        forbidden.setdefault(anchor, set()).update(excluded)
+    return join_orcids_across_subblocks(
+        clusters,
+        orcids,
+        origins,
+        subblocks,
+        partial(_load_arrow_canonical_name_parts, arrow_lease),
+        forbidden=forbidden,
+        seed_groups=seed_groups,
+    )
 
 
 def _has_incremental_seed_source(dataset: Any) -> bool:
@@ -1890,6 +1934,10 @@ class Clusterer:
     # the cluster model's close-pair distance and is independent of the repair. A class
     # attribute, like the repair distance. See s2and.year_gap_split and s2and.block_corrections.
     year_gap_split: bool = True
+
+    # Join same-ORCID clusters with enough evidence after bulk linkage.
+    # Previously exported model bundles use this package default.
+    orcid_join: bool = True
 
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name
@@ -3256,7 +3304,17 @@ class Clusterer:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
             disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
             corrections = corrections_from_rust_featurizer(
-                self, block_dict, rust_featurizer, prediction_state.small_block_signatures
+                self,
+                block_dict,
+                rust_featurizer,
+                prediction_state.small_block_signatures,
+                join_disallows=(
+                    seed_disallow_adjacency(
+                        prediction_state.orcid_join_disallows | proxy_dataset.cluster_seeds_disallow, {}
+                    )
+                    if orcid_join_enabled(self)
+                    else None
+                ),
             )
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
@@ -3937,6 +3995,26 @@ class Clusterer:
                 pred_clusters=pred_clusters,
                 cluster_seeds_require=active_cluster_seeds_require,
             )
+            if orcid_join_enabled(self) and average_linkage_cut(self.cluster_model, cluster_model_params) is not None:
+                oversized = {key: members for key, members in block_dict.items() if len(members) > batching_threshold}
+                pred_clusters = _join_arrow_subblock_clusters(
+                    pred_clusters,
+                    oversized,
+                    block_dict_subblocked,
+                    arrow_dataset,
+                    arrow_lease,
+                    num_threads=resolve_n_jobs(self.n_jobs),
+                    forbidden=seed_disallow_adjacency(
+                        prediction_state.orcid_join_disallows | cluster_seed_disallows,
+                        {
+                            pair: LARGE_DISTANCE
+                            for pair, distance in effective_partial_supervision.items()
+                            if distance > 1
+                        },
+                    ),
+                    profile_exclusions=prediction_state.profile_exclusions,
+                    seed_groups=prediction_cluster_seeds_require if self.dont_merge_cluster_seeds else None,
+                )
             result = dict(pred_clusters), None
         else:
             result = self._predict_from_rust_featurizer(
@@ -4142,6 +4220,10 @@ class Clusterer:
                     "cluster_seeds_disallow cannot be used with precomputed dists because disallow pairs "
                     "would not be injected into the distance matrix"
                 )
+            if cluster_seed_disallows and orcid_join_enabled(self):
+                if prediction_state is None:
+                    prediction_state = PredictionState()
+                prediction_state.orcid_join_disallows = cluster_seed_disallows
             cluster_seed_disallows = effective_dataset_disallows(
                 cluster_seed_disallows,
                 partial_supervision or {},
@@ -4774,8 +4856,8 @@ class Clusterer:
         if corrections is None or block_codes is None:
             return labels
         forbidden: Mapping[str, Set[str]] = disallow_adjacency
-        if block_exclusions and block_codes.repair:
-            # A repair may not bring an excluded mention back to its anchor.
+        if block_exclusions and (block_codes.repair or block_codes.join):
+            # A correction may not bring an excluded mention back to its anchor.
             both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
             for anchor, excluded in block_exclusions.items():
                 both_ways.setdefault(anchor, set()).update(excluded)
@@ -4792,7 +4874,9 @@ class Clusterer:
                 forbidden=forbidden,
                 # Each view copies the request's seeds, so it is built only for a step that runs.
                 repair_seed_groups=(
-                    self._repair_seed_groups(dataset, prediction_state) if block_codes.repair else None
+                    self._repair_seed_groups(dataset, prediction_state)
+                    if block_codes.repair or block_codes.join
+                    else None
                 ),
                 # A split never separates a required seed group, so it reads every seed in sight,
                 # unless the caller turned seeds off, as the altered-profile pre-split does.
@@ -4845,7 +4929,7 @@ class Clusterer:
         dataset: ANDData,
         prediction_state: PredictionState | None,
     ) -> Mapping[str, Any] | None:
-        """Return the required seed groups that name-conflict repair may not join, or None.
+        """Return the required seed groups that a block correction may not join, or None.
 
         Reads every seed in sight, whether or not block labels enforce it. Explicit seeds stay
         in the distances when default constraints are off, and a needless veto only skips a repair.
@@ -5172,7 +5256,18 @@ class Clusterer:
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
         # A precomputed matrix can hold impossible pairs from the caller's own supervision, and
         # nothing here can tell those from name conflicts. Only distances built in this call are repaired.
-        corrections = None if dists is not None else corrections_from_dataset(self, block_dict, dataset)
+        corrections = (
+            None
+            if dists is not None
+            else corrections_from_dataset(
+                self,
+                block_dict,
+                dataset,
+                join_disallows=seed_disallow_adjacency(cluster_seeds_disallow, {})
+                if orcid_join_enabled(self)
+                else None,
+            )
+        )
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16
@@ -5186,7 +5281,7 @@ class Clusterer:
                 fastcluster_fused_dtype = np.float64
 
         if dists is not None:
-            # precomputed dists (hyperopt path) — cluster from existing matrices
+            # precomputed dists (hyperopt path) Ã¢â‚¬â€ cluster from existing matrices
             for block_key in block_dict.keys():
                 if block_key not in dists:
                     raise KeyError(f"Missing precomputed distance matrix for block '{block_key}'")
@@ -5388,7 +5483,7 @@ class Clusterer:
                 prediction_state=prediction_state,
             )
 
-        # handle singleton blocks (0 or 1 signature — never appeared in generator)
+        # handle singleton blocks (0 or 1 signature Ã¢â‚¬â€ never appeared in generator)
         for block_key in block_dict.keys():
             if block_key not in seen_block_keys:
                 for signature in block_dict[block_key]:

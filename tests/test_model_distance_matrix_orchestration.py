@@ -253,7 +253,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
             "a": ["0", "1"],
             "b": ["2", "3"],
         },
-        object(),
+        SimpleNamespace(name_conflict_facts=lambda: ([], [])),
         cluster_seeds_require={},
         prediction_state=prediction_state,
     )
@@ -385,7 +385,7 @@ def test_rust_prediction_telemetry_isolated_during_nested_request(
     original_attributes = dict(vars(clusterer))
     outer_state = PredictionState()
     nested_state = PredictionState()
-    featurizer = SimpleNamespace(signature_ids=lambda: ["0", "1", "2"])
+    featurizer = SimpleNamespace(signature_ids=lambda: ["0", "1", "2"], name_conflict_facts=lambda: ([], []))
 
     def make_dists(self: Clusterer, blocks: dict[str, list[str]], native: object, **kwargs: Any):
         state = kwargs["prediction_state"]

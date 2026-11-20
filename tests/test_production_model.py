@@ -1117,6 +1117,7 @@ def test_bundle_export_rejects_a_changed_orcid_name_waiver(
         ("name_conflict_repair_max_distance", 0.3),
         ("name_conflict_repair_max_distance", None),
         ("year_gap_split", False),
+        ("orcid_join", False),
     ],
 )
 def test_bundle_export_rejects_a_changed_correction_setting(

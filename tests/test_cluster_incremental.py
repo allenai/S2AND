@@ -262,6 +262,7 @@ def test_model_presplit_cache_fingerprint_hashes_complete_fitted_state(kind) -> 
         ("name_conflict_repair_max_distance", 0.3),
         ("name_conflict_repair_max_distance", None),
         ("year_gap_split", False),
+        ("orcid_join", False),
     ],
 )
 def test_model_presplit_cache_fingerprint_follows_the_correction_settings(setting, value) -> None:

@@ -119,6 +119,7 @@ def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
 _UNRECORDED_CORRECTION_SETTINGS: dict[str, object] = {
     "name_conflict_repair_max_distance": DEFAULT_MAX_AVERAGE_DISTANCE,
     "year_gap_split": True,
+    "orcid_join": True,
 }
 
 

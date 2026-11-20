@@ -319,7 +319,7 @@ def test_review_rejects_a_sweep_from_before_production_block_clustering(tmp_path
     [
         ("route", "bulk", "attachment passes"),
         ("route", None, "attachment passes"),
-        ("distance_policy_version", DISTANCE_POLICY_VERSION - 1, "another distance policy"),
+        ("distance_policy_version", 11, "another distance policy"),
         ("distance_policy_version", None, "another distance policy"),
     ],
 )

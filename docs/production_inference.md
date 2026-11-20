@@ -396,7 +396,32 @@ exclusion and name-rule tests apply to every merge. Pair verdicts and linkage do
 The step runs only for an average-linkage `FastCluster`. Like the rest of the repair, it
 runs only on blocks of at least 11 mentions, so a smaller block keeps a reading split.
 
-After the repair, a year-gap split (`s2and/year_gap_split.py`) cuts each cluster wherever
+### ORCID joins
+
+After name-conflict repair, average-linkage bulk clustering can join clusters with the same
+leading ORCID. The ORCID must account for at least 80% of each cluster's observed ORCIDs,
+and a tie does not qualify. Within a block or subblock, each cluster needs two mentions
+with the ORCID, or at most two mentions in all. The upper bound on the mean cross-cluster
+distance must be at most EPS plus 0.10 and at most 0.60. At least 10% of the pairs other
+than those that share the leading ORCID must be certainly within 0.20. Hard pairs must
+come from the name rules. They count as farthest pairs, with at most one or 10% of the
+pairs, whichever is greater, and at most 16 in all.
+
+At the end of subblocked Arrow prediction, the same ORCID can also join clusters supported
+by separate subblocks of one original block. Each cluster needs two mentions with the ORCID
+and at least 5% coverage. The same canonical full first-name word must occur in at least
+80% of each cluster's mentions. Joined clusters can exceed the subblock size limit.
+Both steps skip joins across seed disallows, profile exclusions, or distinct required
+seed groups when `dont_merge_cluster_seeds` is on.
+
+Set `Clusterer.orcid_join = False` to turn off both steps. They also skip ORCID-suppressed
+requests. The in-block step runs on distances built during prediction or passed to the
+EPS grid, like name-conflict repair. Bundle export requires the default switch because
+the bundle format has no field for it.
+
+### Year-gap split
+
+After the in-block merges, a year-gap split (`s2and/year_gap_split.py`) cuts each cluster wherever
 its dated mentions leave an empty stretch of more than 50 years. The pair model sees the
 years between two papers capped at 50, so it cannot tell 50 years from 80, and topic overlap
 can pull a 1928 paper into a profile that starts in 2000. A real career has papers all along,
@@ -419,17 +444,17 @@ group that shares one with two parts keeps them together. The split only separat
 It reads the same distance copy as the repair, so it needs a cluster model with a close-pair
 bonus, and runs on blocks of any size from two mentions whose dated mentions span more than
 50 years. It also runs on blocks without a name conflict, where no repair applies, and since
-`1.0.0b14` with the repair off (`name_conflict_repair_max_distance = None`); turn both off for
-linkage-only clusters. Like the repair, it skips a prediction call that takes precomputed
+`1.0.0b14` with the repair off (`name_conflict_repair_max_distance = None`). Turn off all three
+corrections for linkage-only clusters. Like the repair, it skips a prediction call that takes precomputed
 distances (`dists=`). A request with
 `incremental_dont_use_cluster_seeds=True`, such as the altered-profile pre-split, may split a
 seed group. The pre-split's cut is temporary: incremental linking returns the altered profile
 whole and uses the pieces only to decide where a new mention links. `Clusterer.year_gap_split = False` turns it off.
 
-The repair and the split share one one-byte-per-pair copy of each block's distances while the
-block clusters, about one eighth of the matrix (`s2and/pair_codes.py`). The RAM guard counts it
-whenever either correction is on. `s2and/block_corrections.py` runs both corrections, in the
-same order, for every route that clusters a block from a distance matrix.
+The in-block corrections share a one-byte-per-pair copy of the distances while the block
+clusters, about one eighth of the matrix (`s2and/pair_codes.py`). The RAM guard accounts for the
+copy when a correction can use it. `s2and/block_corrections.py` runs the corrections in the same
+order on every bulk route that builds its distances and in the EPS grid.
 
 The repair reads a pair as forbidden only at the exact impossible-pair distance.
 A block is not repaired when its distances hold any other value above one, such as

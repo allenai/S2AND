@@ -78,7 +78,8 @@ ORCID IDs remain hidden from native features, constraints, and subblocking repai
 Unknown identities remain in inference context; B3 scores only known references.
 
 The default `--route production` scores what `predict_from_arrow` returns at each EPS.
-It clusters the full-name subblocks from cached distances with the production block-clustering code, so the clusters include name-conflict repair.
+It clusters the full-name subblocks from cached distances with the production block-clustering code, including the block corrections.
+The ORCID-B3 sweep hides ORCIDs from those corrections and the final subblock join.
 `plan.json` records this as `clustering_source`; the release review rejects a sweep without it.
 Production code then reunites no-middle records that the size cap split, and attaches initial-only groups through the linker.
 Those steps run on `orcid_free_arrow/` in the output directory, a dataset copy without ORCIDs.

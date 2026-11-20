@@ -64,8 +64,17 @@ The one change that did help is the [close-pair bonus](eps_calibration.md#close-
 | Keeping the hard veto when exclusions exceed a share of a profile | 2026-11-10 | The cutoff fired 26 times in simulation; plain eviction was right 26 times | Removed in favor of plain eviction |
 | Letting other mentions follow an evicted group | 2026-11-10 | Share of a profile's own papers kept fell from 0.939 to 0.823 | Rejected |
 
-Two results in this area are open, not negative.
-A guarded ORCID join after clustering measured +0.60 points on hidden-ORCID signatures and is not implemented.
+The archived ORCID join experiment gained +0.60 points on hidden-ORCID signatures.
+The [guarded bulk join](production_inference.md#orcid-joins) ships with `1.0.0b14`.
+With the 1.3.2 bundle, a half-ORCID holdout across four full giants and three samples
+scored 10,788 mentions. One join in `a_silva` left precision unchanged and added 0.0144
+points of recall and 0.0077 points of F1.
+
+An audit with all ORCIDs visible sampled 26,000 mentions from each of the seven giants.
+Of 51,757 clusters, 16 held two ORCIDs with at least three mentions each, and four held
+two with at least five each. Some pairs shared the same full name and others had
+conflicting middle names. The audit did not establish enough precision to ship a split.
+
 A cluster-pair merge model reached held-out AUC 0.96 against 0.73 for average distance, and was shelved to avoid a third model.
 
 ## Evaluation traps

@@ -45,6 +45,7 @@ def test_fastcluster_matrix_budget_uses_float64(monkeypatch, route):
     # Without the corrections no block keeps a one-byte copy, so the budget is the matrix alone.
     clusterer.name_conflict_repair_max_distance = None
     clusterer.year_gap_split = False
+    clusterer.orcid_join = False
     block = {"a sattar": ["0", "1", "2"]}
     monkeypatch.setattr(
         model_module.memory_budget,

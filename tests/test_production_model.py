@@ -1113,9 +1113,13 @@ def test_bundle_export_rejects_a_changed_orcid_name_waiver(
 
 @pytest.mark.parametrize(
     ("setting", "value"),
-    [("name_conflict_repair_rounds", 1), ("name_conflict_repair_uses_close_pair_bonus", False)],
+    [
+        ("name_conflict_repair_max_distance", 0.3),
+        ("name_conflict_repair_max_distance", None),
+        ("year_gap_split", False),
+    ],
 )
-def test_bundle_export_rejects_a_changed_repair_height_setting(
+def test_bundle_export_rejects_a_changed_correction_setting(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
     setting: str,
@@ -1528,12 +1532,12 @@ def test_bundle_export_compares_repair_settings_with_fixed_defaults(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A changed class attribute must not pass as the default: a fresh process loads 5 rounds.
+    # A changed class attribute must not pass as the default: a fresh process splits year gaps.
     _, source_clusterer = synthetic_pairwise_bundle
     source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
     source_clusterer.orcid_name_waiver = Clusterer.orcid_name_waiver
-    monkeypatch.setattr(Clusterer, "name_conflict_repair_rounds", 1)
-    with pytest.raises(ValueError, match="cannot record name_conflict_repair_rounds"):
+    monkeypatch.setattr(Clusterer, "year_gap_split", False)
+    with pytest.raises(ValueError, match="cannot record year_gap_split"):
         write_pairwise_production_bundle(
             source_clusterer, tmp_path / "class" / "production_model_v9.9", release_version="9.9"
         )

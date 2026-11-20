@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy.spatial.distance import squareform
 
-import s2and.model as model_module
+import s2and.block_corrections as block_corrections
 import s2and.name_conflict_repair as name_conflict_repair_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
@@ -22,11 +22,12 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, _RustFeaturizerPredictDataset
 from s2and.model_pairwise import FastCluster
 from s2and.name_conflict_repair import (
+    REPAIR_ROUNDS,
     NameConflictRepair,
     has_full_first_name,
-    quantize_distances,
     repair_name_conflicts_in_block,
 )
+from s2and.pair_codes import quantize_distances
 from s2and.prediction_state import PredictionState
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 from tests.incremental_test_helpers import _dataset, attach_tiny_incremental_linker, prepare_seed_arrow_bundle
@@ -114,13 +115,6 @@ def test_repair_needs_a_full_first_name_on_each_side() -> None:
     square = _square()
     only_b_and_odd = frozenset(SIGNATURES[5:11])
     assert _repair(square, NameConflictRepair(0.2, only_b_and_odd)) == _labels(square)
-
-
-def test_repair_can_skip_the_full_first_name_test() -> None:
-    square = _square()
-    only_b_and_odd = frozenset(SIGNATURES[5:11])
-    repair = NameConflictRepair(0.2, only_b_and_odd, require_full_first_names=False)
-    assert _partition(_repair(square, repair)) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
 
 
 def _half_close_square() -> np.ndarray:
@@ -250,59 +244,37 @@ def test_bonus_min_side_applies_in_block_repair(min_side: int, merges: bool) -> 
     assert merged is merges
 
 
-def test_clusterer_hands_its_bonus_bound_to_the_repair() -> None:
-    clusterer = SimpleNamespace(
-        cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05),
-        name_conflict_repair_uses_close_pair_bonus=True,
-        name_conflict_repair_bonus_min_close_share=0.1,
-        name_conflict_repair_bonus_max_plain_average=0.35,
-        name_conflict_repair_bonus_min_side_mentions=10,
+def test_repair_settings_follow_the_cluster_model_and_the_module_constants() -> None:
+    cluster_model = SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05)
+    # An object without the repair attribute gets the same settings as the class default.
+    bare = SimpleNamespace(cluster_model=cluster_model, name_conflict_repair_max_distance=0.2)
+    with_class_defaults = type("WithClassDefaults", (Clusterer,), {"cluster_model": cluster_model})
+    for source in (bare, with_class_defaults):
+        settings = block_corrections._repair_settings(source)
+        assert settings is not None
+        assert settings["max_average_distance"] == 0.2
+        assert settings["close_pair_bonus"] == 8.0
+        assert settings["rounds"] == REPAIR_ROUNDS == 5
+        assert (
+            settings["bonus_min_close_share"],
+            settings["bonus_max_plain_average"],
+            settings["bonus_min_side_mentions"],
+        ) == (0.10, 0.40, 10)
+    # A cluster model without a close-pair bonus keeps the plain average.
+    plain = SimpleNamespace(
+        cluster_model=SimpleNamespace(close_pair_bonus=0.0, close_pair_distance=0.0),
+        name_conflict_repair_max_distance=0.2,
     )
-    settings = model_module._repair_height_settings(clusterer)
-    assert (
-        settings["bonus_min_close_share"],
-        settings["bonus_max_plain_average"],
-        settings["bonus_min_side_mentions"],
-    ) == (0.1, 0.35, 10)
+    settings = block_corrections._repair_settings(plain)
+    assert settings is not None and "close_pair_bonus" not in settings
+    plain.name_conflict_repair_max_distance = None
+    assert block_corrections._repair_settings(plain) is None
 
 
 @pytest.mark.parametrize(("bonus", "distance"), [(-1.0, 0.05), (float("nan"), 0.05), (8.0, 0.0), (8.0, 1.5)])
 def test_repair_settings_reject_an_invalid_close_pair_rule(bonus: float, distance: float) -> None:
     with pytest.raises(ValueError, match="close_pair"):
         NameConflictRepair(0.2, FULL, close_pair_bonus=bonus, close_pair_distance=distance)
-
-
-@pytest.mark.parametrize(("uses_bonus", "requires_full"), [(False, True), (True, True), (True, False)])
-def test_clusterer_hands_its_close_pair_rule_to_the_repair(uses_bonus: bool, requires_full: bool) -> None:
-    clusterer = SimpleNamespace(
-        cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05),
-        name_conflict_repair_uses_close_pair_bonus=uses_bonus,
-        name_conflict_repair_requires_full_first_names=requires_full,
-    )
-    settings = model_module._repair_height_settings(clusterer)
-    assert settings["require_full_first_names"] is requires_full
-    assert settings.get("close_pair_bonus", 0.0) == (8.0 if uses_bonus else 0.0)
-    # A clusterer without a close-pair bonus keeps the plain average.
-    clusterer.cluster_model = SimpleNamespace(close_pair_bonus=0.0, close_pair_distance=0.0)
-    assert "close_pair_bonus" not in model_module._repair_height_settings(clusterer)
-
-
-def test_clusterer_defaults_use_the_bounded_close_pair_rule() -> None:
-    cluster_model = SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05)
-    # An object without the repair attributes gets the same settings as the class defaults.
-    bare = SimpleNamespace(cluster_model=cluster_model)
-    with_class_defaults = type("WithClassDefaults", (Clusterer,), {"cluster_model": cluster_model})
-    for source in (bare, with_class_defaults):
-        settings = model_module._repair_height_settings(source)
-        assert settings["close_pair_bonus"] == 8.0
-        assert settings["rounds"] == 5
-        assert settings["require_full_first_names"] is True
-        assert settings["initials_side_min_mentions"] is None
-        assert (
-            settings["bonus_min_close_share"],
-            settings["bonus_max_plain_average"],
-            settings["bonus_min_side_mentions"],
-        ) == (0.10, 0.40, 10)
 
 
 def test_repair_skips_sides_with_different_orcids() -> None:
@@ -412,7 +384,7 @@ def test_dataset_facts_parse_raw_first_names_as_the_name_rules_do() -> None:
     model = _model()
     model.name_conflict_repair_max_distance = 0.2
 
-    repair = model_module._name_conflict_repair_from_dataset(model, {"b": list(raw_first) * 3}, cast(Any, dataset))
+    repair = _repair_from_dataset(model, {"b": list(raw_first) * 3}, cast(Any, dataset))
 
     assert repair is not None
     assert repair.full_first_names == {"2", "3"}
@@ -474,7 +446,7 @@ def test_block_clustering_does_not_repair_across_a_soft_distance_above_one() -> 
         None,
         build_dummy_dataset("name_conflict_repair"),
         {},
-        name_conflict_repair=NameConflictRepair(0.2, FULL),
+        corrections=_corrections(NameConflictRepair(0.2, FULL)),
     )
     assert len(_partition([int(label) for label in labels])) == 3
 
@@ -502,13 +474,10 @@ def test_repair_accepts_two_odd_mentions_but_not_three() -> None:
 
 
 @pytest.mark.parametrize(
-    ("seed", "odd_count", "planted", "extends"),
-    # Six random odd mentions pair every cluster off, so none is left to absorb.
-    [(seed, 6, False, False) for seed in range(8)] + [(seed, 1, True, seed in (1, 2)) for seed in range(8)],
+    ("seed", "odd_count", "planted"),
+    [(seed, 6, False) for seed in range(8)] + [(seed, 1, True) for seed in range(8)],
 )
-def test_repair_preserves_direct_pair_search_and_bounds_extensions(
-    seed: int, odd_count: int, planted: bool, extends: bool
-) -> None:
+def test_one_repair_round_matches_a_direct_pair_search(seed: int, odd_count: int, planted: bool) -> None:
     # Random clusters and impossible pairs, checked against a plain search over cluster pairs.
     rng = np.random.default_rng(seed)
     n = 72
@@ -563,38 +532,7 @@ def test_repair_preserves_direct_pair_search_and_bounds_extensions(
         want[labels == b] = a
 
     got = repair_name_conflicts_in_block(signatures, labels, codes, repair)
-    for group in _partition(want.tolist(), signatures):
-        assert len({int(got[int(signature)]) for signature in group}) == 1
-    baseline_groups = _partition(want.tolist(), signatures)
-    widest = max(len({int(labels[int(s)]) for s in group}) for group in _partition(list(got), signatures))
-    assert (widest == 3) == extends
-    for group in _partition(list(got), signatures):
-        original = sorted({int(labels[int(signature)]) for signature in group})
-        assert len(original) <= 3
-        if len(original) <= 2:
-            assert group in baseline_groups
-            continue
-        # Check new triples directly against the full matrix, without the kernel's sums.
-        sides = [np.flatnonzero(labels == label).tolist() for label in original]
-        edges = [(i, j) for a, b in itertools.combinations(sides, 2) for i in a for j in b if hard[i, j]]
-        nodes = sorted({i for edge in edges for i in edge})
-        covers = [set(cover) for size in (1, 2) for cover in itertools.combinations(nodes, size)]
-        assert any(
-            all(i in cover or j in cover for i, j in edges)
-            and all(len(set(side) - cover) >= 5 for side in sides)
-            and all(
-                (
-                    np.floor(
-                        square[np.ix_([i for i in a if i not in cover], [j for j in b if j not in cover])] * 254.999
-                    ).mean()
-                    + 1
-                )
-                / 254.999
-                <= 0.2
-                for a, b in itertools.combinations(sides, 2)
-            )
-            for cover in covers
-        )
+    assert _partition(list(got), signatures) == _partition(want.tolist(), signatures)
 
 
 def _three_clusters() -> tuple[np.ndarray, list[int], list[str]]:
@@ -613,52 +551,41 @@ def _repair_three(square: np.ndarray, **kwargs: Any) -> list[int]:
     _, labels, signatures = _three_clusters()
     codes = quantize_distances(squareform(square), num_threads=1)
     assert codes is not None
-    repair = kwargs.pop("repair", NameConflictRepair(0.2, frozenset(signatures)))
+    repair = kwargs.pop("repair", NameConflictRepair(0.2, frozenset(signatures), rounds=REPAIR_ROUNDS))
     return [int(label) for label in repair_name_conflicts_in_block(signatures, labels, codes, repair, **kwargs)]
 
 
-def test_repaired_pair_absorbs_a_third_cluster_when_every_original_pair_passes() -> None:
+def test_a_later_round_joins_the_third_cluster() -> None:
     square, _, _ = _three_clusters()
-    assert _repair_three(square) == [1] * 18
+    assert len(set(_repair_three(square))) == 1
 
 
-def test_extension_considers_other_accepted_covers_of_the_selected_pair() -> None:
-    square = np.full((18, 18), 0.01)
-    square[:6, 6:12] = square[6:12, :6] = 0.05
-    square[:6, 12:] = square[12:, :6] = 0.10
-    square[6:12, 12:] = square[12:, 6:12] = 0.15
-    # The pair merge scores without 0, but the shared cover is 6 and 12.
-    square[0, 6] = square[6, 0] = LARGE_DISTANCE
-    square[:12, 12] = square[12, :12] = LARGE_DISTANCE
-    square[6, 12:] = square[12:, 6] = LARGE_DISTANCE
-    np.fill_diagonal(square, 0.0)
-    assert _repair_three(square) == [0] * 18
-
-
-def test_extension_requires_a_direct_eligible_pair_between_every_original_cluster() -> None:
+def test_a_later_round_needs_the_merged_pair_close_to_the_third_cluster() -> None:
     square, _, _ = _three_clusters()
     square[:6, 12:] = square[12:, :6] = 0.8
     assert _repair_three(square) == [0] * 6 + [1] * 12
 
 
-def test_extension_limits_the_shared_exceptions_to_two_mentions() -> None:
+def test_a_later_round_limits_the_odd_mentions_to_two() -> None:
     square, _, _ = _three_clusters()
     square[0, 12:] = square[12:, 0] = 0.19
     square[1, 12:] = square[12:, 1] = LARGE_DISTANCE
     assert _repair_three(square) == [0] * 6 + [1] * 12
 
 
-@pytest.mark.parametrize("clean_distance", [0.21, 0.1999], ids=["above-limit", "quantization-uncertainty"])
-def test_extension_rechecks_each_pair_after_removing_the_same_exceptions(clean_distance: float) -> None:
+@pytest.mark.parametrize(("third_distance", "merges"), [(0.21, True), (0.35, False)])
+def test_a_later_round_tests_the_merged_cluster_average(third_distance: float, merges: bool) -> None:
+    # Round one joins the second and third clusters (0.09). Round two reads the first cluster
+    # against both, without the odd mention 0: 30 pairs at 0.15, 5 at 0.0 and 25 at the third
+    # distance. That is 0.1625 at 0.21 and 0.221 at 0.35, as average linkage would see it.
     square, _, _ = _three_clusters()
-    # Removing the second exception loses a cheap column and raises the first/third mean.
     square[1:6, 12] = square[12, 1:6] = 0.0
-    square[1:6, 13:] = square[13:, 1:6] = clean_distance
-    assert _repair_three(square) == [0] * 6 + [1] * 12
+    square[1:6, 13:] = square[13:, 1:6] = third_distance
+    assert (len(set(_repair_three(square))) == 1) is merges
 
 
 @pytest.mark.parametrize("veto", ["orcid", "seed", "exclusion", "name-rule-provenance"])
-def test_extension_keeps_every_original_pair_veto(veto: str) -> None:
+def test_a_later_round_keeps_every_veto(veto: str) -> None:
     square, _, signatures = _three_clusters()
     kwargs: dict[str, Any] = {}
     repair = NameConflictRepair(
@@ -666,6 +593,7 @@ def test_extension_keeps_every_original_pair_veto(veto: str) -> None:
         frozenset(signatures),
         {"1": "X", "13": "Y"} if veto == "orcid" else {},
         (lambda pairs: [not (a == "0" and int(b) >= 12) for a, b in pairs]) if veto == "name-rule-provenance" else None,
+        rounds=REPAIR_ROUNDS,
     )
     if veto == "seed":
         kwargs["seed_groups"] = {"1": "X", "13": "Y"}
@@ -674,39 +602,19 @@ def test_extension_keeps_every_original_pair_veto(veto: str) -> None:
     assert _repair_three(square, repair=repair, **kwargs) == [0] * 6 + [1] * 12
 
 
-def test_extension_preserves_another_selected_pair() -> None:
-    square = np.full((24, 24), 0.1)
-    square[:6, 6:12] = square[6:12, :6] = 0.05
-    square[12:18, 18:] = square[18:, 12:18] = 0.06
-    # Every original pair qualifies, but the two existing pair merges retain their members.
-    for start in (0, 6, 12):
-        square[start, start + 6 :] = square[start + 6 :, start] = LARGE_DISTANCE
-    np.fill_diagonal(square, 0.0)
-    codes = quantize_distances(squareform(square), num_threads=1)
-    assert codes is not None
-    signatures = [str(i) for i in range(24)]
-    labels = repair_name_conflicts_in_block(
-        signatures, np.repeat(np.arange(4), 6), codes, NameConflictRepair(0.2, frozenset(signatures))
-    )
-    assert list(labels) == [0] * 12 + [2] * 12
+def _corrections(repair: NameConflictRepair) -> block_corrections.BlockCorrections:
+    """Corrections that only repair, with the given settings."""
+    return block_corrections.BlockCorrections(repair, None, repair.orcids)
 
 
-def test_extension_stops_at_three_original_clusters() -> None:
-    square, _, _ = _three_clusters()
-    four = np.full((24, 24), 0.8)
-    four[:18, :18] = square
-    four[18:, 18:] = 0.01
-    four[6:12, 18:] = four[18:, 6:12] = 0.19
-    four[12:18, 18:] = four[18:, 12:18] = 0.195
-    four[18, 6:18] = four[6:18, 18] = LARGE_DISTANCE
-    np.fill_diagonal(four, 0.0)
-    codes = quantize_distances(squareform(four), num_threads=1)
-    assert codes is not None
-    signatures = [str(i) for i in range(24)]
-    labels = repair_name_conflicts_in_block(
-        signatures, np.repeat(np.arange(4), 6), codes, NameConflictRepair(0.2, frozenset(signatures))
-    )
-    assert list(labels) == [1] * 18 + [3] * 6
+def _repair_from_dataset(model: Any, block_dict: Any, dataset: Any) -> NameConflictRepair | None:
+    corrections = block_corrections.corrections_from_dataset(model, block_dict, dataset)
+    return None if corrections is None else corrections.repair
+
+
+def _repair_from_rust_featurizer(model: Any, block_dict: Any, featurizer: Any) -> NameConflictRepair | None:
+    corrections = block_corrections.corrections_from_rust_featurizer(model, block_dict, featurizer)
+    return None if corrections is None else corrections.repair
 
 
 def _model() -> Clusterer:
@@ -729,9 +637,9 @@ def test_block_clustering_applies_the_repair_and_respects_exclusions() -> None:
         return _partition([int(label) for label in labels])
 
     assert len(run()) == 3
-    assert run(name_conflict_repair=repair) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
+    assert run(corrections=_corrections(repair)) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
     # b3 is excluded from the profile of a1 and sits in another cluster. The repair may not bring it back.
-    excluded = run(name_conflict_repair=repair, profile_exclusions={"a1": frozenset({"b3"})})
+    excluded = run(corrections=_corrections(repair), profile_exclusions={"a1": frozenset({"b3"})})
     assert len(excluded) == 3
 
 
@@ -751,7 +659,7 @@ def test_block_clustering_keeps_two_claimed_profiles_apart(dont_merge_cluster_se
         dataset,
         {},
         prediction_state=state,
-        name_conflict_repair=NameConflictRepair(0.2, FULL),
+        corrections=_corrections(NameConflictRepair(0.2, FULL)),
     )
 
     assert len(_partition([int(label) for label in labels])) == clusters
@@ -762,7 +670,7 @@ def _facts_featurizer(name_rule_conflicts: bool = True) -> SimpleNamespace:
 
     Its constraint call answers every pair alike: a conflict of the name rules alone, or a seed constraint.
     """
-    constraint = model_module._NAME_RULE_CONFLICT if name_rule_conflicts else LARGE_DISTANCE
+    constraint = block_corrections._NAME_RULE_CONFLICT if name_rule_conflicts else LARGE_DISTANCE
     return SimpleNamespace(
         name_conflict_facts=lambda: (list(SIGNATURES), {"a0": "0000000218250097"}),
         joined_reading_facts=lambda: ([], []),
@@ -777,7 +685,7 @@ def test_rust_featurizer_facts_honor_orcid_suppression(suppress_orcid: bool) -> 
     model = _model()
     model.suppress_orcid = suppress_orcid
 
-    repair = model_module._name_conflict_repair_from_rust_featurizer(model, {"b": SIGNATURES}, _facts_featurizer())
+    repair = _repair_from_rust_featurizer(model, {"b": SIGNATURES}, _facts_featurizer())
 
     assert repair is not None
     assert repair.full_first_names == FULL
@@ -789,7 +697,7 @@ def test_a_stand_in_dataset_reads_repair_facts_from_its_featurizer() -> None:
     stand_in = _RustFeaturizerPredictDataset(
         cluster_seeds_require={}, cluster_seeds_disallow=set(), signatures={}, rust_featurizer=_facts_featurizer()
     )
-    repair = model_module._name_conflict_repair_from_dataset(_model(), {"b": SIGNATURES}, stand_in)
+    repair = _repair_from_dataset(_model(), {"b": SIGNATURES}, stand_in)
     assert repair is not None and repair.full_first_names == FULL
 
 
@@ -910,9 +818,7 @@ def test_repair_keeps_explicit_seed_groups_apart_without_default_constraints(tmp
 def test_python_route_repair_asks_the_dataset_about_name_rules() -> None:
     # Signature 5 carries a conflicting name; signature 6 is kept from it by a seed disallow as well.
     dataset = _dataset([("Ada", "", "Smith")] * 5 + [("Alan", "", "Smith")] + [("Ada", "", "Smith")] * 10, {})
-    repair = model_module._name_conflict_repair_from_dataset(
-        _model(), {"a smith": [str(i) for i in range(16)]}, dataset
-    )
+    repair = _repair_from_dataset(_model(), {"a smith": [str(i) for i in range(16)]}, dataset)
     assert repair is not None and repair.name_rules_alone_forbid is not None
     assert list(repair.name_rules_alone_forbid([("5", "6"), ("0", "6")])) == [True, False]
     dataset.cluster_seeds_disallow = {("5", "6")}
@@ -932,7 +838,7 @@ def test_rust_route_name_rule_test_reads_the_featurizer_seeds(tmp_path: Path) ->
     )
 
     def answers(featurizer: Any, pairs: list[tuple[str, str]]) -> list[bool]:
-        repair = model_module._name_conflict_repair_from_rust_featurizer(_model(), {"block": ids}, featurizer)
+        repair = _repair_from_rust_featurizer(_model(), {"block": ids}, featurizer)
         assert repair is not None and repair.name_rules_alone_forbid is not None
         return list(repair.name_rules_alone_forbid(pairs))
 
@@ -1002,12 +908,13 @@ def test_every_bulk_route_hands_the_same_facts_to_block_clustering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The dummy blocks are smaller than a repairable block.
-    monkeypatch.setattr(model_module, "MIN_BLOCK_SIZE", 2)
+    monkeypatch.setattr(block_corrections, "MIN_BLOCK_SIZE", 2)
     seen: list[NameConflictRepair | None] = []
     original = Clusterer._cluster_one_block
 
     def spy(self: Clusterer, *args: Any, **kwargs: Any) -> Any:
-        seen.append(kwargs.get("name_conflict_repair"))
+        corrections = kwargs.get("corrections")
+        seen.append(None if corrections is None else corrections.repair)
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(Clusterer, "_cluster_one_block", spy)
@@ -1039,12 +946,13 @@ def test_every_bulk_route_hands_the_same_facts_to_block_clustering(
 def test_incremental_prediction_repairs_when_it_clusters_new_mentions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(model_module, "MIN_BLOCK_SIZE", 2)
+    monkeypatch.setattr(block_corrections, "MIN_BLOCK_SIZE", 2)
     seen: list[NameConflictRepair | None] = []
     original = Clusterer._cluster_one_block
 
     def spy(self: Clusterer, *args: Any, **kwargs: Any) -> Any:
-        seen.append(kwargs.get("name_conflict_repair"))
+        corrections = kwargs.get("corrections")
+        seen.append(None if corrections is None else corrections.repair)
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(Clusterer, "_cluster_one_block", spy)
@@ -1094,10 +1002,6 @@ def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int
         ("rounds", 0),
         ("rounds", 1.9),
         ("rounds", True),
-        ("initials_side_min_mentions", 0),
-        ("initials_side_min_mentions", -3),
-        ("initials_side_min_mentions", 2.5),
-        ("initials_side_min_mentions", True),
         ("bonus_min_side_mentions", True),
         ("bonus_min_side_mentions", 1.5),
         ("bonus_min_side_mentions", float("nan")),
@@ -1106,15 +1010,6 @@ def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int
 def test_repair_settings_reject_a_count_that_is_not_a_positive_integer(setting: str, value: Any) -> None:
     with pytest.raises(ValueError, match=setting):
         NameConflictRepair(0.2, FULL, **{setting: value})
-
-
-@pytest.mark.parametrize(("minimum", "merges"), [(None, False), (6, False), (5, True)])
-def test_a_large_initials_side_can_pass_the_full_name_test(minimum: int | None, merges: bool) -> None:
-    # Without the odd mention, the first side keeps five mentions and no full first name.
-    square = _square()
-    only_b_and_odd = frozenset(SIGNATURES[5:11])
-    repair = NameConflictRepair(0.2, only_b_and_odd, initials_side_min_mentions=minimum)
-    assert (len(_partition(_repair(square, repair))) == 2) is merges
 
 
 @pytest.mark.parametrize(("floor", "close", "count"), [(0.07, 7, 100), (0.1, 3, 30), (0.3, 3, 10)])
@@ -1267,3 +1162,12 @@ def test_reading_step_keeps_conflicts_the_own_cluster_speller_shares() -> None:
         frozenset(SIGNATURES[:11]),
         frozenset(SIGNATURES[11:]),
     }
+
+
+@pytest.mark.parametrize("setting", ["name_conflict_repair_rounds", "name_conflict_repair_uses_close_pair_bonus"])
+def test_a_removed_repair_setting_is_refused(setting: str) -> None:
+    # Setting a removed attribute would silently change nothing, so prediction refuses it.
+    model = _model()
+    setattr(model, setting, 1)
+    with pytest.raises(ValueError, match=f"{setting} no longer exist"):
+        model.predict({"b": SIGNATURES}, build_dummy_dataset("name_conflict_repair"))

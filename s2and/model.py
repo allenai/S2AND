@@ -23,11 +23,19 @@ from tqdm import tqdm
 
 from s2and import memory_budget
 from s2and.arrow_inputs import ArrowDataset, arrow_string_array
+from s2and.block_corrections import (
+    BlockCorrections,
+    arrow_small_block_signatures,
+    average_linkage_cut,
+    correction_fingerprint,
+    corrections_copy_codes,
+    corrections_from_dataset,
+    corrections_from_rust_featurizer,
+)
 from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
     LARGE_DISTANCE,
     LARGE_INTEGER,
-    YEAR_DIFF_CAP,
 )
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_port import (
@@ -73,19 +81,7 @@ from s2and.model_pairwise import (
     predict_pairwise_class0,
 )
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
-from s2and.name_conflict_repair import (
-    DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
-    DEFAULT_BONUS_MIN_CLOSE_SHARE,
-    DEFAULT_BONUS_MIN_SIDE_MENTIONS,
-    DEFAULT_MAX_AVERAGE_DISTANCE,
-    DEFAULT_REPAIR_ROUNDS,
-    MIN_BLOCK_SIZE,
-    NameConflictRepair,
-    certain_close_code,
-    has_full_first_name,
-    quantize_distances,
-    repair_name_conflicts_in_block,
-)
+from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
 from s2and.prediction_state import PredictionState
 from s2and.profile_exclusions import (
     enforce_profile_exclusions_in_block,
@@ -127,14 +123,9 @@ from s2and.supervision import (
 )
 from s2and.text import (
     canonicalize_name_parts,
-    given_name_for_constraint,
-    is_joined_reading,
-    normalize_orcid,
     normalize_orcid_compact,
-    spelled_reading_forms,
 )
 from s2and.thread_config import resolve_n_jobs
-from s2and.year_gap_split import split_year_gaps, split_years
 
 if TYPE_CHECKING:
     from hyperopt import Trials
@@ -360,10 +351,8 @@ def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
         bool(getattr(clusterer, "use_default_constraints_as_supervision", True)),
         bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         bool(getattr(clusterer, "suppress_orcid", False)),
-        getattr(clusterer, "name_conflict_repair_max_distance", None),
-        # The repair's height rule and rounds change the pre-split partition too.
-        _cacheable_value(_repair_height_settings(clusterer)),
-        _wants_year_gap_split(clusterer),
+        # The corrections' settings change the pre-split partition too.
+        _cacheable_value(correction_fingerprint(clusterer)),
         _orcid_name_waiver_setting(clusterer),
     )
 
@@ -749,411 +738,6 @@ def _profile_exclusion_kwargs(prediction_state: PredictionState | None) -> dict[
     return {"profile_exclusions": prediction_state.profile_exclusions}
 
 
-def _wants_name_conflict_repair(clusterer: Any, block_dict: Mapping[str, Sequence[str]]) -> float | None:
-    """Return the clusterer's repair distance when a block is large enough to repair or to split.
-
-    The year-gap split reads the repair's facts and runs on blocks of any size from two mentions.
-    """
-    max_average_distance = getattr(clusterer, "name_conflict_repair_max_distance", None)
-    smallest = 2 if _wants_year_gap_split(clusterer) else MIN_BLOCK_SIZE
-    if max_average_distance is None or all(len(members) < smallest for members in block_dict.values()):
-        return None
-    return float(max_average_distance)
-
-
-def _spans_a_year_gap(block_signatures: Sequence[str], years: Mapping[str, int], close_code: int | None) -> bool:
-    """Return whether a block's dated mentions span more than ``YEAR_DIFF_CAP`` years with the split on.
-
-    A shorter span has no empty stretch to cut, so the block skips the split and its code copy.
-    """
-    if close_code is None or not years:
-        return False
-    # Read only this block's years: a multi-block request holds every block's years.
-    dating = split_years({s: years[s] for s in block_signatures if s in years})
-    dated = list(dating.values())
-    return len(dated) >= 2 and max(dated) - min(dated) > YEAR_DIFF_CAP
-
-
-# A name-rule conflict gets this value in the repair's own constraint calls. An explicit seed
-# disallow keeps its own value and takes precedence, so this value marks a conflict of the name
-# rules on a pair that no disallow holds.
-_NAME_RULE_CONFLICT = 2 * LARGE_DISTANCE
-
-
-def _in_two_required_groups(require: Mapping[str, Any], left: str, right: str) -> bool:
-    return left in require and right in require and require[left] != require[right]
-
-
-def _rust_name_rules_alone_forbid(rust_featurizer: object) -> Callable[[Sequence[tuple[str, str]]], list[bool]]:
-    """Return the repair's name-rule test, answered by the featurizer and the seeds it holds.
-
-    A pair passes when its names conflict, no disallow the featurizer holds covers it, and its
-    signatures are not in two different required groups. Two signatures of one required group
-    pass: prediction may ignore the groups, and one group never keeps its own signatures apart.
-    """
-    index_by_id: dict[str, int] = {}
-    require: dict[str, Any] = {}
-
-    def forbid(pairs: Sequence[tuple[str, str]]) -> list[bool]:
-        if not pairs:
-            return []
-        if not index_by_id:
-            index_by_id.update(_build_signature_index_by_id(rust_featurizer))
-            require.update(_cluster_seeds_require_from_rust_featurizer(rust_featurizer))
-        values = get_constraints_matrix_indexed_rust(
-            [(index_by_id[left], index_by_id[right]) for left, right in pairs],
-            featurizer=rust_featurizer,
-            high_value=_NAME_RULE_CONFLICT,
-            dont_merge_cluster_seeds=True,
-            # Required groups are left out of the call, which still applies explicit disallows.
-            incremental_dont_use_cluster_seeds=True,
-            # One thread: its pool is apart from the scoring pool unless scoring also runs on one thread.
-            num_threads=1,
-            # The question is about names; an equal ORCID must not hide a conflict.
-            suppress_orcid=True,
-        )
-        return [
-            value == _NAME_RULE_CONFLICT and not _in_two_required_groups(require, left, right)
-            for value, (left, right) in zip(values, pairs, strict=True)
-        ]
-
-    return forbid
-
-
-def _dataset_name_rules_alone_forbid(dataset: ANDData) -> Callable[[Sequence[tuple[str, str]]], list[bool]]:
-    """Return the same test, answered by ``ANDData`` and its cluster seeds."""
-
-    def forbid(pairs: Sequence[tuple[str, str]]) -> list[bool]:
-        return [
-            dataset.get_constraint(
-                left,
-                right,
-                high_value=_NAME_RULE_CONFLICT,
-                dont_merge_cluster_seeds=True,
-                incremental_dont_use_cluster_seeds=True,
-                suppress_orcid=True,
-            )
-            == _NAME_RULE_CONFLICT
-            and not _in_two_required_groups(dataset.cluster_seeds_require, left, right)
-            for left, right in pairs
-        ]
-
-    return forbid
-
-
-def _reading_facts(readings: Sequence[tuple[str, str]], spellers: Sequence[tuple[str, str]]) -> dict[str, Any]:
-    """Return the reading-step fields of ``NameConflictRepair`` from reading and speller pairs."""
-    by_reading: dict[str, set[str]] = {}
-    for signature_id, reading in spellers:
-        by_reading.setdefault(reading, set()).add(signature_id)
-    return {"joined_readings": dict(readings), "reading_spellers": by_reading}
-
-
-def _split_year_gaps(
-    block_signatures: Sequence[str],
-    labels: np.ndarray | Sequence[int],
-    codes: np.ndarray,
-    repair: NameConflictRepair,
-    close_code: int | None,
-    seed_groups: Mapping[str, Any] | None,
-    block_key: str,
-) -> np.ndarray | Sequence[int]:
-    """Split repaired labels at year gaps when the repair carries years.
-
-    ``close_code`` comes from ``_year_gap_close_code``; None skips the split. The repair's
-    first names cover only signatures of small surname blocks, so only those bridge on a name.
-    """
-    if not repair.years or close_code is None:
-        return labels
-    return split_year_gaps(
-        block_signatures,
-        labels,
-        codes,
-        repair.years,
-        close_code,
-        orcids=repair.orcids,
-        seed_groups=seed_groups,
-        first_names=repair.first_names,
-        block_key=block_key,
-    )
-
-
-def _average_linkage_cut(cluster_model: Any, params: Mapping[str, Any] | None) -> float | None:
-    """Return the EPS cut of an average-linkage FastCluster, else None.
-
-    The repair's reading step merges two clusters under this cut, as linkage would have.
-    """
-    if not isinstance(cluster_model, FastCluster) or cluster_model.input_as_observation_matrix:
-        return None
-    settings = {**cluster_model.get_params(), **(params or {})}
-    if settings.get("linkage") != "average" or settings.get("eps") is None:
-        return None
-    return float(settings["eps"])
-
-
-def _wants_year_gap_split(clusterer: Any) -> bool:
-    """Return whether the clusterer splits clusters at year gaps; the split needs a close-pair distance."""
-    cluster_model = getattr(clusterer, "cluster_model", None)
-    return (
-        bool(getattr(clusterer, "year_gap_split", True))
-        and float(getattr(cluster_model, "close_pair_bonus", 0.0) or 0.0) > 0
-    )
-
-
-def _year_gap_close_code(clusterer: Any) -> int | None:
-    """Return the cluster model's certain close-pair code for the year-gap split, or None when off.
-
-    It reads the cluster model, not the repair, so the repair's height setting leaves the split on.
-    A close-pair distance under every code gives -1: the split runs and no pair bridges a gap.
-    """
-    if not _wants_year_gap_split(clusterer):
-        return None
-    return certain_close_code(float(getattr(clusterer.cluster_model, "close_pair_distance", 0.0)))
-
-
-def _has_impossible_pair(codes: np.ndarray) -> bool:
-    """Return whether one-byte codes hold an impossible pair, which any repair needs."""
-    return bool(len(codes)) and int(codes.max()) == 255
-
-
-def _repair_height_settings(clusterer: Any) -> dict[str, Any]:
-    """Return the repair's close-pair and full-first-name settings from the clusterer.
-
-    Both routes read them here, so the Python and Arrow routes repair alike.
-    """
-    settings: dict[str, Any] = {
-        "require_full_first_names": bool(getattr(clusterer, "name_conflict_repair_requires_full_first_names", True)),
-        "rounds": getattr(clusterer, "name_conflict_repair_rounds", DEFAULT_REPAIR_ROUNDS),
-        "initials_side_min_mentions": getattr(clusterer, "name_conflict_repair_initials_side_min_mentions", None),
-    }
-    cluster_model = getattr(clusterer, "cluster_model", None)
-    bonus = float(getattr(cluster_model, "close_pair_bonus", 0.0) or 0.0)
-    if getattr(clusterer, "name_conflict_repair_uses_close_pair_bonus", True) and bonus > 0:
-        settings["close_pair_bonus"] = bonus
-        settings["close_pair_distance"] = float(getattr(cluster_model, "close_pair_distance", 0.0))
-        settings["bonus_min_close_share"] = getattr(
-            clusterer, "name_conflict_repair_bonus_min_close_share", DEFAULT_BONUS_MIN_CLOSE_SHARE
-        )
-        settings["bonus_max_plain_average"] = getattr(
-            clusterer, "name_conflict_repair_bonus_max_plain_average", DEFAULT_BONUS_MAX_PLAIN_AVERAGE
-        )
-        settings["bonus_min_side_mentions"] = getattr(
-            clusterer, "name_conflict_repair_bonus_min_side_mentions", DEFAULT_BONUS_MIN_SIDE_MENTIONS
-        )
-    return settings
-
-
-def _common_surname(count: float | None) -> bool:
-    """Return whether a last-name-and-first-initial name count marks the name as not rare.
-
-    The counts come from the name-count index, not the request, so they catch a request that
-    holds only part of a large block, such as Scholar's reclustering of excluded mentions. A
-    count of ``MIN_BLOCK_SIZE`` or more rules out the first-name bridge; a few true small blocks
-    have such counts and lose it. A missing count rules out nothing.
-    """
-    return count is not None and not math.isnan(count) and count >= MIN_BLOCK_SIZE
-
-
-def _request_small_block_signatures(block_dict: Mapping[str, Sequence[str]]) -> frozenset[str]:
-    """Return the signatures of request blocks under ``MIN_BLOCK_SIZE``, for callers that pass whole blocks."""
-    return frozenset(str(s) for members in block_dict.values() if len(members) < MIN_BLOCK_SIZE for s in members)
-
-
-def _count_small_blocks(
-    candidates: Mapping[str, str | None], block_sizes: Mapping[str, int], request_small: Set[str]
-) -> frozenset[str]:
-    """Return the candidates whose surname block is small; one with no block key keeps the request rule."""
-    return frozenset(
-        signature_id
-        for signature_id, block in candidates.items()
-        if (block_sizes.get(block, 0) < MIN_BLOCK_SIZE if block is not None else signature_id in request_small)
-    )
-
-
-def _dataset_small_block_signatures(block_dict: Mapping[str, Sequence[str]], dataset: Any) -> frozenset[str] | None:
-    """Return the request signatures whose ``author_info_block`` has under ``MIN_BLOCK_SIZE`` dataset mentions.
-
-    A claimed profile, an incremental residual or a subblock is smaller than its surname block,
-    so the block size comes from the dataset. None when the dataset holds no signatures to count.
-    """
-    signatures = getattr(dataset, "signatures", None)
-    if not signatures:
-        return None
-    request_small = _request_small_block_signatures(block_dict)
-    if not request_small:
-        return frozenset()
-    candidates = {
-        s: getattr(signatures[s], "author_info_block", None) if s in signatures else None for s in request_small
-    }
-    needed = {block for block in candidates.values() if block is not None}
-    sizes: dict[str, int] = defaultdict(int)
-    if needed:
-        for signature in signatures.values():
-            block = signature.author_info_block
-            if block in needed:
-                sizes[block] += 1
-    return _count_small_blocks(candidates, sizes, request_small)
-
-
-def _arrow_small_block_signatures(arrow_lease: Any, block_dict: Mapping[str, Sequence[str]]) -> frozenset[str] | None:
-    """Return the request signatures whose ``author_block`` has under ``MIN_BLOCK_SIZE`` rows in the dataset.
-
-    Reads two signature columns, and only when a request block is that small. None when the
-    signatures table has no ``author_block`` column.
-    """
-    request_small = _request_small_block_signatures(block_dict)
-    if not request_small:
-        return frozenset()
-    import pyarrow as pa
-
-    pc: Any = __import__("pyarrow.compute").compute
-    candidates: dict[str, str | None] = {}
-    sizes: dict[str, int] = defaultdict(int)
-    with arrow_lease.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
-        reader = pa.ipc.open_file(source)
-        if "author_block" not in reader.schema.names:
-            return None
-        id_index = reader.schema.get_field_index("signature_id")
-        block_index = reader.schema.get_field_index("author_block")
-        value_set = arrow_string_array(sorted(request_small))
-        block_columns = []
-        for batch_index in range(reader.num_record_batches):
-            batch = reader.get_batch(batch_index)
-            block_column = batch.column(block_index)
-            block_columns.append(block_column)
-            mask = pc.is_in(batch.column(id_index), value_set=value_set)
-            if bool(pc.any(mask).as_py()):
-                for signature_id, block in zip(
-                    pc.filter(batch.column(id_index), mask).to_pylist(),
-                    pc.filter(block_column, mask).to_pylist(),
-                    strict=True,
-                ):
-                    candidates[str(signature_id)] = block
-        needed = sorted({block for block in candidates.values() if block is not None})
-        if needed:
-            needed_set = arrow_string_array(needed)
-            for block_column in block_columns:
-                kept = pc.filter(block_column, pc.is_in(block_column, value_set=needed_set))
-                for entry in pc.value_counts(kept).to_pylist():
-                    sizes[entry["values"]] += int(entry["counts"])
-    for signature_id in request_small - candidates.keys():
-        candidates[signature_id] = None
-    return _count_small_blocks(candidates, sizes, request_small)
-
-
-def _name_conflict_repair_from_rust_featurizer(
-    clusterer: Any,
-    block_dict: Mapping[str, Sequence[str]],
-    rust_featurizer: object,
-    small_block_signatures: Set[str] | None = None,
-) -> NameConflictRepair | None:
-    """Read the first-name and ORCID facts that name-conflict repair needs.
-
-    ``small_block_signatures`` limits the year-gap split's first-name bridge to those
-    signatures; None treats each block of ``block_dict`` as a whole surname block.
-    """
-    max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
-    if max_average_distance is None:
-        return None
-    featurizer = cast(Any, rust_featurizer)
-    full_first_names, orcids = featurizer.name_conflict_facts()
-    wants_years = _wants_year_gap_split(clusterer)
-    small = _request_small_block_signatures(block_dict) if small_block_signatures is None else small_block_signatures
-    # A clusterer that hides ORCIDs from its constraints hides them from the repair too.
-    use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
-    return NameConflictRepair(
-        max_average_distance,
-        frozenset(full_first_names),
-        dict(orcids) if use_orcid else {},
-        _rust_name_rules_alone_forbid(rust_featurizer),
-        **_repair_height_settings(clusterer),
-        **_reading_facts(*featurizer.joined_reading_facts()),
-        years=dict(featurizer.signature_years()) if wants_years else {},
-        first_names=(
-            {
-                s: name
-                for s, name, count in featurizer.signature_first_names()
-                if s in small and not _common_surname(count)
-            }
-            if wants_years and small
-            else {}
-        ),
-    )
-
-
-def _name_conflict_repair_from_dataset(
-    clusterer: Any, block_dict: Mapping[str, Sequence[str]], dataset: ANDData
-) -> NameConflictRepair | None:
-    """Read the same facts from ``ANDData`` signatures, or from a stand-in dataset's featurizer."""
-    rust_featurizer = getattr(dataset, "rust_featurizer", None)
-    small_block_signatures = _dataset_small_block_signatures(block_dict, dataset)
-    if rust_featurizer is not None:
-        return _name_conflict_repair_from_rust_featurizer(
-            clusterer, block_dict, rust_featurizer, small_block_signatures
-        )
-    max_average_distance = _wants_name_conflict_repair(clusterer, block_dict)
-    if max_average_distance is None:
-        return None
-    small = _request_small_block_signatures(block_dict) if small_block_signatures is None else small_block_signatures
-    full_first_names: set[str] = set()
-    orcids: dict[str, str] = {}
-    values: dict[str, str | None] = {}
-    years: dict[str, int] = {}
-    first_names: dict[str, str] = {}
-    wants_years = _wants_year_gap_split(clusterer)
-    use_orcid = not bool(getattr(clusterer, "suppress_orcid", False))
-    for members in block_dict.values():
-        for signature_id in members:
-            signature = dataset.signatures[signature_id]
-            values[signature_id] = given_name_for_constraint(signature.author_info_first, signature.author_info_middle)
-            first = signature.author_info_first_normalized
-            if first is None:
-                # An Arrow-backed dataset leaves normalized names to Rust; parse as the name rules do,
-                # so "J. D." is the initial "j" here as it is in production.
-                first = canonicalize_name_parts(
-                    signature.author_info_first, signature.author_info_middle, signature.author_info_last
-                ).first
-            if has_full_first_name(first):
-                full_first_names.add(signature_id)
-            first_word = (first or "").split(maxsplit=1)[:1]
-            counts = getattr(signature, "author_info_name_counts", None)
-            common = _common_surname(counts.last_first_initial if counts is not None else None)
-            if wants_years and signature_id in small and not common and first_word and len(first_word[0]) > 1:
-                first_names[signature_id] = first_word[0]
-            orcid = normalize_orcid(signature.author_info_orcid) if use_orcid and signature.author_info_orcid else None
-            if orcid is not None:
-                orcids[signature_id] = orcid
-            paper = dataset.papers.get(str(signature.paper_id)) if wants_years else None
-            # A NaN year fails the comparison, so it stays undated.
-            if paper is not None and paper.year is not None and paper.year > 0:
-                years[signature_id] = int(paper.year)
-    # The same facts as the Rust featurizer's joined_reading_facts, for the block's signatures.
-    readings = [(s, value) for s, value in values.items() if value is not None and is_joined_reading(value)]
-    reading_values = {value for _, value in readings}
-    spellers: list[tuple[str, str]] = []
-    if reading_values:
-        for signature_id, value in values.items():
-            if is_joined_reading(value):
-                continue
-            signature = dataset.signatures[signature_id]
-            parts = canonicalize_name_parts(
-                signature.author_info_first, signature.author_info_middle, signature.author_info_last
-            )
-            spellers.extend(
-                (signature_id, form) for form in spelled_reading_forms(parts, value) if form in reading_values
-            )
-    return NameConflictRepair(
-        max_average_distance,
-        frozenset(full_first_names),
-        orcids,
-        _dataset_name_rules_alone_forbid(dataset),
-        **_repair_height_settings(clusterer),
-        **_reading_facts(readings, spellers),
-        years=years,
-        first_names=first_names,
-    )
-
-
 def _validate_python_seed_separations(
     clusterer: Any,
     block_dict: Mapping[str, Sequence[str]],
@@ -1471,13 +1055,13 @@ def _guard_predict_block_matrix_allocation(
     uses_fastcluster: bool,
     fastcluster_fused_dtype: Any,
     total_ram_bytes: int | None,
-    repairs_name_conflicts: bool = False,
+    copies_codes: bool = False,
 ) -> None:
     """Fail fast before exact prediction allocates a block matrix above the RAM budget.
 
-    Linkage works in the matrix, so the matrix is the block's peak. Name-conflict repair
-    adds its one-byte-per-pair copy. A block with profile exclusions also keeps a second
-    matrix for relinking, which this guard does not count.
+    Linkage works in the matrix, so the matrix is the block's peak. The post-linkage
+    corrections add their one-byte-per-pair copy. A block with profile exclusions also keeps a
+    second matrix for relinking, which this guard does not count.
     """
     if total_ram_bytes is None or block_size <= 1:
         return
@@ -1492,7 +1076,7 @@ def _guard_predict_block_matrix_allocation(
         uses_fastcluster=uses_fastcluster,
         fastcluster_fused_dtype=fastcluster_fused_dtype,
     )
-    if repairs_name_conflicts and uses_fastcluster and block_size >= MIN_BLOCK_SIZE:
+    if copies_codes and uses_fastcluster:
         matrix_bytes += int(block_size * (block_size - 1) // 2)
     if matrix_bytes <= int(snapshot.available_bytes):
         return
@@ -2301,39 +1885,11 @@ class Clusterer:
     # from older pickles get it too. See s2and.name_conflict_repair.
     name_conflict_repair_max_distance: float | None = DEFAULT_MAX_AVERAGE_DISTANCE
 
-    # Whether name-conflict repair tests the close-pair linkage height (the average
-    # distance less the cluster model's close-pair bonus times the share of close pairs)
-    # instead of the plain average. The clustering cut uses that height, so repair
-    # rejoins what the cut would have joined. A class attribute, like the repair distance.
-    name_conflict_repair_uses_close_pair_bonus: bool = True
-
-    # Whether name-conflict repair needs a full first name on each side once the odd
-    # mentions are left out. A class attribute, like the repair distance.
-    name_conflict_repair_requires_full_first_names: bool = True
-
-    # Most name-conflict repair rounds per block. A round merges each cluster at most once,
-    # so a profile split into several parts needs several rounds. A class attribute, like
-    # the repair distance.
-    name_conflict_repair_rounds: int = DEFAULT_REPAIR_ROUNDS
-
     # Whether a block's clusters are split, after name-conflict repair, at empty stretches of
     # more than YEAR_DIFF_CAP years that no close pair, ORCID or seed group bridges. It needs
-    # the repair's codes and the cluster model's close-pair distance. A class attribute, like
-    # the repair distance. See s2and.year_gap_split.
+    # the cluster model's close-pair distance and is independent of the repair. A class
+    # attribute, like the repair distance. See s2and.year_gap_split and s2and.block_corrections.
     year_gap_split: bool = True
-
-    # A repair side with no full first name passes the full-name test when it keeps at least
-    # this many mentions; None exempts no side. A class attribute, like the repair distance.
-    name_conflict_repair_initials_side_min_mentions: int | None = None
-
-    # With the close-pair bonus on, a repair pair whose plain average is over the repair
-    # distance may use the bonus only with at least this share of certainly close pairs, a
-    # plain average at most the cap, and at least this many mentions on each side. None sets
-    # no such limit. A few very close pairs then cannot carry two clusters that are otherwise
-    # far apart. Class attributes, like the repair distance.
-    name_conflict_repair_bonus_min_close_share: float | None = DEFAULT_BONUS_MIN_CLOSE_SHARE
-    name_conflict_repair_bonus_max_plain_average: float | None = DEFAULT_BONUS_MAX_PLAIN_AVERAGE
-    name_conflict_repair_bonus_min_side_mentions: int | None = DEFAULT_BONUS_MIN_SIDE_MENTIONS
 
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name
@@ -2467,7 +2023,7 @@ class Clusterer:
         pred_clusters: defaultdict[str, list[str]],
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
-        name_conflict_repair: NameConflictRepair | None = None,
+        corrections: BlockCorrections | None = None,
     ) -> None:
         if block_key == "" or pairwise_proba is None:
             return
@@ -2483,7 +2039,7 @@ class Clusterer:
             block_key=block_key,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
-            name_conflict_repair=name_conflict_repair,
+            corrections=corrections,
             **_profile_exclusion_kwargs(prediction_state),
         )
         for signature, label in zip(block_dict[block_key], labels, strict=True):
@@ -3078,7 +2634,7 @@ class Clusterer:
                 uses_fastcluster=isinstance(self.cluster_model, FastCluster),
                 fastcluster_fused_dtype=fastcluster_dtype,
                 total_ram_bytes=total_ram_bytes,
-                repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
+                copies_codes=corrections_copy_codes(self),
             )
             if isinstance(self.cluster_model, FastCluster):
                 # flattened pdist style
@@ -3301,7 +2857,7 @@ class Clusterer:
                 uses_fastcluster=uses_fastcluster,
                 fastcluster_fused_dtype=fastcluster_dtype,
                 total_ram_bytes=total_ram_bytes,
-                repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
+                copies_codes=corrections_copy_codes(self),
             )
             if uses_fastcluster:
                 pairwise_proba = np.zeros(block_pair_count, dtype=fastcluster_dtype)
@@ -3699,11 +3255,8 @@ class Clusterer:
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
             disallow_adjacency = seed_disallow_adjacency(proxy_dataset.cluster_seeds_disallow, partial_supervision)
-            name_conflict_repair = _name_conflict_repair_from_rust_featurizer(
+            corrections = corrections_from_rust_featurizer(
                 self, block_dict, rust_featurizer, prediction_state.small_block_signatures
-            )
-            repair_kwargs: dict[str, Any] = (
-                {} if name_conflict_repair is None else {"name_conflict_repair": name_conflict_repair}
             )
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
@@ -3742,7 +3295,7 @@ class Clusterer:
                     disallow_adjacency,
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                    **repair_kwargs,
+                    corrections=corrections,
                     **_profile_exclusion_kwargs(prediction_state),
                 )
                 return labels, time.perf_counter() - start
@@ -4188,8 +3741,8 @@ class Clusterer:
         if bulk_clusters is not None and not needs_subblocking:
             raise ValueError("bulk_clusters applies only to subblocked Arrow prediction")
         # Before subblocking: a subblock, a claimed profile or a residual is not its surname block.
-        if _wants_year_gap_split(self):
-            prediction_state.small_block_signatures = _arrow_small_block_signatures(arrow_lease, block_dict)
+        if getattr(self, "year_gap_split", True):
+            prediction_state.small_block_signatures = arrow_small_block_signatures(arrow_lease, block_dict)
 
         arrow_subblocking_seconds = 0.0
         block_dict_multiple_letter: dict[str, list[str]] | None = None
@@ -5153,14 +4706,14 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool = False,
         prediction_state: PredictionState | None = None,
         profile_exclusions: Mapping[str, frozenset[str]] | None = None,
-        name_conflict_repair: NameConflictRepair | None = None,
+        corrections: BlockCorrections | None = None,
         block_key: str = "",
     ) -> np.ndarray | list[int]:
         """Cluster one block from a distance matrix and return labels.
 
         Profile exclusions, when the block holds one of their anchors, evict
-        excluded mentions from the anchor's cluster and relink the block.
-        Name-conflict repair then merges clusters that one odd mention keeps apart.
+        excluded mentions from the anchor's cluster and relink the block. The
+        post-linkage corrections (``s2and.block_corrections``) then run.
         """
         if len(block_signatures) == 0:
             return []
@@ -5199,20 +4752,10 @@ class Clusterer:
                 prediction_state=prediction_state,
             )
 
-        # Linkage may overwrite the matrix, so the repair keeps a one-byte-per-pair copy.
+        # Linkage may overwrite the matrix, so the corrections keep a one-byte-per-pair copy.
         # One thread: the copy then runs on this thread. A pool job would wait behind the
         # next block's scoring, which measured 270 times slower on a giant block.
-        # The year-gap split also reads blocks without an impossible pair.
-        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else None
-        repairable = name_conflict_repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
-        splittable = name_conflict_repair is not None and _spans_a_year_gap(
-            block_signatures, name_conflict_repair.years, year_gap_close_code
-        )
-        repair_codes = (
-            quantize_distances(dist_matrix, num_threads=1, require_hard=not splittable)
-            if repairable or splittable
-            else None
-        )
+        block_codes = None if corrections is None else corrections.codes_for(block_signatures, dist_matrix, 1)
 
         labels = relabel(dist_matrix)
         if original_distances is not None:
@@ -5228,46 +4771,32 @@ class Clusterer:
                 scratch=scratch,
                 block_key=block_key,
             )
-        if repair_codes is None or name_conflict_repair is None:
+        if corrections is None or block_codes is None:
             return labels
-        # Without an impossible pair no repair applies; only the year-gap split reads the codes.
-        if repairable and _has_impossible_pair(repair_codes):
-            forbidden: Mapping[str, Set[str]] = disallow_adjacency
-            if block_exclusions:
-                # A repair may not bring an excluded mention back to its anchor.
-                both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
-                for anchor, excluded in block_exclusions.items():
-                    both_ways.setdefault(anchor, set()).update(excluded)
-                    for signature_id in excluded:
-                        both_ways.setdefault(signature_id, set()).add(anchor)
-                forbidden = both_ways
-            labels = repair_name_conflicts_in_block(
-                block_signatures,
-                labels,
-                repair_codes,
-                name_conflict_repair,
-                forbidden=forbidden,
-                seed_groups=self._repair_seed_groups(dataset, prediction_state),
-                block_key=block_key,
-                cut_height=_average_linkage_cut(self.cluster_model, cluster_model_params),
-            )
-        if not splittable:
-            return cast("np.ndarray | list[int]", labels)
-        # A split never separates a required seed group, so it reads every seed in sight,
-        # unless the caller turned seeds off, as the altered-profile pre-split does.
-        split_seed_groups = (
-            None if incremental_dont_use_cluster_seeds else self._seeds_in_sight(dataset, prediction_state)
-        )
+        forbidden: Mapping[str, Set[str]] = disallow_adjacency
+        if block_exclusions and block_codes.repair:
+            # A repair may not bring an excluded mention back to its anchor.
+            both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
+            for anchor, excluded in block_exclusions.items():
+                both_ways.setdefault(anchor, set()).update(excluded)
+                for signature_id in excluded:
+                    both_ways.setdefault(signature_id, set()).add(anchor)
+            forbidden = both_ways
         return cast(
             "np.ndarray | list[int]",
-            _split_year_gaps(
+            corrections.apply(
                 block_signatures,
                 labels,
-                repair_codes,
-                name_conflict_repair,
-                year_gap_close_code,
-                split_seed_groups,
-                block_key,
+                block_codes,
+                cut_height=average_linkage_cut(self.cluster_model, cluster_model_params),
+                forbidden=forbidden,
+                repair_seed_groups=self._repair_seed_groups(dataset, prediction_state),
+                # A split never separates a required seed group, so it reads every seed in sight,
+                # unless the caller turned seeds off, as the altered-profile pre-split does.
+                split_seed_groups=(
+                    None if incremental_dont_use_cluster_seeds else self._seeds_in_sight(dataset, prediction_state)
+                ),
+                block_key=block_key,
             ),
         )
 
@@ -5420,8 +4949,7 @@ class Clusterer:
         disallow_adjacency = seed_disallow_adjacency(
             prediction_state.cluster_seeds_disallow, normalize_partial_supervision(None)
         )
-        name_conflict_repair = _name_conflict_repair_from_dataset(self, block_dict, dataset)
-        year_gap_close_code = _year_gap_close_code(self) if name_conflict_repair is not None else None
+        corrections = corrections_from_dataset(self, block_dict, dataset)
         seed_groups = self._repair_seed_groups(dataset, prediction_state)
         split_seed_groups = self._seeds_in_sight(dataset, prediction_state)
         signatures: list[str] = []
@@ -5443,21 +4971,12 @@ class Clusterer:
             block_distances = dists[block_key]
             linkage_matrix = np.ascontiguousarray(cluster_model.linkage_matrix(block_distances), dtype=np.float64)
             block_width = len(block_signatures)
-            # The matrix is preserved, so one copy of its codes serves the repair at every EPS.
-            repairable = name_conflict_repair is not None and block_width >= MIN_BLOCK_SIZE
-            splittable = name_conflict_repair is not None and _spans_a_year_gap(
-                block_signatures, name_conflict_repair.years, year_gap_close_code
+            # The matrix is preserved, so one copy of its codes serves the corrections at every EPS.
+            block_codes = (
+                None
+                if corrections is None
+                else corrections.codes_for(block_signatures, np.asarray(block_distances), resolve_n_jobs(self.n_jobs))
             )
-            repair_codes = (
-                quantize_distances(
-                    np.asarray(block_distances),
-                    num_threads=resolve_n_jobs(self.n_jobs),
-                    require_hard=not splittable,
-                )
-                if repairable or splittable
-                else None
-            )
-            has_impossible_pair = repairable and repair_codes is not None and _has_impossible_pair(repair_codes)
             del block_distances
             for eps_index, (eps, ids) in enumerate(ids_by_eps.items()):
                 if eps_index == 0 or cluster_dist is None:
@@ -5472,26 +4991,16 @@ class Clusterer:
                     disallow_adjacency,
                     prediction_state=prediction_state,
                 )
-                if repair_codes is not None and name_conflict_repair is not None and has_impossible_pair:
-                    labels = repair_name_conflicts_in_block(
+                if corrections is not None:
+                    labels = corrections.apply(
                         block_signatures,
                         labels,
-                        repair_codes,
-                        name_conflict_repair,
+                        block_codes,
+                        cut_height=average_linkage_cut(self.cluster_model, {"eps": float(eps)}),
                         forbidden=disallow_adjacency,
-                        seed_groups=seed_groups,
+                        repair_seed_groups=seed_groups,
+                        split_seed_groups=split_seed_groups,
                         block_key=block_key,
-                        cut_height=float(eps) if self.cluster_model.linkage == "average" else None,
-                    )
-                if splittable and repair_codes is not None and name_conflict_repair is not None:
-                    labels = _split_year_gaps(
-                        block_signatures,
-                        labels,
-                        repair_codes,
-                        name_conflict_repair,
-                        year_gap_close_code,
-                        split_seed_groups,
-                        block_key,
                     )
                 _, block_ids = np.unique(np.asarray(labels), return_inverse=True)
                 ids.append(next_id + block_ids.astype(np.int64))
@@ -5512,7 +5021,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool,
         prediction_state: PredictionState | None = None,
         profile_exclusions: Mapping[str, frozenset[str]] | None = None,
-        name_conflict_repair: NameConflictRepair | None = None,
+        corrections: BlockCorrections | None = None,
     ) -> np.ndarray | list[int]:
         """Cluster one block and emit explicit entry/exit logs around the cluster-model fit."""
         cluster_model_name = type(self.cluster_model).__name__
@@ -5532,7 +5041,7 @@ class Clusterer:
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             prediction_state=prediction_state,
             profile_exclusions=profile_exclusions,
-            name_conflict_repair=name_conflict_repair,
+            corrections=corrections,
             block_key=block_key,
         )
         logger.info(
@@ -5658,9 +5167,7 @@ class Clusterer:
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
         # A precomputed matrix can hold impossible pairs from the caller's own supervision, and
         # nothing here can tell those from name conflicts. Only distances built in this call are repaired.
-        name_conflict_repair = (
-            None if dists is not None else _name_conflict_repair_from_dataset(self, block_dict, dataset)
-        )
+        corrections = None if dists is not None else corrections_from_dataset(self, block_dict, dataset)
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16
@@ -5687,7 +5194,7 @@ class Clusterer:
                     block_key=block_key,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,
-                    name_conflict_repair=name_conflict_repair,
+                    corrections=corrections,
                     **_profile_exclusion_kwargs(prediction_state),
                 )
                 for signature, label in zip(block_dict[block_key], labels, strict=True):
@@ -5761,7 +5268,7 @@ class Clusterer:
                         pred_clusters=pred_clusters,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                         prediction_state=prediction_state,
-                        name_conflict_repair=name_conflict_repair,
+                        corrections=corrections,
                     )
                     pairwise_proba = None
 
@@ -5772,7 +5279,7 @@ class Clusterer:
                         uses_fastcluster=isinstance(self.cluster_model, FastCluster),
                         fastcluster_fused_dtype=fastcluster_fused_dtype,
                         total_ram_bytes=total_ram_bytes,
-                        repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
+                        copies_codes=corrections_copy_codes(self),
                     )
                     if isinstance(self.cluster_model, FastCluster):
                         pairwise_proba = np.zeros(
@@ -5806,7 +5313,7 @@ class Clusterer:
                 pred_clusters=pred_clusters,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 prediction_state=prediction_state,
-                name_conflict_repair=name_conflict_repair,
+                corrections=corrections,
             )
         else:
             block_pair_index = 0
@@ -5822,7 +5329,7 @@ class Clusterer:
                     uses_fastcluster=isinstance(self.cluster_model, FastCluster),
                     fastcluster_fused_dtype=fastcluster_fused_dtype,
                     total_ram_bytes=total_ram_bytes,
-                    repairs_name_conflicts=getattr(self, "name_conflict_repair_max_distance", None) is not None,
+                    copies_codes=corrections_copy_codes(self),
                 )
                 if isinstance(self.cluster_model, FastCluster):
                     pairwise_proba = np.zeros(
@@ -5858,7 +5365,7 @@ class Clusterer:
                     pred_clusters=pred_clusters,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     prediction_state=prediction_state,
-                    name_conflict_repair=name_conflict_repair,
+                    corrections=corrections,
                 )
 
             model_predict_seconds += self._featurize_predict_write_batches(

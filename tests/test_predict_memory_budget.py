@@ -42,6 +42,9 @@ def _snapshot(*, available_bytes: int, total_ram_bytes: int = 1_000) -> memory_b
 def test_fastcluster_matrix_budget_uses_float64(monkeypatch, route):
     """Stored Python matrices must budget eight bytes for each condensed pair."""
     clusterer, dataset = _build_dummy_clusterer_and_dataset(name="stored_matrix_precision_budget")
+    # Without the corrections no block keeps a one-byte copy, so the budget is the matrix alone.
+    clusterer.name_conflict_repair_max_distance = None
+    clusterer.year_gap_split = False
     block = {"a sattar": ["0", "1", "2"]}
     monkeypatch.setattr(
         model_module.memory_budget,

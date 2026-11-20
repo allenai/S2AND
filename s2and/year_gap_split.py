@@ -8,18 +8,19 @@ whose dated mentions leave an empty stretch longer than the cap is cut there.
 Two parts across a cut stay together when the model is certain of some pair between them
 (a code under the close-pair distance), or they share an ORCID or a required seed group.
 A reprint or a re-dated record usually has such a pair: the same title and coauthors. When
-the surname block has under 11 mentions (``s2and.name_conflict_repair.MIN_BLOCK_SIZE``), two
+the surname block has under 11 mentions (``SMALL_SURNAME_BLOCK``), two
 parts that share the first word of a full first name also stay together: there the surname is
 rare, so a shared first name usually means one person. Judges found 9 of 28 decided such
 cuts right in small blocks, against 37 of 38 in large blocks. The caller decides which
-signatures sit in a small surname block; a claimed profile or a subblock of a large block does not.
+signatures sit in a small surname block (``SMALL_SURNAME_BLOCK``); a claimed profile or a
+subblock of a large block does not.
 
 The step only splits, so no other cluster changes. Undated mentions that share an ORCID, a
 seed group or a bridging first name move as one group. A group follows the part that shares
 one with it, else the part with the lowest average code. A group that shares one with two
 parts keeps them together.
 
-The split runs after name-conflict repair on the repair's codes, with the repair's
+The split runs after name-conflict repair (``s2and.block_corrections``) on the same pair codes,
 ORCIDs and seed groups, so the repair cannot undo it.
 
 ``PLACEHOLDER_YEARS`` count as undated. The corpus stamps 1601 and 1800 on modern papers
@@ -37,11 +38,12 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from s2and.consts import YEAR_DIFF_CAP
+from s2and.pair_codes import code_tiles
 
 logger = logging.getLogger("s2and")
 
-# Rows per batch when reading the codes between two parts.
-_BATCH_CELLS = 1 << 22
+# A surname block under this many mentions is small: there a shared first name bridges a gap.
+SMALL_SURNAME_BLOCK = 11
 
 # Years the corpus gives papers whose year it does not know; the split treats them as undated.
 PLACEHOLDER_YEARS = frozenset({1601, 1800})
@@ -52,31 +54,16 @@ def split_years(years: Mapping[str, int]) -> dict[str, int]:
     return {signature_id: year for signature_id, year in years.items() if year > 0 and year not in PLACEHOLDER_YEARS}
 
 
-def _cross_codes(codes: np.ndarray, block_width: int, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
-    """Return the codes between two disjoint groups of mentions, one row per mention of ``rows``."""
-    low = np.minimum(rows[:, None], cols[None, :])
-    high = np.maximum(rows[:, None], cols[None, :])
-    return codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
-
-
 def _has_close_pair(codes: np.ndarray, block_width: int, a: np.ndarray, b: np.ndarray, close_code: int) -> bool:
     """Return whether some pair between two groups has a code of at most ``close_code``."""
     if len(a) > len(b):
         a, b = b, a
-    step = max(1, _BATCH_CELLS // max(1, len(b)))
-    return any(
-        bool((_cross_codes(codes, block_width, a[start : start + step], b) <= close_code).any())
-        for start in range(0, len(a), step)
-    )
+    return any(bool((tile <= close_code).any()) for _, tile in code_tiles(codes, block_width, a, b))
 
 
 def _mean_cross_code(codes: np.ndarray, block_width: int, rows: np.ndarray, cols: np.ndarray) -> float:
-    """Return the mean code between two disjoint groups, read in batches to bound memory."""
-    step = max(1, _BATCH_CELLS // max(1, len(cols)))
-    total = sum(
-        int(_cross_codes(codes, block_width, rows[start : start + step], cols).sum(dtype=np.int64))
-        for start in range(0, len(rows), step)
-    )
+    """Return the mean code between two disjoint groups."""
+    total = sum(int(tile.sum(dtype=np.int64)) for _, tile in code_tiles(codes, block_width, rows, cols))
     return total / (len(rows) * len(cols))
 
 
@@ -237,7 +224,7 @@ def split_year_gaps(
     Args:
         block_signatures: Signature ids in matrix order.
         labels: Cluster label per signature.
-        codes: One-byte condensed pair codes from ``quantize_distances``.
+        codes: One-byte condensed pair codes from ``s2and.pair_codes.quantize_distances``.
         years: Paper year per signature id. Years at or below zero and ``PLACEHOLDER_YEARS``
             count as undated; a placeholder still guides where its mention goes.
         close_code: Largest code that is certainly under the close-pair distance; a pair at
@@ -246,7 +233,7 @@ def split_year_gaps(
         seed_groups: Required seed group per signature id; two parts that share one stay together.
         first_names: First word of the full first name per signature id; two parts that share
             one stay together. Give it only for signatures whose surname block has under
-            ``MIN_BLOCK_SIZE`` mentions.
+            ``SMALL_SURNAME_BLOCK`` mentions.
         block_key: Block name for the log.
 
     Returns:

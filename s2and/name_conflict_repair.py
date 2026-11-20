@@ -11,9 +11,7 @@ After a block is clustered, this module merges two clusters when all of these ho
   the two clusters; the smallest such set is the odd mentions, and a larger set is
   not tried when the smallest fails a later test;
 - without them, each cluster keeps at least ``MIN_SIDE`` mentions;
-- without them, each cluster has a mention with a full first name, unless
-  ``require_full_first_names`` is off or the side keeps at least
-  ``initials_side_min_mentions`` mentions;
+- without them, each cluster has a mention with a full first name;
 - the height between the clusters, without them, is certainly below
   ``max_average_distance``. The height is the average model distance, less
   ``close_pair_bonus`` times the share of pairs under ``close_pair_distance``:
@@ -42,12 +40,8 @@ The odd mentions stay in the merged cluster. Blind judging on seven large blocks
 called all 28 sampled merges with one odd mention and all 13 with two correct, and
 found most odd mentions belonged to the merged person.
 
-After the pair merges, a repaired pair can absorb one untouched original cluster.
-Every original pair must pass these checks. One shared set of at most two odd
-mentions must explain their conflicts, and every clean pair must remain below
-the distance limit after removing that same set. Each original cluster must keep
-five mentions and a full first name. An extension never grows beyond three
-original clusters or changes another pair merge.
+A round merges each cluster at most once; a later round sees the merged clusters, so a
+person split three ways rejoins over two rounds.
 
 Each round first runs a reading step. A short given name may be joined initials
 ("Ec" for E. C.), and the name rules veto it against a bare "Edward". Once linkage puts
@@ -67,8 +61,8 @@ them, and the odd-mention tests above apply. Pair verdicts do not change.
 ``Clusterer.name_conflict_repair_max_distance`` sets the distance for every route
 that clusters blocks; ``None`` turns the repair off.
 
-Linkage may overwrite the distance matrix, so the caller keeps a one-byte-per-pair
-copy made by ``quantize_distances`` before the first linkage.
+The repair reads the one-byte pair codes of ``s2and.pair_codes``. ``s2and.block_corrections``
+runs it after linkage and before the year-gap split.
 """
 
 from __future__ import annotations
@@ -76,13 +70,19 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
-from itertools import product
 
 import numpy as np
 
-from s2and.consts import LARGE_DISTANCE
+from s2and.pair_codes import (
+    FARTHEST_CODE,
+    HARD_CODE,
+    SCALE,
+    certain_close_code,
+    code_tiles,
+    codes_against,
+)
 from s2and.runtime import load_s2and_rust_extension
 
 logger = logging.getLogger("s2and")
@@ -93,37 +93,14 @@ MIN_SIDE = 5
 MAX_ODD_MENTIONS = 2
 # A block needs two sides and an odd mention.
 MIN_BLOCK_SIZE = 2 * MIN_SIDE + 1
-# Clusterer defaults for the close-pair repair. On 127 dev blocks, 7 ORCID-labelled giant
+# Production settings of the close-pair repair. On 127 dev blocks, 7 ORCID-labelled giant
 # blocks and 40 fresh blocks, these bounds made no ORCID-confirmed wrong merge. Five rounds
 # rejoin a profile split into several parts. A smaller side under 10 mentions was where the
 # judged-wrong merges concentrated.
-DEFAULT_REPAIR_ROUNDS = 5
-DEFAULT_BONUS_MIN_CLOSE_SHARE = 0.10
-DEFAULT_BONUS_MAX_PLAIN_AVERAGE = 0.40
-DEFAULT_BONUS_MIN_SIDE_MENTIONS = 10
-# A code is the distance times the scale, rounded down: [0, 1] maps to 0..254,
-# and 255 marks an impossible pair. The Rust kernels use the same scale.
-_SCALE = 254.999
-
-
-@dataclass(frozen=True)
-class _RepairCandidate:
-    """Keep the original pair evidence for a possible three-cluster repair."""
-
-    average: float
-    a: int
-    b: int
-    odd: tuple[int, ...]
-    code_sum: int
-    close_count: int = 0
-
-
-def certain_close_code(close_pair_distance: float) -> int:
-    """Return the largest code whose whole range lies under ``close_pair_distance``.
-
-    Code ``c`` holds distances in ``[c, c + 1) / _SCALE``.
-    """
-    return math.floor(close_pair_distance * _SCALE - 1)
+REPAIR_ROUNDS = 5
+BONUS_MIN_CLOSE_SHARE = 0.10
+BONUS_MAX_PLAIN_AVERAGE = 0.40
+BONUS_MIN_SIDE_MENTIONS = 10
 
 
 def repair_close_code(repair: NameConflictRepair) -> int:
@@ -143,14 +120,14 @@ def _height_bound(
     its smaller side keeps enough mentions. A few very close pairs then cannot carry two
     clusters that are otherwise far apart. Such a pair gets an infinite bound.
     """
-    adjusted = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
+    adjusted = ((code_sum - repair.close_pair_bonus * SCALE * close_count) / count + 1) / SCALE
     if repair.close_pair_bonus <= 0 or (
         repair.bonus_min_close_share is None
         and repair.bonus_max_plain_average is None
         and repair.bonus_min_side_mentions is None
     ):
         return adjusted
-    plain = (code_sum / count + 1) / _SCALE
+    plain = (code_sum / count + 1) / SCALE
     if plain <= repair.max_average_distance:
         return adjusted
     if repair.bonus_min_close_share is not None and close_count / count < repair.bonus_min_close_share:
@@ -166,44 +143,6 @@ def _height_bound(
     return adjusted
 
 
-def _common_odd_average_bound(
-    candidate: _RepairCandidate,
-    odd: tuple[int, ...],
-    members: Mapping[int, np.ndarray],
-    codes: np.ndarray,
-    block_width: int,
-    repair: NameConflictRepair,
-) -> float:
-    """Recompute a pair's bound after excluding the shared scoring exceptions."""
-    side_a, side_b = members[candidate.a], members[candidate.b]
-    original_a = side_a[~np.isin(side_a, candidate.odd)]
-    original_b = side_b[~np.isin(side_b, candidate.odd)]
-    extra_a = original_a[np.isin(original_a, odd)]
-    extra_b = original_b[np.isin(original_b, odd)]
-    code_sum, close_count = candidate.code_sum, candidate.close_count
-    close_code = repair_close_code(repair)
-
-    def row_sum(mention: int, others: np.ndarray) -> tuple[int, int]:
-        low, high = np.minimum(mention, others), np.maximum(mention, others)
-        indices = block_width * low - low * (low + 1) // 2 + high - low - 1
-        row = codes[indices]
-        return int(row.sum(dtype=np.uint64)), int(np.count_nonzero((row != 255) & (row.astype(np.int64) <= close_code)))
-
-    # Read only the extra rows; the kernel already summed the original clean pair.
-    for mention in extra_a:
-        removed, removed_close = row_sum(int(mention), original_b)
-        code_sum, close_count = code_sum - removed, close_count - removed_close
-    for mention in extra_b:
-        removed, removed_close = row_sum(int(mention), original_a)
-        code_sum, close_count = code_sum - removed, close_count - removed_close
-    for mention in extra_a:
-        added, added_close = row_sum(int(mention), extra_b)
-        code_sum, close_count = code_sum + added, close_count + added_close
-    side_a_kept, side_b_kept = len(original_a) - len(extra_a), len(original_b) - len(extra_b)
-    count = side_a_kept * side_b_kept
-    return _height_bound(code_sum, close_count, count, repair, min(side_a_kept, side_b_kept))
-
-
 @dataclass(frozen=True)
 class NameConflictRepair:
     """Settings and per-signature facts for name-conflict repair.
@@ -214,11 +153,7 @@ class NameConflictRepair:
         close_pair_bonus: Bonus that close-pair linkage gives a close pair. Zero
             compares the plain average distance.
         close_pair_distance: Distance under which a pair is close.
-        require_full_first_names: Whether each side must keep a mention with a full
-            first name once the odd mentions are left out.
         rounds: Most repair rounds per block; each merges a cluster at most once.
-        initials_side_min_mentions: A side with no full first name passes the full-name
-            test when it keeps at least this many mentions. ``None`` exempts no side.
         bonus_min_close_share: With a close-pair bonus, a pair whose plain average is
             over ``max_average_distance`` needs at least this share of certainly close
             pairs. ``None`` sets no floor.
@@ -238,12 +173,6 @@ class NameConflictRepair:
             per signature id, for signatures that have one.
         reading_spellers: Per reading, the signature ids without a reading whose name spells
             it (``spelled_reading_forms``). The reading step needs both mappings.
-        years: Paper year per signature id, for years above zero. The year-gap split
-            (``s2and.year_gap_split``) reads it after the repair.
-        first_names: First word of the normalized first name per signature id, for words of
-            two or more characters, and only for signatures whose surname block has under
-            ``MIN_BLOCK_SIZE`` mentions and whose name count does not mark a common surname.
-            The year-gap split bridges parts that share one.
     """
 
     max_average_distance: float
@@ -254,33 +183,21 @@ class NameConflictRepair:
     )
     close_pair_bonus: float = 0.0
     close_pair_distance: float = 0.0
-    require_full_first_names: bool = True
     rounds: int = 1
-    initials_side_min_mentions: int | None = None
     bonus_min_close_share: float | None = None
     bonus_max_plain_average: float | None = None
     bonus_min_side_mentions: int | None = None
     joined_readings: Mapping[str, str] = field(default_factory=dict)
     reading_spellers: Mapping[str, Set[str]] = field(default_factory=dict)
-    years: Mapping[str, int] = field(default_factory=dict)
-    first_names: Mapping[str, str] = field(default_factory=dict)
 
     def lacks_full_name(self, side: Sequence[str]) -> bool:
-        """Whether a side fails the full-first-name test."""
-        if not self.require_full_first_names or any(s in self.full_first_names for s in side):
-            return False
-        return self.initials_side_min_mentions is None or len(side) < self.initials_side_min_mentions
+        """Whether a side has no mention with a full first name."""
+        return not any(s in self.full_first_names for s in side)
 
     def __post_init__(self) -> None:
         # bool is an int subclass; True as a count is a caller mistake.
         if not isinstance(self.rounds, int) or isinstance(self.rounds, bool) or self.rounds < 1:
             raise ValueError("rounds must be an integer of at least 1")
-        if self.initials_side_min_mentions is not None and (
-            not isinstance(self.initials_side_min_mentions, int)
-            or isinstance(self.initials_side_min_mentions, bool)
-            or self.initials_side_min_mentions < 1
-        ):
-            raise ValueError("initials_side_min_mentions must be an integer of at least 1")
         if not (math.isfinite(self.close_pair_bonus) and self.close_pair_bonus >= 0):
             raise ValueError("close_pair_bonus must be finite and non-negative")
         if self.close_pair_bonus > 0 and not 0 < self.close_pair_distance <= 1:
@@ -303,35 +220,6 @@ def has_full_first_name(first: str | None) -> bool:
     "j p", from "J.-P.", is two initials and not a full first name.
     """
     return any(len(word) > 1 for word in (first or "").split())
-
-
-def quantize_distances(
-    condensed: np.ndarray, *, num_threads: int | None = None, require_hard: bool = True
-) -> np.ndarray | None:
-    """Return a one-byte-per-pair copy of condensed distances.
-
-    Args:
-        condensed: Condensed distances in [0, 1], with exactly ``LARGE_DISTANCE``
-            for impossible pairs. Another float dtype or a strided view is copied to
-            contiguous float64 first, as linkage accepts those too.
-        num_threads: Rust pool size; None uses the default pool.
-        require_hard: Return ``None`` for a matrix without an impossible pair,
-            where no repair can apply. The year-gap split passes False.
-
-    Returns:
-        ``uint8`` codes: 255 for an impossible pair, else the distance times
-        254.999, rounded down. ``None`` when the matrix is not a condensed float
-        matrix, holds another value above one, or, with ``require_hard``, has no
-        impossible pair. A value above one is a caller's soft "keep apart"
-        distance, which linkage honors and a one-byte code cannot carry.
-    """
-    numeric = np.issubdtype(condensed.dtype, np.floating) or np.issubdtype(condensed.dtype, np.integer)
-    if condensed.ndim != 1 or not numeric:
-        return None
-    condensed = np.ascontiguousarray(condensed, dtype=np.float64)
-    return load_s2and_rust_extension().quantize_block_distances(
-        condensed, float(LARGE_DISTANCE), num_threads, require_hard
-    )
 
 
 def _top_orcids(signature_ids: Sequence[str], orcids: Mapping[str, str]) -> frozenset[str]:
@@ -358,9 +246,7 @@ def _impossible_pairs(
     pairs: set[tuple[int, int]] = set()
     for mention in odd:
         others = side_b if mention in in_a else side_a
-        low, high = np.minimum(mention, others), np.maximum(mention, others)
-        condensed = block_width * low - low * (low + 1) // 2 + high - low - 1
-        for other in others[codes[condensed] == 255].tolist():
+        for other in others[codes_against(codes, block_width, mention, others) == HARD_CODE].tolist():
             pairs.add((min(mention, other), max(mention, other)))
     return sorted(pairs)
 
@@ -405,27 +291,38 @@ def _passes_merge_guards(
     return True
 
 
-def _codes_against(codes: np.ndarray, block_width: int, mention: int, others: np.ndarray) -> np.ndarray:
-    """Return the codes between one mention and other mentions, none equal to it."""
-    low, high = np.minimum(mention, others), np.maximum(mention, others)
-    return codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
+def _merge_disjoint(
+    label_array: np.ndarray,
+    accepted: Sequence[tuple[float, int, int, tuple[int, ...]]],
+    members: Callable[[int], np.ndarray],
+    label_of: Callable[[int], object],
+    block_signatures: Sequence[str],
+    block_key: str,
+    reason: str,
+) -> np.ndarray:
+    """Merge accepted ``(height, a, b, odd mentions)`` pairs, lowest height first.
 
-
-# The code of the farthest possible pair, which a set-aside pair counts as.
-_FARTHEST_CODE = 254
-# Cells per tile when the reading step reads the codes between two clusters.
-_TILE_CELLS = 1 << 22
-
-
-def _tiles(
-    codes: np.ndarray, block_width: int, side_a: np.ndarray, side_b: np.ndarray
-) -> Iterator[tuple[int, np.ndarray]]:
-    """Yield (first row, codes) tiles of the codes between two disjoint groups of mentions."""
-    step = max(1, _TILE_CELLS // max(1, len(side_b)))
-    for start in range(0, len(side_a), step):
-        rows = side_a[start : start + step, None]
-        low, high = np.minimum(rows, side_b[None, :]), np.maximum(rows, side_b[None, :])
-        yield start, codes[block_width * low - low * (low + 1) // 2 + high - low - 1]
+    A cluster takes part in one merge per step, so no merge rests on a cluster that an earlier
+    merge changed. The close-pair height can fall below zero, where linkage would clamp it; the
+    order keeps the unclamped value, so the pair with more close evidence goes first.
+    """
+    merged = label_array.copy()
+    used: set[int] = set()
+    for height, a, b, odd in sorted(accepted):
+        if a in used or b in used:
+            continue
+        used.update((a, b))
+        merged[members(b)] = label_of(a)
+        logger.info(
+            "Name-conflict repair: block %s merges clusters of %d and %d mentions%s, height %.3f, odd mentions %s",
+            block_key,
+            len(members(a)),
+            len(members(b)),
+            reason,
+            height,
+            ", ".join(block_signatures[m] for m in odd),
+        )
+    return merged
 
 
 def _smallest_covers(cells: Sequence[tuple[int, int]]) -> list[tuple[tuple[int, int], ...]]:
@@ -528,9 +425,9 @@ def _pair_evidence(
         residual=[],
         rule=rule,
     )
-    for start, tile in _tiles(codes, block_width, side_a, side_b):
+    for start, tile in code_tiles(codes, block_width, side_a, side_b):
         stop = start + len(tile)
-        impossible = tile == 255
+        impossible = tile == HARD_CODE
         possible = ~impossible
         values = np.where(possible, tile, 0).astype(np.int64)
         close = possible & (tile <= close_code) if close_code >= 0 else np.zeros_like(possible)
@@ -576,8 +473,8 @@ def _reading_merge_bound(
     if odd_rows and odd_columns:
         # Cells in an odd row and an odd column were taken away twice.
         for row in odd_rows:
-            cross = _codes_against(codes, len(block_signatures), int(side_a[row]), side_b[odd_columns])
-            possible = cross != 255
+            cross = codes_against(codes, len(block_signatures), int(side_a[row]), side_b[odd_columns])
+            possible = cross != HARD_CODE
             code_sum += int(cross[possible].astype(np.int64).sum())
             count += int(np.count_nonzero(possible))
             close_count += int(np.count_nonzero(possible & (cross <= close_code))) if close_code >= 0 else 0
@@ -586,7 +483,7 @@ def _reading_merge_bound(
     # A set-aside pair has no model distance. It counts as the farthest possible pair, so the
     # merge holds even if every such pair is far apart, and a few spellers cannot carry two
     # clusters whose pairs are mostly set aside.
-    code_sum += _FARTHEST_CODE * aside
+    code_sum += FARTHEST_CODE * aside
     count += aside
     if count == 0:
         return None
@@ -601,7 +498,7 @@ def _reading_merge_bound(
         bound = _height_bound(code_sum, close_count, count, repair, smaller)
         return bound if bound <= repair.max_average_distance else None
     # Only set-aside pairs kept the clusters apart: merge where linkage would have.
-    bound = ((code_sum - repair.close_pair_bonus * _SCALE * close_count) / count + 1) / _SCALE
+    bound = ((code_sum - repair.close_pair_bonus * SCALE * close_count) / count + 1) / SCALE
     return bound if bound <= cut_height else None
 
 
@@ -612,8 +509,8 @@ def _name_rules_explain_every_pair(
     if repair.name_rules_alone_forbid is None:
         return True
     side_a, side_b = sides
-    for start, tile in _tiles(codes, len(block_signatures), side_a, side_b):
-        rows, columns = np.nonzero(tile == 255)
+    for start, tile in code_tiles(codes, len(block_signatures), side_a, side_b):
+        rows, columns = np.nonzero(tile == HARD_CODE)
         left, right = side_a[rows + start].tolist(), side_b[columns].tolist()
         batch = [(block_signatures[x], block_signatures[y]) for x, y in zip(left, right, strict=True)]
         if batch and not all(repair.name_rules_alone_forbid(batch)):
@@ -683,7 +580,7 @@ def _reading_round(
             own = int(inverse[mention])
             others = targets[inverse[targets] != own]
             if len(others):
-                partners = others[_codes_against(codes, width, mention, others) == 255]
+                partners = others[codes_against(codes, width, mention, others) == HARD_CODE]
                 pairs.update((min(own, c), max(own, c)) for c in np.unique(inverse[partners]).tolist())
             if own not in spelling_clusters[value]:
                 continue
@@ -692,14 +589,14 @@ def _reading_round(
                 checked = np.zeros(width, dtype=bool)
                 agreed = np.zeros(width, dtype=bool)
             outside = everyone[inverse != own]
-            vetoed = outside[_codes_against(codes, width, mention, outside) == 255]
+            vetoed = outside[codes_against(codes, width, mention, outside) == HARD_CODE]
             unread = vetoed[~checked[vetoed]]
             checked[unread] = True
             # Each speller reads only the mentions no earlier speller agreed with.
             for speller in speller_positions[inverse[speller_positions] == own].tolist():
                 if not len(unread):
                     break
-                agrees = _codes_against(codes, width, speller, unread) != 255
+                agrees = codes_against(codes, width, speller, unread) != HARD_CODE
                 agreed[unread[agrees]] = True
                 unread = unread[~agrees]
             joinable = vetoed[agreed[vetoed]]
@@ -736,8 +633,8 @@ def _reading_round(
                     dtype=np.int64,
                 )
                 agrees = np.zeros(len(other), dtype=bool)
-                for _, tile in _tiles(codes, width, own_spellers, other):
-                    agrees |= (tile != 255).any(axis=0)
+                for _, tile in code_tiles(codes, width, own_spellers, other):
+                    agrees |= (tile != HARD_CODE).any(axis=0)
                 group_of[value] = len(masks)
                 masks.append(agrees)
             groups[i] = group_of[value]
@@ -778,23 +675,15 @@ def _reading_round(
             accepted.append((found[0], a, b, found[1]))
     if not accepted:
         return labels
-    merged = label_array.copy()
-    used: set[int] = set()
-    for bound, a, b, odd in sorted(accepted):
-        if a in used or b in used:
-            continue
-        used.update((a, b))
-        merged[members(b)] = unique[a]
-        logger.info(
-            "Name-conflict repair: block %s merges clusters of %d and %d mentions over joined-initials "
-            "readings, height %.3f, odd mentions %s",
-            block_key,
-            len(members(a)),
-            len(members(b)),
-            bound,
-            ", ".join(block_signatures[m] for m in odd),
-        )
-    return merged
+    return _merge_disjoint(
+        label_array,
+        accepted,
+        members,
+        lambda a: unique[a],
+        block_signatures,
+        block_key,
+        " over joined-initials readings",
+    )
 
 
 def repair_name_conflicts_in_block(
@@ -851,7 +740,7 @@ def _repair_round(
     Args:
         block_signatures: Signature ids in matrix order.
         labels: Cluster label per signature.
-        codes: ``quantize_distances`` output for the block's model distances.
+        codes: ``s2and.pair_codes.quantize_distances`` output for the block's model distances.
         repair: Settings and per-signature facts.
         forbidden: Signature ids that may not share a cluster with each key,
             from seed disallows and profile exclusions.
@@ -878,16 +767,16 @@ def _repair_round(
         cluster,
         len(big),
         MIN_SIDE,
-        repair.max_average_distance * _SCALE,
+        repair.max_average_distance * SCALE,
         MAX_ODD_MENTIONS,
         repair_close_code(repair),
-        repair.close_pair_bonus * _SCALE,
+        repair.close_pair_bonus * SCALE,
     )
     if not candidates:
         return labels
 
     members = {index: np.flatnonzero(cluster == index) for index in {c for a, b, *_ in candidates for c in (a, b)}}
-    accepted: list[_RepairCandidate] = []
+    accepted: list[tuple[float, int, int, tuple[int, ...]]] = []
     for a, b, odd, code_sum, close_count in candidates:
         odd_ids = {block_signatures[m] for m in odd}
         all_a = [block_signatures[m] for m in members[a]]
@@ -900,8 +789,6 @@ def _repair_round(
         bound = _height_bound(code_sum, close_count, count, repair, min(len(ids_a), len(ids_b)))
         if bound > repair.max_average_distance:
             continue
-        # The middle of the range orders the merges and goes to the log.
-        average = bound - 0.5 / _SCALE
         if repair.lacks_full_name(ids_a) or repair.lacks_full_name(ids_b):
             continue
         if not _passes_merge_guards(
@@ -914,75 +801,10 @@ def _repair_round(
             seed_groups,
         ):
             continue
-        accepted.append(_RepairCandidate(average, a, b, tuple(odd), code_sum, close_count))
+        # The middle of the range orders the merges and goes to the log.
+        accepted.append((bound - 0.5 / SCALE, a, b, tuple(odd)))
     if not accepted:
         return labels
-
-    # Closest pair first. A cluster takes part in one merge per block, so no
-    # merge rests on a cluster that an earlier merge changed. The close-pair height
-    # can fall below zero, where linkage would clamp it; the order keeps the
-    # unclamped value, so the pair with more close evidence goes first.
-    merged = label_array.copy()
-    used: set[int] = set()
-    selected: list[_RepairCandidate] = []
-    for candidate in sorted(accepted, key=lambda item: (item.average, item.a, item.b, item.odd)):
-        average, a, b, odd = candidate.average, candidate.a, candidate.b, candidate.odd
-        if a in used or b in used:
-            continue
-        used.update((a, b))
-        selected.append(candidate)
-        merged[members[b]] = unique[big[a]]
-        logger.info(
-            "Name-conflict repair: block %s merges clusters of %d and %d mentions, height %.3f, odd mentions %s",
-            block_key,
-            int(sizes[big[a]]),
-            int(sizes[big[b]]),
-            average,
-            ", ".join(block_signatures[m] for m in odd),
-        )
-
-    # Keep every pair decision. Extend only when all three original pairs agree.
-    by_pair: dict[tuple[int, int], list[_RepairCandidate]] = {}
-    neighbors: dict[int, set[int]] = {}
-    for candidate in accepted:
-        by_pair.setdefault((candidate.a, candidate.b), []).append(candidate)
-        neighbors.setdefault(candidate.a, set()).add(candidate.b)
-        neighbors.setdefault(candidate.b, set()).add(candidate.a)
-    extensions: list[tuple[float, int, int, int, tuple[int, ...]]] = []
-    for pair in selected:
-        a, b = pair.a, pair.b
-        for c in sorted((neighbors[a] & neighbors[b]) - used):
-            for ab, ac, bc in product(by_pair[a, b], by_pair[min(a, c), max(a, c)], by_pair[min(b, c), max(b, c)]):
-                odd = tuple(sorted(set(ab.odd) | set(ac.odd) | set(bc.odd)))
-                if len(odd) > MAX_ODD_MENTIONS:
-                    continue
-                # A shared exception can remove another side's only full name.
-                kept = [members[index][~np.isin(members[index], odd)] for index in (a, b, c)]
-                if any(len(side) < MIN_SIDE for side in kept):
-                    continue
-                if any(repair.lacks_full_name([block_signatures[m] for m in side]) for side in kept):
-                    continue
-                bound = max(
-                    _common_odd_average_bound(item, odd, members, codes, len(block_signatures), repair)
-                    for item in (ab, ac, bc)
-                )
-                if bound <= repair.max_average_distance:
-                    extensions.append((bound, a, b, c, odd))
-    extended: set[tuple[int, int]] = set()
-    for bound, a, b, c, odd in sorted(extensions):
-        if c in used or (a, b) in extended:
-            continue
-        used.add(c)
-        extended.add((a, b))
-        merged[members[c]] = unique[big[a]]
-        logger.info(
-            "Name-conflict repair: block %s extends clusters of %d, %d and %d mentions, "
-            "maximum distance bound %.3f, odd mentions %s",
-            block_key,
-            int(sizes[big[a]]),
-            int(sizes[big[b]]),
-            int(sizes[big[c]]),
-            bound,
-            ", ".join(block_signatures[m] for m in odd),
-        )
-    return merged
+    return _merge_disjoint(
+        label_array, accepted, members.__getitem__, lambda a: unique[big[a]], block_signatures, block_key, ""
+    )

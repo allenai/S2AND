@@ -34,8 +34,9 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # reading mention's own cluster; 8: the year-gap split runs on blocks under 11 mentions;
 # 9: the split treats 1601 and 1800 as undated and, in blocks under 11 mentions, keeps parts
 # that share a first name; 10: the bridge counts the surname block, not the clustered unit,
-# and a 1601 or 1800 stamp follows the part whose years span it.
-DISTANCE_POLICY_VERSION = 10
+# and a 1601 or 1800 stamp follows the part whose years span it; 11: the repair's
+# three-cluster extension is removed (later rounds join the third cluster).
+DISTANCE_POLICY_VERSION = 11
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

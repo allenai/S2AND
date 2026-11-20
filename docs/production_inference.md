@@ -311,34 +311,25 @@ clusterer.name_conflict_repair_max_distance = None
 clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
 ```
 
-Seven more class attributes on `Clusterer` change the repair. A model bundle does not record
-them, so a loaded model uses the class defaults, and bundle export refuses a clusterer whose
-values differ from them. Since `1.0.0b12` the defaults use the bounded
-close-pair rule: on 127 dev blocks, 7 ORCID-labelled giant blocks and 40 fresh blocks it made no
-ORCID-confirmed wrong merge. Setting the first to `False` and the rounds to `1` restores the
-`1.0.0b11` rule.
+The repair's other settings are fixed (`s2and/name_conflict_repair.py`). Since `1.0.0b12` they
+are the bounded close-pair rule; on 127 dev blocks, 7 ORCID-labelled giant blocks and 40 fresh
+blocks it made no ORCID-confirmed wrong merge:
 
-- `name_conflict_repair_uses_close_pair_bonus` (default `True`): compare the close-pair
-  linkage height instead of the plain average distance. The height is the average less the
-  cluster model's `close_pair_bonus` times the share of pairs under `close_pair_distance`,
-  the height that close-pair linkage cuts. Only codes whose whole range lies under the close
-  distance count as close, so the height is an upper bound. The limit stays
-  `name_conflict_repair_max_distance`.
-- `name_conflict_repair_requires_full_first_names` (default `True`): whether each side must
-  keep a mention with a full first name once the odd mentions are left out.
-- `name_conflict_repair_rounds` (default `5`): the most repair rounds per block. A round
-  merges each cluster at most once; a later round sees the merged clusters.
-- `name_conflict_repair_initials_side_min_mentions` (default `None`): a side with no full
-  first name passes the full-name test when it keeps at least this many mentions.
-- `name_conflict_repair_bonus_min_close_share`,
-  `name_conflict_repair_bonus_max_plain_average` and
-  `name_conflict_repair_bonus_min_side_mentions` (defaults `0.10`, `0.40` and `10`; `None`
-  sets no limit): with the close-pair
-  height on, a pair whose plain average is over the limit may use the bonus only when at
-  least this share of its pairs is certainly close, its plain average is at most the cap,
-  and each side keeps at least this many mentions. A few very close pairs then cannot carry
-  two clusters that are otherwise far apart. A pair under the limit on its plain average is
-  not affected.
+- The height is the close-pair linkage height: the average model distance less the cluster
+  model's `close_pair_bonus` times the share of pairs under `close_pair_distance`. Only codes
+  whose whole range lies under the close distance count as close, so the height is an upper
+  bound. A cluster model without a close-pair bonus compares the plain average.
+- A pair whose plain average is over the limit may use the bonus only when at least 10% of its
+  pairs are certainly close, its plain average is at most 0.40, and each side keeps at least
+  10 mentions. A few very close pairs then cannot carry two clusters that are otherwise far apart.
+- Each side must keep a mention with a full first name once the odd mentions are left out.
+- A block gets up to five repair rounds. A round merges each cluster at most once; a later round
+  sees the merged clusters, so a profile split three ways rejoins over two rounds.
+
+`1.0.0b14` removed the seven `Clusterer` attributes that set these
+(`name_conflict_repair_uses_close_pair_bonus`, `name_conflict_repair_requires_full_first_names`,
+`name_conflict_repair_rounds`, `name_conflict_repair_initials_side_min_mentions` and the three
+`name_conflict_repair_bonus_*` bounds). Prediction refuses a clusterer that still sets one.
 
 The setting applies wherever a call builds a block's distances and clusters them:
 `predict_from_arrow`, `predict`, `predict_from_rust_featurizer`, and the two clustering
@@ -374,14 +365,12 @@ After a block or subblock is clustered, two clusters merge when all of these hol
 - With `dont_merge_cluster_seeds` on, the two clusters do not hold mentions of two
   different cluster seeds, such as two claimed profiles.
 
-The odd mentions stay in the merged cluster. The repair first selects disjoint
-pair merges, closest first. A selected pair can then absorb one untouched
-original cluster when every original pair passes the checks above. One shared
-set of at most two odd mentions must explain all three pairs, and every pair's
-distance bound must still pass after excluding that same set. Each original
-cluster must retain five mentions and a full first name. Extensions are ordered
-by their highest pair-distance bound. They preserve every selected pair and stop
-at three original clusters.
+The odd mentions stay in the merged cluster. Each round selects disjoint pair merges,
+closest first. A person split three ways rejoins over two rounds: the second round tests the
+merged pair against the third cluster as one cluster, as average linkage would. Until
+`1.0.0b14` a selected pair could also absorb a third cluster in the same round when each
+original pair passed on its own; on 128 production blocks and 7 giant blocks the rounds give
+the same partitions without that step.
 
 Each repair round first runs a reading step for joined-initials readings (see
 "Canonical name contract" in `docs/canonical_names.md`). The name rules veto "Ec" against
@@ -424,18 +413,20 @@ that share an ORCID, a seed group or such a first name move as one group. A grou
 part that shares one with it. Otherwise a group stamped 1601 or 1800 follows the one part whose
 dated years span the stamp, and any other group the part with the lowest average distance; a
 group that shares one with two parts keeps them together. The split only separates, so no other cluster changes.
-It runs on the repair's distance copy, so it needs a cluster model with a close-pair bonus,
-runs on blocks of any size from two mentions whose dated mentions span more than 50 years,
-and is off when `name_conflict_repair_max_distance` is `None`.
-It also runs on blocks without a name conflict, where no repair applies, and with
-`name_conflict_repair_uses_close_pair_bonus = False`. A request with
+It reads the same distance copy as the repair, so it needs a cluster model with a close-pair
+bonus, and runs on blocks of any size from two mentions whose dated mentions span more than
+50 years. It also runs on blocks without a name conflict, where no repair applies, and since
+`1.0.0b14` with the repair off (`name_conflict_repair_max_distance = None`); turn both off for
+linkage-only clusters. Like the repair, it skips a prediction call that takes precomputed
+distances (`dists=`). A request with
 `incremental_dont_use_cluster_seeds=True`, such as the altered-profile pre-split, may split a
 seed group. The pre-split's cut is temporary: incremental linking returns the altered profile
 whole and uses the pieces only to decide where a new mention links. `Clusterer.year_gap_split = False` turns it off.
 
-The repair keeps a one-byte-per-pair copy of each block's distances while the
-block clusters, about one eighth of the matrix. Extending a pair reuses the
-original pair sums and reads only the additional excluded rows.
+The repair and the split share one one-byte-per-pair copy of each block's distances while the
+block clusters, about one eighth of the matrix (`s2and/pair_codes.py`). The RAM guard counts it
+whenever either correction is on. `s2and/block_corrections.py` runs both corrections, in the
+same order, for every route that clusters a block from a distance matrix.
 
 The repair reads a pair as forbidden only at the exact impossible-pair distance.
 A block is not repaired when its distances hold any other value above one, such as

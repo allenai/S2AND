@@ -259,14 +259,16 @@ def test_model_presplit_cache_fingerprint_hashes_complete_fitted_state(kind) -> 
 @pytest.mark.parametrize(
     ("setting", "value"),
     [
-        ("name_conflict_repair_rounds", 2),
-        ("name_conflict_repair_uses_close_pair_bonus", False),
-        ("name_conflict_repair_bonus_min_side_mentions", 5),
+        ("name_conflict_repair_max_distance", 0.3),
+        ("name_conflict_repair_max_distance", None),
         ("year_gap_split", False),
     ],
 )
-def test_model_presplit_cache_fingerprint_follows_the_repair_settings(setting, value) -> None:
-    clusterer = SimpleNamespace(cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05))
+def test_model_presplit_cache_fingerprint_follows_the_correction_settings(setting, value) -> None:
+    clusterer = SimpleNamespace(
+        cluster_model=SimpleNamespace(close_pair_bonus=8.0, close_pair_distance=0.05),
+        name_conflict_repair_max_distance=0.2,
+    )
     before = model_module._model_presplit_cache_fingerprint(clusterer)
     setattr(clusterer, setting, value)
     assert model_module._model_presplit_cache_fingerprint(clusterer) != before

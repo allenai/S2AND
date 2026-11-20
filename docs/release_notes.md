@@ -2,6 +2,31 @@
 
 ## Unreleased runtime changes
 
+- Run the post-linkage corrections from one module, `s2and/block_corrections.py`. Block clustering
+  and `predict_eps_grid` now share one sequence: quantize the block's distances once, run the
+  name-conflict repair, then the year-gap split. The repair and the split read pair codes through
+  `s2and/pair_codes.py`. On 128 large and 480 small production blocks, 68 edited profiles, 257
+  captured giant-block repair calls, a seeded block under 184 seed and flag combinations, and the
+  held-out benchmark, the clusters are the same as `1.0.0b13`'s.
+- Remove the repair's three-cluster extension. A later repair round joins the third cluster
+  instead, testing the merged pair against it as one cluster. On 128 production blocks (5
+  extensions) and 7 giant blocks the final clusters are the same. The two differ on constructed
+  cases: the extension could join three clusters whose leading ORCIDs only pairwise agree, or
+  whose pairs pass the close-share floor only one by one; the rounds do not. The EPS
+  distance-policy version is now 11.
+- Remove seven `Clusterer` attributes that tuned the repair: `name_conflict_repair_uses_close_pair_bonus`,
+  `name_conflict_repair_requires_full_first_names`, `name_conflict_repair_rounds`,
+  `name_conflict_repair_initials_side_min_mentions`, `name_conflict_repair_bonus_min_close_share`,
+  `name_conflict_repair_bonus_max_plain_average` and `name_conflict_repair_bonus_min_side_mentions`.
+  They held A/B arms; the repair keeps their default values as fixed settings. Prediction refuses a
+  clusterer that still sets one, so an old setting cannot be silently ignored. Bundle export checks
+  only `name_conflict_repair_max_distance` and `year_gap_split` now.
+- The year-gap split no longer turns off with the repair. With
+  `name_conflict_repair_max_distance = None` it still runs; set `year_gap_split = False` as well
+  for linkage-only clusters. The default configuration is unchanged.
+- The RAM guard counts the one-byte pair codes whenever either correction is on, also for blocks
+  under 11 mentions and split-only configurations.
+
 - Treat the years 1601 and 1800 as undated in the year-gap split. The corpus gives these years to
   papers whose real year it does not know: 1601 holds 1,002 papers against 18 in 1600 and a handful
   after it, and 1800 twice the papers of 1801. Judges found 10 of 50 decided gaps through these years

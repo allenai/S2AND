@@ -24,13 +24,7 @@ from s2and.model import (
     _selected_feature_indices,
 )
 from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
-from s2and.name_conflict_repair import (
-    DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
-    DEFAULT_BONUS_MIN_CLOSE_SHARE,
-    DEFAULT_BONUS_MIN_SIDE_MENTIONS,
-    DEFAULT_MAX_AVERAGE_DISTANCE,
-    DEFAULT_REPAIR_ROUNDS,
-)
+from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
     CLOSE_PAIR_FIELDS,
@@ -120,16 +114,10 @@ def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
     return payload
 
 
-# Clusterer repair settings that a bundle does not record, with the package defaults a
+# Clusterer correction switches that a bundle does not record, with the package defaults a
 # loaded model gets. Fixed values, so a changed class attribute cannot pass the check.
-_UNRECORDED_REPAIR_SETTINGS: dict[str, object] = {
-    "name_conflict_repair_uses_close_pair_bonus": True,
-    "name_conflict_repair_requires_full_first_names": True,
-    "name_conflict_repair_rounds": DEFAULT_REPAIR_ROUNDS,
-    "name_conflict_repair_initials_side_min_mentions": None,
-    "name_conflict_repair_bonus_min_close_share": DEFAULT_BONUS_MIN_CLOSE_SHARE,
-    "name_conflict_repair_bonus_max_plain_average": DEFAULT_BONUS_MAX_PLAIN_AVERAGE,
-    "name_conflict_repair_bonus_min_side_mentions": DEFAULT_BONUS_MIN_SIDE_MENTIONS,
+_UNRECORDED_CORRECTION_SETTINGS: dict[str, object] = {
+    "name_conflict_repair_max_distance": DEFAULT_MAX_AVERAGE_DISTANCE,
     "year_gap_split": True,
 }
 
@@ -143,16 +131,8 @@ def _clusterer_config_payload(
     raw_feature_contract = getattr(clusterer, "feature_contract", None)
     if not isinstance(raw_feature_contract, Mapping):
         raise ValueError("Production bundle export requires an explicit source feature_contract")
-    repair_distance = getattr(clusterer, "name_conflict_repair_max_distance", DEFAULT_MAX_AVERAGE_DISTANCE)
-    if repair_distance != DEFAULT_MAX_AVERAGE_DISTANCE:
-        # A bundle has no field for the setting, so a loaded model would silently get the default.
-        raise ValueError(
-            "Production bundle export cannot record name_conflict_repair_max_distance="
-            f"{repair_distance!r}; a loaded model uses {DEFAULT_MAX_AVERAGE_DISTANCE}. "
-            "Restore the default before export and set the attribute after loading."
-        )
-    for setting, default in _UNRECORDED_REPAIR_SETTINGS.items():
-        # These have no bundle field either.
+    for setting, default in _UNRECORDED_CORRECTION_SETTINGS.items():
+        # A bundle has no field for these, so a loaded model would silently get the default.
         value = getattr(clusterer, setting, default)
         if value != default:
             raise ValueError(

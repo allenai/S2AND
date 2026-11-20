@@ -9,15 +9,15 @@ import numpy as np
 import pytest
 from scipy.spatial.distance import squareform
 
-import s2and.model as model_module
-from s2and import year_gap_split
+import s2and.block_corrections as block_corrections
+from s2and import pair_codes, year_gap_split
 from s2and.consts import YEAR_DIFF_CAP
 from s2and.data import ANDData, NameCounts
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.model_pairwise import FastCluster
-from s2and.name_conflict_repair import quantize_distances
+from s2and.pair_codes import quantize_distances
 from s2and.year_gap_split import split_year_gaps, split_years
 from tests.helpers import build_arrow_training_dataset
 from tests.incremental_test_helpers import _dataset
@@ -215,13 +215,13 @@ def test_both_routes_read_the_same_years(tmp_path: Path) -> None:
     dataset = _dated_dataset()
     ids = [str(i) for i in range(13)]
     model = _model(8.0)
-    python_repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    python_repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
     assert arrow_dataset is not None
     featurizer = build_rust_featurizer_from_arrow_dataset(
         arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
     )
-    rust_repair = model_module._name_conflict_repair_from_rust_featurizer(model, {"b": ids}, featurizer)
+    rust_repair = block_corrections.corrections_from_rust_featurizer(model, {"b": ids}, featurizer)
 
     assert python_repair is not None and rust_repair is not None
     assert (
@@ -236,13 +236,13 @@ def test_both_routes_read_the_same_first_names_in_a_small_block(tmp_path: Path) 
     dataset = _dataset([(name, "", "Smith") for name in names], {})
     ids = [str(i) for i in range(len(names))]
     model = _model(8.0)
-    python_repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    python_repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
     assert arrow_dataset is not None
     featurizer = build_rust_featurizer_from_arrow_dataset(
         arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
     )
-    rust_repair = model_module._name_conflict_repair_from_rust_featurizer(model, {"b": ids}, featurizer)
+    rust_repair = block_corrections.corrections_from_rust_featurizer(model, {"b": ids}, featurizer)
 
     assert python_repair is not None and rust_repair is not None
     assert dict(python_repair.first_names) == dict(rust_repair.first_names)
@@ -254,25 +254,25 @@ def test_both_routes_count_the_surname_block_not_the_request(tmp_path: Path) -> 
     # Five of thirteen Smith mentions, as a claimed profile or a residual would send them.
     dataset = _dated_dataset()
     part = {"profile": [str(i) for i in range(5)]}
-    assert model_module._dataset_small_block_signatures(part, dataset) == frozenset()
+    assert block_corrections.dataset_small_block_signatures(part, dataset) == frozenset()
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
     assert arrow_dataset is not None
     with arrow_dataset.use() as lease:
-        assert model_module._arrow_small_block_signatures(lease, part) == frozenset()
+        assert block_corrections.arrow_small_block_signatures(lease, part) == frozenset()
     whole = {"b": [str(i) for i in range(5)]}
     small = _dataset([("Ada", "", "Smith")] * 5, {})
     small_arrow = build_arrow_training_dataset(small, tmp_path / "small").arrow_dataset
     assert small_arrow is not None
-    assert model_module._dataset_small_block_signatures(whole, small) == frozenset(whole["b"])
+    assert block_corrections.dataset_small_block_signatures(whole, small) == frozenset(whole["b"])
     with small_arrow.use() as lease:
-        assert model_module._arrow_small_block_signatures(lease, whole) == frozenset(whole["b"])
+        assert block_corrections.arrow_small_block_signatures(lease, whole) == frozenset(whole["b"])
 
 
 def test_python_route_reads_a_nan_year_as_undated() -> None:
     dataset = _dated_dataset()
     dataset.papers["100"] = dataset.papers["100"]._replace(year=float("nan"))
     ids = [str(i) for i in range(13)]
-    repair = model_module._name_conflict_repair_from_dataset(_model(8.0), {"b": ids}, dataset)
+    repair = block_corrections.corrections_from_dataset(_model(8.0), {"b": ids}, dataset)
     assert repair is not None
     assert "0" not in repair.years
 
@@ -283,9 +283,9 @@ def test_block_clustering_splits_year_gaps_after_the_repair(close_pair_bonus: fl
     ids = [str(i) for i in range(13)]
     model = _model(close_pair_bonus)
     model.year_gap_split = enabled
-    repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
 
-    labels = model._cluster_one_block(ids, squareform(_square(0.25)), None, dataset, {}, name_conflict_repair=repair)
+    labels = model._cluster_one_block(ids, squareform(_square(0.25)), None, dataset, {}, corrections=repair)
 
     assert len(_partition(labels)) == parts
 
@@ -300,8 +300,8 @@ def test_eps_grid_splits_as_block_clustering_does() -> None:
 
 def _cluster(model: Clusterer, dataset: ANDData, square: np.ndarray, **kwargs: Any) -> set[frozenset[str]]:
     ids = [str(i) for i in range(13)]
-    repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
-    labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, name_conflict_repair=repair, **kwargs)
+    repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
+    labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, corrections=repair, **kwargs)
     return _partition(labels)
 
 
@@ -312,10 +312,10 @@ def test_block_clustering_splits_a_block_without_an_impossible_pair() -> None:
     assert _cluster(_model(8.0), _dated_dataset(), square) == SPLIT
 
 
-def test_block_clustering_splits_when_the_repair_uses_the_plain_average() -> None:
-    # The 1.0.0b11 repair rule; the split reads the cluster model's close-pair distance.
+def test_block_clustering_splits_with_the_repair_off() -> None:
+    # The two switches are independent; the split reads the cluster model's close-pair distance.
     model = _model(8.0)
-    model.name_conflict_repair_uses_close_pair_bonus = False
+    model.name_conflict_repair_max_distance = None
     assert _cluster(model, _dated_dataset(), _square(0.25)) == SPLIT
 
 
@@ -339,8 +339,8 @@ def test_mean_cross_code_reads_in_batches(monkeypatch: pytest.MonkeyPatch) -> No
     codes = quantize_distances(squareform(_square(0.25)), require_hard=False)
     assert codes is not None
     rows, cols = np.arange(0, 5), np.arange(5, 13)
-    expected = float(year_gap_split._cross_codes(codes, 13, rows, cols).mean())
-    monkeypatch.setattr(year_gap_split, "_BATCH_CELLS", 9)
+    expected = float(codes[pair_codes.condensed_index(13, rows[:, None], cols[None, :])].mean())
+    monkeypatch.setattr(pair_codes, "TILE_CELLS", 9)
     assert year_gap_split._mean_cross_code(codes, 13, rows, cols) == expected
 
 
@@ -363,10 +363,10 @@ def _small_block_labels(
         dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
     ids = [str(i) for i in range(5)]
     model = _model(8.0)
-    repair = model_module._name_conflict_repair_from_dataset(model, {"b": ids}, dataset)
+    repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
     square = np.full((5, 5), 0.25)
     np.fill_diagonal(square, 0.0)
-    labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, name_conflict_repair=repair)
+    labels = model._cluster_one_block(ids, squareform(square), None, dataset, {}, corrections=repair)
     return np.asarray(labels).tolist()
 
 
@@ -404,9 +404,8 @@ def test_block_clustering_treats_placeholder_years_as_undated(old_years: tuple[i
 
 def test_short_spans_skip_the_split() -> None:
     years = {"a": 2010 - YEAR_DIFF_CAP - 1, "b": 2010}
-    assert model_module._spans_a_year_gap(["a", "b"], years, 11)
-    assert not model_module._spans_a_year_gap(["a", "b"], {"a": 2010 - YEAR_DIFF_CAP, "b": 2010}, 11)
-    assert not model_module._spans_a_year_gap(["a", "b"], years, None)
+    assert block_corrections._spans_a_year_gap(["a", "b"], years)
+    assert not block_corrections._spans_a_year_gap(["a", "b"], {"a": 2010 - YEAR_DIFF_CAP, "b": 2010})
 
 
 @pytest.mark.parametrize("other_smiths", [0, 6])
@@ -418,8 +417,8 @@ def test_bulk_routes_bridge_only_in_a_small_surname_block(
     original = Clusterer._cluster_one_block
 
     def spy(self: Clusterer, *args: Any, **kwargs: Any) -> Any:
-        repair = kwargs.get("name_conflict_repair")
-        seen.append(dict(repair.first_names) if repair is not None else {})
+        corrections = kwargs.get("corrections")
+        seen.append(dict(corrections.first_names) if corrections is not None else {})
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(Clusterer, "_cluster_one_block", spy)

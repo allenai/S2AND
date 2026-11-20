@@ -253,11 +253,11 @@ def test_rust_featurizer_distance_matrix_guards_allocation_before_matrix_build()
         )
 
 
-@pytest.mark.parametrize(("repairs", "block_size"), [(False, 100), (True, 100), (True, 10)])
-def test_matrix_guard_budgets_the_repair_codes(monkeypatch, repairs, block_size):
+@pytest.mark.parametrize(("copies_codes", "block_size"), [(False, 100), (True, 100), (True, 10)])
+def test_matrix_guard_budgets_the_correction_codes(monkeypatch, copies_codes, block_size):
     pairs = block_size * (block_size - 1) // 2
-    # A block of ten is too small to repair, so it has no codes.
-    needed = pairs * 8 + (pairs if repairs and block_size >= 11 else 0)
+    # The year-gap split reads codes of blocks of any size, so every block counts them.
+    needed = pairs * 8 + (pairs if copies_codes else 0)
 
     def guard(available: int) -> None:
         monkeypatch.setattr(
@@ -277,7 +277,7 @@ def test_matrix_guard_budgets_the_repair_codes(monkeypatch, repairs, block_size)
             uses_fastcluster=True,
             fastcluster_fused_dtype=np.float64,
             total_ram_bytes=available,
-            repairs_name_conflicts=repairs,
+            copies_codes=copies_codes,
         )
 
     guard(needed)

@@ -3311,18 +3311,6 @@ class Clusterer:
                 block_dict,
                 rust_featurizer,
                 prediction_state.small_block_signatures,
-                # The featurizer's own disallows count too: a caller distance override can hide one
-                # from the matrix, and the join must still not cross it.
-                join_disallows=(
-                    seed_disallow_adjacency(
-                        prediction_state.orcid_join_disallows
-                        | proxy_dataset.cluster_seeds_disallow
-                        | set(cast(Any, rust_featurizer).cluster_seeds_disallow()),
-                        {},
-                    )
-                    if orcid_join_enabled(self)
-                    else None
-                ),
             )
             effective_cluster_model_params = cluster_model_params
             if isinstance(self.cluster_model, FastCluster):
@@ -4866,7 +4854,7 @@ class Clusterer:
         if corrections is None or block_codes is None:
             return labels
         forbidden: Mapping[str, Set[str]] = disallow_adjacency
-        if block_exclusions and (block_codes.repair or block_codes.join):
+        if block_exclusions and block_codes.repair:
             # A correction may not bring an excluded mention back to its anchor.
             both_ways: dict[str, set[str]] = {key: set(value) for key, value in disallow_adjacency.items()}
             for anchor, excluded in block_exclusions.items():
@@ -4884,9 +4872,7 @@ class Clusterer:
                 forbidden=forbidden,
                 # Each view copies the request's seeds, so it is built only for a step that runs.
                 repair_seed_groups=(
-                    self._repair_seed_groups(dataset, prediction_state)
-                    if block_codes.repair or block_codes.join
-                    else None
+                    self._repair_seed_groups(dataset, prediction_state) if block_codes.repair else None
                 ),
                 # A split never separates a required seed group, so it reads every seed in sight,
                 # unless the caller turned seeds off, as the altered-profile pre-split does.
@@ -5277,18 +5263,7 @@ class Clusterer:
         disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
         # A precomputed matrix can hold impossible pairs from the caller's own supervision, and
         # nothing here can tell those from name conflicts. Only distances built in this call are repaired.
-        corrections = (
-            None
-            if dists is not None
-            else corrections_from_dataset(
-                self,
-                block_dict,
-                dataset,
-                join_disallows=seed_disallow_adjacency(cluster_seeds_disallow, {})
-                if orcid_join_enabled(self)
-                else None,
-            )
-        )
+        corrections = None if dists is not None else corrections_from_dataset(self, block_dict, dataset)
 
         effective_cluster_model_params = cluster_model_params
         fastcluster_fused_dtype = np.float16

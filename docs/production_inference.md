@@ -398,26 +398,21 @@ runs only on blocks of at least 11 mentions, so a smaller block keeps a reading 
 
 ### ORCID joins
 
-After name-conflict repair, average-linkage bulk clustering can join clusters with the same
-leading ORCID. The ORCID must account for at least 80% of each cluster's observed ORCIDs,
-and a tie does not qualify. Within a block or subblock, each cluster needs two mentions
-with the ORCID, or at most two mentions in all. The upper bound on the mean cross-cluster
-distance must be at most EPS plus 0.10 and at most 0.60. At least 10% of the pairs other
-than those that share the leading ORCID must be certainly within 0.20. Hard pairs must
-come from the name rules. They count as farthest pairs, with at most one or 10% of the
-pairs, whichever is greater, and at most 16 in all.
+Within one distance matrix, equal ORCIDs get distance 0 before the name rules, so linkage
+merges their mentions first and no join is needed there. Subblocking can still put mentions
+of one ORCID into separate subblocks. At the end of subblocked Arrow prediction, average-linkage
+clustering therefore joins final clusters that separate subblocks of one original block
+support with the same leading ORCID. The ORCID must account for at least 80% of each cluster's
+observed ORCIDs, a tie does not qualify, and each cluster needs two mentions with the ORCID and
+at least 5% coverage. The same canonical full first-name word must occur in at least 80% of
+each cluster's mentions. The clusters' name forms must not break the hard name rule, so
+different full middle names or different compound first names stay apart. Joined clusters
+can exceed the subblock size limit. The join skips seed disallows, profile exclusions, and
+distinct required seed groups when `dont_merge_cluster_seeds` is on.
 
-At the end of subblocked Arrow prediction, the same ORCID can also join clusters supported
-by separate subblocks of one original block. Each cluster needs two mentions with the ORCID
-and at least 5% coverage. The same canonical full first-name word must occur in at least
-80% of each cluster's mentions. Joined clusters can exceed the subblock size limit.
-Both steps skip joins across seed disallows, profile exclusions, or distinct required
-seed groups when `dont_merge_cluster_seeds` is on.
-
-Set `Clusterer.orcid_join = False` to turn off both steps. They also skip ORCID-suppressed
-requests. The in-block step runs on distances built during prediction or passed to the
-EPS grid, like name-conflict repair. Bundle export requires the default switch because
-the bundle format has no field for it.
+Set `Clusterer.orcid_join = False` to turn the join off. It also skips ORCID-suppressed
+requests. Bundle export requires the default switch because the bundle format has no field
+for it.
 
 ### Year-gap split
 

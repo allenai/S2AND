@@ -6,14 +6,15 @@ Every route that clusters a block from a distance matrix runs the same sequence:
 2. the contracts, which are exact and never weighed: required seed groups restored, then
    profile exclusions evicted (``Clusterer._cluster_one_block``);
 3. the corrections in this module, which are heuristics shipped on judged evidence:
-   name-conflict repair, guarded ORCID joins, then the year-gap split. Merges come first,
-   so a merge cannot undo a split.
+   name-conflict repair, then the year-gap split. The merge comes first, so it cannot undo a
+   split. Subblocked Arrow prediction then joins final clusters that share an ORCID across
+   subblocks (``s2and.orcid_join``).
 
 The corrections read the same evidence, a one-byte copy of the block's model distances
 (``s2and.pair_codes``) taken before linkage overwrites the matrix, and the same facts per
 signature (``BlockCorrections``), gathered once per request from a Rust featurizer or an
 ``ANDData``. ``Clusterer.name_conflict_repair_max_distance`` turns the repair on and sets its
-limit. ``Clusterer.orcid_join`` turns on joins within blocks and after subblocked Arrow prediction.
+limit. ``Clusterer.orcid_join`` turns on the join across subblocks.
 ``Clusterer.year_gap_split`` turns the split on.
 """
 
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -41,7 +42,6 @@ from s2and.name_conflict_repair import (
     has_full_first_name,
     repair_name_conflicts_in_block,
 )
-from s2and.orcid_join import join_orcids_in_block
 from s2and.pair_codes import HARD_CODE, certain_close_code, quantize_distances
 from s2and.rust_calls import get_constraints_matrix_indexed_rust
 from s2and.text import (
@@ -66,7 +66,6 @@ class BlockCodes:
     codes: np.ndarray
     repair: bool
     split: bool
-    join: bool
 
 
 @dataclass(frozen=True)
@@ -82,9 +81,6 @@ class BlockCorrections:
         first_names: First word of a full first name per signature id, only for signatures of
             small surname blocks whose name count does not mark a common surname. The split
             bridges parts that share one.
-        orcid_join: Whether to join clusters with a shared ORCID and distance support.
-        join_name_conflicts: Name-rule test for hard pairs crossed by a candidate join.
-        join_disallows: Explicit disallows that still veto an ORCID join after distance overrides.
     """
 
     repair: NameConflictRepair | None
@@ -92,9 +88,6 @@ class BlockCorrections:
     orcids: Mapping[str, str] = field(default_factory=dict)
     years: Mapping[str, int] = field(default_factory=dict)
     first_names: Mapping[str, str] = field(default_factory=dict)
-    orcid_join: bool = False
-    join_name_conflicts: Callable[[Sequence[tuple[str, str]]], list[bool]] | None = None
-    join_disallows: Mapping[str, Set[str]] = field(default_factory=dict)
 
     def codes_for(self, block_signatures: Sequence[str], distances: np.ndarray, num_threads: int) -> BlockCodes | None:
         """Copy a block's distances to codes before linkage, when a correction will read them.
@@ -108,21 +101,20 @@ class BlockCorrections:
         Returns:
             None when no correction applies: the repair needs ``MIN_BLOCK_SIZE`` mentions and an
             impossible pair, the split a span of dated years over ``YEAR_DIFF_CAP``, and both a
-            plain condensed matrix of model distances. The join needs a repeated ORCID.
+            plain condensed matrix of model distances.
         """
         repair = self.repair is not None and len(block_signatures) >= MIN_BLOCK_SIZE
         split = self.split_close_code is not None and _spans_a_year_gap(block_signatures, self.years)
-        join = self.orcid_join and _has_repeated_orcid(block_signatures, self.orcids)
-        if not (repair or split or join):
+        if not (repair or split):
             return None
-        require_hard = not (split or join)
+        require_hard = not split
         codes = quantize_distances(distances, num_threads=num_threads, require_hard=require_hard)
         if codes is None:
             return None
         # Codes quantized with require_hard hold an impossible pair. Without one, the repair skips the block.
         if not require_hard:
             repair = repair and bool(len(codes)) and int(codes.max()) == HARD_CODE
-        return BlockCodes(codes, repair, split, join) if repair or split or join else None
+        return BlockCodes(codes, repair, split) if repair or split else None
 
     def apply(
         self,
@@ -136,7 +128,7 @@ class BlockCorrections:
         split_seed_groups: Mapping[str, Any] | None,
         block_key: str = "",
     ) -> np.ndarray | Sequence[int]:
-        """Apply the name-conflict repair and ORCID joins, then split at year gaps.
+        """Apply the name-conflict repair, then split at year gaps.
 
         Args:
             block_signatures: Signature ids in matrix order.
@@ -146,7 +138,7 @@ class BlockCorrections:
                 merges; None skips the reading step.
             forbidden: Signature ids that may not share a cluster with each key: seed
                 disallows and profile exclusions, both ways.
-            repair_seed_groups: Required seed groups the repair and ORCID join may not join, or None.
+            repair_seed_groups: Required seed groups the repair may not join, or None.
             split_seed_groups: Required seed groups the split never separates, or None.
             block_key: Block name for logs.
         """
@@ -163,20 +155,6 @@ class BlockCorrections:
                 block_key=block_key,
                 cut_height=cut_height,
             )
-        if block_codes.join and cut_height is not None:
-            # A view, not a merged copy: both maps can hold the whole request's disallows.
-            join_forbidden = _AdjacencyUnion(forbidden, self.join_disallows) if self.join_disallows else forbidden
-            labels = join_orcids_in_block(
-                block_signatures,
-                labels,
-                block_codes.codes,
-                self.orcids,
-                cut_height=cut_height,
-                forbidden=join_forbidden,
-                seed_groups=repair_seed_groups,
-                name_conflicts=self.join_name_conflicts,
-                block_key=block_key,
-            )
         if block_codes.split and self.split_close_code is not None:
             labels = split_year_gaps(
                 block_signatures,
@@ -190,40 +168,6 @@ class BlockCorrections:
                 block_key=block_key,
             )
         return labels
-
-
-class _AdjacencyUnion(Mapping[str, Set[str]]):
-    """Read-only union of two disallow adjacency maps, combined per looked-up signature."""
-
-    def __init__(self, first: Mapping[str, Set[str]], second: Mapping[str, Set[str]]) -> None:
-        self._maps = (first, second)
-
-    def __getitem__(self, signature_id: str) -> Set[str]:
-        found = [m[signature_id] for m in self._maps if signature_id in m]
-        if not found:
-            raise KeyError(signature_id)
-        return found[0] if len(found) == 1 else frozenset().union(*found)
-
-    def __iter__(self) -> Iterator[str]:
-        first, second = self._maps
-        yield from first
-        yield from (key for key in second if key not in first)
-
-    def __len__(self) -> int:
-        first, second = self._maps
-        return len(first) + sum(key not in first for key in second)
-
-
-def _has_repeated_orcid(signatures: Sequence[str], orcids: Mapping[str, str]) -> bool:
-    if len(orcids) < 2:
-        return False
-    seen: set[str] = set()
-    for signature_id in signatures:
-        if (orcid := orcids.get(signature_id)) is not None:
-            if orcid in seen:
-                return True
-            seen.add(orcid)
-    return False
 
 
 def orcid_join_enabled(clusterer: Any) -> bool:
@@ -241,19 +185,6 @@ def _spans_a_year_gap(block_signatures: Sequence[str], years: Mapping[str, int])
     # Read only this block's years: a multi-block request holds every block's years.
     dated = list(split_years({s: years[s] for s in block_signatures if s in years}).values())
     return len(dated) >= 2 and max(dated) - min(dated) > YEAR_DIFF_CAP
-
-
-def _uses_average_linkage(cluster_model: Any) -> bool:
-    """Return whether ``cluster_model`` is a FastCluster that cuts an average-linkage tree.
-
-    The ORCID join needs such a tree; the EPS that cuts it can come later, from prediction
-    parameters or from each value of an EPS grid.
-    """
-    return (
-        isinstance(cluster_model, FastCluster)
-        and not cluster_model.input_as_observation_matrix
-        and cluster_model.get_params().get("linkage") == "average"
-    )
 
 
 def average_linkage_cut(cluster_model: Any, params: Mapping[str, Any] | None) -> float | None:
@@ -496,19 +427,16 @@ def arrow_small_block_signatures(arrow_lease: Any, block_dict: Mapping[str, Sequ
     return _count_small_blocks(candidates, sizes, request_small)
 
 
-def _wanted(
-    clusterer: Any, block_dict: Mapping[str, Sequence[str]]
-) -> tuple[dict[str, Any] | None, int | None, bool] | None:
+def _wanted(clusterer: Any, block_dict: Mapping[str, Sequence[str]]) -> tuple[dict[str, Any] | None, int | None] | None:
     """Return the repair settings and the split's close code, or None when no block can be corrected."""
     repair = _repair_settings(clusterer)
     split = _split_close_code(clusterer)
-    join = orcid_join_enabled(clusterer) and _uses_average_linkage(getattr(clusterer, "cluster_model", None))
     largest = max(map(len, block_dict.values()), default=0)
     if largest < MIN_BLOCK_SIZE:
         repair = None
-    if largest < 2 or (repair is None and split is None and not join):
+    if largest < 2 or (repair is None and split is None):
         return None
-    return repair, split, join
+    return repair, split
 
 
 def corrections_from_rust_featurizer(
@@ -516,8 +444,6 @@ def corrections_from_rust_featurizer(
     block_dict: Mapping[str, Sequence[str]],
     rust_featurizer: object,
     small_block_signatures: Set[str] | None = None,
-    *,
-    join_disallows: Mapping[str, Set[str]] | None = None,
 ) -> BlockCorrections | None:
     """Gather the corrections' facts from a Rust featurizer.
 
@@ -527,7 +453,6 @@ def corrections_from_rust_featurizer(
         rust_featurizer: Featurizer over every signature of ``block_dict``.
         small_block_signatures: Signatures of small surname blocks, which may bridge a year gap
             on a shared first name; None treats each block of ``block_dict`` as a whole surname block.
-        join_disallows: Explicit disallows for the ORCID join.
 
     Returns:
         None when no correction is on or no block is large enough.
@@ -535,14 +460,12 @@ def corrections_from_rust_featurizer(
     wanted = _wanted(clusterer, block_dict)
     if wanted is None:
         return None
-    repair_settings, split_close_code, orcid_join = wanted
+    repair_settings, split_close_code = wanted
     featurizer = cast(Any, rust_featurizer)
     full_first_names, orcid_pairs = featurizer.name_conflict_facts()
     # A clusterer that hides ORCIDs from its constraints hides them from the corrections too.
     orcids = {} if getattr(clusterer, "suppress_orcid", False) else dict(orcid_pairs)
-    name_conflicts = (
-        _rust_name_rules_alone_forbid(rust_featurizer) if repair_settings is not None or orcid_join else None
-    )
+    name_conflicts = _rust_name_rules_alone_forbid(rust_featurizer) if repair_settings is not None else None
     repair = None
     if repair_settings is not None:
         readings, spellers = featurizer.joined_reading_facts()
@@ -566,9 +489,7 @@ def corrections_from_rust_featurizer(
                 for s, name, count in featurizer.signature_first_names()
                 if s in small and not _common_surname(count)
             }
-    return BlockCorrections(
-        repair, split_close_code, orcids, years, first_names, orcid_join, name_conflicts, join_disallows or {}
-    )
+    return BlockCorrections(repair, split_close_code, orcids, years, first_names)
 
 
 def corrections_from_dataset(
@@ -576,7 +497,6 @@ def corrections_from_dataset(
     block_dict: Mapping[str, Sequence[str]],
     dataset: Any,
     *,
-    join_disallows: Mapping[str, Set[str]] | None = None,
     small_block_signatures: frozenset[str] | None = None,
 ) -> BlockCorrections | None:
     """Gather the same facts from a dataset's Rust featurizer, or from classic ``ANDData`` signatures.
@@ -594,13 +514,11 @@ def corrections_from_dataset(
     if rust_featurizer is None and getattr(dataset, "arrow_dataset", None) is not None:
         # Prediction that built its own distances has already built and cached this featurizer.
         rust_featurizer = _get_rust_featurizer(dataset)
-    repair_settings, split_close_code, orcid_join = wanted
+    repair_settings, split_close_code = wanted
     if small_block_signatures is None and split_close_code is not None:
         small_block_signatures = dataset_small_block_signatures(block_dict, dataset)
     if rust_featurizer is not None:
-        return corrections_from_rust_featurizer(
-            clusterer, block_dict, rust_featurizer, small_block_signatures, join_disallows=join_disallows
-        )
+        return corrections_from_rust_featurizer(clusterer, block_dict, rust_featurizer, small_block_signatures)
     small = small_block_signatures
     if small is None and split_close_code is not None:
         small = _request_small_block_signatures(block_dict)
@@ -640,7 +558,7 @@ def corrections_from_dataset(
             # A NaN year fails the comparison, so it stays undated.
             if paper is not None and paper.year is not None and paper.year > 0:
                 years[signature_id] = int(paper.year)
-    name_conflicts = _dataset_name_rules_alone_forbid(dataset) if repair_settings is not None or orcid_join else None
+    name_conflicts = _dataset_name_rules_alone_forbid(dataset) if repair_settings is not None else None
     repair = None
     if repair_settings is not None:
         # The same facts as the Rust featurizer's joined_reading_facts, for the block's signatures.
@@ -665,9 +583,7 @@ def corrections_from_dataset(
             **_reading_fields(readings, spellers),
             **repair_settings,
         )
-    return BlockCorrections(
-        repair, split_close_code, orcids, years, first_names, orcid_join, name_conflicts, join_disallows or {}
-    )
+    return BlockCorrections(repair, split_close_code, orcids, years, first_names)
 
 
 def _reading_fields(readings: Sequence[tuple[str, str]], spellers: Sequence[tuple[str, str]]) -> dict[str, Any]:
@@ -680,11 +596,7 @@ def _reading_fields(readings: Sequence[tuple[str, str]], spellers: Sequence[tupl
 
 def corrections_copy_codes(clusterer: Any) -> bool:
     """Return whether a block clustered by ``clusterer`` may keep a one-byte copy of its distances."""
-    return (
-        _repair_settings(clusterer) is not None
-        or _split_close_code(clusterer) is not None
-        or (orcid_join_enabled(clusterer) and _uses_average_linkage(getattr(clusterer, "cluster_model", None)))
-    )
+    return _repair_settings(clusterer) is not None or _split_close_code(clusterer) is not None
 
 
 def correction_fingerprint(clusterer: Any) -> tuple[Any, ...]:

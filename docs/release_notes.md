@@ -2,10 +2,6 @@
 
 ## Unreleased runtime changes
 
-- The ORCID join also obeys the disallows a Rust featurizer holds. Before, a caller distance
-  override on such a pair hid it from `predict_from_rust_featurizer`, which could then join
-  across it; classic and Arrow prediction already kept the pair apart. Native featurizers gain
-  `cluster_seeds_disallow()`, the counterpart of `cluster_seeds_require()`.
 - Bundle export refuses a clusterer that still sets a repair setting removed in this release,
   as prediction does, instead of dropping it.
 - `predict_eps_grid` and `predict_eps_grid_from_rust_featurizer` take `small_block_signatures`.
@@ -13,16 +9,8 @@
   `predict_from_arrow` decides them before subblocking; before, a subblock under 11 mentions
   counted as a small surname block, so the year-gap split could differ from production. The EPS
   distance-policy version is now 13.
-- The ORCID join across subblocks no longer joins clusters whose name forms break the hard name
-  rule, such as different full middle names ("Ana C." and "Ana M.") or different compound first
-  names ("Jean Pierre" and "Jean Luc"). Before, it compared only the first word of each
-  cluster's dominant first name.
-- The ORCID join runs in `predict_eps_grid` for a model that sets no EPS; each grid value
-  supplies the cut, as prediction parameters do for `predict`.
 - Arrow prediction reads the small surname blocks from the signatures table only when the
   year-gap split can run, which needs a close-pair bonus.
-- The ORCID join reads the request's disallows and the join's own disallows through one view
-  instead of copying both maps for every block that has a repeated ORCID.
 
 - Run the post-linkage corrections from one module, `s2and/block_corrections.py`. Block clustering
   and `predict_eps_grid` now share one sequence: quantize the block's distances once, run the
@@ -30,11 +18,13 @@
   `s2and/pair_codes.py`. On 128 large and 480 small production blocks, 68 edited profiles, 257
   captured giant-block repair calls, a seeded block under 184 seed and flag combinations, and the
   held-out benchmark, this consolidation kept the `1.0.0b13` clusters.
-- Join bulk clusters on a shared leading ORCID when model distances support the join, or
-  when separate Arrow subblocks of the same original block agree on a well-supported ORCID
-  and full first name. The join obeys seed and exclusion constraints and skips suppressed
-  ORCIDs. Set `Clusterer.orcid_join = False` to turn it off. Existing model bundles use the
-  package default.
+- Join final clusters of subblocked Arrow prediction when separate subblocks of the same
+  original block agree on a well-supported ORCID and a full first name, and their name forms do
+  not break the hard name rule (different full middle names or compound first names stay apart).
+  The join obeys seed and exclusion constraints and skips suppressed ORCIDs. Set
+  `Clusterer.orcid_join = False` to turn it off. Existing model bundles use the package default.
+  No join runs inside one distance matrix: equal ORCIDs get distance 0, so linkage already
+  merges their mentions.
 - Read the corrections' facts from the Rust featurizer for an Arrow-backed `ANDData`, as production
   does. `calibrate-eps` keeps the featurizer that built the validation distances and clusters
   through `predict_eps_grid_from_rust_featurizer`. On the 7 random-block validation populations

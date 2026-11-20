@@ -2999,14 +2999,6 @@ impl RustFeaturizer {
         (readings, spellers)
     }
 
-    /// Explicit disallowed pairs this featurizer holds, in canonical order, sorted.
-    fn cluster_seeds_disallow(&self) -> Vec<(String, String)> {
-        let mut pairs: Vec<(String, String)> =
-            self.cluster_seeds_disallow.iter().cloned().collect();
-        pairs.sort();
-        pairs
-    }
-
     fn cluster_seeds_require(&self) -> Vec<(String, String)> {
         let mut pairs: Vec<(String, String)> = self
             .cluster_seeds_require

@@ -77,6 +77,34 @@ conflicting middle names. The audit did not establish enough precision to ship a
 
 A cluster-pair merge model reached held-out AUC 0.96 against 0.73 for average distance, and was shelved to avoid a third model.
 
+## Pairwise training recipe and linker gate
+
+Measured 2026-11-20 against model 1.3.2, refitting with the 1.3.2 hyperparameters (no search) on the
+1.3 training data. "Best-EPS F1" scores each held-out dataset at its own best EPS, with the close-pair bonus.
+The two linker-gate rows compare against the plain refit's linker on the same pairwise model; the others
+compare against 1.3.2. Giant F1 for the SPECTER2 rows uses the four smaller giants in full and a 25% sample of
+`h_wang`, `s_lee` and `s_park`. Replay is the incremental replay of 18,162 masked-ORCID queries on the giants.
+A refit with nothing changed already moves single datasets by up to 0.4 points, pooled giant F1 by 0.07,
+incremental replay accuracy by 0.14 points and the linker test by 17 of 10,837 queries.
+
+| Idea | Date | Result | Why it failed |
+| --- | --- | --- | --- |
+| Drop name-vetoed pairs from training, main head only | 2026-11-20 | Best-EPS F1 .97345 against .97380 for the plain refit | Vetoed pairs still teach the main head about compatible but different names |
+| Drop name-vetoed pairs from both heads | 2026-11-20 | Best-EPS F1 .97257 | The nameless head needs them as "same topic, different person" negatives |
+| Sample fewer pairs from big blocks (block weight n or n^1.5 instead of n²) | 2026-11-20 | Best-EPS F1 .97379 and .97319; calibrated EPS fell to 0.27; KISTI and PubMed −0.72 at that EPS | Big blocks hold the hard negatives |
+| Year difference capped at 100 instead of 50 | 2026-11-20 | Bit-identical boosters | 0.3% of training pairs span more than 50 years, below the main head's minimum leaf size; old labeled pairs are needed |
+| SPECTER2 for non-English papers (language gate removed) | 2026-11-20 | With 25% SPECTER2 omission in augmented data: `a_silva` precision −7.7, pooled giants F1 −0.74, replay accuracy −0.74 | SPECTER2 similarity between Portuguese papers pulls different people together |
+| SPECTER2 omission in augmented data (25% of variants), language gate kept | 2026-11-20 | Held-out −0.05; sampled pooled giants F1 −0.19 (precision +0.66, recall −1.0); replay accuracy −0.44 (false abstains 641 to 751) | It moves the operating point toward splitting and abstaining |
+| Coauthor counts, containment, window and IDF features; affiliation IDF | 2026-11-20 | Pairwise AUC on non-vetoed pairs +0.0001 to +0.0003 over three seeds, below seed noise; KISTI fell in every subset | The existing coauthor features already carry the signal (Python approximation, AUC only) |
+| Clip the veto distance (10,000) in the linker's logistic gate | 2026-11-20 | Replay accuracy −0.41; linker test weighted error +2% | The linear gate already discounts those features; clipping shifts it toward abstaining |
+| Keep missing pair values out of the linker's pw_* aggregates | 2026-11-20 | Replay accuracy −0.17 (false abstains +75), weighted error −2%; linker test weighted error +1% | Same shift toward abstaining; with clipping too, replay accuracy −0.36 |
+
+Removing the language gate without missing vectors in training made LightGBM learn no missing-value branch for
+SPECTER2. It then scored every paper without a vector as cosine −1, which split `j_smith` into 22,876 clusters
+instead of 7,122. Benchmark blocks have full SPECTER2 coverage; giant blocks lack vectors for 20-31% of papers,
+so only giant blocks show this failure. The gate supplies the training NaNs today (2.7% of rows, over half from
+non-English ZbMATH pairs).
+
 ## Evaluation traps
 
 | Trap | Date | What happened |
@@ -85,6 +113,8 @@ A cluster-pair merge model reached held-out AUC 0.96 against 0.73 for average di
 | Per-dataset gain and loss calls on small datasets | 2026-10-16 | 25 gains and 23 losses; the Qian interval is about 2.7 points wide |
 | Giant-block proxy labels built from 1.2-model clusters | 2026-10-16 | They favor 1.2; an ORCID-hidden sweep cut the apparent 3 to 8 point regression to under 0.7 |
 | EPS sweeps that score bulk clustering only | 2026-10-23 | Production output scored 0.5 to 1.0 points higher at most EPS values; the best EPS barely moved |
+| Refit with unchanged hyperparameters | 2026-11-20 | Up to ±0.4 points per small dataset (ArnetMiner, KISTI, PubMed); the calibrated EPS moves within the flat top of the validation curve |
+| Benchmark held-out blocks for SPECTER2 changes | 2026-11-20 | Held-out blocks have full SPECTER2 coverage and missed a giant-block collapse; check giant blocks |
 | Per-dataset metrics rounded to three decimals before weighting | 2026-11-11 | INSPIRE moved the weighted F1 in steps of 0.0007, the size of the selection tolerance; the report now sums at full precision |
 
 ## Speed

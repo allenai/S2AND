@@ -4790,11 +4790,16 @@ class Clusterer:
                 block_codes,
                 cut_height=average_linkage_cut(self.cluster_model, cluster_model_params),
                 forbidden=forbidden,
-                repair_seed_groups=self._repair_seed_groups(dataset, prediction_state),
+                # Each view copies the request's seeds, so it is built only for a step that runs.
+                repair_seed_groups=(
+                    self._repair_seed_groups(dataset, prediction_state) if block_codes.repair else None
+                ),
                 # A split never separates a required seed group, so it reads every seed in sight,
                 # unless the caller turned seeds off, as the altered-profile pre-split does.
                 split_seed_groups=(
-                    None if incremental_dont_use_cluster_seeds else self._seeds_in_sight(dataset, prediction_state)
+                    self._seeds_in_sight(dataset, prediction_state)
+                    if block_codes.split and not incremental_dont_use_cluster_seeds
+                    else None
                 ),
                 block_key=block_key,
             ),

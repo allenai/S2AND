@@ -3308,9 +3308,14 @@ class Clusterer:
                 block_dict,
                 rust_featurizer,
                 prediction_state.small_block_signatures,
+                # The featurizer's own disallows count too: a caller distance override can hide one
+                # from the matrix, and the join must still not cross it.
                 join_disallows=(
                     seed_disallow_adjacency(
-                        prediction_state.orcid_join_disallows | proxy_dataset.cluster_seeds_disallow, {}
+                        prediction_state.orcid_join_disallows
+                        | proxy_dataset.cluster_seeds_disallow
+                        | set(cast(Any, rust_featurizer).cluster_seeds_disallow()),
+                        {},
                     )
                     if orcid_join_enabled(self)
                     else None
@@ -4953,6 +4958,8 @@ class Clusterer:
         rust_featurizer: object,
         dists: Mapping[str, np.ndarray],
         eps_grid: Sequence[float],
+        *,
+        small_block_signatures: frozenset[str] | None = None,
     ) -> tuple[list[str], dict[float, np.ndarray]]:
         """Cluster every block at each EPS from precomputed distances and a Rust featurizer.
 
@@ -4968,6 +4975,9 @@ class Clusterer:
             dists: Condensed distance matrix of every block with two or more signatures. A
                 mapping may load each matrix on first access.
             eps_grid: EPS values to cut at.
+            small_block_signatures: Signatures whose original surname block is small. Pass it
+                when ``block_dict`` holds subblocks, which are smaller than their block;
+                ``predict_from_arrow`` decides this before subblocking.
 
         Returns:
             The signatures in block order, and per EPS one cluster id per signature.
@@ -4987,7 +4997,9 @@ class Clusterer:
             signatures={},
             rust_featurizer=rust_featurizer,
         )
-        return self.predict_eps_grid(block_dict, cast(ANDData, proxy_dataset), dists, eps_grid)
+        return self.predict_eps_grid(
+            block_dict, cast(ANDData, proxy_dataset), dists, eps_grid, small_block_signatures=small_block_signatures
+        )
 
     def predict_eps_grid(
         self,
@@ -4995,6 +5007,8 @@ class Clusterer:
         dataset: ANDData,
         dists: Mapping[str, np.ndarray],
         eps_grid: Sequence[float],
+        *,
+        small_block_signatures: frozenset[str] | None = None,
     ) -> tuple[list[str], dict[float, np.ndarray]]:
         """Cluster every block at each EPS from one linkage per block.
 
@@ -5014,6 +5028,8 @@ class Clusterer:
             dists: Condensed distance matrix of every block with two or more signatures.
                 Each block's matrix is read once, so a mapping may load it on access.
             eps_grid: EPS values to cut at.
+            small_block_signatures: Signatures whose original surname block is small, when
+                ``block_dict`` holds subblocks; None lets the dataset or the blocks decide.
 
         Returns:
             The signatures in block order, and per EPS one cluster id per
@@ -5038,7 +5054,7 @@ class Clusterer:
         disallow_adjacency = seed_disallow_adjacency(
             prediction_state.cluster_seeds_disallow, normalize_partial_supervision(None)
         )
-        corrections = corrections_from_dataset(self, block_dict, dataset)
+        corrections = corrections_from_dataset(self, block_dict, dataset, small_block_signatures=small_block_signatures)
         seed_groups = self._repair_seed_groups(dataset, prediction_state)
         split_seed_groups = self._seeds_in_sight(dataset, prediction_state)
         signatures: list[str] = []

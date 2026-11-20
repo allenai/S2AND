@@ -2,6 +2,20 @@
 
 ## Unreleased runtime changes
 
+- The ORCID join also obeys the disallows a Rust featurizer holds. Before, a caller distance
+  override on such a pair hid it from `predict_from_rust_featurizer`, which could then join
+  across it; classic and Arrow prediction already kept the pair apart. Native featurizers gain
+  `cluster_seeds_disallow()`, the counterpart of `cluster_seeds_require()`.
+- Bundle export refuses a clusterer that still sets a repair setting removed in this release,
+  as prediction does, instead of dropping it.
+- `predict_eps_grid` and `predict_eps_grid_from_rust_featurizer` take `small_block_signatures`.
+  The giant EPS sweep passes the small surname blocks of the whole original block, as
+  `predict_from_arrow` decides them before subblocking; before, a subblock under 11 mentions
+  counted as a small surname block, so the year-gap split could differ from production. The EPS
+  distance-policy version is now 13.
+- The ORCID join reads the request's disallows and the join's own disallows through one view
+  instead of copying both maps for every block that has a repeated ORCID.
+
 - Run the post-linkage corrections from one module, `s2and/block_corrections.py`. Block clustering
   and `predict_eps_grid` now share one sequence: quantize the block's distances once, run the
   name-conflict repair, then the year-gap split. The repair and the split read pair codes through
@@ -12,7 +26,7 @@
   when separate Arrow subblocks of the same original block agree on a well-supported ORCID
   and full first name. The join obeys seed and exclusion constraints and skips suppressed
   ORCIDs. Set `Clusterer.orcid_join = False` to turn it off. Existing model bundles use the
-  package default. The EPS distance-policy version is now 12.
+  package default.
 - Read the corrections' facts from the Rust featurizer for an Arrow-backed `ANDData`, as production
   does. `calibrate-eps` keeps the featurizer that built the validation distances and clusters
   through `predict_eps_grid_from_rust_featurizer`. On the 7 random-block validation populations

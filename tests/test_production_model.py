@@ -1111,6 +1111,22 @@ def test_bundle_export_rejects_a_changed_orcid_name_waiver(
         )
 
 
+def test_bundle_export_rejects_a_removed_repair_setting(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    # Prediction refuses a removed repair setting; export must too, or the bundle drops it silently.
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.name_conflict_repair_rounds = 1
+    try:
+        with pytest.raises(ValueError, match="name_conflict_repair_rounds no longer exist"):
+            write_pairwise_production_bundle(
+                source_clusterer, tmp_path / "removed" / "production_model_v9.9", release_version="9.9"
+            )
+    finally:
+        del source_clusterer.name_conflict_repair_rounds
+
+
 @pytest.mark.parametrize(
     ("setting", "value"),
     [

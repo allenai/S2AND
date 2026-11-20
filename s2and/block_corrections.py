@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -164,12 +164,8 @@ class BlockCorrections:
                 cut_height=cut_height,
             )
         if block_codes.join and cut_height is not None:
-            join_forbidden = forbidden
-            if self.join_disallows:
-                combined = dict(forbidden)
-                for signature_id, neighbors in self.join_disallows.items():
-                    combined[signature_id] = neighbors | combined.get(signature_id, frozenset())
-                join_forbidden = combined
+            # A view, not a merged copy: both maps can hold the whole request's disallows.
+            join_forbidden = _AdjacencyUnion(forbidden, self.join_disallows) if self.join_disallows else forbidden
             labels = join_orcids_in_block(
                 block_signatures,
                 labels,
@@ -194,6 +190,28 @@ class BlockCorrections:
                 block_key=block_key,
             )
         return labels
+
+
+class _AdjacencyUnion(Mapping[str, Set[str]]):
+    """Read-only union of two disallow adjacency maps, combined per looked-up signature."""
+
+    def __init__(self, first: Mapping[str, Set[str]], second: Mapping[str, Set[str]]) -> None:
+        self._maps = (first, second)
+
+    def __getitem__(self, signature_id: str) -> Set[str]:
+        found = [m[signature_id] for m in self._maps if signature_id in m]
+        if not found:
+            raise KeyError(signature_id)
+        return found[0] if len(found) == 1 else frozenset().union(*found)
+
+    def __iter__(self) -> Iterator[str]:
+        first, second = self._maps
+        yield from first
+        yield from (key for key in second if key not in first)
+
+    def __len__(self) -> int:
+        first, second = self._maps
+        return len(first) + sum(key not in first for key in second)
 
 
 def _has_repeated_orcid(signatures: Sequence[str], orcids: Mapping[str, str]) -> bool:
@@ -544,12 +562,15 @@ def corrections_from_dataset(
     dataset: Any,
     *,
     join_disallows: Mapping[str, Set[str]] | None = None,
+    small_block_signatures: frozenset[str] | None = None,
 ) -> BlockCorrections | None:
     """Gather the same facts from a dataset's Rust featurizer, or from classic ``ANDData`` signatures.
 
     A stand-in dataset carries its featurizer. An Arrow-backed ``ANDData`` reads its cached
     featurizer, with the dataset's seeds, so it gets the facts production gets. Only an
     ``ANDData`` built without Arrow, which has no Rust featurizer, reads its signatures here.
+    ``small_block_signatures`` overrides the small-surname set, for callers that pass subblocks
+    of a larger block; otherwise the dataset or the request blocks decide it.
     """
     wanted = _wanted(clusterer, block_dict)
     if wanted is None:
@@ -559,9 +580,8 @@ def corrections_from_dataset(
         # Prediction that built its own distances has already built and cached this featurizer.
         rust_featurizer = _get_rust_featurizer(dataset)
     repair_settings, split_close_code, orcid_join = wanted
-    small_block_signatures = (
-        dataset_small_block_signatures(block_dict, dataset) if split_close_code is not None else None
-    )
+    if small_block_signatures is None and split_close_code is not None:
+        small_block_signatures = dataset_small_block_signatures(block_dict, dataset)
     if rust_featurizer is not None:
         return corrections_from_rust_featurizer(
             clusterer, block_dict, rust_featurizer, small_block_signatures, join_disallows=join_disallows

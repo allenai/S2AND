@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from s2and._sha256 import sha256_file as _sha256_file
+from s2and.block_corrections import correction_fingerprint
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.model import (
@@ -132,6 +133,9 @@ def _clusterer_config_payload(
     raw_feature_contract = getattr(clusterer, "feature_contract", None)
     if not isinstance(raw_feature_contract, Mapping):
         raise ValueError("Production bundle export requires an explicit source feature_contract")
+    # Refuse a clusterer that still sets a removed repair setting, as prediction does; a bundle
+    # would drop it silently and the loaded model would use the fixed repair settings.
+    correction_fingerprint(clusterer)
     for setting, default in _UNRECORDED_CORRECTION_SETTINGS.items():
         # A bundle has no field for these, so a loaded model would silently get the default.
         value = getattr(clusterer, setting, default)

@@ -39,6 +39,7 @@ import pyarrow.ipc as ipc
 
 from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
+from s2and.block_corrections import arrow_small_block_signatures
 from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
     CLUSTERING_SOURCE,
@@ -839,8 +840,14 @@ def _cluster_cached_blocks(
             arrow_dataset,
             list(dict.fromkeys(signature_id for members in clustered.values() for signature_id in members)),
         )
+        # Production decides small surname blocks before subblocking, from the whole request block.
+        # A subblock under SMALL_SURNAME_BLOCK must not count as a small surname block.
+        with arrow_dataset.use() as lease:
+            small_block_signatures = arrow_small_block_signatures(
+                lease, {"request": [signature_id for members in subblocks.values() for signature_id in members]}
+            )
         signature_ids, ids_by_eps = clusterer.predict_eps_grid_from_rust_featurizer(
-            clustered, rust_featurizer, distances, eps_grid
+            clustered, rust_featurizer, distances, eps_grid, small_block_signatures=small_block_signatures
         )
         distances.close_row()
         del rust_featurizer

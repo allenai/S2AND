@@ -219,3 +219,40 @@ def test_cross_subblock_join_requires_orcid_coverage(size: int, joined: bool) ->
     )
 
     assert (len(actual) == 1) == joined
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_join_honors_a_featurizer_disallow_hidden_by_a_distance_override(tmp_path: Path, explicit: bool) -> None:
+    # Joins one cluster pair through ORCID support; caller supervision then hides the disallow
+    # ("2", "4") from the matrix, so only the featurizer still knows it.
+    dataset, supervision = _within_block(dict.fromkeys("0134", ORCID))
+    supervision.update({("2", "5"): 0.19, ("2", "4"): 0.75})
+    disallow = {("2", "4")}
+    dataset.cluster_seeds_disallow = disallow
+    ids = list(dataset.signatures)
+    model = _model(0.75)
+    model.orcid_join = True
+    prepare_seed_arrow_bundle(dataset, tmp_path)
+    with ArrowDataset.open(tmp_path) as arrow:
+        featurizer = build_rust_featurizer_from_arrow_dataset(
+            arrow, signature_ids=ids, name_tuples=frozenset(), preprocess=True, num_threads=1
+        ).with_cluster_seeds({}, disallow)
+        assert featurizer.cluster_seeds_disallow() == [("2", "4")]
+        clusters, _ = model.predict_from_rust_featurizer(
+            {"block": ids},
+            featurizer,
+            partial_supervision=supervision,
+            cluster_seeds_disallow=disallow if explicit else None,
+        )
+    assert _partition(clusters) == {LEFT, RIGHT}
+
+
+def test_adjacency_union_reads_both_maps_without_copying() -> None:
+    from s2and.block_corrections import _AdjacencyUnion
+
+    union = _AdjacencyUnion({"a": {"b"}, "c": {"d"}}, {"a": {"e"}, "f": {"g"}})
+    assert union.get("a") == {"b", "e"}
+    assert union["c"] == {"d"} and union["f"] == {"g"}
+    assert union.get("z", ()) == ()
+    assert sorted(union) == ["a", "c", "f"] and len(union) == 3
+    assert bool(_AdjacencyUnion({}, {"a": {"b"}})) and not _AdjacencyUnion({}, {})

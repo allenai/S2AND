@@ -431,3 +431,43 @@ def test_bulk_routes_bridge_only_in_a_small_surname_block(
     model.predict(blocks, dataset)
     expected = {} if other_smiths else dict.fromkeys(blocks["profile"], "ada")
     assert seen == [expected, expected]
+
+
+@pytest.mark.parametrize("others", [0, 6])
+def test_cached_grid_takes_small_surname_blocks_from_the_original_block(tmp_path: Path, others: int) -> None:
+    # Five Ada Smiths across a 71-year gap. With six Bo Smiths the surname block has 11 mentions,
+    # so the shared first name must not bridge the gap, though the five arrive as one subblock.
+    from s2and.arrow_inputs import ArrowDataset
+    from s2and.block_corrections import arrow_small_block_signatures
+    from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+    from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
+
+    data = _dataset([("Ada", "", "Smith")] * 5 + [("Bo", "", "Smith")] * others, {})
+    ids = [str(i) for i in range(5)]
+    for sid, year in zip(ids, [1928, 1930, 2001, 2010, 2020], strict=True):
+        key = str(data.signatures[sid].paper_id)
+        data.papers[key] = data.papers[key]._replace(year=year)
+    model = _model(8.0)
+    model.orcid_join = False
+    model.n_jobs = 1
+    blocks = {"subblock": ids}
+    prepare_seed_arrow_bundle(data, tmp_path)
+    with ArrowDataset.open(tmp_path) as arrow:
+        rust = build_rust_featurizer_from_arrow_dataset(
+            arrow, signature_ids=ids, name_tuples=frozenset(), num_threads=1
+        )
+        dists = model.make_distance_matrices_from_rust_featurizer(blocks, rust)
+        predicted, _ = model.predict_from_arrow(blocks, arrow, name_tuples=frozenset())
+        with arrow.use() as lease:
+            small = arrow_small_block_signatures(lease, {"request": list(data.signatures)})
+        eps = float(model.cluster_model.eps)
+        signatures, labels = model.predict_eps_grid_from_rust_featurizer(
+            blocks, rust, dists, [eps], small_block_signatures=small
+        )
+    grid = {
+        frozenset(s for s, label in zip(signatures, labels[eps], strict=True) if label == value)
+        for value in set(labels[eps])
+    }
+    assert grid == {frozenset(members) for members in predicted.values()}
+    expected = {frozenset(ids)} if others == 0 else {frozenset(("0", "1")), frozenset(("2", "3", "4"))}
+    assert grid == expected

@@ -37,7 +37,7 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # and a 1601 or 1800 stamp follows the part whose years span it; 11: the repair's
 # three-cluster extension is removed (later rounds join the third cluster);
 # 12: guarded ORCID joins within blocks and across Arrow subblocks.
-DISTANCE_POLICY_VERSION = 12
+DISTANCE_POLICY_VERSION = 13
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

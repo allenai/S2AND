@@ -762,26 +762,28 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
                     name_counts_manifest_sha256=artifacts.name_counts_index.manifest_sha256,
                     num_threads=int(args.n_jobs),
                 )
-                distances = clusterer.make_distance_matrices_from_rust_featurizer(
-                    val_blocks,
-                    rust_featurizer.with_cluster_seeds(dataset.cluster_seeds_require, dataset.cluster_seeds_disallow),
-                    total_ram_bytes=args.total_ram_bytes,
+                seeded = rust_featurizer.with_cluster_seeds(
+                    dataset.cluster_seeds_require, dataset.cluster_seeds_disallow
                 )
-                del rust_featurizer
+                distances = clusterer.make_distance_matrices_from_rust_featurizer(
+                    val_blocks, seeded, total_ram_bytes=args.total_ram_bytes
+                )
                 identities[name] = {
                     "block_count": len(val_blocks),
                     "signature_count": sum(len(signatures) for signatures in val_blocks.values()),
                 }
-                # Prediction can read the Arrow-backed dataset, so it stays inside the open handle.
                 # Each block is linked once per close-pair setting and cut at every EPS, as predict would cut it.
+                # The corrections read their facts from the featurizer that built the distances, as in production.
                 scorer = None
                 for close_pair in CLOSE_PAIR_CANDIDATES:
                     clusterer.cluster_model.close_pair_bonus, clusterer.cluster_model.close_pair_distance = close_pair
-                    signatures, ids_by_eps = clusterer.predict_eps_grid(val_blocks, dataset, distances, plan.eps.grid)
+                    signatures, ids_by_eps = clusterer.predict_eps_grid_from_rust_featurizer(
+                        val_blocks, seeded, distances, plan.eps.grid
+                    )
                     scorer = scorer or _B3Scorer(true_clusters, signatures, unknown_source.ids)
                     for eps in plan.eps.grid:
                         metrics_by_setting[(close_pair, eps)][name] = scorer.report(ids_by_eps[float(eps)])
-                del distances, dataset, val_blocks, true_clusters
+                del distances, seeded, rust_featurizer, dataset, val_blocks, true_clusters
             gc.collect()
     finally:
         clusterer.cluster_model.eps = original_eps

@@ -828,6 +828,30 @@ def test_python_route_repair_asks_the_dataset_about_name_rules() -> None:
     assert list(repair.name_rules_alone_forbid([("5", "7"), ("5", "8"), ("5", "9")])) == [True, False, True]
 
 
+def test_arrow_backed_dataset_reads_facts_from_its_rust_featurizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = [("Ada", "", "Smith")] * 5 + [("Alan", "", "Smith")] + [("Ada", "", "Smith")] * 10
+    block = {"a smith": [str(i) for i in range(16)]}
+    arrow_backed = build_arrow_training_dataset(_dataset(names, {}), tmp_path / "arrow")
+    arrow_backed.cluster_seeds_disallow = {("5", "6")}
+    featurizers: list[Any] = []
+    original = block_corrections.corrections_from_rust_featurizer
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        featurizers.append(args[2])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(block_corrections, "corrections_from_rust_featurizer", spy)
+    repair = _repair_from_dataset(_model(), block, arrow_backed)
+    assert len(featurizers) == 1 and repair is not None and repair.name_rules_alone_forbid is not None
+    # The featurizer carries the dataset's seeds: the disallowed pair is no name-rule conflict.
+    assert list(repair.name_rules_alone_forbid([("5", "6"), ("5", "7"), ("0", "6")])) == [False, True, False]
+    classic = _repair_from_dataset(_model(), block, _dataset(names, {}))
+    assert classic is not None
+    assert repair.full_first_names & set(block["a smith"]) == classic.full_first_names
+
+
 def test_rust_route_name_rule_test_reads_the_featurizer_seeds(tmp_path: Path) -> None:
     dataset = _dataset([("Ada", "", "Smith")] * 5 + [("Alan", "", "Smith")] + [("Ada", "", "Smith")] * 5, {})
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset

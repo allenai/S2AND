@@ -55,16 +55,16 @@ class _StubCalibrationClusterer:
         self.distance_ram.append(total_ram_bytes)
         return {key: object() for key in blocks}
 
-    def predict_eps_grid(
+    def predict_eps_grid_from_rust_featurizer(
         self,
         blocks: dict[str, list[str]],
-        dataset: Any,
+        rust_featurizer: Any,
         dists: dict[str, object],
         eps_grid: list[float],
     ) -> tuple[list[str], dict[float, np.ndarray]]:
         assert dists is not None
         bonus = float(self.cluster_model.close_pair_bonus)
-        self.events.append(("predict_eps_grid", dataset.name, tuple(float(eps) for eps in eps_grid)))
+        self.events.append(("predict_eps_grid", rust_featurizer.dataset_name, tuple(float(eps) for eps in eps_grid)))
         self.close_pairs.append((bonus, float(self.cluster_model.close_pair_distance)))
         # One cluster holds both signatures; its id encodes the EPS and the bonus for the stub scorer.
         offset = 10_000 if bonus > 0 else 0

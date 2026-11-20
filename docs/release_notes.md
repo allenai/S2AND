@@ -8,6 +8,12 @@
   `s2and/pair_codes.py`. On 128 large and 480 small production blocks, 68 edited profiles, 257
   captured giant-block repair calls, a seeded block under 184 seed and flag combinations, and the
   held-out benchmark, the clusters are the same as `1.0.0b13`'s.
+- Read the corrections' facts from the Rust featurizer for an Arrow-backed `ANDData`, as production
+  does. `calibrate-eps` keeps the featurizer that built the validation distances and clusters
+  through `predict_eps_grid_from_rust_featurizer`. On the 7 random-block validation populations
+  (154 partitions, 24 of them changed by the corrections) the clusters are the same; its grid step
+  took 4.7 s instead of 27.9 s and peak working set fell from 2.33 to 2.18 GB. Only a classic
+  `ANDData`, which has no Rust featurizer, still reads the facts in Python.
 - Remove the repair's three-cluster extension. A later repair round joins the third cluster
   instead, testing the merged pair against it as one cluster. On 128 production blocks (5
   extensions) and 7 giant blocks the final clusters are the same. The two differ on constructed

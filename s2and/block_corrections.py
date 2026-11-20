@@ -28,6 +28,7 @@ import numpy as np
 
 from s2and.arrow_inputs import arrow_string_array
 from s2and.consts import LARGE_DISTANCE, YEAR_DIFF_CAP
+from s2and.feature_port import _get_rust_featurizer
 from s2and.model_pairwise import FastCluster
 from s2and.name_conflict_repair import (
     BONUS_MAX_PLAIN_AVERAGE,
@@ -477,14 +478,22 @@ def corrections_from_rust_featurizer(
 def corrections_from_dataset(
     clusterer: Any, block_dict: Mapping[str, Sequence[str]], dataset: Any
 ) -> BlockCorrections | None:
-    """Gather the same facts from ``ANDData`` signatures, or from a stand-in dataset's featurizer."""
-    rust_featurizer = getattr(dataset, "rust_featurizer", None)
-    small_block_signatures = dataset_small_block_signatures(block_dict, dataset)
-    if rust_featurizer is not None:
-        return corrections_from_rust_featurizer(clusterer, block_dict, rust_featurizer, small_block_signatures)
+    """Gather the same facts from a dataset's Rust featurizer, or from classic ``ANDData`` signatures.
+
+    A stand-in dataset carries its featurizer. An Arrow-backed ``ANDData`` reads its cached
+    featurizer, with the dataset's seeds, so it gets the facts production gets. Only an
+    ``ANDData`` built without Arrow, which has no Rust featurizer, reads its signatures here.
+    """
     wanted = _wanted(clusterer, block_dict)
     if wanted is None:
         return None
+    rust_featurizer = getattr(dataset, "rust_featurizer", None)
+    if rust_featurizer is None and getattr(dataset, "arrow_dataset", None) is not None:
+        # Prediction that built its own distances has already built and cached this featurizer.
+        rust_featurizer = _get_rust_featurizer(dataset)
+    small_block_signatures = dataset_small_block_signatures(block_dict, dataset)
+    if rust_featurizer is not None:
+        return corrections_from_rust_featurizer(clusterer, block_dict, rust_featurizer, small_block_signatures)
     repair_settings, split_close_code = wanted
     small = _request_small_block_signatures(block_dict) if small_block_signatures is None else small_block_signatures
     use_orcid = not getattr(clusterer, "suppress_orcid", False)
@@ -499,8 +508,8 @@ def corrections_from_dataset(
             values[signature_id] = given_name_for_constraint(signature.author_info_first, signature.author_info_middle)
             first = signature.author_info_first_normalized
             if first is None:
-                # An Arrow-backed dataset leaves normalized names to Rust; parse as the name rules do,
-                # so "J. D." is the initial "j" here as it is in production.
+                # A dataset built without preprocessing can lack normalized names; parse as the name
+                # rules do, so "J. D." is the initial "j" here as it is in production.
                 first = canonicalize_name_parts(
                     signature.author_info_first, signature.author_info_middle, signature.author_info_last
                 ).first

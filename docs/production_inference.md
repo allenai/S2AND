@@ -344,6 +344,9 @@ its EPS search on such matrices, so it does not see the repair.
 `predict_eps_grid` and `predict_eps_grid_from_rust_featurizer`, which EPS calibration and
 the giant-block sweep use, do apply the repair at every EPS. Pass them only matrices
 built from the same dataset or featurizer, with no supervision of your own.
+The repair and the year-gap split read each mention's facts (full first names, ORCIDs, joined
+readings, years) and the name test from a Rust featurizer. An Arrow-backed `ANDData` uses its
+cached featurizer; only a classic `ANDData`, which has none, reads them from its signatures.
 
 After a block or subblock is clustered, two clusters merge when all of these hold:
 

@@ -5,8 +5,22 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from s2and.arrow_inputs import require_name_counts_index_artifact
+from s2and._sha256 import is_lowercase_sha256
+from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
+
+PROMOTED_LINKER_MODEL_SUPPRESS_ORCID = True
+NAME_COUNTS_MANIFEST_SHA256_FIELD = "name_counts_manifest_sha256"
+
+
+def promoted_linker_orcid_force_link_enabled(*, suppress_orcid: bool) -> bool:
+    """Return whether ORCID may force a runtime linker decision.
+
+    ORCID is deliberately excluded from learned pair-constraint features. When
+    enabled, it acts only through the explicit runtime force-link branch.
+    """
+
+    return not bool(suppress_orcid)
 
 
 def clusterer_uses_name_count_features(clusterer: Any) -> bool:
@@ -31,50 +45,111 @@ def clusterer_uses_embedding_features(clusterer: Any) -> bool:
     return False
 
 
-def existing_name_counts_index_path(paths: Mapping[str, Any]) -> str | None:
-    """Return the configured name-count index path when it exists."""
+def require_name_counts_manifest_sha256(value: Any, *, context: str) -> str:
+    """Return one validated name-count manifest identity."""
 
-    path_value = paths.get("name_counts_index")
-    if path_value is not None:
-        return require_name_counts_index_artifact(
-            path_value,
-            context="Arrow name-count index",
-            producer_hint="pass a manifest-backed name_counts_index directory",
+    if not is_lowercase_sha256(value):
+        raise ValueError(f"{context} requires {NAME_COUNTS_MANIFEST_SHA256_FIELD} as a lowercase SHA-256")
+    return value
+
+
+def _require_name_counts_binding(
+    clusterer: Any,
+    observed_value: Any,
+    *,
+    context: str,
+    source: str,
+) -> None:
+    feature_contract = getattr(clusterer, "feature_contract", None)
+    if not isinstance(feature_contract, Mapping):
+        raise ValueError(f"{context} model requires a feature_contract mapping with a name-count identity")
+    expected = require_name_counts_manifest_sha256(
+        feature_contract.get(NAME_COUNTS_MANIFEST_SHA256_FIELD),
+        context=f"{context} model feature_contract",
+    )
+    observed = require_name_counts_manifest_sha256(
+        observed_value,
+        context=f"{context} {source}",
+    )
+    if observed != expected:
+        raise ValueError(
+            f"{context} name-count binding mismatch for {source}: expected={expected!r} observed={observed!r}"
         )
-    return None
-
-
-def arrow_paths_have_name_counts_index(paths: Mapping[str, Any]) -> bool:
-    """Return whether Arrow paths include an existing name-count index."""
-
-    return existing_name_counts_index_path(paths) is not None
 
 
 def require_arrow_name_counts_index_for_clusterer(
     clusterer: Any,
-    arrow_paths: Mapping[str, Any],
+    arrow_dataset: ArrowDataset,
     *,
     context: str,
 ) -> None:
-    """Raise when a name-count model is used without an Arrow index sidecar."""
+    """Require the exact Arrow name-count generation selected by the model."""
 
-    if clusterer_uses_name_count_features(clusterer) and not arrow_paths_have_name_counts_index(arrow_paths):
+    if not clusterer_uses_name_count_features(clusterer):
+        return
+    if not arrow_dataset.has("name_counts_index"):
         raise ValueError(
             f"{context} with selected name_counts features requires name_counts_index. "
-            "Pass the S2AND name-count index directory in arrow_paths['name_counts_index']."
+            "Open an Arrow release containing the S2AND name-count index."
         )
+    index = arrow_dataset.name_counts_index
+    if index is None:  # pragma: no cover - validated-input invariant
+        raise RuntimeError("validated Arrow inputs lost the retained name-count index")
+    _require_name_counts_binding(
+        clusterer,
+        index.manifest_sha256,
+        context=context,
+        source="ArrowDataset.name_counts_index",
+    )
+
+
+def require_dataset_name_counts_binding_for_clusterer(
+    clusterer: Any,
+    dataset: Any,
+    *,
+    context: str,
+) -> None:
+    """Require the exact in-memory name-count generation selected by the model."""
+
+    if not clusterer_uses_name_count_features(clusterer):
+        return
+    _require_name_counts_binding(
+        clusterer,
+        getattr(dataset, "name_counts_manifest_sha256", None),
+        context=context,
+        source="ANDData.name_counts_manifest_sha256",
+    )
+
+
+def require_rust_featurizer_name_counts_binding_for_clusterer(
+    clusterer: Any,
+    rust_featurizer: Any,
+    *,
+    context: str,
+) -> None:
+    """Require the exact name-count generation retained by a Rust featurizer."""
+
+    if not clusterer_uses_name_count_features(clusterer):
+        return
+    manifest_sha256 = getattr(rust_featurizer, "name_counts_manifest_sha256", None)
+    if manifest_sha256 is None:
+        raise ValueError(f"{context} requires a Rust featurizer with a verified name-count manifest")
+    _require_name_counts_binding(
+        clusterer,
+        manifest_sha256,
+        context=context,
+        source="RustFeaturizer.name_counts_manifest_sha256",
+    )
 
 
 def resolve_load_name_counts_policy(
     clusterer: Any,
-    load_name_counts: bool | None | dict[str, Any],
+    load_name_counts: bool | None,
     *,
     context: str,
 ) -> bool:
     """Return the effective name-count load policy for raw scoring."""
 
-    if isinstance(load_name_counts, dict):
-        raise ValueError(f"{context} accepts load_name_counts as a bool or None, not a dict")
     clusterer_requires_name_counts = clusterer_uses_name_count_features(clusterer)
     if load_name_counts is False and clusterer_requires_name_counts:
         raise ValueError(

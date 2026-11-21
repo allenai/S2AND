@@ -12,8 +12,8 @@ import numpy as np
 matplotlib.use("Agg")  # headless-friendly
 import matplotlib.pyplot as plt
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import StackingClassifier, VotingClassifier
 
-ArrayLike = np.ndarray | Any
 _SHAP_MODULE: Any | None = None
 
 
@@ -25,79 +25,48 @@ def _get_shap_module() -> Any:
         _SHAP_MODULE = importlib.import_module("shap")
     except Exception as exc:
         raise RuntimeError(
-            "Failed to import shap. Install a NumPy-1.24-compatible SHAP version "
-            "(for example, `uv add 'shap>=0.45'`)."
+            "Failed to import shap. Install the supported SHAP dependency (for example, `uv sync`)."
         ) from exc
     return _SHAP_MODULE
 
 
-def __getattr__(name: str) -> Any:
-    """Lazily expose the ``shap`` module as ``shap_utils.shap`` so that tests
-    and callers can monkey-patch ``shap_utils.shap.<attr>`` without requiring
-    an eager import at module load time."""
-    if name == "shap":
-        return _get_shap_module()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def _shap_values_for_tree_model(model: Any, X: Any, class_index: int = 1) -> np.ndarray:
+    """Return 2D SHAP values for a directly fitted tree model.
 
+    Calibrated classifiers and voting or stacking ensembles are intentionally
+    unsupported because their predictions are not explained by a single
+    underlying tree model.
 
-def _is_fitted_tree_estimator(est) -> bool:
-    # RandomForest/ExtraTrees -> estimators_, DecisionTree -> tree_
-    return hasattr(est, "estimators_") and len(getattr(est, "estimators_", [])) > 0 or hasattr(est, "tree_")
+    Args:
+        model: A fitted tree or LightGBM classifier.
+        X: Two-dimensional feature rows accepted by the model.
+        class_index: Output class to select from multi-output SHAP values.
 
+    Returns:
+        A ``(n_samples, n_features)`` SHAP value array.
 
-def _base_estimator(clf):
+    Raises:
+        TypeError: If the classifier combines or calibrates multiple models.
+        ValueError: If SHAP returns an unsupported shape or class index.
     """
-    Return a *fitted* underlying estimator when given a CalibratedClassifierCV,
-    compatible across sklearn versions.
-    """
-    if isinstance(clf, CalibratedClassifierCV):
-        # Preferred: dig into per-fold CalibratedClassifier objects
-        if hasattr(clf, "calibrated_classifiers_") and clf.calibrated_classifiers_:
-            for cc in clf.calibrated_classifiers_:
-                for attr in ("base_estimator", "classifier", "estimator", "clf"):
-                    cand = getattr(cc, attr, None)
-                    if cand is not None and _is_fitted_tree_estimator(cand):
-                        return cand  # fitted
-        # Fallbacks on the outer CV wrapper (only use if *fitted*)
-        for attr in ("estimator", "base_estimator"):
-            cand = getattr(clf, attr, None)
-            if cand is not None and cand != "deprecated" and _is_fitted_tree_estimator(cand):
-                return cand
-    return clf
+    if getattr(model, "prediction_backend", None) == "rust_lightgbm":
+        model = model.booster_
+    if isinstance(model, (CalibratedClassifierCV, VotingClassifier, StackingClassifier)):
+        raise TypeError(
+            "SHAP diagnostics support directly fitted tree models only; "
+            f"{type(model).__name__} is unsupported. Pass skip_shap=True."
+        )
 
-
-def _iter_estimators(clf):
-    """
-    Return underlying estimators for voting/stacking-style ensembles.
-    Do NOT treat tree ensembles (RandomForest, ExtraTrees, GB*) as voting ensembles.
-    """
-    if hasattr(clf, "estimators") and clf.estimators:
-        ests = clf.estimators
-        if isinstance(ests[0], tuple):  # e.g., VotingClassifier: [('rf', rf), ...]
-            return [e for _, e in ests]
-        return list(ests)  # already a list of estimators
-    return None
-
-
-def _shap_values_for_tree_model(model, X, class_index: int = 1) -> np.ndarray:
-    """
-    Compute SHAP values for a (tree) model and return a 2D array (n_samples, n_features).
-    Compatible with SHAP >=0.36.0 through latest:
-      - TreeExplainer(...).shap_values(X) may return:
-        * list of arrays (multiclass) -> we pick class_index
-        * single 2D array
-    """
     shap = _get_shap_module()
     expl = shap.TreeExplainer(model)
-    vals = expl.shap_values(X)
-    if isinstance(vals, list):
-        # multiclass case
-        return np.asarray(vals[class_index])
-    # SHAP >=0.39 can sometimes return Explanation objects from non-TreeExplainer, but we force TreeExplainer above.
-    # Still, be defensive:
-    if hasattr(vals, "values"):
-        vals = vals.values
-    return np.asarray(vals)
+    vals = np.asarray(expl.shap_values(X))
+    if vals.ndim == 2:
+        return vals
+    if vals.ndim != 3:
+        raise ValueError(f"TreeExplainer returned SHAP values with unsupported shape {vals.shape}; expected 2D or 3D")
+    if not 0 <= class_index < vals.shape[2]:
+        raise ValueError(f"class_index {class_index} is out of range for SHAP values with shape {vals.shape}")
+    return vals[:, :, class_index]
 
 
 def _safe_summary_plot(
@@ -108,10 +77,7 @@ def _safe_summary_plot(
     outpath: str,
     fig_num: int | None = None,
 ) -> None:
-    """
-    Prefer legacy summary_plot for cross-version compatibility.
-    Falls back to beeswarm if summary_plot misbehaves.
-    """
+    """Write a SHAP summary plot, falling back to beeswarm if summary_plot fails."""
     shap = _get_shap_module()
     if fig_num is not None:
         plt.figure(fig_num)
@@ -127,7 +93,6 @@ def _safe_summary_plot(
             max_display=len(feature_names),
         )
     except Exception:
-        # Fallback to the new API if needed
         try:
             exp = shap.Explanation(values=shap_values, data=X, feature_names=list(feature_names))
             shap.plots.beeswarm(exp, show=False, max_display=len(feature_names))
@@ -159,10 +124,9 @@ def compute_shap_summary_plots(
     Returns list of written file paths.
 
     Behavior:
-      - If `classifier` is an ensemble with estimators, compute per-estimator SHAP and average.
       - If `nameless_classifier` is provided, compute and plot *both* (named and nameless) models.
-      - If a CalibratedClassifierCV is encountered, SHAP runs on its base_estimator.
-      - Uses TreeExplainer for maximum cross-version stability.
+      - Uses TreeExplainer on directly fitted tree models.
+      - Calibrated classifiers and voting/stacking ensembles are unsupported.
 
     Parameters
     ----------
@@ -184,47 +148,23 @@ def compute_shap_summary_plots(
     outputs: list[str] = []
     assert shap_feature_names is not None
 
-    # Branch 1: ensemble averaging
-    ensemble = _iter_estimators(classifier)
-    if ensemble:
-        vals_list: list[np.ndarray] = []
-        for c in ensemble:
-            base = _base_estimator(c)
-            vals_list.append(_shap_values_for_tree_model(base, X, class_index))
-        mean_vals = np.mean(np.stack(vals_list, axis=0), axis=0)
-        out = join(figs_path, f"{base_name}_shap_0.png")
-        _safe_summary_plot(mean_vals, X, shap_feature_names, shap_plot_type, out, fig_num=2)
-        outputs.append(out)
-        return outputs
-
-    # Branch 2: two-model (named + nameless)
     if nameless_classifier is not None:
-        pairs: list[tuple[object, np.ndarray, Sequence[str], str]] = []
+        vals_a = _shap_values_for_tree_model(classifier, X, class_index)
+        assert nameless_X is not None and nameless_feature_names is not None, (
+            "Provide nameless_X and nameless_feature_names when nameless_classifier is set."
+        )
+        vals_b = _shap_values_for_tree_model(nameless_classifier, nameless_X, class_index)
 
-        base_a = _base_estimator(classifier)
-        vals_a = _shap_values_for_tree_model(base_a, X, class_index)
-        pairs.append((classifier, X, shap_feature_names, f"{base_name}_shap_0.png"))
-
-        assert (
-            nameless_X is not None and nameless_feature_names is not None
-        ), "Provide nameless_X and nameless_feature_names when nameless_classifier is set."
-        base_b = _base_estimator(nameless_classifier)
-        vals_b = _shap_values_for_tree_model(base_b, nameless_X, class_index)
-
-        # plot A
-        out_a = join(figs_path, pairs[0][3])
+        out_a = join(figs_path, f"{base_name}_shap_0.png")
         _safe_summary_plot(vals_a, X, shap_feature_names, shap_plot_type, out_a, fig_num=2)
         outputs.append(out_a)
 
-        # plot B
         out_b = join(figs_path, f"{base_name}_shap_1.png")
         _safe_summary_plot(vals_b, nameless_X, nameless_feature_names, shap_plot_type, out_b, fig_num=3)
         outputs.append(out_b)
         return outputs
 
-    # Branch 3: single model
-    base = _base_estimator(classifier)
-    vals = _shap_values_for_tree_model(base, X, class_index)
+    vals = _shap_values_for_tree_model(classifier, X, class_index)
     out = join(figs_path, f"{base_name}_shap.png")
     _safe_summary_plot(vals, X, shap_feature_names, shap_plot_type, out, fig_num=2)
     outputs.append(out)

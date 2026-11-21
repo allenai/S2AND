@@ -1,19 +1,217 @@
 from __future__ import annotations
 
 import inspect
-import warnings
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from fastcluster import linkage
-from hyperopt import Trials, fmin, hp, space_eval, tpe
-from hyperopt.pyll import scope
-from lightgbm import LGBMClassifier
+from _fastcluster import linkage_wrap as _fastcluster_linkage_wrap
+from fastcluster import mthidx as _FASTCLUSTER_METHOD_INDEX
 from scipy.cluster.hierarchy import fcluster
-from sklearn.base import BaseEstimator, TransformerMixin, clone
-from sklearn.metrics import roc_auc_score
+from scipy.spatial.distance import pdist
 
-from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
+from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
+
+# Prediction needs none of scikit-learn, LightGBM, or pandas. Training code imports them where it uses
+# them, because together they add about 1.5 s to every new prediction process.
+if TYPE_CHECKING:
+    from hyperopt import Trials
+    from lightgbm import Booster
+
+# The bonus is subtracted from every merge height, the hard-negative barrier included.
+# Under this cap the barrier keeps two clusters apart up to about ten billion cross pairs.
+MAX_CLOSE_PAIR_BONUS = 100.0
+
+# Giant blocks can hold hard negatives in most pairs; scan in bounded chunks so
+# the temporary mask stays small, not one byte or index per pair.
+_HARD_NEGATIVE_SCAN_CHUNK = 1 << 22
+
+
+def _hard_negative_chunks(distances: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield each condensed chunk with its exact hard-negative sentinel mask."""
+    for start in range(0, len(distances), _HARD_NEGATIVE_SCAN_CHUNK):
+        chunk = distances[start : start + _HARD_NEGATIVE_SCAN_CHUNK]
+        yield chunk, chunk == LARGE_DISTANCE
+
+
+def _linkage_in_place(condensed: np.ndarray, method: str) -> np.ndarray:
+    """Build a fastcluster linkage tree with ``condensed`` as its working memory.
+
+    ``fastcluster.linkage`` copies a condensed matrix under NumPy 2 even with
+    ``preserve_input=False``, so a block peaked at two matrices. This runs the same
+    C routine on the array itself and returns the same tree.
+
+    Args:
+        condensed: Writable, aligned, C-contiguous float64 condensed distances. The
+            routine overwrites it.
+        method: fastcluster linkage method.
+
+    Returns:
+        The fastcluster linkage matrix.
+    """
+    pair_count = len(condensed)
+    count = int(np.ceil(np.sqrt(pair_count * 2)))
+    if count * (count - 1) // 2 != pair_count:
+        raise ValueError(r"The length of the condensed distance matrix must be (k \choose 2) for k data points!")
+    tree = np.empty((count - 1, 4))
+    if count > 1:
+        _fastcluster_linkage_wrap(count, condensed, tree, _FASTCLUSTER_METHOD_INDEX[method])
+    return tree
+
+
+def constrained_linkage(
+    distances: np.ndarray,
+    method: str,
+    *,
+    preserve_input: bool,
+    close_pair_bonus: float = 0.0,
+    close_pair_distance: float = 0.0,
+) -> np.ndarray:
+    """Build a linkage tree in which hard negatives never share a cluster below EPS.
+
+    Every pair at exactly ``LARGE_DISTANCE`` is a hard negative. Linkage gets
+    ``HARD_LINKAGE_DISTANCE`` for these pairs, because average linkage can
+    dilute a finite sentinel below EPS inside a large merge. Other distances,
+    including soft distances above ``LARGE_DISTANCE``, pass through unchanged.
+
+    With a positive ``close_pair_bonus``, a merge height is the average model
+    distance of the two clusters minus the bonus times their share of close
+    pairs, floored at zero. A close pair is a model distance under
+    ``close_pair_distance``. Heights stay comparable with EPS, so every cut of
+    the returned tree works unchanged. The model scores a pair with shared
+    evidence near zero and a pair without evidence above EPS; a plain average
+    lets the many pairs without evidence outvote the few near-certain ones.
+
+    Args:
+        distances: Condensed distance matrix.
+        method: fastcluster linkage method.
+        preserve_input: Keep the caller's array unchanged. When False, the
+            caller gives up the array: linkage overwrites a writable, aligned,
+            C-contiguous float64 array, so the block needs no second matrix.
+        close_pair_bonus: Amount a close pair lowers the average. Zero turns
+            the bonus off.
+        close_pair_distance: Model distances under this value are close pairs.
+
+    Returns:
+        The fastcluster linkage matrix.
+    """
+    # The C routine reads the buffer directly, so it must be aligned C-contiguous float64.
+    condensed = np.require(distances, dtype=np.float64, requirements=["C", "A"])
+    shared = isinstance(distances, np.ndarray) and np.may_share_memory(condensed, distances)
+    if (shared and preserve_input) or not condensed.flags.writeable:
+        condensed = condensed.copy()
+    for chunk, mask in _hard_negative_chunks(condensed):
+        if close_pair_bonus > 0:
+            # Raising every other distance equals lowering the close pairs, and keeps distances
+            # non-negative. Soft values above one rise too, so the later shift of heights leaves
+            # them where the caller put them; hard negatives get their barrier on the next line.
+            chunk[chunk >= close_pair_distance] += close_pair_bonus
+        chunk[mask] = HARD_LINKAGE_DISTANCE
+    # condensed is now owned by this call, or released by the caller.
+    tree = _linkage_in_place(condensed, method)
+    if close_pair_bonus > 0:
+        heights = tree[:, 2]
+        heights -= close_pair_bonus
+        # A height under zero means close pairs dominate; such clusters merge at every EPS.
+        np.maximum(heights, 0.0, out=heights)
+    return tree
+
+
+def lightgbm_booster(model: Any) -> Booster:
+    """Return the fitted booster behind an S2AND or LightGBM model wrapper."""
+
+    from lightgbm import Booster
+
+    if isinstance(model, Booster):
+        return model
+    inner = getattr(model, "classifier", None)
+    if inner is not None and inner is not model:
+        return lightgbm_booster(inner)
+    for attribute in ("booster_", "_Booster"):
+        booster = getattr(model, attribute, None)
+        if isinstance(booster, Booster):
+            return booster
+    raise TypeError(f"Expected a fitted LightGBM model, got {type(model)!r}")
+
+
+def _validated_classifier_features(
+    classifier: Any,
+    features: Any,
+    *,
+    feature_names: Sequence[str] | None = None,
+) -> Any:
+    """Return classifier input after validating its fitted feature schema."""
+
+    values = np.asarray(features)
+    if values.ndim != 2:
+        raise ValueError(f"Classifier features must be 2D, got shape={values.shape}")
+
+    expected_count = getattr(classifier, "n_features_in_", None)
+    if expected_count is not None and int(expected_count) != values.shape[1]:
+        raise ValueError(
+            f"Classifier feature count does not match fitted schema: {values.shape[1]} != {int(expected_count)}"
+        )
+
+    supplied_names = tuple(str(name) for name in feature_names) if feature_names is not None else None
+    if supplied_names is not None and len(supplied_names) != values.shape[1]:
+        raise ValueError(
+            f"Classifier feature names do not match matrix width: {len(supplied_names)} != {values.shape[1]}"
+        )
+
+    fitted_names_raw = getattr(classifier, "feature_names_in_", None)
+    if fitted_names_raw is None:
+        return values
+    fitted_names = tuple(str(name) for name in fitted_names_raw)
+    actual_names = supplied_names
+    if actual_names is None:
+        columns = getattr(features, "columns", None)
+        if columns is not None:
+            actual_names = tuple(str(name) for name in columns)
+    if actual_names is not None and actual_names != fitted_names:
+        raise ValueError(f"Classifier feature names do not match fitted schema: {actual_names!r} != {fitted_names!r}")
+    if getattr(features, "columns", None) is not None:
+        return features
+
+    import pandas as pd
+
+    return pd.DataFrame(values, columns=pd.Index(fitted_names), copy=False)
+
+
+def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
+    """Predict class-0 probabilities with native positive-probability fast path support."""
+
+    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
+    raw_features = np.asarray(features)
+    features_2d = np.asarray(
+        raw_features,
+        dtype=np.float32 if callable(predict_proba_positive) and raw_features.dtype == np.float32 else np.float64,
+        order="C",
+    )
+    if features_2d.size == 0:
+        return np.asarray([], dtype=np.float64)
+
+    if callable(predict_proba_positive):
+        return 1.0 - np.asarray(predict_proba_positive(features_2d), dtype=np.float64).reshape(-1)
+
+    probabilities = classifier.predict_proba(_validated_classifier_features(classifier, features_2d))
+    return np.asarray(probabilities, dtype=np.float64)[:, 0]
+
+
+def native_pairwise_scorers(classifier: Any, nameless_classifier: Any | None) -> tuple[Any, Any | None] | None:
+    """Return the Rust boosters of native classifiers, for fused featurize-and-score passes.
+
+    Fused scoring reproduces `predict_pairwise_class0` for native boosters only;
+    other classifiers keep the feature-matrix path. Returns None when either
+    classifier is not native.
+    """
+
+    if str(getattr(classifier, "prediction_backend", "python")) != "rust_lightgbm":
+        return None
+    if nameless_classifier is None:
+        return classifier._rust_scorer, None
+    if str(getattr(nameless_classifier, "prediction_backend", "python")) != "rust_lightgbm":
+        return None
+    return classifier._rust_scorer, nameless_classifier._rust_scorer
 
 
 class PairwiseModeler:
@@ -49,6 +247,11 @@ class PairwiseModeler:
         n_jobs: int = 16,  # for the model, not the hyperopt
         random_state: int = 42,
     ):
+        from hyperopt import hp
+        from hyperopt.pyll import scope
+        from lightgbm import LGBMClassifier
+        from sklearn.base import clone
+
         if estimator is None:
             self.estimator = LGBMClassifier(
                 objective="binary",
@@ -93,10 +296,12 @@ class PairwiseModeler:
 
     def fit(
         self,
-        X_train: np.ndarray[Any, Any] | None | Any,
-        y_train: np.ndarray[Any, Any] | None | Any,
-        X_val: np.ndarray[Any, Any] | None | Any,
-        y_val: np.ndarray[Any, Any] | None | Any,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        *,
+        feature_names: Sequence[str] | None = None,
     ) -> Trials | dict[Any, Any]:
         """
         Fits the classifier
@@ -111,18 +316,24 @@ class PairwiseModeler:
             feature matrix for the validation set
         y_val: np.ndarray
             labels for the validation set
+        feature_names: optional sequence of str
+            column names for the final fit of a LightGBM estimator. Its saved
+            booster then names features instead of using Column_N; the trees
+            are unchanged.
 
         Returns
         -------
         Trials: the Trials object from hyperparameter optimization
         """
         if len(self.search_space) > 0:
+            from hyperopt import Trials, fmin, space_eval, tpe
+            from sklearn.metrics import roc_auc_score
 
             def obj(params):
                 params = {k: intify(v) for k, v in params.items()}
                 self.estimator.set_params(**params)
                 self.estimator.fit(X_train, y_train)
-                y_pred_proba = self.estimator.predict_proba(X_val)[:, 1]
+                y_pred_proba = np.asarray(self.estimator.predict_proba(X_val), dtype=np.float64)[:, 1]
                 return -roc_auc_score(y_val, y_pred_proba)
 
             self.hyperopt_trials_store = Trials()
@@ -143,16 +354,18 @@ class PairwiseModeler:
             self.hyperopt_trials_store = {}
 
         # refitting but only on training data so as not to leak anything
-        self.classifier = self.estimator.fit(X_train, y_train)
+        # Only this fit is kept, so only it needs names; the trials score unnamed arrays.
+        if feature_names is None:
+            self.classifier = self.estimator.fit(X_train, y_train)
+        else:
+            self.classifier = self.estimator.fit(X_train, y_train, feature_name=[str(name) for name in feature_names])
 
         assert self.hyperopt_trials_store is not None
         return self.hyperopt_trials_store
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self.classifier is not None, "You need to call fit first"
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return self.classifier.predict_proba(X)
+        return self.classifier.predict_proba(_validated_classifier_features(self.classifier, X))
 
 
 def intify(x):
@@ -163,9 +376,12 @@ def intify(x):
         return x
 
 
-class FastCluster(TransformerMixin, BaseEstimator):
+class FastCluster:
     """
-    A scikit-learn wrapper for fastcluster.
+    A scikit-learn compatible wrapper for fastcluster.
+
+    It implements the parameter API that ``sklearn.base.clone`` uses, without
+    importing scikit-learn, so prediction processes start faster.
     Inputs:
         linkage: string (default="average")
             Agglomerative linkage method. Defaults to "average".
@@ -175,7 +391,12 @@ class FastCluster(TransformerMixin, BaseEstimator):
             Cutoff used to determine number of clusters.
         preserve_input: bool (default=True)
             Whether to preserve the X input or modify in place.
-            Defaults to False, which modifies in place.
+        close_pair_bonus: float (default=0.0)
+            Amount each close pair lowers the average distance of two clusters.
+            Zero keeps plain linkage. Requires average linkage over condensed
+            distances. See ``constrained_linkage``.
+        close_pair_distance: float (default=0.0)
+            Model distances under this value are close pairs.
         input_as_observation_matrix: bool (default=False)
             If True, the input to fit/transform must be a 2-D array
             of observation vectors (N by d). If False input to fit/transform
@@ -189,12 +410,18 @@ class FastCluster(TransformerMixin, BaseEstimator):
     https://cran.r-project.org/web/packages/fastcluster/vignettes/fastcluster.pdf
     """
 
+    # Class defaults keep objects pickled before these parameters existed usable.
+    close_pair_bonus: float = 0.0
+    close_pair_distance: float = 0.0
+
     def __init__(
         self,
         linkage: str = "average",
         eps: float = 0.5,
         preserve_input: bool = True,
         input_as_observation_matrix: bool = False,
+        close_pair_bonus: float = 0.0,
+        close_pair_distance: float = 0.0,
     ):
         if linkage not in {
             "complete",
@@ -214,46 +441,48 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.eps = eps
         self.preserve_input = preserve_input
         self.input_as_observation_matrix = input_as_observation_matrix
+        self.close_pair_bonus = close_pair_bonus
+        self.close_pair_distance = close_pair_distance
         self.labels_ = None
 
-    # ---- new: robust get_params ----
-    def get_params(self, deep=True):
-        """
-        Return params but gracefully handle the case where an instance
-        (e.g., loaded from an old pickle) is missing attributes.
-        """
-        params = {}
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            # prefer the runtime attribute if present, otherwise the __init__ default
-            if hasattr(self, name):
-                params[name] = getattr(self, name)
-            else:
-                params[name] = param.default if param.default is not inspect.Parameter.empty else None
+    @classmethod
+    def _get_param_names(cls) -> list[str]:
+        """Return the constructor parameter names, sorted as scikit-learn sorts them."""
+        parameters = inspect.signature(cls.__init__).parameters.values()
+        return sorted(parameter.name for parameter in parameters if parameter.name != "self")
 
-        if deep:
-            # sklearn convention: include nested estimator params with __ separator
-            for key, val in list(params.items()):
-                if hasattr(val, "get_params"):
-                    for subk, subv in val.get_params(deep=True).items():
-                        params[f"{key}__{subk}"] = subv
-        return params
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        """Return the constructor parameters, as ``sklearn.base.BaseEstimator.get_params`` does.
 
-    # ---- new: ensure defaults after unpickling ----
-    def __setstate__(self, state):
+        Args:
+            deep: Accepted for scikit-learn compatibility; no parameter is an estimator.
         """
-        Called on unpickle. Populate any missing ctor attrs with their defaults.
+        del deep
+        return {name: getattr(self, name) for name in self._get_param_names()}
+
+    def set_params(self, **params: Any) -> FastCluster:
+        """Set constructor parameters, as ``sklearn.base.BaseEstimator.set_params`` does.
+
+        Raises:
+            ValueError: A name is not a constructor parameter.
         """
-        self.__dict__.update(state)
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            if not hasattr(self, name):
-                default = param.default if param.default is not inspect.Parameter.empty else None
-                setattr(self, name, default)
+        valid = self._get_param_names()
+        for name, value in params.items():
+            if name not in valid:
+                raise ValueError(f"Invalid parameter {name!r} for estimator {self}. Valid parameters are: {valid!r}.")
+            setattr(self, name, value)
+        return self
+
+    def __repr__(self) -> str:
+        defaults = {
+            parameter.name: parameter.default
+            for parameter in inspect.signature(type(self).__init__).parameters.values()
+            if parameter.name != "self"
+        }
+        changed = ", ".join(
+            f"{name}={value!r}" for name, value in self.get_params().items() if value != defaults.get(name)
+        )
+        return f"{type(self).__name__}({changed})"
 
     def fit(self, X: np.ndarray) -> FastCluster:
         """
@@ -270,6 +499,21 @@ class FastCluster(TransformerMixin, BaseEstimator):
         -------
         self
         """
+        self.labels_ = fcluster(self.linkage_matrix(X), t=self.eps, criterion="distance")
+        return self
+
+    def linkage_matrix(self, X: np.ndarray) -> np.ndarray:
+        """Return the linkage of `X` that `fit` cuts at `eps`.
+
+        Parameters
+        ----------
+        X: np.array
+            The input that `fit` takes.
+
+        Returns
+        -------
+        np.ndarray: the SciPy linkage matrix
+        """
         X = np.asarray(X)
         if len(X.shape) == 1 and self.input_as_observation_matrix:
             raise ValueError(
@@ -283,9 +527,26 @@ class FastCluster(TransformerMixin, BaseEstimator):
             )
         elif len(X.shape) > 2:
             raise ValueError("The input to fit can only be one-dimensional or two-dimensional.")
-        Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
-        self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
-        return self
+        bonus, close = float(self.close_pair_bonus), float(self.close_pair_distance)
+        if not 0.0 <= bonus <= MAX_CLOSE_PAIR_BONUS or not 0.0 <= close <= 1.0 or (bonus > 0 and close <= 0):
+            raise ValueError(
+                f"close_pair_bonus must be within [0, {MAX_CLOSE_PAIR_BONUS:g}] and close_pair_distance within "
+                f"[0, 1], and positive with a bonus; got {bonus!r}, {close!r}"
+            )
+        if bonus > 0 and (self.linkage != "average" or self.input_as_observation_matrix):
+            # The bonus is defined on an average of pair distances.
+            raise ValueError("close_pair_bonus requires average linkage over condensed distances")
+        if self.input_as_observation_matrix:
+            # The pairwise distances are this call's own array, so linkage works in them.
+            # fastcluster.linkage derives the same Euclidean distances and then copies them.
+            return _linkage_in_place(pdist(X, metric="euclidean"), self.linkage)
+        return constrained_linkage(
+            X,
+            self.linkage,
+            preserve_input=self.preserve_input,
+            close_pair_bonus=bonus,
+            close_pair_distance=close,
+        )
 
     def fit_transform(
         self,
@@ -314,110 +575,14 @@ class FastCluster(TransformerMixin, BaseEstimator):
         raise NotImplementedError("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
 
 
-class VotingClassifier:
+def clone_cluster_model(cluster_model: Any) -> Any:
+    """Return an unfitted copy of a clustering estimator with the same parameters.
+
+    A FastCluster copies itself, so prediction does not import scikit-learn.
+    Other estimators use ``sklearn.base.clone``.
     """
-    Stripped-down version of VotingClassifier that uses prefit estimators
+    if isinstance(cluster_model, FastCluster):
+        return type(cluster_model)(**cluster_model.get_params())
+    from sklearn.base import clone
 
-    Parameters
-    ----------
-    estimators: List[sklearn classifier]
-        A list of sklearn classifiers that support predict_proba.
-    voting: string
-        Type of voting.
-        Defaults to "hard", can also be "soft".
-        "soft" means "take the highest average probability class" and
-        "hard" means "take the class that the plurality of the models pick"
-    weights: List or np.array
-        Weights for each estimator.
-    """
-
-    def __init__(self, estimators, voting="soft", weights=None):
-        self.estimators = estimators
-        self.voting = voting
-        self.weights = weights
-
-    def fit(self, X, y, sample_weight=None):
-        raise NotImplementedError
-
-    def predict(self, X):
-        """
-        Predict class labels for X.
-
-        Parameters
-        ----------
-        X: {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        predictions : array-like, shape = [n_samples]
-            Predicted class labels.
-        """
-        if self.voting == "soft":
-            predictions = np.argmax(self.predict_proba(X), axis=1)
-        elif self.voting == "hard":
-            predictions = np.apply_along_axis(
-                lambda x: np.argmax(np.bincount(x, weights=self.weights)),
-                axis=1,
-                arr=self._predict(X).astype("int"),
-            )
-        else:
-            raise ValueError("Voting type must be one of 'soft' or 'hard'")
-        return predictions
-
-    def _collect_probas(self, X):
-        """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return np.asarray([clf.predict_proba(X) for clf in self.estimators])
-
-    def predict_proba(self, X):
-        """
-        Compute probabilities of possible outcomes for samples in X.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        ----------
-        avg : array-like, shape = [n_samples, n_classes]
-            Weighted average probability for each class per sample.
-        """
-        if self.voting == "hard":
-            raise AttributeError(f"predict_proba is not available when voting={self.voting!r}")
-        avg = np.average(self._collect_probas(X), axis=0, weights=self.weights)
-        return avg
-
-    def transform(self, X):
-        """
-        Return class labels or probabilities for X for each estimator.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        If `voting='soft'`:
-          array-like = [n_classifiers, n_samples, n_classes]
-            Class probabilities calculated by each classifier.
-        If `voting='hard'`:
-          array-like = [n_samples, n_classifiers]
-            Class labels predicted by each classifier.
-        """
-        if self.voting == "soft":
-            return self._collect_probas(X)
-        else:
-            return self._predict(X)
-
-    def _predict(self, X):
-        """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return np.asarray([clf.predict(X) for clf in self.estimators]).T
+    return clone(cluster_model)

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from s2and.incremental_linking import features
@@ -43,48 +42,13 @@ def _row_feature_fixture(row_count: int) -> dict[str, np.ndarray]:
 
 
 def test_promoted_linker_feature_columns_match_promoted_target_file() -> None:
-    target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
+    target_path = Path("tests/fixtures/incremental_linker_training_target.json")
     target = json.loads(target_path.read_text(encoding="utf-8"))
 
-    assert features.promoted_linker_feature_columns() == tuple(target["features"])
-
-
-def test_promoted_linker_feature_columns_are_promoted_53_without_rank_fractions() -> None:
     promoted = features.promoted_linker_feature_columns()
 
-    assert len(promoted) == 53
+    assert promoted == tuple(target["features"])
     assert not any(column.endswith("_rank_fraction") for column in promoted)
-
-
-def test_assemble_linker_feature_matrix_places_row_and_pairwise_columns() -> None:
-    row_count = 3
-    candidate_batch = LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-    )
-    pairwise_columns = promoted_pairwise_aggregate_columns()
-    pairwise_matrix = np.arange(row_count * len(pairwise_columns), dtype=np.float32).reshape(
-        row_count, len(pairwise_columns)
-    )
-    assembled = features.assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_feature_fixture(row_count),
-        pairwise_stats=_static_pairwise_stats(pairwise_matrix, pairwise_columns),
-    )
-
-    assert assembled.matrix.dtype == np.float32
-    assert assembled.matrix.shape == (row_count, len(features.promoted_linker_feature_columns()))
-    assert assembled.feature_columns == features.promoted_linker_feature_columns()
-    np.testing.assert_array_equal(
-        assembled.matrix[:, assembled.feature_columns.index("min_distance")],
-        np.asarray(_row_feature_fixture(row_count)["min_distance"], dtype=np.float32),
-    )
-    np.testing.assert_array_equal(
-        assembled.matrix[:, assembled.feature_columns.index("pw_mean_first_names_equal")],
-        pairwise_matrix[:, pairwise_columns.index("pw_mean_first_names_equal")],
-    )
 
 
 def test_assemble_linker_feature_matrix_rejects_pairwise_nans() -> None:
@@ -127,23 +91,26 @@ def test_assemble_linker_feature_matrix_rejects_pairwise_infinities() -> None:
         )
 
 
-def test_assemble_linker_feature_matrix_matches_tracked_target_order() -> None:
-    target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
+@pytest.mark.parametrize("explicit_columns", [False, True], ids=["default-columns", "explicit-columns"])
+def test_assemble_linker_feature_matrix_matches_tracked_target_order(explicit_columns: bool) -> None:
+    target_path = Path("tests/fixtures/incremental_linker_training_target.json")
     target_columns = tuple(json.loads(target_path.read_text(encoding="utf-8"))["features"])
     row_count = 4
     pairwise_columns = promoted_pairwise_aggregate_columns()
-    frame = pd.DataFrame(
-        {
-            column: np.full(row_count, column_index + 0.25, dtype=np.float32)
-            for column_index, column in enumerate(target_columns)
-            if not column.startswith("pw_")
-        }
-    )
-    pairwise_frame = pd.DataFrame(
-        {
-            column: np.full(row_count, column_index + 100.25, dtype=np.float32)
-            for column_index, column in enumerate(pairwise_columns)
-        }
+    row_offsets = np.arange(row_count, dtype=np.float32) * np.float32(1000)
+    row_features = {
+        column: row_offsets + np.float32(column_index + 0.25)
+        for column_index, column in enumerate(target_columns)
+        if not column.startswith("pw_")
+    }
+    pairwise_features = {
+        column: row_offsets + np.float32(column_index + 100.25) for column_index, column in enumerate(pairwise_columns)
+    }
+    pairwise_matrix = np.column_stack([pairwise_features[column] for column in pairwise_columns])
+    original_pairwise_matrix = pairwise_matrix.copy()
+    original_row_features = {column: values.copy() for column, values in row_features.items()}
+    expected = np.column_stack(
+        [pairwise_features[column] if column.startswith("pw_") else row_features[column] for column in target_columns]
     )
     candidate_batch = LinkerCandidateBatch(
         row_count=row_count,
@@ -152,18 +119,22 @@ def test_assemble_linker_feature_matrix_matches_tracked_target_order() -> None:
         pair_row_indices=np.zeros(0, dtype=np.uint32),
     )
 
+    options = {"feature_columns": target_columns} if explicit_columns else {}
     assembled = features.assemble_linker_feature_matrix(
         candidate_batch,
-        frame,
-        pairwise_stats=_static_pairwise_stats(
-            pairwise_frame.loc[:, list(pairwise_columns)].to_numpy(np.float32),
-            pairwise_columns,
-        ),
-        feature_columns=target_columns,
+        row_features,
+        pairwise_stats=_static_pairwise_stats(pairwise_matrix, pairwise_columns),
+        **options,
     )
-    expected = pd.concat([frame, pairwise_frame], axis=1).loc[:, list(target_columns)].to_numpy(np.float32)
 
+    assert assembled.matrix.dtype == np.float32
+    assert assembled.matrix.shape == (row_count, len(target_columns))
+    assert assembled.feature_columns == target_columns == features.promoted_linker_feature_columns()
     np.testing.assert_array_equal(assembled.matrix, expected)
+    np.testing.assert_array_equal(pairwise_matrix, original_pairwise_matrix)
+    assert row_features.keys() == original_row_features.keys()
+    for column, values in row_features.items():
+        np.testing.assert_array_equal(values, original_row_features[column])
 
 
 def test_feature_values_from_runtime_reuses_assembled_pairwise_columns() -> None:
@@ -192,36 +163,6 @@ def test_feature_values_from_runtime_reuses_assembled_pairwise_columns() -> None
     values = feature_values_from_runtime(assembled, None)
 
     assert pairwise_stats.feature_matrix_call_count == 1
-    np.testing.assert_array_equal(
-        values["pw_mean_first_names_equal"],
-        assembled.matrix[:, assembled.feature_columns.index("pw_mean_first_names_equal")],
-    )
-
-
-def test_feature_values_from_runtime_keeps_pairwise_columns_over_row_signals() -> None:
-    row_count = 2
-    candidate_batch = LinkerCandidateBatch(
-        row_count=row_count,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-    )
-    pairwise_columns = promoted_pairwise_aggregate_columns()
-    pairwise_matrix = np.arange(row_count * len(pairwise_columns), dtype=np.float32).reshape(
-        row_count, len(pairwise_columns)
-    )
-    pairwise_stats = StaticPairwiseStats(pairwise_matrix, pairwise_columns)
-    assembled = features.assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_feature_fixture(row_count),
-        pairwise_stats=cast(Any, pairwise_stats),
-    )
-
-    values = feature_values_from_runtime(
-        assembled,
-        {"pw_mean_first_names_equal": np.asarray([999.0, 999.0], dtype=np.float32)},
-    )
-
     np.testing.assert_array_equal(
         values["pw_mean_first_names_equal"],
         assembled.matrix[:, assembled.feature_columns.index("pw_mean_first_names_equal")],
@@ -278,10 +219,8 @@ def test_feature_values_from_runtime_precedence_three_way_overlap() -> None:
         np.full(row_count, matrix_value, dtype=np.float32),
     )
 
-    # Then mutate the pairwise overlay AFTER assembly so the pairwise_stats overlay value
-    # (3.0) differs from the matrix-baked value (1.0). This is the only way to construct
-    # a three-way disagreement and is exactly the silent-precedence footgun this test
-    # locks down.
+    # Mutate the pairwise overlay AFTER assembly so its value (3.0) differs from the
+    # matrix-baked value (1.0); this is the only way to construct a three-way disagreement.
     overlay_value = np.float32(3.0)
     pairwise_stats._matrix[:, target_index] = overlay_value
     row_signal_value = np.asarray([2.0, 2.0], dtype=np.float32)
@@ -296,7 +235,6 @@ def test_feature_values_from_runtime_precedence_three_way_overlap() -> None:
         values[target_column],
         np.full(row_count, matrix_value, dtype=np.float32),
     )
-    # Explicitly assert the losers are NOT visible.
     assert not np.array_equal(values[target_column], row_signal_value)
     assert not np.array_equal(values[target_column], np.full(row_count, overlay_value, dtype=np.float32))
 

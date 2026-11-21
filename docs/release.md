@@ -158,8 +158,9 @@ uv run cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-featu
 Remove-Item Env:S2AND_PAIRWISE_MODEL_DIR
 ```
 
-A failed native fast-plan check requires representative latency measurements and a candidate review.
-Do not silently change the scientific search space to satisfy this check.
+The pairwise search and `--incumbent-parameters` allow at most 256 leaves per tree, the native fast-plan limit.
+Larger trees fall back to slow native scoring, so no release model may use them.
+A failed native fast-plan check still requires representative latency measurements and a candidate review.
 
 ## Stage 4: select EPS and freeze linker inputs
 

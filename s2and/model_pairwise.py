@@ -10,7 +10,7 @@ from fastcluster import mthidx as _FASTCLUSTER_METHOD_INDEX
 from scipy.cluster.hierarchy import fcluster
 from scipy.spatial.distance import pdist
 
-from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
+from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE, MAX_FAST_PLAN_LEAVES
 
 # Prediction needs none of scikit-learn, LightGBM, or pandas. Training code imports them where it uses
 # them, because together they add about 1.5 s to every new prediction process.
@@ -267,7 +267,7 @@ class PairwiseModeler:
         if search_space is None:
             self.search_space = {
                 "learning_rate": hp.loguniform("learning_rate", -7, 0),
-                "num_leaves": scope.int(hp.qloguniform("num_leaves", 2, 7, 1)),
+                "num_leaves": scope.int(hp.qloguniform("num_leaves", 2, np.log(MAX_FAST_PLAN_LEAVES), 1)),
                 "colsample_bytree": hp.uniform("colsample_bytree", 0.5, 1),
                 "subsample": hp.uniform("subsample", 0.5, 1),
                 "min_child_samples": scope.int(hp.qloguniform("min_child_samples", 3, 9, 1)),

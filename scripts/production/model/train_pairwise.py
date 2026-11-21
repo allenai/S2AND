@@ -42,7 +42,7 @@ from s2and.featurizer import (  # noqa: E402
     resolve_selection_pairs,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
-from s2and.model_pairwise import _validated_classifier_features  # noqa: E402
+from s2and.model_pairwise import MAX_FAST_PLAN_LEAVES, _validated_classifier_features  # noqa: E402
 from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
 from s2and.production_bundle_contract import PENDING_EPS_CALIBRATION, PENDING_PAIRWISE_EPS  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
@@ -364,6 +364,13 @@ def _load_incumbent_parameters(path: Path | None) -> dict[str, dict[str, Any]]:
         or any(not isinstance(parameters, dict) or not parameters for parameters in payload.values())
     ):
         raise SystemExit("--incumbent-parameters must map 'main' and/or 'nameless' to LightGBM parameters")
+    for head, parameters in payload.items():
+        num_leaves = parameters.get("num_leaves")
+        if not isinstance(num_leaves, int) or not 2 <= num_leaves <= MAX_FAST_PLAN_LEAVES:
+            raise SystemExit(
+                f"--incumbent-parameters {head}.num_leaves must be an integer from 2 to {MAX_FAST_PLAN_LEAVES} "
+                "so native scoring keeps a fast plan"
+            )
     return payload
 
 

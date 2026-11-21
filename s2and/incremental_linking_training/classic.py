@@ -18,6 +18,7 @@ from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from s2and.consts import MAX_FAST_PLAN_LEAVES
 from s2and.incremental_linking.artifact import IncrementalLinkingArtifact
 from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
@@ -693,6 +694,12 @@ def _build_classic_classifier(
     n_jobs: int = DEFAULT_CLASSIC_N_JOBS,
 ) -> LGBMClassifier:
     classifier_params = {key: value for key, value in params.items()}
+    num_leaves = classifier_params.get("num_leaves", 31)
+    # Larger trees lose the native fast scoring plan, which makes every linker request slow.
+    if isinstance(num_leaves, bool) or not isinstance(num_leaves, int) or not 2 <= num_leaves <= MAX_FAST_PLAN_LEAVES:
+        raise ValueError(
+            f"Classic linker num_leaves must be an integer from 2 to {MAX_FAST_PLAN_LEAVES}, got {num_leaves!r}"
+        )
     if monotone_constraints is not None:
         classifier_params["monotone_constraints"] = list(monotone_constraints)
     return LGBMClassifier(

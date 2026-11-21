@@ -138,3 +138,8 @@ CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
 # matrix can hold either.
 HARD_LINKAGE_DISTANCE = 1e12
 SPECTER_DIM = 768
+
+# Native scoring has fast plans only for trees with at most this many leaves
+# (`MAX_LOCKSTEP_LEAVES` in s2and_rust/src/lightgbm_booster/fast.rs). Larger trees
+# fall back to slow traversal, so no trained LightGBM model may use them.
+MAX_FAST_PLAN_LEAVES = 256

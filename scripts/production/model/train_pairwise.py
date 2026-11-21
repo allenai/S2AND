@@ -146,6 +146,10 @@ def _preflight_pairwise(args: argparse.Namespace) -> PairwisePreflightPlan:
 
     if not bool(args.run_full):
         raise SystemExit("production training requires --run-full")
+    if getattr(args, "fixed_parameters", None) is not None:
+        if getattr(args, "incumbent_parameters", None) is not None:
+            raise SystemExit("--fixed-parameters replaces the search; do not combine it with --incumbent-parameters")
+        _load_fixed_parameters(args.fixed_parameters)
     output_dir = Path(args.output_dir).resolve()
     if output_dir.exists():
         raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
@@ -351,27 +355,45 @@ def _concatenate_staged_arrays(
     return output_path
 
 
-def _load_incumbent_parameters(path: Path | None) -> dict[str, dict[str, Any]]:
-    """Read optional LightGBM parameters that compete with each head's search winner."""
+def _load_head_parameters(path: Path | None, *, option: str, require_both: bool) -> dict[str, dict[str, Any]]:
+    """Read per-head LightGBM parameters and keep every tree inside the native fast plan."""
 
     if path is None:
         return {}
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    heads = {"main", "nameless"}
     if (
         not isinstance(payload, dict)
         or not payload
-        or not set(payload) <= {"main", "nameless"}
+        or not (set(payload) == heads if require_both else set(payload) <= heads)
         or any(not isinstance(parameters, dict) or not parameters for parameters in payload.values())
     ):
-        raise SystemExit("--incumbent-parameters must map 'main' and/or 'nameless' to LightGBM parameters")
+        scope = "both 'main' and 'nameless'" if require_both else "'main' and/or 'nameless'"
+        raise SystemExit(f"{option} must map {scope} to LightGBM parameters")
     for head, parameters in payload.items():
         num_leaves = parameters.get("num_leaves")
-        if not isinstance(num_leaves, int) or not 2 <= num_leaves <= MAX_FAST_PLAN_LEAVES:
+        if (
+            isinstance(num_leaves, bool)
+            or not isinstance(num_leaves, int)
+            or not 2 <= num_leaves <= MAX_FAST_PLAN_LEAVES
+        ):
             raise SystemExit(
-                f"--incumbent-parameters {head}.num_leaves must be an integer from 2 to {MAX_FAST_PLAN_LEAVES} "
+                f"{option} {head}.num_leaves must be an integer from 2 to {MAX_FAST_PLAN_LEAVES} "
                 "so native scoring keeps a fast plan"
             )
     return payload
+
+
+def _load_incumbent_parameters(path: Path | None) -> dict[str, dict[str, Any]]:
+    """Read optional LightGBM parameters that compete with each head's search winner."""
+
+    return _load_head_parameters(path, option="--incumbent-parameters", require_both=False)
+
+
+def _load_fixed_parameters(path: Path | None) -> dict[str, dict[str, Any]]:
+    """Read the parameters that replace the search for both heads."""
+
+    return _load_head_parameters(path, option="--fixed-parameters", require_both=True)
 
 
 def _fit_pairwise_model(
@@ -382,6 +404,7 @@ def _fit_pairwise_model(
     monotone_constraints: Any,
     feature_names: list[str],
     incumbent: Mapping[str, Any] | None = None,
+    fixed: Mapping[str, Any] | None = None,
 ) -> tuple[PairwiseModeler, float, dict[str, Any]]:
     model = PairwiseModeler(
         n_iter=int(args.n_iter),
@@ -392,6 +415,18 @@ def _fit_pairwise_model(
     y_train = _load_staged_array(arrays["y_train"])
     X_val = _load_staged_array(arrays[f"{feature_prefix}X_val"])
     y_val = _load_staged_array(arrays["y_val"])
+    if fixed is not None:
+        # Fit the search's own estimator with known parameters and skip the search, so a
+        # refit on corrected data repeats the chosen recipe exactly.
+        model.search_space = {}
+        model.estimator.set_params(**fixed)
+        if monotone_constraints is not None:
+            model.estimator.set_params(monotone_constraints=list(monotone_constraints))
+        model.fit(X_train, y_train, X_val, y_val, feature_names=feature_names)
+        model.best_params = dict(fixed)
+        validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
+        gc.collect()
+        return model, validation_roc_auc, {"selected_source": "fixed", "fixed_validation_roc_auc": validation_roc_auc}
     # Named fits write feature names into the saved boosters, as in the released 1.3 model.
     model.fit(X_train, y_train, X_val, y_val, feature_names=feature_names)
     validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
@@ -483,6 +518,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             require_training_members(augmented_members, dataset_name, training)
             require_validation_members(augmented_validation_members, dataset_name, validation)
     incumbents = _load_incumbent_parameters(getattr(args, "incumbent_parameters", None))
+    fixed_parameters = _load_fixed_parameters(getattr(args, "fixed_parameters", None))
     artifact_authority = load_packaged_artifact_authority(
         name_counts_index_root=Path(args.name_counts_index_root),
     )
@@ -496,6 +532,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     training_config["unknown_signature_inputs"] = {name: source.binding() for name, source in unknown_inputs.items()}
     training_config["unknown_signature_policy"] = "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only"
     training_config["incumbent_parameters"] = incumbents
+    training_config["fixed_parameters"] = fixed_parameters
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
     logger.info(
         "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
@@ -604,6 +641,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             monotone_constraints=monotone_constraints,
             feature_names=featurizer_info.get_feature_names(),
             incumbent=incumbents.get("main"),
+            fixed=fixed_parameters.get("main"),
         )
 
         logger.info("fitting nameless pairwise model")
@@ -614,6 +652,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             monotone_constraints=nameless_monotone_constraints,
             feature_names=nameless_featurizer_info.get_feature_names(),
             incumbent=incumbents.get("nameless"),
+            fixed=fixed_parameters.get("nameless"),
         )
 
         logger.info("building uncalibrated pairwise bundle")
@@ -675,6 +714,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional JSON of LightGBM parameters per head that compete with each search winner.",
+    )
+    parser.add_argument(
+        "--fixed-parameters",
+        type=Path,
+        default=None,
+        help="Optional JSON of LightGBM parameters for both heads; fits them directly instead of searching.",
     )
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
     parser.add_argument(

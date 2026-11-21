@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 from hyperopt.pyll import stochastic
 
@@ -13,6 +15,7 @@ from s2and.incremental_linking_training.classic import _build_classic_classifier
 from s2and.model import PairwiseModeler
 from s2and.model_pairwise import MAX_FAST_PLAN_LEAVES
 from scripts.production.model import train_pairwise
+from tests.helpers import pairwise_training_args
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,3 +64,53 @@ def test_linker_target_params_are_within_leaf_cap() -> None:
 def test_linker_classifier_outside_leaf_cap_is_rejected(num_leaves: object) -> None:
     with pytest.raises(ValueError, match="num_leaves"):
         _build_classic_classifier({"num_leaves": num_leaves})
+
+
+def test_fixed_parameters_fit_both_heads_without_search(tmp_path: Path) -> None:
+    rng = np.random.default_rng(0)
+    arrays: dict[str, Path] = {}
+    for role, rows in (("X_train", 200), ("X_val", 80)):
+        features = rng.normal(size=(rows, 3))
+        arrays[role] = tmp_path / f"{role}.npy"
+        np.save(arrays[role], features)
+        labels = (features[:, 0] + 0.1 * rng.normal(size=rows) > 0).astype(np.int8)
+        arrays["y_" + role.split("_")[1]] = tmp_path / f"y_{role}.npy"
+        np.save(arrays["y_" + role.split("_")[1]], labels)
+    fixed = {"num_leaves": 7, "n_estimators": 5, "learning_rate": 0.1, "min_child_samples": 5}
+    args = argparse.Namespace(n_iter=50, n_jobs=1)
+
+    model, auc, selection = train_pairwise._fit_pairwise_model(
+        args, arrays, feature_prefix="", monotone_constraints=[1, 0, 0], feature_names=["a", "b", "c"], fixed=fixed
+    )
+
+    assert selection == {"selected_source": "fixed", "fixed_validation_roc_auc": auc}
+    assert model.best_params == fixed
+    assert model.hyperopt_trials_store == {}
+    assert model.classifier is not None
+    params = model.classifier.get_params()
+    assert (params["num_leaves"], params["n_estimators"]) == (7, 5)
+    # The search's own estimator defaults stay in force, so a fixed refit repeats the chosen recipe.
+    assert (params["tree_learner"], params["monotone_constraints"], params["monotone_constraints_method"]) == (
+        "data",
+        [1, 0, 0],
+        "advanced",
+    )
+    assert auc > 0.9
+
+
+@pytest.mark.parametrize(
+    "payload", [{"main": {"num_leaves": 7}}, {"main": {"num_leaves": 7}, "nameless": {"num_leaves": 300}}]
+)
+def test_fixed_parameters_need_both_heads_within_leaf_cap(tmp_path: Path, payload: dict[str, object]) -> None:
+    path = tmp_path / "fixed.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SystemExit, match="--fixed-parameters"):
+        train_pairwise._load_fixed_parameters(path)
+
+
+def test_fixed_parameters_exclude_incumbents_before_data_loads(tmp_path: Path) -> None:
+    fixed = tmp_path / "fixed.json"
+    fixed.write_text(json.dumps({"main": {"num_leaves": 7}, "nameless": {"num_leaves": 7}}), encoding="utf-8")
+    args = pairwise_training_args(tmp_path, fixed_parameters=fixed, incumbent_parameters=fixed)
+    with pytest.raises(SystemExit, match="do not combine"):
+        train_pairwise._preflight_pairwise(args)

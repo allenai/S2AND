@@ -111,6 +111,9 @@ Each head runs the official 50-trial TPE search.
 `--incumbent-parameters` adds one known LightGBM configuration per head.
 The incumbent fits on the same training rows and wins ties on validation ROC AUC.
 Release `1.3` used the H13 configuration in `pairwise_incumbent_h13.json`.
+`--fixed-parameters` takes the same JSON shape for both heads and fits them directly, with no search.
+Use it to refit a chosen configuration after a data correction; it excludes `--incumbent-parameters`.
+Every head's `num_leaves` must stay within 256, the native fast-plan limit.
 The `1.3` main head kept search trial 26; the nameless head kept H13.
 The training summary records the selected source and both validation scores.
 

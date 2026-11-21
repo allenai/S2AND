@@ -12,6 +12,8 @@ import pytest
 
 from s2and import production_training_contract
 from s2and._sha256 import sha256_file
+from s2and.consts import _PACKAGE_DATA_DIR
+from s2and.orcid_prefix_counts import ORCID_PREFIX_DATA_FILENAME
 from scripts.production.model import train_linker_and_finalize, train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
@@ -277,17 +279,8 @@ def test_preflight_rejects_existing_output_and_nonempty_scratch(tmp_path: Path) 
 
 
 def test_artifact_authority_uses_packaged_runtime_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    opened: dict[str, Path] = {}
-
-    def open_orcid(root: Path) -> SimpleNamespace:
-        opened["orcid"] = root
-        return SimpleNamespace(
-            name_tuples_sha256="a" * 64,
-            data_sha256="b" * 64,
-        )
-
     def open_name_counts(path: Path) -> SimpleNamespace:
-        opened["name_counts"] = path
+        assert path == Path("name-counts")
         return SimpleNamespace(
             manifest_sha256="d" * 64,
         )
@@ -297,24 +290,18 @@ def test_artifact_authority_uses_packaged_runtime_data(monkeypatch: pytest.Monke
         "open",
         staticmethod(open_name_counts),
     )
-    monkeypatch.setattr(
-        production_training_contract,
-        "load_packaged_name_tuple_artifact",
-        lambda: SimpleNamespace(data_sha256="a" * 64),
-    )
-    monkeypatch.setattr(production_training_contract, "load_canonical_orcid_prefix_counts", open_orcid)
-
     authority = production_training_contract.load_packaged_artifact_authority(
         name_counts_index_root=Path("name-counts"),
     )
 
-    assert train_pairwise._canonical_training_artifact_hashes(_artifact_authority()) == authority.hashes
+    refreshed = Path(_PACKAGE_DATA_DIR) / "orcid_prefix_counts_v1_4" / ORCID_PREFIX_DATA_FILENAME
+    assert train_pairwise._canonical_training_artifact_hashes(authority) == {
+        "name_counts_manifest_sha256": "d" * 64,
+        "name_tuples_data_sha256": authority.name_tuples.data_sha256,
+        "orcid_prefix_counts_data_sha256": sha256_file(refreshed),
+    }
     with pytest.raises(RuntimeError, match="different canonical name-tuple"):
         train_pairwise._canonical_training_artifact_hashes(_artifact_authority(tuple_hash="x" * 64))
-    assert opened == {
-        "name_counts": Path("name-counts"),
-        "orcid": Path(production_training_contract._PACKAGE_DATA_DIR),
-    }
 
 
 def test_staging_keeps_only_train_validation_and_checks_disk(

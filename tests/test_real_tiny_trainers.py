@@ -11,10 +11,11 @@ import pytest
 from s2and._sha256 import sha256_file
 from s2and.data import ANDData
 from s2and.incremental_linking_training.classic import fit_classic
-from s2and.name_counts_index import NameCountsIndex
-from s2and.name_tuple_artifact import load_name_tuple_artifact
-from s2and.orcid_prefix_counts import load_canonical_orcid_prefix_counts
-from s2and.production_training_contract import ModelDataset, ProductionArtifactAuthority
+from s2and.production_training_contract import (
+    ModelDataset,
+    ProductionArtifactAuthority,
+    load_packaged_artifact_authority,
+)
 from scripts.production.model import train_pairwise
 from tests.helpers import pairwise_training_args
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
@@ -140,14 +141,10 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     monkeypatch: pytest.MonkeyPatch,
     augmented_population: str,
 ) -> None:
-    name_tuples_path, name_counts_path, orcid_counts_path = write_pairwise_artifacts(tmp_path)
+    _, name_counts_path, _ = write_pairwise_artifacts(tmp_path)
     matrix_work_dir = tmp_path / "matrix-work"
     matrix_work_dir.mkdir()
-    authority = ProductionArtifactAuthority(
-        name_counts_index=NameCountsIndex.open(name_counts_path),
-        name_tuples=load_name_tuple_artifact(name_tuples_path),
-        orcid_prefix_counts=load_canonical_orcid_prefix_counts(orcid_counts_path),
-    )
+    authority = load_packaged_artifact_authority(name_counts_index_root=name_counts_path)
     args = pairwise_training_args(
         tmp_path,
         output_dir=tmp_path / "production_model_v9.9",
@@ -225,7 +222,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     real_loader = train_pairwise.load_development_dataset
 
     def checked_loader(*loader_args: Any, **kwargs: Any) -> ANDData:
-        assert kwargs["name_tuples"] == load_name_tuple_artifact(name_tuples_path).pairs
+        assert kwargs["name_tuples"] == authority.name_tuples.pairs
         assert kwargs["train_pairs_size"] == args.train_pairs_size
         assert kwargs["val_pairs_size"] == args.validation_pairs_size
         return real_loader(*loader_args, **kwargs)

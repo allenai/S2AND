@@ -31,6 +31,8 @@ CANONICAL_ORCID_PATHS = frozenset(
     {
         "s2and/data/first_k_letter_counts_from_orcid.json",
         "s2and/data/first_k_letter_counts_from_orcid.manifest.json",
+        "s2and/data/orcid_prefix_counts_v1_4/first_k_letter_counts_from_orcid.json",
+        "s2and/data/orcid_prefix_counts_v1_4/first_k_letter_counts_from_orcid.manifest.json",
     }
 )
 DEFAULT_PRODUCTION_MODEL_PATH = "s2and/data/default_production_model.json"

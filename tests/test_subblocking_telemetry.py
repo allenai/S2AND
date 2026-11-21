@@ -12,8 +12,11 @@ import s2and.subblocking as subblocking
 from s2and.arrow_inputs import ArrowDataset
 from s2and.data import Signature
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
+from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
+from s2and.production_model import _load_pairwise_staging_model, canonical_artifact_hashes
 from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
+from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 from tests.raw_arrow_helpers import write_ipc as _write_ipc
 
 
@@ -840,6 +843,40 @@ def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> Ar
             )
     write_test_arrow_artifact_manifest(tmp_path, paths)
     return ArrowDataset.open(tmp_path, require_specter="specter" in paths)
+
+
+def test_loaded_models_use_their_orcid_prefix_counts_in_both_planners(tmp_path: Path) -> None:
+    refreshed_hashes = canonical_artifact_hashes()
+    original_hashes = {
+        **refreshed_hashes,
+        "orcid_prefix_counts_data_sha256": "fcb4cb7bdf30f07366b946b9fdb1bb0a807bdb00f7dda521575daea6b2b9d8ce",
+    }
+    models = []
+    for version, hashes in (("1.4", refreshed_hashes), ("1.3.2", original_hashes)):
+        bundle = tmp_path / f"production_model_v{version}"
+        write_synthetic_pairwise_bundle(bundle, artifact_hashes=hashes, release_version=version)
+        models.append(_load_pairwise_staging_model(bundle, expected_eps_calibration=CALIBRATED_EPS_CALIBRATION))
+
+    rows = [("s1", "ch", ""), ("s2", "cy", ""), ("s3", "cq", "")]
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
+    signatures = {sid: _signature(sid, first=first, middle=middle) for sid, first, middle in rows}
+    dataset = SimpleNamespace(signatures=signatures, random_seed=0)
+    block = {"c wang": list(signatures)}
+    with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow:
+        for model, count, expected in zip(
+            models, (16, None), ([["s1", "s2"], ["s3"]], [["s1"], ["s2"], ["s3"]]), strict=True
+        ):
+            counts = model._subblocking_prefix_counts()
+            assert counts.get("ch", {}).get("cy") == count
+            python_subblocks = subblocking.make_subblocks(
+                list(signatures), dataset, maximum_size=2, first_k_letter_counts_sorted=counts
+            )
+            native_subblocks, _ = model._build_arrow_subblocked_block_dict(
+                block, arrow, batching_threshold=2, cluster_seeds_require={}
+            )
+            assert sorted(map(sorted, python_subblocks.values())) == expected
+            assert sorted(map(sorted, native_subblocks.values())) == expected
 
 
 def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:

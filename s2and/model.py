@@ -85,6 +85,7 @@ from s2and.model_pairwise import (
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
 from s2and.orcid_join import join_orcids_across_subblocks
+from s2and.orcid_prefix_counts import DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256, load_packaged_orcid_prefix_counts
 from s2and.prediction_state import PredictionState
 from s2and.profile_exclusions import (
     enforce_profile_exclusions_in_block,
@@ -1944,6 +1945,9 @@ class Clusterer:
     # Previously exported model bundles use this package default.
     orcid_join: bool = True
 
+    # Production bundles pin this hash at load time.
+    _orcid_prefix_counts_data_sha256: str = DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256
+
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name
     # conflicts with other mentions of its ORCID, the name without an ORCID does not
@@ -3559,6 +3563,7 @@ class Clusterer:
                 arrow_dataset,
                 block_signatures,
                 maximum_size=batching_threshold,
+                first_k_letter_counts_sorted=self._subblocking_prefix_counts(),
                 graph_subblocking_config=self._subblocking_graph_config(),
                 graph_subblocking_random_seed=int(getattr(self, "random_state", 0) or 0),
                 use_orcid_subblocking=True,
@@ -4441,6 +4446,11 @@ class Clusterer:
 
     def _subblocking_graph_config(self) -> GraphSubblockingConfig:
         return _resolve_graph_subblocking_config(getattr(self, "subblocking_graph_config", None))
+
+    def _subblocking_prefix_counts(self) -> Mapping[str, Mapping[str, int]]:
+        """Get the ORCID prefix counts this model uses for subblocking."""
+
+        return load_packaged_orcid_prefix_counts(self._orcid_prefix_counts_data_sha256).counts
 
     def _partition_subblocked_first_name_groups(
         self,

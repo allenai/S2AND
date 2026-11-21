@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.0.0b14
+
+- Ship the original ORCID prefix counts for `1.3.x` models and refreshed counts
+  for `1.4`. Each loaded model uses the counts named by its contract hash.
+  New training contracts use the refreshed counts, which exclude five additional
+  reviewed mixed-identity ORCID groups.
+
 ## Unreleased runtime changes
 
 - Bundle export refuses a clusterer that still sets a repair setting removed in this release,

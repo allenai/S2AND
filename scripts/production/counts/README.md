@@ -1,19 +1,21 @@
 # Author-table name counts
 
 These producers read internal Semantic Scholar exports, so only AI2 staff can run them.
-Public users download the released index and prefix artifacts instead.
+Public users download the released name-count index and install the wheel with the prefix artifacts.
 Plan a staff rebuild for every future count refresh.
 
 ## ORCID prefix evidence
 
 Use `generate_orcid_name_prefix_counts` for the final ORCID prefix artifact.
-The producer excludes 14 mixed-identity ORCID groups from the September 25 manual review.
+The producer excludes 19 mixed-identity ORCID groups from the September 25 and November 20 reviews.
 `EXCLUDED_ORCID_GROUPS` contains the reviewed identifiers.
 The producer records excluded group and row counts in its result log.
 It preserves raw source data and requires matching, nonempty canonical surnames for all retained ORCID evidence.
 It retains the EVENT threshold of 10 and the curated alias threshold of 2.
 The exclusion does not affect curated aliases or the separate runtime same-ORCID subblocking rule.
-The artifact and manifest formats remain unchanged.
+Package the refreshed `1.4` output and its manifest in `s2and/data/orcid_prefix_counts_v1_4/`.
+Keep the original `1.3.x` files at the root of `s2and/data/` for existing contracts.
+Register the refreshed data SHA-256 as the new training default in `s2and/orcid_prefix_counts.py`.
 
 ```powershell
 uv run --no-sync python -m scripts.production.counts.generate_orcid_name_prefix_counts `

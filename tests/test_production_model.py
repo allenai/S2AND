@@ -7,6 +7,7 @@ import pickle
 import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,6 @@ import pytest
 import s2and.incremental_linking.artifact as incremental_artifact_module
 import s2and.production_bundle as production_bundle_module
 import s2and.production_model as production_model_module
-import s2and.subblocking as subblocking_module
 from s2and.data import ANDData
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
@@ -53,10 +53,8 @@ from tests.promoted_linking_helpers import (
     write_synthetic_pairwise_bundle,
 )
 
-_TEST_CANONICAL_ARTIFACT_HASHES = {
-    "name_tuples_data_sha256": "a" * 64,
-    "orcid_prefix_counts_data_sha256": "b" * 64,
-}
+_TEST_CANONICAL_ARTIFACT_HASHES = production_model_module.canonical_artifact_hashes()
+_V132_ORCID_PREFIX_COUNTS_DATA_SHA256 = "fcb4cb7bdf30f07366b946b9fdb1bb0a807bdb00f7dda521575daea6b2b9d8ce"
 _TEST_EXPLICIT_ARTIFACT_HASHES = {
     **_TEST_CANONICAL_ARTIFACT_HASHES,
     "name_counts_manifest_sha256": "c" * 64,
@@ -100,13 +98,7 @@ def _load_pairwise_staging_model(
 @pytest.fixture
 def synthetic_pairwise_bundle(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Clusterer]:
-    monkeypatch.setattr(
-        production_model_module,
-        "canonical_artifact_hashes",
-        lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
-    )
     bundle_dir = tmp_path / "production_model_v9.9"
     source_clusterer = write_synthetic_pairwise_bundle(
         bundle_dir,
@@ -395,10 +387,8 @@ def test_complete_bundle_native_inference_does_not_load_training_libraries(
 
 
 def test_synthetic_native_clusterer_predict_matches_source_python(
-    monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
-    monkeypatch.setattr(subblocking_module._LazyCanonicalOrcidPrefixCounts, "load", lambda _self: {})  # noqa: SLF001
     bundle_dir, source_clusterer = synthetic_pairwise_bundle
 
     for batching_threshold in (None,):
@@ -440,19 +430,12 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
     assert getattr(native_clusterer, "suppress_orcid", False) == getattr(source_clusterer, "suppress_orcid", False)
 
 
-def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        production_model_module,
-        "canonical_artifact_hashes",
-        lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
-    )
+def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values() -> None:
     invalid_values = (
         ("name_tuples_data_sha256", None, "name_tuples_data_sha256"),
         ("name_tuples_data_sha256", "f" * 63, "name_tuples_data_sha256"),
         ("orcid_prefix_counts_data_sha256", "F" * 64, "orcid_prefix_counts_data_sha256"),
-        ("orcid_prefix_counts_data_sha256", "c" * 64, "orcid_prefix_counts_data_sha256 does not match"),
+        ("orcid_prefix_counts_data_sha256", "c" * 64, "Unknown orcid_prefix_counts_data_sha256"),
     )
     for field, invalid, message in invalid_values:
         feature_contract = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
@@ -500,7 +483,7 @@ def test_explicit_artifact_authority_requires_exact_fields() -> None:
         )
 
 
-def test_bundle_export_uses_training_artifact_hashes_without_loading_packaged_artifacts(
+def test_bundle_export_uses_explicit_name_tuple_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
@@ -508,18 +491,20 @@ def test_bundle_export_uses_training_artifact_hashes_without_loading_packaged_ar
     _, source_clusterer = synthetic_pairwise_bundle
     explicit_hashes = {
         "name_tuples_data_sha256": "e" * 64,
-        "orcid_prefix_counts_data_sha256": "f" * 64,
+        "orcid_prefix_counts_data_sha256": _V132_ORCID_PREFIX_COUNTS_DATA_SHA256,
         "name_counts_manifest_sha256": "1" * 64,
     }
     source_clusterer.feature_contract.update(explicit_hashes)
     package_loads = 0
 
-    def packaged_hashes() -> dict[str, str]:
+    load_name_tuples = production_model_module.load_packaged_name_tuple_artifact
+
+    def counted_load():
         nonlocal package_loads
         package_loads += 1
-        return dict(_TEST_CANONICAL_ARTIFACT_HASHES)
+        return load_name_tuples()
 
-    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", packaged_hashes)
+    monkeypatch.setattr(production_model_module, "load_packaged_name_tuple_artifact", counted_load)
     output_dir = tmp_path / "production_model_v10.0"
 
     write_pairwise_production_bundle(
@@ -557,32 +542,24 @@ def test_bundle_export_rejects_training_artifact_hash_mismatch(
 
 def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaults(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.feature_contract.update(_TEST_EXPLICIT_ARTIFACT_HASHES)
+    explicit_hashes = {**_TEST_EXPLICIT_ARTIFACT_HASHES, "name_tuples_data_sha256": "e" * 64}
+    source_clusterer.feature_contract.update(explicit_hashes)
     pairwise_bundle = tmp_path / "production_model_v10.0"
     write_pairwise_production_bundle(
         source_clusterer,
         pairwise_bundle,
         release_version="10.0",
-        pairwise_training_config={"input_artifact_hashes": dict(_TEST_EXPLICIT_ARTIFACT_HASHES)},
+        pairwise_training_config={"input_artifact_hashes": explicit_hashes},
         pairwise_training_summary={"pair_count": 11},
     )
     linker_dir = tmp_path / "linker"
     target_json = _write_synthetic_linker(
         pairwise_bundle,
         linker_dir,
-        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
-    )
-    monkeypatch.setattr(
-        production_model_module,
-        "canonical_artifact_hashes",
-        lambda: {
-            "name_tuples_data_sha256": "c" * 64,
-            "orcid_prefix_counts_data_sha256": "d" * 64,
-        },
+        expected_artifact_hashes=explicit_hashes,
     )
 
     with pytest.raises(ValueError, match="canonical artifacts installed with this package"):
@@ -599,17 +576,19 @@ def test_finalization_uses_explicit_artifact_authority_instead_of_package_defaul
         output_bundle_dir=output_bundle,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,
-        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+        expected_artifact_hashes=explicit_hashes,
     )
 
     loaded = load_production_model(
         output_bundle,
-        expected_artifact_hashes=_TEST_EXPLICIT_ARTIFACT_HASHES,
+        expected_artifact_hashes=explicit_hashes,
     )
     assert loaded.incremental_linker_artifact is not None
 
 
+@pytest.mark.parametrize("field", sorted(_TEST_CANONICAL_ARTIFACT_HASHES))
 def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
+    field: str,
     monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
@@ -622,20 +601,17 @@ def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
     }
     config_path = bundle_dir / "clusterer.json"
     original_config = json.loads(config_path.read_text(encoding="utf-8"))
-    for field in _TEST_CANONICAL_ARTIFACT_HASHES:
-        changed_hashes = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
-        changed_hashes[field] = "c" * 64
-        monkeypatch.setattr(
-            production_model_module,
-            "canonical_artifact_hashes",
-            lambda hashes=changed_hashes: dict(hashes),
-        )
-        config = copy.deepcopy(original_config)
-        config["feature_contract"][field] = changed_hashes[field]
-        config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        _refresh_manifest_checksum(bundle_dir, "clusterer.json")
-        changed_binding = pairwise_bundle_binding(bundle_dir)
-        assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
+    if field == "name_tuples_data_sha256":
+        changed_hash = "c" * 64
+        artifact = replace(production_model_module.load_packaged_name_tuple_artifact(), data_sha256=changed_hash)
+        monkeypatch.setattr(production_model_module, "load_packaged_name_tuple_artifact", lambda: artifact)
+    else:
+        changed_hash = _V132_ORCID_PREFIX_COUNTS_DATA_SHA256
+    original_config["feature_contract"][field] = changed_hash
+    config_path.write_text(json.dumps(original_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(bundle_dir, "clusterer.json")
+    changed_binding = pairwise_bundle_binding(bundle_dir)
+    assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
 def test_manifest_has_exact_shape_and_identity(
@@ -1404,6 +1380,26 @@ def test_normal_load_hashes_each_declared_file_exactly_once(finalization, monkey
     expected = sorted((output_bundle / relpath).resolve().as_posix() for relpath in manifest["sha256"])
     assert sorted(manifest_hashes) == expected
     assert standalone_artifact_hashes == []
+
+
+@pytest.mark.parametrize("explicit_authority", [False, True])
+def test_load_production_model_rejects_an_unknown_orcid_prefix_hash(finalization, explicit_authority: bool) -> None:
+    output_bundle = finalization["output_bundle_dir"]
+    finalize_production_bundle(**finalization)
+    path = output_bundle / "clusterer.json"
+    config = json.loads(path.read_bytes())
+    unknown_hash = "c" * 64
+    hashes = {
+        **config["feature_contract"],
+        "orcid_prefix_counts_data_sha256": unknown_hash,
+        "name_counts_manifest_sha256": "d" * 64,
+    }
+    config["feature_contract"] = hashes
+    path.write_text(json.dumps(config), encoding="utf-8")
+    _refresh_manifest_checksum(output_bundle, "clusterer.json")
+
+    with pytest.raises(ValueError, match=f"Unknown orcid_prefix_counts_data_sha256.*{unknown_hash}"):
+        load_production_model(output_bundle, expected_artifact_hashes=hashes if explicit_authority else None)
 
 
 def test_load_production_model_applies_requested_n_jobs(finalization) -> None:

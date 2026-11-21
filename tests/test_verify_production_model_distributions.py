@@ -13,17 +13,27 @@ from scripts.verification.verify_production_model_distributions import verify_pr
 TUPLE_DATA_PATH = "s2and/data/s2and_name_tuples_canonical.txt"
 ORCID_DATA_PATH = "s2and/data/first_k_letter_counts_from_orcid.json"
 ORCID_MANIFEST_PATH = "s2and/data/first_k_letter_counts_from_orcid.manifest.json"
+ORCID_V1_4_DATA_PATH = "s2and/data/orcid_prefix_counts_v1_4/first_k_letter_counts_from_orcid.json"
+ORCID_V1_4_MANIFEST_PATH = "s2and/data/orcid_prefix_counts_v1_4/first_k_letter_counts_from_orcid.manifest.json"
 DEFAULT_MODEL_PATH = "s2and/data/default_production_model.json"
 MODEL_MEMBER_PATH = "s2and/data/production_model_v8.8/manifest.json"
 GENERIC_MEMBER_PATH = "s2and/arrow_schema_contract.json"
 MODULE_PATH = "s2and/__init__.py"
 NATIVE_PATH = "s2and/_s2and_rust.cp311-win_amd64.pyd"
 METADATA_PATH = "s2and-0.0.0.dist-info/METADATA"
-REQUIRED_RUNTIME_PATHS = (TUPLE_DATA_PATH, ORCID_DATA_PATH, ORCID_MANIFEST_PATH)
+REQUIRED_RUNTIME_PATHS = (
+    TUPLE_DATA_PATH,
+    ORCID_DATA_PATH,
+    ORCID_MANIFEST_PATH,
+    ORCID_V1_4_DATA_PATH,
+    ORCID_V1_4_MANIFEST_PATH,
+)
 RELEASE_MEMBERS = {
     TUPLE_DATA_PATH: b"alice\talicia\n",
     ORCID_DATA_PATH: b"{}\n",
     ORCID_MANIFEST_PATH: b"{}\n",
+    ORCID_V1_4_DATA_PATH: b'{"ale":{"alx":10}}\n',
+    ORCID_V1_4_MANIFEST_PATH: b"{}\n",
     GENERIC_MEMBER_PATH: b"{}\n",
 }
 SOURCE_MEMBERS = {**RELEASE_MEMBERS, MODULE_PATH: b""}

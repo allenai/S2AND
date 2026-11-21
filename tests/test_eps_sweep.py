@@ -298,6 +298,7 @@ def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
 def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neighbors, orcid):
     calls = []
     dataset = object()
+    counts = {"ch": {"cy": 16}}
 
     def native(arrow_dataset, signature_ids, **kwargs):
         assert arrow_dataset is dataset
@@ -311,7 +312,9 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
     monkeypatch.setattr(subblocking, "make_subblocks_with_telemetry", reject_python)
     blocks, telemetry = sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
         args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=orcid),
-        clusterer=SimpleNamespace(subblocking_graph_config=raw_config, random_state=7),
+        clusterer=SimpleNamespace(
+            subblocking_graph_config=raw_config, random_state=7, _subblocking_prefix_counts=lambda: counts
+        ),
         block_dict={"large": ["1", "2", "3"], "small": ["4"], "irrelevant": ["5", "6", "7"]},
         target_signature_ids={"1", "4"},
         arrow_dataset=dataset,
@@ -321,6 +324,7 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
     assert calls[0][0] == ["1", "2", "3"]
     assert calls[0][1]["graph_subblocking_config"].neighbors == neighbors
     assert calls[0][1]["graph_subblocking_random_seed"] == 7
+    assert calls[0][1]["first_k_letter_counts_sorted"] is counts
     assert calls[0][1]["use_orcid_subblocking"] is orcid
     assert telemetry[0]["subblocking_telemetry"]["graph_fallback_native"] is True
 
@@ -334,7 +338,7 @@ def test_eps_sweep_rejects_invalid_native_partition(monkeypatch, result):
     with pytest.raises(ValueError, match="every input signature exactly once|oversized subblock"):
         sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
             args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
-            clusterer=SimpleNamespace(),
+            clusterer=SimpleNamespace(_subblocking_prefix_counts=dict),
             block_dict={"block": ["1", "2", "3"]},
             target_signature_ids={"1"},
             arrow_dataset=object(),

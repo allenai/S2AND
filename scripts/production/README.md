@@ -251,17 +251,19 @@ For A, both values represent author-table rows.
 The archived M study does not define the current production count authority.
 
 The ORCID input contains `raw_orcid,orcid,first_name,middle,last_name` in the required source order.
-The producer enforces the shared nonempty surname rule and the 14-group exclusion.
+The producer enforces the shared nonempty surname rule and the 19-group exclusion.
 The surname comparison removes spaces after canonicalization; `Ou Yang` and `Ouyang` match.
 Pairs must share their own surname key; surname agreement is not transitive.
 
-Copy the approved ORCID JSON and tuple-dependency manifest to these package paths:
+Package the approved ORCID JSON and tuple-dependency manifest together.
+The `1.3.x` files live in `s2and/data/`. The `1.4` files live in
+`s2and/data/orcid_prefix_counts_v1_4/`. Each directory holds:
 
-- `s2and/data/first_k_letter_counts_from_orcid.json`
-- `s2and/data/first_k_letter_counts_from_orcid.manifest.json`
+- `first_k_letter_counts_from_orcid.json`
+- `first_k_letter_counts_from_orcid.manifest.json`
 
-A tuple or ORCID asset change requires affected model exports to bind the new hashes.
-Models reject a mismatch with required package assets.
+New model exports bind the training artifacts' hashes. Existing models keep the ORCID
+counts named in their contracts while those counts remain packaged.
 
 ## Distribution and Arrow checks
 

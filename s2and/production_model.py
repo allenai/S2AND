@@ -30,6 +30,7 @@ from s2and.model import (
 )
 from s2and.model_pairwise import MAX_CLOSE_PAIR_BONUS
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
+from s2and.orcid_prefix_counts import ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD, load_packaged_orcid_prefix_counts
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
     CLOSE_PAIR_FIELDS,
@@ -61,13 +62,13 @@ _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
 _CANONICAL_ARTIFACT_HASH_FIELDS = (
     "name_tuples_data_sha256",
-    "orcid_prefix_counts_data_sha256",
+    ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD,
 )
 EXPLICIT_RELEASE_ARTIFACT_HASH_FIELDS = frozenset(
     {
         "name_counts_manifest_sha256",
         "name_tuples_data_sha256",
-        "orcid_prefix_counts_data_sha256",
+        ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD,
     }
 )
 _CLUSTERER_CONFIG_FIELDS = frozenset(
@@ -362,11 +363,11 @@ def _require_finite_number(value: Any, *, field: str) -> float:
 
 
 def canonical_artifact_hashes() -> dict[str, str]:
-    """Return content hashes for the canonical artifacts used by production."""
+    """Return content hashes for the default canonical artifacts."""
 
     return {
         "name_tuples_data_sha256": load_packaged_name_tuple_artifact().data_sha256,
-        "orcid_prefix_counts_data_sha256": canonical_orcid_prefix_counts_data_sha256(),
+        ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD: canonical_orcid_prefix_counts_data_sha256(),
     }
 
 
@@ -425,7 +426,7 @@ def require_expected_artifact_hashes(
 
 
 def require_canonical_artifact_hashes(feature_contract: Mapping[str, Any], *, context: str) -> None:
-    """Require a contract to match this package's two canonical data artifacts."""
+    """Require a contract to match installed canonical data artifacts."""
 
     observed_fields = frozenset(feature_contract)
     canonical_fields = frozenset(_CANONICAL_ARTIFACT_HASH_FIELDS)
@@ -445,12 +446,15 @@ def require_canonical_artifact_hashes(feature_contract: Mapping[str, Any], *, co
             feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD],
             context=context,
         )
-    expected = canonical_artifact_hashes()
     _require_matching_artifact_hashes(
         feature_contract,
-        {field: expected[field] for field in _CANONICAL_ARTIFACT_HASH_FIELDS},
+        {"name_tuples_data_sha256": load_packaged_name_tuple_artifact().data_sha256},
         context=f"{context} canonical artifacts installed with this package",
     )
+    orcid_hash = feature_contract[ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD]
+    if not is_lowercase_sha256(orcid_hash):
+        raise ValueError(f"{context} requires lowercase SHA-256 field {ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD!r}")
+    load_packaged_orcid_prefix_counts(orcid_hash)
 
 
 def _validate_clusterer_config(
@@ -665,6 +669,8 @@ def _load_bundle_clusterer(
         expected_artifact_hashes=expected_artifact_hashes,
     )
     feature_contract = clusterer_config["feature_contract"]
+    # Explicit authorities still need an installed artifact when constructing a model.
+    orcid_counts = load_packaged_orcid_prefix_counts(feature_contract[ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD])
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
     if any("name_counts" in info.features_to_use for info in (featurizer_info, nameless_featurizer_info)):
@@ -727,6 +733,7 @@ def _load_bundle_clusterer(
         suppress_orcid=bool(clusterer_config["suppress_orcid"]),
     )
     clusterer.feature_contract = dict(feature_contract)
+    clusterer._orcid_prefix_counts_data_sha256 = orcid_counts.data_sha256
     clusterer.best_params = (
         {
             "eps": effective_eps,
@@ -807,6 +814,7 @@ def load_production_model(
     Args:
         path: Complete native bundle directory.
         expected_artifact_hashes: Optional artifact hashes the bundle must match.
+            The ORCID prefix-count hash must also identify a packaged artifact.
         n_jobs: Prediction worker count applied through ``Clusterer.n_jobs``.
             ``None`` keeps the bundle's stored value, which is 1.
 

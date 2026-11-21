@@ -33,6 +33,9 @@ Keep source snapshots and fit outputs in separate directories.
 - Publish the common binary name-count index and complete production model only in the `inference` S3 bundle.
 - Build the common index from author-table rows. Archive mention counts, M, as a research alternative.
 - Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
+- Keep the ORCID prefix artifacts required by supported model contracts. Use the newest
+  packaged counts for new training contracts. Verify both the count JSON and its
+  tuple-dependency manifest in each distribution.
 - Publish three S3 bundles, `inference`, `dataset`, and `source`, with one copy of each file.
 - Publish only papers present in production S2AG and remove their excluded dependent records.
 - Publish abstract text only when the production S2AG sharing gate permits it.

@@ -749,13 +749,12 @@ Python is the sole name-tuple artifact loader. It validates the canonical text
 directly, retains frozen pairs plus the computed `data_sha256`, and passes
 those pairs explicitly to Rust-backed flows.
 
-Canonical ORCID prefix counts use a direct JSON data file and one adjacent
-`.manifest.json` containing only the `name_tuples_sha256` dependency. The lazy
-runtime loader validates the prefix-pair keys and positive integer counts,
-computes the data hash, and retains the result in-process.
-Production contracts bind that hash and require the manifest's tuple hash
-to match the canonical name-tuple artifact. The package declares both ORCID
-runtime paths.
+Each packaged ORCID prefix-count artifact has a JSON data file and an adjacent
+`.manifest.json` containing only the `name_tuples_sha256` dependency. The
+runtime loader validates the prefix pairs and retains immutable counts by data hash.
+Each production model uses the packaged hash in its feature contract. Loading a
+model with an unknown ORCID hash fails. New training contracts use the refreshed
+`1.4` artifact and verify its tuple hash against the canonical name-tuple artifact.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key

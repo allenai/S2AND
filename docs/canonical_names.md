@@ -73,14 +73,14 @@ It does not remove a first-name title.
 Load the packaged alias tuples and ORCID prefix counts:
 
 ```python
-from pathlib import Path
-
-import s2and
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
-from s2and.orcid_prefix_counts import load_canonical_orcid_prefix_counts
+from s2and.orcid_prefix_counts import (
+    DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
+    load_packaged_orcid_prefix_counts,
+)
 
 aliases = load_packaged_name_tuple_artifact()
-orcid = load_canonical_orcid_prefix_counts(Path(s2and.__file__).parent / "data")
+orcid = load_packaged_orcid_prefix_counts(DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256)
 assert orcid.name_tuples_sha256 == aliases.data_sha256
 ```
 

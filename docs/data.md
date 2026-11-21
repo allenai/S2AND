@@ -30,6 +30,9 @@ The index applies the `1.0.0b11` name rules: Georgian and Armenian names count u
 Its `inference/` bundle is under `s2and/1.3.2/`; it has no `dataset/` bundle and uses the `1.3.1` one.
 It needs `s2and` `1.0.0b11` or later. The `1.3.1` model remains at `s2and/1.3.1/inference/`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
+Starting with `1.0.0b14`, the wheel ships the original `1.3.x` ORCID counts and the refreshed
+`1.4` counts. Each production model selects the counts by its contract's data SHA-256.
+New training contracts record the `1.4` hash.
 The complete model contains both pairwise boosters, the reviewed EPS, the incremental linker, and required prediction fixtures.
 See [the inference contract](production_inference.md#complete-model-bundles).
 

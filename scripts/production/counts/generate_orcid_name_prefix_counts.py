@@ -62,6 +62,12 @@ EXCLUDED_ORCID_GROUPS = frozenset(
         "0000-0003-3393-8460",
         "0000-0003-3895-7409",
         "0009-0004-4499-3929",
+        # The November 20 review identifies five more mixed-identity groups.
+        "0000-0001-5373-2326",
+        "0000-0001-8915-3377",
+        "0000-0002-0786-7307",
+        "0009-0005-6326-4470",
+        "0009-0009-5657-3485",
     }
 )
 GUARDRAIL_FIELDS = frozenset(
@@ -177,7 +183,7 @@ def build_prefix_counts_from_sorted_rows(
     comparison ignores canonical spaces, as within-block name constraints do.
     Each distinct first-name pair contributes once per ORCID even when it shares
     several surnames; different first-name pairs retain separate prefix events.
-    The 14 reviewed mixed-identity groups supply no ORCID evidence. Curated
+    The reviewed mixed-identity groups supply no ORCID evidence. Curated
     aliases remain independent of this exclusion and the surname rule.
     """
 

@@ -11,11 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from s2and._sha256 import is_lowercase_sha256, sha256_file
-from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import NameTupleArtifact, load_packaged_name_tuple_artifact
-from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts, load_canonical_orcid_prefix_counts
+from s2and.orcid_prefix_counts import (
+    DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
+    ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD,
+    LoadedOrcidPrefixCounts,
+    load_packaged_orcid_prefix_counts,
+)
 
 REQUIRED_LINKER_TABLE_KEYS = (
     "train_path",
@@ -333,7 +337,7 @@ class ProductionArtifactAuthority:
         return {
             "name_counts_manifest_sha256": self.name_counts_index.manifest_sha256,
             "name_tuples_data_sha256": self.name_tuples.data_sha256,
-            "orcid_prefix_counts_data_sha256": self.orcid_prefix_counts.data_sha256,
+            ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD: self.orcid_prefix_counts.data_sha256,
         }
 
 
@@ -346,7 +350,7 @@ def load_packaged_artifact_authority(
     authority = ProductionArtifactAuthority(
         name_counts_index=NameCountsIndex.open(name_counts_index_root),
         name_tuples=load_packaged_name_tuple_artifact(),
-        orcid_prefix_counts=load_canonical_orcid_prefix_counts(Path(_PACKAGE_DATA_DIR)),
+        orcid_prefix_counts=load_packaged_orcid_prefix_counts(DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256),
     )
     if authority.orcid_prefix_counts.name_tuples_sha256 != authority.name_tuples.data_sha256:
         raise ValueError("ORCID prefix counts were generated from a different name-tuple artifact")

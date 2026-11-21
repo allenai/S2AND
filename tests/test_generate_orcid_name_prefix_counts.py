@@ -221,7 +221,17 @@ def test_builder_reads_mixed_case_initials_through_the_last_name_guard() -> None
 
 # The CLI test checks the full reviewed set size. These rows check each ORCID prefix and the URL form.
 @pytest.mark.parametrize(
-    "orcid", ["0000-0000-0000-0001", "0009-0004-4499-3929", "https://orcid.org/0000-0002-1825-0097"]
+    "orcid",
+    [
+        "0000-0000-0000-0001",
+        "0009-0004-4499-3929",
+        "https://orcid.org/0000-0002-1825-0097",
+        "0000-0001-5373-2326",
+        "0000-0001-8915-3377",
+        "0000-0002-0786-7307",
+        "0009-0005-6326-4470",
+        "0009-0009-5657-3485",
+    ],
 )
 def test_reviewed_group_supplies_no_evidence_even_with_matching_surnames(orcid: str) -> None:
     rows = [{"orcid": orcid, "first_name": first, "last_name": "Smith"} for first in ("Al", "Amy", "Ava", "Al")]
@@ -272,7 +282,7 @@ def test_cli_excludes_reviewed_group_before_publication(tmp_path: Path, capsys: 
     )
     assert generator.main(_csv_args(tmp_path, rows)) == 0
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert len(records[0]["plan"]["excluded_orcid_groups"]) == 14
+    assert len(records[0]["plan"]["excluded_orcid_groups"]) == 19
     assert records[-1]["metrics"]["excluded_orcid_groups"] == 1
     assert records[-1]["metrics"]["excluded_orcid_rows"] == 2
     loaded = load_canonical_orcid_prefix_counts(tmp_path / "publication")

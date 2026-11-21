@@ -6,15 +6,15 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import combinations
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from s2and.arrow_schema import validate_arrow_schema
-from s2and.consts import _PACKAGE_DATA_DIR, SPECTER_DIM
+from s2and.consts import SPECTER_DIM
 from s2and.orcid_prefix_counts import (
-    load_canonical_orcid_prefix_counts,
+    DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
+    load_packaged_orcid_prefix_counts,
 )
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
@@ -46,28 +46,8 @@ def _orcid_prefix_pair_count(counts: Mapping[str, Mapping[str, int]], first: str
 class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
     """Defer canonical artifact I/O until subblocking actually needs the priors."""
 
-    def __init__(self, data_dir: str | Path) -> None:
-        self._data_dir = Path(data_dir)
-        self._loaded: Mapping[str, Mapping[str, int]] | None = None
-        self._data_sha256: str | None = None
-
     def load(self) -> Mapping[str, Mapping[str, int]]:
-        loaded = self._loaded
-        if loaded is None:
-            artifact = load_canonical_orcid_prefix_counts(self._data_dir)
-            loaded = artifact.counts
-            self._data_sha256 = artifact.data_sha256
-            self._loaded = artifact.counts
-        return loaded
-
-    def data_sha256(self) -> str:
-        """Return the verified count-data content hash."""
-
-        self.load()
-        data_sha256 = self._data_sha256
-        if data_sha256 is None:
-            raise RuntimeError("Canonical ORCID prefix-count data hash was not retained after loading")
-        return data_sha256
+        return load_packaged_orcid_prefix_counts(DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256).counts
 
     def __getitem__(self, key: str) -> Mapping[str, int]:
         return self.load()[key]
@@ -85,13 +65,13 @@ def _resolved_orcid_prefix_counts(
     return counts.load() if isinstance(counts, _LazyCanonicalOrcidPrefixCounts) else counts
 
 
-FIRST_K_LETTER_COUNTS = _LazyCanonicalOrcidPrefixCounts(_PACKAGE_DATA_DIR)
+FIRST_K_LETTER_COUNTS = _LazyCanonicalOrcidPrefixCounts()
 
 
 def canonical_orcid_prefix_counts_data_sha256() -> str:
-    """Return the content hash of the verified packaged ORCID priors."""
+    """Return the content hash of the verified default ORCID priors."""
 
-    return FIRST_K_LETTER_COUNTS.data_sha256()
+    return load_packaged_orcid_prefix_counts(DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256).data_sha256
 
 
 def normalize_orcid_for_subblocking(value: Any) -> str | None:

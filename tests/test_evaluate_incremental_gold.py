@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from s2and import memory_budget
-from s2and import production_model as production_model_module
 from scripts.verification import evaluate_incremental_gold as gold
 from scripts.verification import smoke_installed_incremental_arrow as smoke
 
@@ -168,9 +167,6 @@ def test_two_cases_use_serialized_complete_model_and_actual_arrow(
     payload["cases"] = [case for case in payload["cases"] if case["query_author_id"] == "author_a"]
     cases = tmp_path / "cases.json"
     _write_json(cases, payload)
-    hashes = {"name_tuples_data_sha256": "1" * 64, "orcid_prefix_counts_data_sha256": "2" * 64}
-    monkeypatch.setattr(smoke, "canonical_artifact_hashes", lambda: dict(hashes))
-    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(hashes))
     monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", lambda _total: (100_000_000, "test"))
     model = smoke._write_synthetic_bundle(tmp_path / "model")  # noqa: SLF001
     summary = gold.evaluate_cases(

@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from s2and import memory_budget
-from s2and import production_model as production_model_module
 from s2and.arrow_inputs import PUBLIC_DATA_KIND, build_arrow_artifact_manifest, write_arrow_artifact_manifest
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
@@ -59,12 +58,6 @@ def _write_release_smoke_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path]:
-    artifact_hashes = {
-        "name_tuples_data_sha256": "1" * 64,
-        "orcid_prefix_counts_data_sha256": "2" * 64,
-    }
-    monkeypatch.setattr(smoke_module, "canonical_artifact_hashes", lambda: dict(artifact_hashes))
-    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(artifact_hashes))
     model_dir = smoke_module._write_synthetic_bundle(  # noqa: SLF001
         tmp_path / "model-inputs",
         release_version="1.3",
@@ -84,16 +77,7 @@ def _run_release_candidate(model_dir: Path, data_root: Path) -> dict[str, object
     )
 
 
-def test_promoted_incremental_arrow_smoke_helper(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact_hashes = {
-        "name_tuples_data_sha256": "1" * 64,
-        "orcid_prefix_counts_data_sha256": "2" * 64,
-    }
-    monkeypatch.setattr(smoke_module, "canonical_artifact_hashes", lambda: dict(artifact_hashes))
-    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(artifact_hashes))
+def test_promoted_incremental_arrow_smoke_helper(tmp_path: Path) -> None:
     summary = smoke_module.run_smoke(tmp_path)
 
     assert summary == {

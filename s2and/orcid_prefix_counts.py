@@ -6,15 +6,24 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from s2and._sha256 import is_lowercase_sha256
+from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.text import same_prefix_tokens
 
 ORCID_PREFIX_MANIFEST_FILENAME = "first_k_letter_counts_from_orcid.manifest.json"
 ORCID_PREFIX_DATA_FILENAME = "first_k_letter_counts_from_orcid.json"
+ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD = "orcid_prefix_counts_data_sha256"
+
+DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256 = "b2f811ba01e4fea25eb22d3686a4f085d8fae4c0e410b2fcd9921c26940e43ad"
+_PACKAGED_ORCID_PREFIX_COUNTS_DIRS = {
+    "fcb4cb7bdf30f07366b946b9fdb1bb0a807bdb00f7dda521575daea6b2b9d8ce": Path(_PACKAGE_DATA_DIR),
+    DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256: Path(_PACKAGE_DATA_DIR) / "orcid_prefix_counts_v1_4",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,3 +102,31 @@ def load_canonical_orcid_prefix_counts(data_dir: str | Path) -> LoadedOrcidPrefi
         data_sha256=hashlib.sha256(data_payload).hexdigest(),
         name_tuples_sha256=manifest["name_tuples_sha256"],
     )
+
+
+@cache
+def load_packaged_orcid_prefix_counts(data_sha256: str) -> LoadedOrcidPrefixCounts:
+    """Load the installed artifact for a model hash.
+
+    Args:
+        data_sha256: The SHA-256 of the artifact's count data.
+
+    Returns:
+        The validated immutable artifact.
+
+    Raises:
+        ValueError: The hash is unknown or the packaged bytes differ.
+    """
+
+    data_dir = _PACKAGED_ORCID_PREFIX_COUNTS_DIRS.get(data_sha256)
+    if data_dir is None:
+        raise ValueError(
+            f"Unknown {ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD} {data_sha256!r}. "
+            f"Packaged hashes: {', '.join(_PACKAGED_ORCID_PREFIX_COUNTS_DIRS)}"
+        )
+    artifact = load_canonical_orcid_prefix_counts(data_dir)
+    if artifact.data_sha256 != data_sha256:
+        raise ValueError(
+            f"Packaged ORCID prefix-count data at {data_dir} has SHA-256 {artifact.data_sha256}, expected {data_sha256}"
+        )
+    return artifact

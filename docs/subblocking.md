@@ -9,16 +9,18 @@ returns only the reference subblock dictionary. Production and EPS sweeps use th
 `N` becomes the maximum subblock size. Every emitted subblock is expected to
 have at most `N` signatures.
 
-Both routes use the packaged ORCID prefix counts under the [ORCID policy](#orcid-policy).
-The committed producer excludes the 14 reviewed groups and preserves the shared-surname rule.
-The wheel contains the count JSON and its tuple-dependency manifest.
+Production Arrow prediction uses the packaged ORCID prefix counts named in the model's
+contract under the [ORCID policy](#orcid-policy). The standalone Python reference uses
+the latest packaged counts by default and accepts an explicit mapping for parity checks.
+The producer excludes 19 reviewed groups and preserves the shared-surname rule.
+The wheel contains both versions of the count JSON and their tuple-dependency manifests.
 
 ## Default fallback
 
 Oversized groups that cannot be split by names go to a fallback cluster function:
 
 - Prefix and middle-name splitting define the main subblock structure.
-- `Clusterer.predict(...)` and the Arrow route use the graph fallback.
+- The Arrow prediction route uses the graph fallback.
 - Direct callers of `make_subblocks(...)` or `make_subblocks_with_telemetry(...)`
   that do not pass a cluster function get the SPECTER fallback,
   `cluster_with_specter(...)`.

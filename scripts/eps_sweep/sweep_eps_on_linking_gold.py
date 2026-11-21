@@ -379,6 +379,7 @@ def _build_arrow_subblocked_block_dict(
             arrow_dataset,
             signature_ids,
             maximum_size=threshold,
+            first_k_letter_counts_sorted=clusterer._subblocking_prefix_counts(),
             graph_subblocking_config=config,
             graph_subblocking_random_seed=int(getattr(clusterer, "random_state", 0) or 0),
             use_orcid_subblocking=bool(args.use_orcid_subblocking),

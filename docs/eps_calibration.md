@@ -173,11 +173,10 @@ if ($null -eq $PrecisionF1Tolerance) { $PrecisionF1Tolerance = 0 }
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `
-  --precision-f1-tolerance 0.001 `
+  --expected-batching-threshold $BatchingThreshold --precision-f1-tolerance $PrecisionF1Tolerance `
   --review-note '<human decision and tradeoff>' --output-report "$EpsRun/eps_review.json"
 ```
 
-For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
 It requires each plan's subblock limit to match `--expected-batching-threshold`.
 The command resolves the snapshot's linker calibration assignments outside `s2and_eval`

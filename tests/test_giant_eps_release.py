@@ -106,6 +106,7 @@ def _curve(
     mode: str = "orcid-b3",
     *,
     with_source_map: bool = False,
+    test_signature: str = "q1",
 ) -> Path:
     dataset = root / "unit"
     dataset.mkdir(parents=True)
@@ -114,8 +115,9 @@ def _curve(
         reference, index=False
     )
     snapshot_root = root / "snapshot"
-    map_path = _source_snapshot(snapshot_root, with_clone=with_source_map)
-    _write_sweep_assignments(snapshot_root)
+    map_path = _source_snapshot(snapshot_root, source=test_signature, with_clone=with_source_map)
+    test_query = derived_query_id("visibleq:", test_signature, "source-paper") if with_source_map else test_signature
+    _write_sweep_assignments(snapshot_root, test_signature=test_query)
     map_digest = sha256_file(map_path) if with_source_map else None
     plan = {
         "dataset": "unit",
@@ -176,9 +178,7 @@ def _curve(
     return dataset
 
 
-def _apply(
-    tmp_path: Path, source: Path, *, test_ids: frozenset[str] = frozenset(), datasets: tuple[str, ...] = ("unit",)
-):
+def _apply(tmp_path: Path, source: Path, *, datasets: tuple[str, ...] = ("unit",)):
     return apply_reviewed_eps(
         source,
         tmp_path / "output",
@@ -188,7 +188,6 @@ def _apply(
         "Fixture review",
         tmp_path / "review.json",
         expected_batching_threshold=15000,
-        test_identities=lambda _root, _dataset, _sources: test_ids,
     )
 
 
@@ -436,14 +435,14 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     source.mkdir()
     manifest = source / "manifest.json"
     manifest.write_text("{}", encoding="utf-8")
-    dataset = _curve(tmp_path / "curves", sha256_file(manifest))
+    dataset = _curve(tmp_path / "curves", sha256_file(manifest), with_source_map=True, test_signature="r2")
 
     with pytest.raises(ValueError, match="must match the snapshot's calibration assignments"):
         _apply(tmp_path, source, datasets=("unit", "unit"))
-
     with pytest.raises(ValueError, match="contains final-test records"):
-        _apply(tmp_path, source, test_ids=frozenset({"r2"}))
+        _apply(tmp_path, source)
 
+    _write_sweep_assignments(tmp_path / "curves" / "snapshot")
     diagnostic = dataset / "eps_b3_with_singletons.tsv"
     diagnostic.write_bytes(diagnostic.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="singleton-inclusive EPS scores change"):

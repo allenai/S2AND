@@ -280,7 +280,7 @@ def test_calibrate_eps_requires_an_opt_in_to_select_a_bonus_at_zero_tolerance(
     bundle = _calibration_bundle(tmp_path)
     clusterer = _StubCalibrationClusterer()
     scores: _CalibrationScores = {0.2: 0.7, 0.4: 0.8, 0.6: 0.75, (True, 0.4): 0.9}
-    finalizations, _ = _patch_calibration(monkeypatch, clusterer, scores)
+    finalizations, featurizer_calls = _patch_calibration(monkeypatch, clusterer, scores)
 
     args = _calibration_args(tmp_path, bundle, model_plan)
     cli_args = ["calibrate-eps"]
@@ -290,16 +290,31 @@ def test_calibrate_eps_requires_an_opt_in_to_select_a_bonus_at_zero_tolerance(
         cli_args.append("--allow-zero-precision-f1-tolerance")
     parsed = release_pairwise.build_parser().parse_args(cli_args)
 
+    pending_path = args.output_report.with_name(f"{args.output_report.name}.pending.json")
     if not allow_zero_tolerance:
         with pytest.raises(ValueError, match="close-pair bonus with zero precision_f1_tolerance"):
             release_pairwise.calibrate_eps(parsed)
         assert not finalizations
         assert not args.output_bundle.exists()
         assert not args.output_report.exists()
-        return
+        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        assert pending["report"]["selected_close_pair_bonus"] == 8.0
+        assert len(pending["report"]["trials"]) == 3 * len(release_pairwise.CLOSE_PAIR_CANDIDATES)
+        assert len(featurizer_calls) == 1
+        with pytest.raises(ValueError, match="Trials are saved"):
+            release_pairwise.calibrate_eps(parsed)
+        parsed = release_pairwise.build_parser().parse_args([*cli_args, "--allow-zero-precision-f1-tolerance"])
+        plan_contents = model_plan.read_bytes()
+        model_plan.write_bytes(plan_contents + b"\n")
+        with pytest.raises(ValueError, match="Pending calibration trials do not match the inputs"):
+            release_pairwise.calibrate_eps(parsed)
+        model_plan.write_bytes(plan_contents)
 
     report = release_pairwise.calibrate_eps(parsed)
 
+    assert len(featurizer_calls) == 1
+    assert not pending_path.exists()
+    assert json.loads(args.output_report.read_text(encoding="utf-8")) == report
     bonus, distance = release_pairwise.CLOSE_PAIR_CANDIDATES[1]
     assert (report["selected_eps"], report["selected_close_pair_bonus"], report["selected_close_pair_distance"]) == (
         pytest.approx(0.4),

@@ -705,17 +705,15 @@ def _calibration_preflight(
 CLOSE_PAIR_CANDIDATES: tuple[tuple[float, float], ...] = ((0.0, 0.0), (8.0, 0.05))
 
 
-def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
-    """Select EPS and the close-pair bonus using each random-block validation population once.
-
-    With a positive ``precision_f1_tolerance`` in the plan, the most precise setting wins among
-    those within that tolerance of the best signature-weighted F1. Otherwise the best F1 wins.
-    Selecting a close-pair bonus at zero tolerance requires explicit approval.
-    """
-
-    source_bundle, output_bundle, output_report, plan, config, manifest_sha256 = _calibration_preflight(args)
+def _compute_eps_calibration_report(
+    args: argparse.Namespace,
+    source_bundle: Path,
+    plan: ModelPlan,
+    config: Mapping[str, Any],
+    artifacts: ProductionArtifactAuthority,
+) -> dict[str, Any]:
+    """Score and select a linkage setting on random-block validation data."""
     recorded = _recorded_populations(source_bundle)
-    artifacts = _load_release_artifacts(args)
     clusterer = _load_pairwise_staging_model(
         source_bundle,
         expected_eps_calibration="pending",
@@ -832,28 +830,9 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
             key=lambda trial: (trial["signature_weighted"]["f1"], -trial["close_pair_bonus"], -trial["eps"]),
         )
         selection_rule = "highest signature-weighted F1"
-    if (
-        plan.eps.precision_f1_tolerance == 0
-        and selected["close_pair_bonus"] > 0
-        and not getattr(args, "allow_zero_precision_f1_tolerance", False)
-    ):
-        raise ValueError(
-            "EPS calibration selected a close-pair bonus with zero precision_f1_tolerance. "
-            "Set a positive tolerance in the model plan or pass --allow-zero-precision-f1-tolerance."
-        )
-    selected_eps = float(selected["eps"])
-    finalize_pairwise_eps(
-        source_bundle_dir=source_bundle,
-        output_bundle_dir=output_bundle,
-        expected_manifest_sha256=manifest_sha256,
-        new_eps=selected_eps,
-        close_pair_bonus=float(selected["close_pair_bonus"]),
-        close_pair_distance=float(selected["close_pair_distance"]),
-        expected_artifact_hashes=artifacts.hashes,
-    )
-    report = {
+    return {
         "source_eps": original_eps,
-        "selected_eps": selected_eps,
+        "selected_eps": float(selected["eps"]),
         "selected_close_pair_bonus": float(selected["close_pair_bonus"]),
         "selected_close_pair_distance": float(selected["close_pair_distance"]),
         "selection_rule": selection_rule,
@@ -861,7 +840,64 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
         "validation_identities": identities,
         "trials": trials,
     }
+
+
+def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
+    """Select EPS and save trials for an explicit retry if a zero-tolerance bonus wins."""
+    source_bundle, output_bundle, output_report, plan, config, manifest_sha256 = _calibration_preflight(args)
+    pending_path = output_report.with_name(f"{output_report.name}.pending.json")
+    if any(_paths_overlap(pending_path, bundle) for bundle in (source_bundle, output_bundle)):
+        raise ValueError("Pending calibration trials must be outside source and output bundles")
+    artifacts = _load_release_artifacts(args)
+    inputs = {
+        "source_manifest_sha256": manifest_sha256,
+        "model_plan_sha256": plan.sha256,
+        "artifact_hashes": artifacts.hashes,
+    }
+    approval_message = (
+        "EPS calibration selected a close-pair bonus with zero precision_f1_tolerance. "
+        f"Trials are saved at {pending_path}. "
+        "Rerun with the same inputs and --allow-zero-precision-f1-tolerance to reuse them."
+    )
+    allow_bonus = getattr(args, "allow_zero_precision_f1_tolerance", False)
+    resuming = pending_path.exists()
+    if resuming:
+        pending = _read_json(pending_path)
+        if (
+            not isinstance(pending, dict)
+            or pending.get("inputs") != inputs
+            or not isinstance(pending.get("report"), dict)
+        ):
+            raise ValueError(
+                f"Pending calibration trials do not match the inputs: {pending_path}. Use a fresh report path."
+            )
+        if not allow_bonus:
+            raise ValueError(approval_message)
+        # Verify the files behind the hash-bound plan without rebuilding validation distances.
+        for dataset in plan.datasets.values():
+            if dataset.split_mode == "random_blocks":
+                plan_unknown_signatures(dataset)
+                with open_plan_arrow(dataset):
+                    pass
+        report = pending["report"]
+    else:
+        report = _compute_eps_calibration_report(args, source_bundle, plan, config, artifacts)
+        if plan.eps.precision_f1_tolerance == 0 and report["selected_close_pair_bonus"] > 0 and not allow_bonus:
+            _write_fresh_json(pending_path, {"inputs": inputs, "report": report})
+            raise ValueError(approval_message)
+
+    finalize_pairwise_eps(
+        source_bundle_dir=source_bundle,
+        output_bundle_dir=output_bundle,
+        expected_manifest_sha256=manifest_sha256,
+        new_eps=report["selected_eps"],
+        close_pair_bonus=report["selected_close_pair_bonus"],
+        close_pair_distance=report["selected_close_pair_distance"],
+        expected_artifact_hashes=artifacts.hashes,
+    )
     _write_fresh_json(output_report, report)
+    if resuming:
+        pending_path.unlink(missing_ok=True)
     return report
 
 

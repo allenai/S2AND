@@ -12,6 +12,7 @@ import pyarrow.dataset as pa_dataset
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import (
     OfficialBundle,
+    _classic_stratified_eval_source_specs,
     _promoted_stratified_gate_spec,
     _resolve_path,
     _validate_stratified_split_assignments,
@@ -146,13 +147,65 @@ def validate_source_bundle_support_files(source_bundle: OfficialBundle) -> list[
     return [str(path) for path in dict.fromkeys(required_files)]
 
 
+def _release_table_plan(
+    source_bundle: OfficialBundle,
+) -> tuple[tuple[str, ...], dict[str, set[str]], tuple[str, ...]]:
+    """Separate train/calibration rows from frozen evaluation tables."""
+
+    classic = dict(source_bundle.models["classic"])
+    split_spec = dict(classic["stratified_eval_test_split"])
+    gate_spec = _promoted_stratified_gate_spec(classic)
+    if gate_spec is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
+    assignments = pd.read_csv(_resolve_path(source_bundle, str(split_spec["assignments_path"])))
+    _validate_stratified_split_assignments(assignments)
+    calibration_splits = {str(split) for split in gate_spec["calibration_splits"]}
+    calibration_assignments = assignments[assignments["split"].astype(str).isin(calibration_splits)]
+    if calibration_assignments.empty:
+        raise ValueError("Linker calibration splits contain no assigned queries")
+
+    table_keys = source_featureless_table_keys(source_bundle)
+    path_to_table_key = {
+        source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve(): table_key
+        for table_key in table_keys
+    }
+    calibration_query_ids: dict[str, set[str]] = {}
+    for source_spec in _classic_stratified_eval_source_specs(classic):
+        if source_spec["source_kind"] == "calibration_source":
+            continue
+        table_key = path_to_table_key.get(_resolve_path(source_bundle, source_spec["path"]).resolve())
+        if table_key is None:
+            raise ValueError(f"Stratified source has no featureless table: {source_spec['path']}")
+        query_ids = set(
+            calibration_assignments.loc[
+                calibration_assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
+                "query_group_id",
+            ].astype(str)
+        )
+        if query_ids:
+            calibration_query_ids[table_key] = query_ids
+
+    training_keys = tuple(
+        dict.fromkeys(
+            (
+                "train_path",
+                "classic_gate_source_path",
+                *calibration_query_ids,
+            )
+        )
+    )
+    evaluation_keys = tuple(key for key in table_keys if key not in {"train_path", "classic_gate_source_path"})
+    return training_keys, calibration_query_ids, evaluation_keys
+
+
 def preflight_source_rows(
     source_bundle: OfficialBundle,
     *,
     name_counts_index_root: Path | None,
     arrow_stack: ExitStack,
+    calibration_query_ids: Mapping[str, set[str]] | None = None,
 ) -> tuple[int, dict[str, ArrowDataset]]:
-    """Validate source row presence and every referenced Arrow generation."""
+    """Validate source rows, calibration coverage, and referenced Arrow generations."""
 
     available_tables = source_featureless_table_keys(source_bundle)
     available_table_set = set(available_tables)
@@ -160,13 +213,23 @@ def preflight_source_rows(
     if missing_required:
         raise ValueError(f"official linker source bundle is missing required tables: {missing_required}")
 
+    if calibration_query_ids is None:
+        _, calibration_query_ids, _ = _release_table_plan(source_bundle)
+
     source_rows = 0
     observed_datasets: set[str] = set()
     for table_key in available_tables:
         labels_path = source_bundle_asset_file(source_bundle, "featureless_rows", table_key)
-        rows = read_source_parquet_rows(labels_path, columns=["dataset"])
+        assigned_ids = calibration_query_ids.get(table_key, set())
+        columns = ["dataset", "query_group_id"] if assigned_ids else ["dataset"]
+        rows = read_source_parquet_rows(labels_path, columns=columns)
         if rows.empty:
             raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
+        if assigned_ids and (missing_ids := assigned_ids - set(rows["query_group_id"].astype(str))):
+            raise ValueError(
+                f"source table {table_key!r} is missing {len(missing_ids)} assigned calibration groups: "
+                f"{sorted(missing_ids)[:5]} ({labels_path})"
+            )
         source_rows += len(rows)
         observed_datasets.update(rows["dataset"].astype(str))
 

@@ -55,12 +55,9 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
     ClassicHoldoutIdentities,
     OfficialBundle,
     _apply_classic_train_holdout_filter,
-    _classic_stratified_eval_source_specs,
     _drop_unlabeled_singleton_orcid_rows,
     _filter_candidate_rows_to_retrieval_top_k,
-    _promoted_stratified_gate_spec,
     _resolve_path,
-    _validate_stratified_split_assignments,
     evaluate_classic,
     fit_classic,
     load_bundle,
@@ -68,10 +65,10 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
 )
 from s2and.incremental_linking_training.data_loading import load_clusterer  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
+    _release_table_plan,
     preflight_source_rows,
     read_source_parquet_rows,
     source_bundle_asset_file,
-    source_featureless_table_keys,
     validate_source_bundle_support_files,
 )
 from s2and.production_bundle import finalize_production_bundle  # noqa: E402
@@ -1726,57 +1723,6 @@ def _assert_output_paths_outside_inputs(
         raise SystemExit("complete model output must not replace the calibrated pairwise input")
 
 
-def _release_table_plan(
-    source_bundle: OfficialBundle,
-) -> tuple[tuple[str, ...], dict[str, set[str]], tuple[str, ...]]:
-    """Separate train/calibration rows from frozen evaluation tables."""
-
-    classic = dict(source_bundle.models["classic"])
-    split_spec = dict(classic["stratified_eval_test_split"])
-    gate_spec = _promoted_stratified_gate_spec(classic)
-    if gate_spec is None:
-        raise ValueError("classic.promoted_stratified_gate is required")
-    assignments = pd.read_csv(_resolve_path(source_bundle, str(split_spec["assignments_path"])))
-    _validate_stratified_split_assignments(assignments)
-    calibration_splits = {str(split) for split in gate_spec["calibration_splits"]}
-    calibration_assignments = assignments[assignments["split"].astype(str).isin(calibration_splits)]
-    if calibration_assignments.empty:
-        raise ValueError("Linker calibration splits contain no assigned queries")
-
-    table_keys = source_featureless_table_keys(source_bundle)
-    path_to_table_key = {
-        source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve(): table_key
-        for table_key in table_keys
-    }
-    calibration_query_ids: dict[str, set[str]] = {}
-    for source_spec in _classic_stratified_eval_source_specs(classic):
-        if source_spec["source_kind"] == "calibration_source":
-            continue
-        table_key = path_to_table_key.get(_resolve_path(source_bundle, source_spec["path"]).resolve())
-        if table_key is None:
-            raise ValueError(f"Stratified source has no featureless table: {source_spec['path']}")
-        query_ids = set(
-            calibration_assignments.loc[
-                calibration_assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
-                "query_group_id",
-            ].astype(str)
-        )
-        if query_ids:
-            calibration_query_ids[table_key] = query_ids
-
-    training_keys = tuple(
-        dict.fromkeys(
-            (
-                "train_path",
-                "classic_gate_source_path",
-                *calibration_query_ids,
-            )
-        )
-    )
-    evaluation_keys = tuple(key for key in table_keys if key not in {"train_path", "classic_gate_source_path"})
-    return training_keys, calibration_query_ids, evaluation_keys
-
-
 def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir, complete_model_dir = _resolved_output_paths(args)
     target = _load_target(args.target_json)
@@ -1804,6 +1750,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             source_bundle,
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
+            calibration_query_ids=calibration_query_ids,
         )
         query_sources = load_initial_query_sources(
             source_bundle.root,

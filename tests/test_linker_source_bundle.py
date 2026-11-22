@@ -187,7 +187,7 @@ def _write_linker_inputs(root: Path, *, leak: bool, dataset: str = "replay_demo"
     assignments = pd.DataFrame(
         {
             "query_group_id": ["cal:q1", "s2and:q1", "hwang:q1"],
-            "source_key": ["s2and_eval", "s2and_eval", "hwang_eval"],
+            "source_key": ["calibration_source", "s2and_eval", "hwang_eval"],
             "split": ["calibration_fit", "calibration_fit", "test"],
             "base_group_id": ["cal:b1", "s2and:b1", "cal:b1" if leak else "hwang:b1"],
         }
@@ -367,6 +367,26 @@ def test_assembled_source_bundle_is_valid_bound_and_portable(
         )
         assert selected_rows == 4
         assert set(datasets) == {"replay_demo"}
+
+
+def test_assembly_requires_calibration_groups_in_the_assigned_eval_table(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    labels = inputs["source_root"] / "labels" / "s2and_eval.parquet"
+    assignments_path = inputs["source_root"] / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    # The query exists elsewhere in the bundle. It must also exist in its assigned table.
+    assignments.loc[assignments["source_key"].eq("s2and_eval"), "query_group_id"] = "train:q1"
+    assignments.to_csv(assignments_path, index=False)
+
+    with pytest.raises(ValueError, match=r"s2and_eval_path.*missing 1 assigned calibration groups.*train:q1"):
+        assemble_source_bundle(**inputs)
+
+    rows = pd.read_parquet(labels)
+    rows["query_group_id"] = "train:q1"
+    rows.to_parquet(labels, index=False)
+    inputs["output_source_bundle"] = tmp_path / "fixed-source"
+    inputs["output_data_root"] = tmp_path / "fixed-data"
+    assert assemble_source_bundle(**inputs)["selected_source_rows"] == 4
 
 
 def test_assembly_rejects_source_leakage_and_published_arrow_inputs(tmp_path: Path) -> None:

@@ -1543,7 +1543,28 @@ def _select_classic_stratified_eval_rows(
             "Stratified split assignments did not all match source rows: "
             f"matched={len(matched_assignments)}, expected={len(assignments)}, sample={examples}"
         )
-    return rows
+    if "base_group_id_split" not in rows.columns:
+        raise ValueError("Stratified eval source rows must contain base_group_id")
+    assignment_base_column = "base_group_id_split"
+    source_base_ids = rows["base_group_id"]
+    assignment_base_ids = rows[assignment_base_column]
+    invalid_source_base_ids = source_base_ids.isna() | source_base_ids.astype(str).str.strip().eq("")
+    if bool(invalid_source_base_ids.any()):
+        raise ValueError(
+            "Stratified eval source rows require nonempty base_group_id values: "
+            f"invalid_rows={int(invalid_source_base_ids.sum())}"
+        )
+    mismatched_base_ids = source_base_ids.astype(str) != assignment_base_ids.astype(str)
+    if bool(mismatched_base_ids.any()):
+        sample = rows.loc[
+            mismatched_base_ids,
+            ["query_group_id", "source_key", "base_group_id", assignment_base_column],
+        ].head(5)
+        raise ValueError(
+            "Stratified split assignment base_group_id does not match source rows: "
+            f"mismatched_rows={int(mismatched_base_ids.sum())}, sample={sample.to_dict(orient='records')}"
+        )
+    return rows.drop(columns=[assignment_base_column])
 
 
 def _read_classic_stratified_source_rows(source_path: Path, source_query_ids: set[str]) -> pd.DataFrame:
@@ -1602,28 +1623,6 @@ def _load_classic_stratified_eval_rows(
         include_calibration_source=include_calibration_source,
         read_source_rows=_read_classic_stratified_source_rows,
     )
-    if "base_group_id_split" not in rows.columns:
-        raise ValueError("Stratified eval source rows must contain base_group_id")
-    assignment_base_column = "base_group_id_split"
-    source_base_ids = rows["base_group_id"]
-    assignment_base_ids = rows[assignment_base_column]
-    invalid_source_base_ids = source_base_ids.isna() | source_base_ids.astype(str).str.strip().eq("")
-    if bool(invalid_source_base_ids.any()):
-        raise ValueError(
-            "Stratified eval source rows require nonempty base_group_id values: "
-            f"invalid_rows={int(invalid_source_base_ids.sum())}"
-        )
-    mismatched_base_ids = source_base_ids.astype(str) != assignment_base_ids.astype(str)
-    if bool(mismatched_base_ids.any()):
-        sample = rows.loc[
-            mismatched_base_ids,
-            ["query_group_id", "source_key", "base_group_id", assignment_base_column],
-        ].head(5)
-        raise ValueError(
-            "Stratified split assignment base_group_id does not match source rows: "
-            f"mismatched_rows={int(mismatched_base_ids.sum())}, sample={sample.to_dict(orient='records')}"
-        )
-    rows = rows.drop(columns=[assignment_base_column])
     for column in selected_assignment_columns:
         if column in {"query_group_id", "source_key"}:
             continue

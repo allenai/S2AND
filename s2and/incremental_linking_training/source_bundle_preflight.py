@@ -245,7 +245,9 @@ def _validate_source_split_coverage(source_bundle: OfficialBundle, label_tables:
         return rows.filter(pa_dataset.field("query_group_id").isin(sorted(query_ids))).to_pandas()
 
     for splits, include_calibration_source in ((gate["calibration_splits"], True), ([gate["test_split"]], False)):
-        selected = assignments.loc[assignments["split"].astype(str).isin(splits), ["query_group_id", "source_key"]]
+        selected = assignments.loc[
+            assignments["split"].astype(str).isin(splits), ["query_group_id", "source_key", "base_group_id"]
+        ]
         if selected.empty:
             raise ValueError(f"Stratified assignments contain no rows for splits={sorted(splits)}")
         matched = _select_classic_stratified_eval_rows(
@@ -267,7 +269,7 @@ def validate_source_label_tables(
     *,
     singleton_orcid_review_note: str | None = None,
 ) -> SourceLabelSummary:
-    """Validate source labels and split coverage without opening Arrow datasets."""
+    """Validate source labels, split coverage, and base group IDs without opening Arrow datasets."""
 
     available_tables = source_featureless_table_keys(source_bundle)
     available_table_set = set(available_tables)
@@ -290,6 +292,8 @@ def validate_source_label_tables(
         has_supervision_type = "supervision_type" in labels.schema.names
         check_singletons = has_supervision_type and not has_singleton_review
         columns = ["dataset"]
+        if labels_path in split_paths:
+            columns.append("base_group_id")
         if labels_path in split_paths or check_singletons:
             columns.append("query_group_id")
             if has_supervision_type:

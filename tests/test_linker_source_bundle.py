@@ -25,7 +25,10 @@ from s2and.incremental_linking.feature_block import (
     write_name_counts_index,
 )
 from s2and.incremental_linking_training.classic import load_bundle
-from s2and.incremental_linking_training.source_bundle_preflight import preflight_source_rows
+from s2and.incremental_linking_training.source_bundle_preflight import (
+    preflight_source_rows,
+    validate_source_label_tables,
+)
 from scripts.production.model.linker_source_bundle import (
     assemble_source_bundle,
 )
@@ -401,6 +404,18 @@ def test_assembly_rejects_a_missing_calibration_group(tmp_path: Path) -> None:
     rows["query_group_id"] = "train:q1"
     rows.to_parquet(labels, index=False)
     assert assemble_source_bundle(**inputs)["selected_source_rows"] == 4
+
+
+@pytest.mark.parametrize("query_id", ["s2and:q1", "cal:q1", "hwang:q1"])
+def test_source_label_preflight_rejects_a_mismatched_base_group_id(tmp_path: Path, query_id: str) -> None:
+    source_root = _inputs(tmp_path)["source_root"]
+    assignments_path = source_root / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    assignments.loc[assignments["query_group_id"].eq(query_id), "base_group_id"] = "other:base"
+    assignments.to_csv(assignments_path, index=False)
+
+    with pytest.raises(ValueError, match=f"base_group_id does not match source rows.*{query_id}"):
+        validate_source_label_tables(load_bundle(source_root))
 
 
 @pytest.mark.parametrize("source_key", ["s2nad_eval", "calibration_source"])

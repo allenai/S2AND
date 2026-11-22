@@ -420,8 +420,10 @@ def _fit_pairwise_model(
         # refit on corrected data repeats the chosen recipe exactly.
         model.search_space = {}
         model.estimator.set_params(**fixed)
+        # The run's thread budget and the featurizer's constraint string override the file.
+        model.estimator.set_params(n_jobs=int(args.n_jobs))
         if monotone_constraints is not None:
-            model.estimator.set_params(monotone_constraints=list(monotone_constraints))
+            model.estimator.set_params(monotone_constraints=monotone_constraints)
         model.fit(X_train, y_train, X_val, y_val, feature_names=feature_names)
         model.best_params = dict(fixed)
         validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))

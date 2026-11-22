@@ -76,11 +76,20 @@ def test_fixed_parameters_fit_both_heads_without_search(tmp_path: Path) -> None:
         labels = (features[:, 0] + 0.1 * rng.normal(size=rows) > 0).astype(np.int8)
         arrays["y_" + role.split("_")[1]] = tmp_path / f"y_{role}.npy"
         np.save(arrays["y_" + role.split("_")[1]], labels)
-    fixed = {"num_leaves": 7, "n_estimators": 5, "learning_rate": 0.1, "min_child_samples": 5}
+    # The file cannot override the run's thread budget or the featurizer's constraints.
+    fixed = {
+        "num_leaves": 7,
+        "n_estimators": 5,
+        "learning_rate": 0.1,
+        "min_child_samples": 5,
+        "n_jobs": 8,
+        "monotone_constraints": "0,0,0",
+    }
     args = argparse.Namespace(n_iter=50, n_jobs=1)
 
+    # Featurizer info supplies the constraints as a comma-separated string.
     model, auc, selection = train_pairwise._fit_pairwise_model(
-        args, arrays, feature_prefix="", monotone_constraints=[1, 0, 0], feature_names=["a", "b", "c"], fixed=fixed
+        args, arrays, feature_prefix="", monotone_constraints="1,0,0", feature_names=["a", "b", "c"], fixed=fixed
     )
 
     assert selection == {"selected_source": "fixed", "fixed_validation_roc_auc": auc}
@@ -88,13 +97,15 @@ def test_fixed_parameters_fit_both_heads_without_search(tmp_path: Path) -> None:
     assert model.hyperopt_trials_store == {}
     assert model.classifier is not None
     params = model.classifier.get_params()
-    assert (params["num_leaves"], params["n_estimators"]) == (7, 5)
+    assert (params["num_leaves"], params["n_estimators"], params["n_jobs"]) == (7, 5, 1)
     # The search's own estimator defaults stay in force, so a fixed refit repeats the chosen recipe.
     assert (params["tree_learner"], params["monotone_constraints"], params["monotone_constraints_method"]) == (
         "data",
-        [1, 0, 0],
+        "1,0,0",
         "advanced",
     )
+    # The booster applied the string as three per-feature constraints.
+    assert "[monotone_constraints: 1,0,0]" in model.classifier.booster_.model_to_string()
     assert auc > 0.9
 
 

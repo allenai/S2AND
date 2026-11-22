@@ -71,6 +71,7 @@ def _validated_sweep_plans(
     datasets: Sequence[str],
     eps: float,
     source_hash: str,
+    expected_batching_threshold: int,
     release_datasets: Sequence[str],
     test_identities: TestIdentityLoader,
 ) -> dict[str, dict[str, Any]]:
@@ -94,6 +95,12 @@ def _validated_sweep_plans(
         if plan.get("route") != RELEASE_ROUTE:
             raise ValueError(
                 f"The EPS sweep skipped the production attachment passes; rerun with --route production: {dataset}"
+            )
+        batching_threshold = plan.get("batching_threshold")
+        if type(batching_threshold) is not int or batching_threshold != expected_batching_threshold:
+            raise ValueError(
+                f"The EPS sweep used batching_threshold={batching_threshold!r}, "
+                f"expected {expected_batching_threshold}; rerun it: {dataset}"
             )
         if plan.get("distance_policy_version") != DISTANCE_POLICY_VERSION:
             raise ValueError(f"The EPS sweep used another distance policy; rerun it: {dataset}")
@@ -200,6 +207,7 @@ def apply_reviewed_eps(
     report_path: Path,
     *,
     release_datasets: Sequence[str] = RELEASE_GIANT_DATASETS,
+    expected_batching_threshold: int | None = None,
     test_identities: TestIdentityLoader = final_test_query_identities,
     close_pair: tuple[float, float] | None = None,
     release_version: str | None = None,
@@ -211,7 +219,7 @@ def apply_reviewed_eps(
     setting. ``release_version`` names a model that differs from its source only in linkage settings.
     ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
 
-    With a sweep root, check the snapshot giant curves first.
+    With a sweep root, check the snapshot giant curves against the expected subblock limit.
     Without one, the review note must cite the internal evidence, because the curves are not on disk here.
     """
     source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
@@ -240,11 +248,13 @@ def apply_reviewed_eps(
     if report_path in {source, output} or source in report_path.parents or output in report_path.parents:
         raise ValueError("The review report must remain outside both model directories")
     source_hash = sha256_file(source / "manifest.json")
-    plans = (
-        None
-        if sweep_root is None
-        else _validated_sweep_plans(sweep_root, datasets, eps, source_hash, release_datasets, test_identities)
-    )
+    plans = None
+    if sweep_root is not None:
+        if expected_batching_threshold is None or expected_batching_threshold <= 0:
+            raise ValueError("A sweep review needs a positive --expected-batching-threshold")
+        plans = _validated_sweep_plans(
+            sweep_root, datasets, eps, source_hash, expected_batching_threshold, release_datasets, test_identities
+        )
     giant_f1_tolerance = (
         None
         if precision_f1_tolerance is None or sweep_root is None
@@ -300,6 +310,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Snapshot giant-block sweep root; omit it with --datasets when internal exports supply the review",
     )
     parser.add_argument("--datasets", nargs="+", default=[])
+    parser.add_argument(
+        "--expected-batching-threshold", type=int, help="Production subblock limit required for a snapshot sweep."
+    )
     parser.add_argument("--eps", type=float, required=True)
     parser.add_argument(
         "--close-pair",
@@ -331,6 +344,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         close_pair=(args.close_pair[0], args.close_pair[1]) if args.close_pair else None,
         release_version=args.release_version,
         precision_f1_tolerance=args.precision_f1_tolerance,
+        expected_batching_threshold=args.expected_batching_threshold,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

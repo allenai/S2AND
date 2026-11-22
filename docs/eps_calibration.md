@@ -80,17 +80,21 @@ Set explicit paths outside the checkout:
 $Snapshot = '<combined-inference-and-dataset-root>'
 $Candidate = '<complete-model-directory>'
 $EpsRun = '<fresh-EPS-run-directory>'
+$BatchingThreshold = 15000
 $Giants = @('a_khan', 'a_silva', 'h_wang', 'j_smith', 's_gupta', 's_lee', 's_park')
 $Grid = @('0.40', '0.45', '0.50', '0.55', '0.60', '0.62', '0.64', '0.65', '0.66', '0.68', '0.70', '0.75', '0.80')
 
 uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
   --dataset j_smith --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
   --score-mode orcid-b3 --output-dir "$EpsRun/smoke/j_smith" --route bulk `
+  --batching-threshold $BatchingThreshold `
   --max-subblocks 1 --subblock-selection smallest --compute-missing-dists `
   --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472
 ```
 
-The examples use 12 threads and 128 GiB of RAM; set both to your allocation.
+The examples use a production subblock limit of 15,000, 12 threads, and 128 GiB of RAM.
+Set the limit to the one used in production and the threads and RAM to your allocation.
+Every sweep requires the limit and records it in `plan.json`.
 Inspect the smoke log and `plan.json` before a larger run.
 Run `--dry-run` for each full dataset to obtain subblock, signature, and pair counts.
 Use fresh output paths for plans and measured runs.
@@ -111,6 +115,7 @@ foreach ($Dataset in $Giants) {
     --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
     --score-mode orcid-b3 --output-dir "$EpsRun/b3/$Dataset" `
     --distance-cache-dir "$EpsRun/b3-cache/$Dataset" `
+    --batching-threshold $BatchingThreshold `
     --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472 `
     --compute-missing-dists --allow-full-run
   if ($LASTEXITCODE -ne 0) { throw "B3 sweep fails for $Dataset" }
@@ -124,6 +129,7 @@ foreach ($Dataset in $Giants) {
     --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
     --gold-path "$EpsRun/proxy-gold/${Dataset}_pair_constraints.parquet" `
     --output-dir "$EpsRun/proxy/$Dataset" `
+    --batching-threshold $BatchingThreshold `
     --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472 `
     --compute-missing-dists --allow-full-run
   if ($LASTEXITCODE -ne 0) { throw "Diagnostic sweep fails for $Dataset" }
@@ -169,6 +175,7 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
 
 For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
+It requires each plan's subblock limit to match `--expected-batching-threshold`.
 It requires exactly the seven frozen giants and both complete curves for each.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.

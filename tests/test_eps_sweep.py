@@ -19,7 +19,7 @@ from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
 from tests.model_helpers import ConstantDistanceClassifier
 
 
-def _cli(*extra: str) -> list[str]:
+def _cli(*extra: str, include_batching_threshold: bool = True) -> list[str]:
     return [
         "--dataset",
         "dummy",
@@ -27,6 +27,7 @@ def _cli(*extra: str) -> list[str]:
         "arrow",
         "--model-path",
         "model",
+        *(("--batching-threshold", "15000") if include_batching_threshold else ()),
         *extra,
     ]
 
@@ -72,6 +73,20 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
 
     assert loaded["query_signature_id"].tolist() == ["q2"]
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
+
+
+def test_eps_sweep_requires_and_records_the_subblock_limit(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        sweep_eps_on_linking_gold.parse_args(_cli(include_batching_threshold=False))
+    assert exc.value.code == 2
+    assert "--batching-threshold" in capsys.readouterr().err
+
+    args = sweep_eps_on_linking_gold.parse_args(_cli())
+    gold = pd.DataFrame({"query_signature_id": ["q"], "member_signature_id": ["m"], "label": [1]})
+    _, plan, _ = sweep_eps_on_linking_gold._plan_subblocks(  # noqa: SLF001
+        args, object(), {"block": ["q", "m"]}, gold, cast(ArrowDataset, None)
+    )
+    assert plan["batching_threshold"] == 15000
 
 
 def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path, monkeypatch) -> None:
@@ -167,6 +182,8 @@ def test_distance_cache_recomputes_for_the_new_name_policy(tmp_path) -> None:
             "--model-path",
             str(model_path),
             "--compute-missing-dists",
+            "--batching-threshold",
+            "15000",
             "--n-jobs",
             "1",
         ]

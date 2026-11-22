@@ -94,7 +94,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--distance-cache-dir", type=Path, default=None)
     parser.add_argument("--n-jobs", type=int, default=8)
     parser.add_argument("--total-ram-bytes", type=int, default=48 * 1024**3)
-    parser.add_argument("--batching-threshold", type=int, default=5000)
+    parser.add_argument("--batching-threshold", type=int, required=True, help="Maximum size of a subblock.")
     parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
     parser.add_argument(
         "--use-orcid-subblocking",
@@ -483,6 +483,7 @@ def _plan_subblocks(
     covered_target_signature_ids = target_signature_ids & selected_signature_ids
     plan = {
         "dataset": args.dataset,
+        "batching_threshold": int(args.batching_threshold),
         "gold_rows": int(len(gold)),
         "gold_queries": int(gold["query_signature_id"].nunique()),
         "gold_target_signature_count": int(len(target_signature_ids)),

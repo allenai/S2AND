@@ -78,6 +78,7 @@ def _curve(
         "clustering_source": CLUSTERING_SOURCE,
         "route": RELEASE_ROUTE,
         "distance_policy_version": DISTANCE_POLICY_VERSION,
+        "batching_threshold": 15000,
         "eps_values": [0.55, 0.65],
         "use_orcid_subblocking": False,
         "suppress_orcid_constraints": True,
@@ -140,6 +141,7 @@ def _apply(
         "Fixture review",
         tmp_path / "review.json",
         release_datasets=("unit",),
+        expected_batching_threshold=15000,
         test_identities=lambda _root, _dataset, _sources: test_ids,
     )
 
@@ -327,6 +329,12 @@ def test_review_requires_a_production_sweep_with_current_policies(tmp_path: Path
     _update_curve_plan(dataset, plan | {"distance_policy_version": 11})
     with pytest.raises(ValueError, match="another distance policy"):
         _apply(tmp_path, source)
+    _update_curve_plan(dataset, plan | {"batching_threshold": 5000})
+    with pytest.raises(ValueError, match="batching_threshold=5000, expected 15000"):
+        _apply(tmp_path, source)
+    _update_curve_plan(dataset, {key: value for key, value in plan.items() if key != "batching_threshold"})
+    with pytest.raises(ValueError, match="batching_threshold=None, expected 15000"):
+        _apply(tmp_path, source)
     _update_curve_plan(dataset, plan | {"reference": plan["reference"] | {"reference_policy": "old"}})
     with pytest.raises(ValueError, match="does not exclude final-test"):
         _apply(tmp_path, source)
@@ -341,7 +349,14 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="exactly the frozen datasets"):
         apply_reviewed_eps(
-            source, tmp_path / "output", tmp_path / "curves", ["unit"], 0.65, "Fixture review", tmp_path / "review.json"
+            source,
+            tmp_path / "output",
+            tmp_path / "curves",
+            ["unit"],
+            0.65,
+            "Fixture review",
+            tmp_path / "review.json",
+            expected_batching_threshold=15000,
         )
     with pytest.raises(ValueError, match="contains final-test records"):
         _apply(tmp_path, source, test_ids=frozenset({"r2"}))
@@ -350,6 +365,32 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     diagnostic.write_bytes(diagnostic.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="singleton-inclusive EPS scores change"):
         _apply(tmp_path, source)
+    assert not (tmp_path / "output").exists()
+
+
+def test_snapshot_sweep_review_requires_the_expected_subblock_limit(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="positive --expected-batching-threshold"):
+        apply_reviewed_eps_module.main(
+            [
+                "--source-model",
+                str(source),
+                "--output-model",
+                str(tmp_path / "output"),
+                "--sweep-root",
+                str(tmp_path / "curves"),
+                "--datasets",
+                "unit",
+                "--eps",
+                "0.65",
+                "--review-note",
+                "Fixture review",
+                "--output-report",
+                str(tmp_path / "review.json"),
+            ]
+        )
     assert not (tmp_path / "output").exists()
 
 
@@ -370,6 +411,7 @@ def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_pa
             "Fixture review",
             tmp_path / "review.json",
             release_datasets=("unit",),
+            expected_batching_threshold=15000,
         )
     assert not (tmp_path / "output").exists()
 
@@ -388,7 +430,17 @@ def test_eps_commands_reject_an_unmatched_expected_source_map(
     with pytest.raises(ValueError, match="SHA-256 differs"):
         if command == "sweep":
             parsed = sweep_eps_on_linking_gold.parse_args(
-                ["--dataset", "unit", "--arrow-root", str(tmp_path), "--model-path", str(tmp_path / "model"), *args]
+                [
+                    "--dataset",
+                    "unit",
+                    "--arrow-root",
+                    str(tmp_path),
+                    "--model-path",
+                    str(tmp_path / "model"),
+                    "--batching-threshold",
+                    "15000",
+                    *args,
+                ]
             )
             sweep_eps_on_linking_gold.run(parsed)
         else:
@@ -501,6 +553,7 @@ def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path
             "Fixture review",
             tmp_path / "review.json",
             release_datasets=("unit",),
+            expected_batching_threshold=15000,
             test_identities=lambda _root, _dataset, _sources: frozenset(),
             precision_f1_tolerance=tolerance,
         )
@@ -644,6 +697,8 @@ def test_completed_output_cannot_be_rebound_by_dry_run(tmp_path: Path) -> None:
             "absent",
             "--model-path",
             "absent",
+            "--batching-threshold",
+            "15000",
             "--output-dir",
             str(dataset),
             "--dry-run",

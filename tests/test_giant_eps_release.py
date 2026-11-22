@@ -347,17 +347,6 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     manifest.write_text("{}", encoding="utf-8")
     dataset = _curve(tmp_path / "curves", sha256_file(manifest))
 
-    with pytest.raises(ValueError, match="exactly the frozen datasets"):
-        apply_reviewed_eps(
-            source,
-            tmp_path / "output",
-            tmp_path / "curves",
-            ["unit"],
-            0.65,
-            "Fixture review",
-            tmp_path / "review.json",
-            expected_batching_threshold=15000,
-        )
     with pytest.raises(ValueError, match="contains final-test records"):
         _apply(tmp_path, source, test_ids=frozenset({"r2"}))
 
@@ -368,11 +357,18 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     assert not (tmp_path / "output").exists()
 
 
-def test_snapshot_sweep_review_requires_the_expected_subblock_limit(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("extra_cli_args", "message"),
+    [
+        ([], "positive --expected-batching-threshold"),
+        (["--expected-batching-threshold", "15000"], "needs --release-datasets"),
+    ],
+)
+def test_snapshot_sweep_review_requires_expectations(tmp_path: Path, extra_cli_args: list[str], message: str) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "manifest.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="positive --expected-batching-threshold"):
+    with pytest.raises(ValueError, match=message):
         apply_reviewed_eps_module.main(
             [
                 "--source-model",
@@ -389,9 +385,29 @@ def test_snapshot_sweep_review_requires_the_expected_subblock_limit(tmp_path: Pa
                 "Fixture review",
                 "--output-report",
                 str(tmp_path / "review.json"),
+                *extra_cli_args,
             ]
         )
     assert not (tmp_path / "output").exists()
+
+
+def test_release_review_requires_every_declared_dataset(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}", encoding="utf-8")
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    with pytest.raises(ValueError, match="exactly the frozen datasets"):
+        apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            tmp_path / "curves",
+            ["unit"],
+            0.65,
+            "Fixture review",
+            tmp_path / "review.json",
+            expected_batching_threshold=15000,
+            release_datasets=("unit", "other"),
+        )
 
 
 def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_path: Path) -> None:
@@ -469,7 +485,7 @@ def _changed_files(source: Path, output: Path) -> set[str]:
     return {path for path in before if before[path] != after[path]}
 
 
-def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path) -> None:
+def test_eps_only_update_accepts_an_explicit_dataset_list_and_preserves_artifacts(tmp_path: Path) -> None:
     source = _complete_model(tmp_path)
     _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=True)
     output = tmp_path / "output"

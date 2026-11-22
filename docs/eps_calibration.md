@@ -9,7 +9,7 @@ The scripts do not choose EPS automatically.
 ## Inputs
 
 Use one root that combines the `inference` and `dataset` bundles, and the complete candidate model.
-The seven giant datasets are `a_khan`, `a_silva`, `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`.
+The 1.3 snapshot includes seven giant datasets. They are `a_khan`, `a_silva`, `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`.
 Their Arrow data, profile memberships, dev labels, and initial-query source map already belong to the `dataset` bundle.
 Use `--replay-bundle incremental` to select that catalog from the combined public root.
 Obtain the model and index from the `inference` bundle.
@@ -81,7 +81,7 @@ $Snapshot = '<combined-inference-and-dataset-root>'
 $Candidate = '<complete-model-directory>'
 $EpsRun = '<fresh-EPS-run-directory>'
 $BatchingThreshold = 15000
-$Giants = @('a_khan', 'a_silva', 'h_wang', 'j_smith', 's_gupta', 's_lee', 's_park')
+$Giants = @('a_khan', 'h_wang', 'j_smith', 's_gupta', 's_lee', 's_park')
 $Grid = @('0.40', '0.45', '0.50', '0.55', '0.60', '0.62', '0.64', '0.65', '0.66', '0.68', '0.70', '0.75', '0.80')
 
 uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
@@ -94,6 +94,7 @@ uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
 
 The examples use a production subblock limit of 15,000, 12 threads, and 128 GiB of RAM.
 Set the limit to the one used in production and the threads and RAM to your allocation.
+Set `$Giants` to the frozen development dataset list for your release. The example lists the 1.4 development giants.
 Every sweep requires the limit and records it in `plan.json`.
 Inspect the smoke log and `plan.json` before a larger run.
 Run `--dry-run` for each full dataset to obtain subblock, signature, and pair counts.
@@ -176,12 +177,13 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
 For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
 It requires each plan's subblock limit to match `--expected-batching-threshold`.
-It requires exactly the seven frozen giants and both complete curves for each.
+Pass the frozen dataset list as `--release-datasets`. The command requires `--datasets` to match it
+and checks both complete curves for each dataset.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
 It writes a fresh complete model and preserves every trained artifact byte.
 
-When internal exports supply the review, omit `--sweep-root` and `--datasets`.
+When internal exports supply the review, omit `--sweep-root` and the dataset and threshold options.
 The command cannot check those curves, so the review note must cite their location.
 It still checks the EPS range, the fresh output paths, the model load, and the unchanged artifacts.
 Release `1.3` used this form:

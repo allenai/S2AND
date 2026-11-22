@@ -25,7 +25,6 @@ from s2and.production_model import load_production_model
 from scripts.eps_sweep.common import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
-    RELEASE_GIANT_DATASETS,
     RELEASE_ROUTE,
     SINGLETON_INCLUSIVE_CURVE,
     read_singleton_inclusive_curve,
@@ -76,7 +75,7 @@ def _validated_sweep_plans(
     test_identities: TestIdentityLoader,
 ) -> dict[str, dict[str, Any]]:
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
-    if len(set(datasets)) != len(datasets) or set(datasets) != set(release_datasets):
+    if len(set(datasets)) != len(datasets) or sorted(datasets) != sorted(release_datasets):
         raise ValueError(f"Release EPS review requires exactly the frozen datasets: {sorted(release_datasets)}")
     plans: dict[str, dict[str, Any]] = {}
     source_maps: dict[Path, InitialQuerySources] = {}
@@ -206,7 +205,7 @@ def apply_reviewed_eps(
     review_note: str,
     report_path: Path,
     *,
-    release_datasets: Sequence[str] = RELEASE_GIANT_DATASETS,
+    release_datasets: Sequence[str] | None = None,
     expected_batching_threshold: int | None = None,
     test_identities: TestIdentityLoader = final_test_query_identities,
     close_pair: tuple[float, float] | None = None,
@@ -219,7 +218,8 @@ def apply_reviewed_eps(
     setting. ``release_version`` names a model that differs from its source only in linkage settings.
     ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
 
-    With a sweep root, check the snapshot giant curves against the expected subblock limit.
+    With a sweep root, check the snapshot giant curves against the expected subblock limit
+    and the explicitly frozen release dataset list.
     Without one, the review note must cite the internal evidence, because the curves are not on disk here.
     """
     source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
@@ -252,6 +252,8 @@ def apply_reviewed_eps(
     if sweep_root is not None:
         if expected_batching_threshold is None or expected_batching_threshold <= 0:
             raise ValueError("A sweep review needs a positive --expected-batching-threshold")
+        if not release_datasets:
+            raise ValueError("A sweep review needs --release-datasets with the frozen dataset list")
         plans = _validated_sweep_plans(
             sweep_root, datasets, eps, source_hash, expected_batching_threshold, release_datasets, test_identities
         )
@@ -309,7 +311,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         help="Snapshot giant-block sweep root; omit it with --datasets when internal exports supply the review",
     )
-    parser.add_argument("--datasets", nargs="+", default=[])
+    parser.add_argument("--datasets", nargs="+", default=[], help="Datasets in the sweep being reviewed.")
+    parser.add_argument("--release-datasets", nargs="+", help="Frozen dataset list required for a snapshot sweep.")
     parser.add_argument(
         "--expected-batching-threshold", type=int, help="Production subblock limit required for a snapshot sweep."
     )
@@ -345,6 +348,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         release_version=args.release_version,
         precision_f1_tolerance=args.precision_f1_tolerance,
         expected_batching_threshold=args.expected_batching_threshold,
+        release_datasets=args.release_datasets,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

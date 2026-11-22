@@ -17,8 +17,6 @@ from s2and.arrow_inputs import read_arrow_collection_root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GOLD_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_gold"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_sweeps_arrow"
-# Release EPS review uses exactly these giant datasets; generic sweeps may use any dataset.
-RELEASE_GIANT_DATASETS = ("a_khan", "a_silva", "h_wang", "j_smith", "s_gupta", "s_lee", "s_park")
 # Diagnostic B3 curve that keeps one-record ORCID groups and their merge penalties.
 SINGLETON_INCLUSIVE_CURVE = "eps_b3_with_singletons.tsv"
 # How a sweep clustered its cached distances. Sweeps from before this value cut their own

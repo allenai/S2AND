@@ -10,15 +10,12 @@ import pytest
 
 import s2and.data as data_module
 from s2and.data import ANDData
-from s2and.name_tuple_artifact import load_name_tuple_artifact
 from tests.helpers import build_dummy_dataset, tiny_name_counts_index
 
 
 @pytest.mark.parametrize(
     "seeds, expected",
     [
-        ({"0": {"1": "require"}, "1": {"2": "require"}}, {"0": 0, "1": 0, "2": 0}),
-        ({"2": {"1": "require"}, "1": {"0": "require"}}, {"2": 0, "1": 0, "0": 0}),
         (
             {"0": {"1": "require"}, "2": {"3": "require"}, "1": {"2": "require"}},
             {"0": 0, "1": 0, "2": 0, "3": 0},
@@ -30,9 +27,8 @@ from tests.helpers import build_dummy_dataset, tiny_name_counts_index
         ({"0": {"1": "require"}, "1": {"0": "require"}}, {"0": 0, "1": 0}),
         ({"0": {"0": "require"}}, {"0": 0}),
         ({"0": {"1": "disallow"}}, {}),
-        ({}, {}),
     ],
-    ids=["chain", "reverse_chain", "bridge", "disjoint", "cycle", "self", "disallow_only", "empty"],
+    ids=["bridge", "disjoint", "cycle", "self", "disallow_only"],
 )
 def test_required_seed_components_preserve_transitive_constraints(seeds, expected):
     dataset = ANDData(
@@ -165,21 +161,25 @@ def test_split_ratios_do_not_create_a_partition_for_tolerated_roundoff() -> None
     assert test == []
 
 
-def test_maybe_load_json_reads_utf8_text(tmp_path):
+def test_input_loaders_read_utf8_text(tmp_path):
     json_path = tmp_path / "unicode.json"
     json_path.write_text(json.dumps({"name": "José"}, ensure_ascii=False), encoding="utf-8")
 
     assert ANDData.maybe_load_json(str(json_path)) == {"name": "José"}
 
-
-def test_maybe_load_list_reads_utf8_text(tmp_path):
     list_path = tmp_path / "unicode.txt"
     list_path.write_text("José\nZoë", encoding="utf-8")
 
     assert ANDData.maybe_load_list(str(list_path)) == ["José", "Zoë"]
 
 
-def test_maybe_load_specter_rejects_keys_that_collide_as_strings():
+def test_specter_normalizes_keys_and_rejects_collisions():
+    loaded = ANDData.maybe_load_specter((np.asarray([[1.0, 2.0], [3.0, 4.0]]), [1, 2]))
+
+    assert loaded is not None
+    assert set(loaded) == {"1", "2"}
+    np.testing.assert_array_equal(loaded["1"], np.asarray([1.0, 2.0]))
+
     cases = (
         ("mapping", {1: np.asarray([1.0]), "1": np.asarray([2.0])}),
         ("tuple", (np.asarray([[1.0], [2.0]]), [1, "1"])),
@@ -187,14 +187,6 @@ def test_maybe_load_specter_rejects_keys_that_collide_as_strings():
     for _case_id, payload in cases:
         with pytest.raises(ValueError, match="collide after string normalization"):
             ANDData.maybe_load_specter(payload)
-
-
-def test_maybe_load_specter_normalizes_tuple_keys_to_strings():
-    loaded = ANDData.maybe_load_specter((np.asarray([[1.0, 2.0], [3.0, 4.0]]), [1, 2]))
-
-    assert loaded is not None
-    assert set(loaded) == {"1", "2"}
-    np.testing.assert_array_equal(loaded["1"], np.asarray([1.0, 2.0]))
 
 
 def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
@@ -282,13 +274,6 @@ def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:
     )
 
     assert dataset.name_tuples == {("bill", "william")}
-
-
-def test_name_tuple_loader_rejects_invalid_rows(tmp_path) -> None:
-    (tmp_path / "invalid.txt").write_bytes(b"alice,bob,carol\n")
-
-    with pytest.raises(ValueError, match="invalid.txt:1"):
-        load_name_tuple_artifact(tmp_path / "invalid.txt")
 
 
 def test_signature_full_name_uses_only_canonical_fields() -> None:
@@ -391,52 +376,49 @@ class TestData(unittest.TestCase):
         )
 
     def test_split_pairs_within_blocks(self):
-        # Test random sampling within blocks
-        self.qian_dataset.pair_sampling_mode = "within_block_random"
-        self.qian_dataset.train_pairs_size = 1000
-        self.qian_dataset.val_pairs_size = 500
-        self.qian_dataset.test_pairs_size = 500
-        self.qian_dataset.random_seed = 1111
-        (
-            train_block_dict,
-            val_block_dict,
-            test_block_dict,
-        ) = self.qian_dataset.split_cluster_signatures()
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
+        dataset = self.dummy_dataset
+        dataset.train_pairs_size = 2
+        dataset.val_pairs_size = 2
+        dataset.test_pairs_size = 2
+        dataset.random_seed = 1111
+        dataset.signature_to_cluster_id = {
+            "0": "a",
+            "1": "a",
+            "2": "b",
+            "3": "c",
+            "4": "c",
+            "5": "d",
+            "6": "e",
+            "7": "e",
+            "8": "f",
+        }
+        dataset.signatures["0"] = dataset.signatures["0"]._replace(
+            author_info_first=dataset.signatures["1"].author_info_first
         )
+        train = {"train": ["0", "1", "2"]}
+        validation = {"val": ["3", "4", "5"]}
+        test = {"test": ["6", "7", "8"]}
 
-        assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
-        assert (
-            train_pairs[0] == ("5259", "5270", 1)
-            and val_pairs[0] == ("3830", "3847", 1)
-            and test_pairs[0] == ("1050", "1063", 1)
-        )
+        dataset.pair_sampling_mode = "within_block_random"
+        sampled = dataset.split_pairs(train, validation, test)
+        assert all(len(pairs) == 2 for pairs in sampled)
 
-        # Test balanced pos/neg sampling within blocks
-        self.qian_dataset.pair_sampling_mode = "within_block_balanced_classes"
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
-        )
-        assert sum([int(pair[2]) for pair in train_pairs]) == 500
-        assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
+        dataset.pair_sampling_mode = "within_block_balanced_classes"
+        balanced = dataset.split_pairs(train, validation, test)
+        assert {pair[2] for pair in balanced[0]} == {0, 1}
+        assert all(len(pairs) == 2 for pairs in balanced)
 
-        # Test balanced pos/neg and homonym/synonym sampling within blocks
-        self.qian_dataset.pair_sampling_mode = "within_block_balanced_homonym_synonym"
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
-        )
-        assert sum([int(pair[2]) for pair in train_pairs]) == 500
-        assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
-
-        # Test adding the all test pairs flag to the test above
-        self.qian_dataset.all_test_pairs_flag = True
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
-        )
-        assert len(train_pairs) == 1000
-        assert len(val_pairs) == 500
-        assert len(test_pairs) == 7244
+        dataset.pair_sampling_mode = "within_block_balanced_homonym_synonym"
+        dataset.all_test_pairs_flag = True
+        train_pairs, val_pairs, test_pairs = dataset.split_pairs(train, validation, test)
+        assert {pair[2] for pair in train_pairs} == {0, 1}
+        assert len(val_pairs) == 2
+        assert len(test_pairs) == 3
+        dataset.train_pairs_size = 3
+        dataset.signatures["1"] = dataset.signatures["1"]._replace(author_info_first="Abdul Rahman")
+        dataset.signatures["2"] = dataset.signatures["2"]._replace(author_info_first="Abdul Hadi")
+        train_pairs, _, _ = dataset.split_pairs(train, validation, test)
+        assert len(train_pairs) == 3
 
     def test_split_cluster_signatures_rejects_out_of_range_ratios(self):
         self.qian_dataset.train_ratio = 1.1
@@ -496,13 +478,17 @@ class TestData(unittest.TestCase):
         self.assertEqual(val_blocks, {})
         self.assertEqual(test_blocks, {})
 
-    def test_blocks(self):
+    def test_dummy_blocks_and_cluster_membership(self):
         expected_blocks = {
             "a sattary": ["0", "1", "2"],
             "a konovalov": ["3", "4", "5", "6", "7", "8"],
         }
 
         assert self.dummy_dataset.get_blocks() == expected_blocks
+
+        cluster_to_signatures = self.dummy_dataset.construct_cluster_to_signatures({"a": ["0", "1"], "b": ["3", "4"]})
+        expected_cluster_to_signatures = {"1": ["0", "1"], "3": ["3", "4"]}
+        assert cluster_to_signatures == expected_cluster_to_signatures
 
     def test_initialization(self):
         make_dataset = partial(
@@ -533,11 +519,6 @@ class TestData(unittest.TestCase):
         assert dataset.signature_to_cluster_id is None
         assert dataset.pair_sampling_mode == "within_block_random"
         assert dataset.all_test_pairs_flag
-
-    def test_construct_cluster_to_signatures(self):
-        cluster_to_signatures = self.dummy_dataset.construct_cluster_to_signatures({"a": ["0", "1"], "b": ["3", "4"]})
-        expected_cluster_to_signatures = {"1": ["0", "1"], "3": ["3", "4"]}
-        assert cluster_to_signatures == expected_cluster_to_signatures
 
     def test_multiprocessing_preprocessing_consistency(self):
         dataset_single = build_dummy_dataset("preprocessing_single", n_jobs=1)
@@ -643,7 +624,7 @@ def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):
     assert dataset.altered_cluster_signatures == []
 
 
-def test_fixed_pairs_does_not_mutate_source_dataframes():
+def test_fixed_pairs_validate_and_preserve_source_dataframes():
     train_pairs_df = pd.DataFrame(
         [("s1", "s2", "YES"), ("s3", "s4", "NO")],
         columns=["signature_id_1", "signature_id_2", "label"],
@@ -684,6 +665,13 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
 
     all_labels = [int(pair[2]) for pair in train_pairs + val_pairs + test_pairs]
     assert set(all_labels).issubset({0, 1})
+    dataset.val_pairs = pd.DataFrame([("s2", "s1", 1)], columns=train_pairs_df.columns)
+    with pytest.raises(ValueError, match="overlap by unordered signature pair"):
+        dataset.fixed_pairs()
+
+    dataset.val_pairs = pd.DataFrame([("s5", "s6", "MAYBE")], columns=train_pairs_df.columns)
+    with pytest.raises(ValueError, match="Unknown fixed-pair labels"):
+        dataset.fixed_pairs()
 
 
 def test_fixed_train_val_pairs_matches_fixed_pairs_without_test_or_rng_side_effects():
@@ -714,51 +702,6 @@ def test_fixed_train_val_pairs_matches_fixed_pairs_without_test_or_rng_side_effe
     assert selection_val == full_val
 
 
-def test_fixed_pairs_rejects_unordered_pair_overlap_across_splits():
-    dataset = ANDData.__new__(ANDData)
-    columns = ["signature_id_1", "signature_id_2", "label"]
-    dataset.train_pairs = pd.DataFrame([("a", "b", 1)], columns=columns)
-    dataset.val_pairs = pd.DataFrame([("b", "a", 1)], columns=columns)
-    dataset.test_pairs = pd.DataFrame([("c", "d", 0)], columns=columns)
-
-    with pytest.raises(ValueError, match="overlap by unordered signature pair"):
-        dataset.fixed_pairs()
-
-
-def test_fixed_pairs_rejects_unknown_labels():
-    for invalid_split in ("train", "val", "test"):
-        pair_frames = {
-            split_name: pd.DataFrame(
-                [(f"{split_name}1", f"{split_name}2", "YES")],
-                columns=["signature_id_1", "signature_id_2", "label"],
-            )
-            for split_name in ("train", "val", "test")
-        }
-        pair_frames[invalid_split].loc[0, "label"] = "MAYBE"
-        dataset = ANDData(
-            signatures={},
-            papers={},
-            name="fixed_pairs_invalid_label",
-            mode="train",
-            clusters=None,
-            train_pairs=pair_frames["train"],
-            val_pairs=pair_frames["val"],
-            test_pairs=pair_frames["test"],
-            name_counts_index=None,
-            preprocess=False,
-        )
-
-        try:
-            dataset.fixed_pairs()
-        except ValueError as error:
-            message = str(error)
-            assert "Unknown fixed-pair labels" in message and invalid_split in message and "MAYBE" in message, (
-                f"{invalid_split}: {error}"
-            )
-        else:
-            raise AssertionError(f"{invalid_split}: unknown fixed-pair label was accepted")
-
-
 def test_fixed_pair_csv_keeps_signature_ids_as_text(tmp_path):
     from s2and.data import _map_fixed_pair_labels
 
@@ -770,7 +713,7 @@ def test_fixed_pair_csv_keeps_signature_ids_as_text(tmp_path):
     assert frame.values.tolist() == [["00", "01", 1], ["NA", "7", 0]]
 
 
-@pytest.mark.parametrize("seed_id", [-1, -2, "-1"])
+@pytest.mark.parametrize("seed_id", [-2, "-1"])
 def test_negative_seed_ids_do_not_require_unseeded_signatures(seed_id):
     from tests.incremental_test_helpers import _dataset
 

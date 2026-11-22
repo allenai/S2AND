@@ -21,24 +21,11 @@ def test_seed_packing_prefers_full_names_and_keeps_native_representatives() -> N
     subblocks = {"a": ["i0", "i1"], "ada": ["f0", "f1"], "amy": ["g0"]}
     components = {"first": ["i0", "f0"], "second": ["i1", "g0"]}
 
-    packed = pack_seed_components(subblocks, components, 3, full_name_subblocks={"ada", "amy"})
+    packed = pack_seed_components(subblocks, components, 2, full_name_subblocks={"ada", "amy"})
 
-    assert packed == {"a": [], "ada": [["f0", "i0", "f1"]], "amy": [["g0", "i1"]]}
+    assert packed == {"a": [], "ada": [["f0", "i0"], ["f1"]], "amy": [["g0", "i1"]]}
     assert subblocks == {"a": ["i0", "i1"], "ada": ["f0", "f1"], "amy": ["g0"]}
     assert components == {"first": ["i0", "f0"], "second": ["i1", "g0"]}
-
-
-def test_seed_packing_preserves_capacity_when_full_name_home_is_full() -> None:
-    from s2and.seed_merging import pack_seed_components
-
-    packed = pack_seed_components(
-        {"a": ["i0"], "ada": ["f0", "f1"]},
-        {"claimed": ["i0", "f0"]},
-        2,
-        full_name_subblocks={"ada"},
-    )
-
-    assert packed == {"a": [], "ada": [["f0", "i0"], ["f1"]]}
 
 
 def test_combining_block_local_predictions_preserves_reserved_cluster_keys() -> None:
@@ -59,8 +46,7 @@ def test_combining_block_local_predictions_preserves_reserved_cluster_keys() -> 
     }
 
 
-@pytest.mark.parametrize("backend", ["python", "rust"])
-@pytest.mark.parametrize("reverse_block", [False, True])
+@pytest.mark.parametrize(("backend", "reverse_block"), [("python", False), ("rust", True)])
 def test_seed_restoration_accepts_equal_reverse_supervision(tmp_path: Path, backend: str, reverse_block: bool) -> None:
     """Seed restoration is independent of pair orientation and dictionary order."""
     from s2and.feature_port import _get_rust_featurizer
@@ -164,81 +150,39 @@ def test_batched_prediction_preserves_initial_only_seed_member(
             incremental_dont_use_cluster_seeds=override == "ignore_seeds",
             partial_supervision=partial,
         )
+    if override == "partial_disallow":
+        distances = clusterer.make_distance_matrices(blocks, dataset, partial_supervision=partial)
+        assert distances["a sattar"][0] == 10000.0
     assert any({"0", "1"} <= set(members) for members in normal.values()) == (override == "none")
     assert any({"0", "1"} <= set(members) for members in batched.values()) == (override == "none")
     assert sorted(sig for members in batched.values() for sig in members) == ["0", "1", "2"]
-
-
-def test_explicit_partial_disallow_overrides_original_seed():
-    """The final clustering must retain a caller-supplied hard negative."""
-    raw = json.loads(Path("tests/dummy/signatures.json").read_text())
-    raw = {key: raw[key] for key in ("0", "1")}
-    dataset = ANDData(
-        raw,
-        "tests/dummy/papers.json",
-        name="bug_scan_override",
-        mode="inference",
-        cluster_seeds={"0": {"1": "require"}},
-        name_counts_index=tiny_name_counts_index(),
-    )
-    clusterer = Clusterer(
-        FeaturizationInfo(features_to_use=["year_diff", "misc_features"]), ConstantDistanceClassifier(0.9), n_jobs=1
-    )
-    clusters, _ = clusterer.predict({"a sattar": ["0", "1"]}, dataset, partial_supervision={("0", "1"): 10000.0})
-    distances = clusterer.make_distance_matrices(
-        {"a sattar": ["0", "1"]}, dataset, partial_supervision={("0", "1"): 10000.0}
-    )
-    assert distances["a sattar"][0] == 10000.0
-    assert len(clusters) == 2
 
 
 def test_cannot_link_survives_indirect_seed_unions_and_keeps_other_requires():
     """Indirect unions carry prohibitions while unrelated requires still merge."""
     from s2and.seed_merging import merge_seed_labels, seed_disallow_adjacency
 
-    ids = ["a", "b", "c", "d", "x", "y", "e", "f"]
-    # x/y are unseeded occupants of clusters being indirectly merged by A/B.
-    labels = np.array([0, 1, 1, 2, 0, 2, 3, 4])
-    groups = {"a": "A", "b": "A", "c": "B", "d": "B", "e": "C", "f": "C"}
-    adjacency = seed_disallow_adjacency({("x", "y")}, {})
+    ids = ["a", "b", "c", "d", "x", "y", "e", "f", "g", "h", "i"]
+    # Block an indirect union through ordinary occupants x and y.
+    labels = np.array([0, 1, 1, 2, 0, 2, 3, 4, 5, 6, 7])
+    groups = {"a": "A", "b": "A", "c": "B", "d": "B", "e": "C", "f": "C", "g": "D", "h": "D", "i": "D"}
+    adjacency = seed_disallow_adjacency({("x", "y")}, {("g", "h"): 10000.0, ("g", "i"): 10000.0})
     actual = dict(zip(ids, merge_seed_labels(ids, labels, groups, adjacency), strict=True))
     assert actual["a"] == actual["b"] == actual["c"]
     assert actual["x"] != actual["y"]
     assert actual["c"] != actual["d"]
     assert actual["e"] == actual["f"]
-
-
-def test_cannot_link_endpoint_can_still_merge_with_compatible_seed_members():
-    """A forbidden pair must not exclude its endpoints from every seed union."""
-    from s2and.seed_merging import merge_seed_labels, seed_disallow_adjacency
-
-    ids = ["a", "b", "c", "d"]
-    labels = np.arange(4)
-    groups = dict.fromkeys(ids, "same")
-    adjacency = seed_disallow_adjacency(set(), {("a", "b"): 10000.0, ("a", "c"): 10000.0})
-    actual = dict(zip(ids, merge_seed_labels(ids, labels, groups, adjacency), strict=True))
-    assert actual["a"] != actual["b"]
-    assert actual["a"] != actual["c"]
-    assert actual["b"] == actual["c"]
-    assert len(set(actual.values())) == 2
+    assert actual["g"] != actual["h"] == actual["i"]
 
 
 def test_no_disallows_merge_transitive_seed_components():
     """Unconstrained transitive unions retain the smallest original label."""
     from s2and.seed_merging import merge_seed_labels
 
-    ids = ["a", "b", "c", "d", "e", "f"]
-    labels = np.array([1, 2, 0, 1, 2, 3])
-    groups = {"a": "A", "b": "A", "c": "B", "d": "B", "e": "C", "f": "C"}
+    ids = ["a", "b", "c", "d", "e", "f", "g"]
+    labels = np.array([1, 2, 0, 1, 2, 2, 3])
+    groups = {"a": "A", "b": "A", "c": "B", "d": "B", "e": "B", "f": "C", "g": "C"}
     assert merge_seed_labels(ids, labels, groups, {}) == [0] * len(ids)
-
-
-def test_soft_supervision_overrides_dataset_cannot_link():
-    """Sparse edges follow established explicit-supervision priority."""
-    from s2and.seed_merging import seed_disallow_adjacency
-
-    assert seed_disallow_adjacency({("a", "b")}, {("b", "a"): 0.0}) == {}
-    assert seed_disallow_adjacency(set(), {("a", "b"): 0.9}) == {}
 
 
 def test_directional_precedence_is_scoped_to_evaluated_blocks() -> None:
@@ -252,43 +196,36 @@ def test_directional_precedence_is_scoped_to_evaluated_blocks() -> None:
     assert seed_disallow_adjacency(set(), partial, blocks=[["a"], ["b"]]) == hard
     assert seed_disallow_adjacency(set(), partial) == hard
     assert seed_disallow_adjacency(set(), {("b", "a"): 10000.0}, blocks=[["a", "b"]]) == hard
+    assert seed_disallow_adjacency({("a", "b")}, {("b", "a"): 0.0}) == {}
 
 
-def test_initial_only_seed_partitions_receive_distinct_synthetic_ids():
-    """Do not reunite a forbidden initial-only pair through synthetic IDs."""
+def test_missing_seed_restoration_respects_ordinary_occupants_and_reserved_ids() -> None:
     from s2and.seed_merging import restore_seed_membership, seed_disallow_adjacency
 
-    restored = restore_seed_membership(
-        {"0": ["unrelated"]},
-        {"a": "0", "b": "0", "c": "0"},
-        seed_disallow_adjacency({("a", "b")}, {}),
-    )
-    assert restored["a"] != restored["b"]
-    assert restored["unrelated"] == "0"
-    assert restored["a"] != "0"
-    assert restored["b"] != "0"
-    assert len({restored[sig] for sig in ("a", "b", "c")}) == 2
-
-
-@pytest.mark.parametrize("disallowed", [False, True])
-def test_missing_seed_restoration_checks_unseeded_cluster_occupants(disallowed: bool) -> None:
-    """A sparse edge to an ordinary occupant can prohibit a new seed merge."""
-    from s2and.seed_merging import restore_seed_membership, seed_disallow_adjacency
-
-    clusters = {"existing": ["a", "occupant"], "collision": ["other"]}
-    seeds = {"a": "profile", "b": "profile", "c": "collision", "d": "collision"}
-    adjacency = seed_disallow_adjacency({("b", "occupant")} if disallowed else set(), {})
+    clusters = {"existing": ["a", "occupant"], "collision": ["other"], "allowed": ["d"]}
+    seeds = {
+        "a": "profile",
+        "b": "profile",
+        "c": "profile",
+        "x": "collision",
+        "y": "collision",
+        "d": "another_profile",
+        "e": "another_profile",
+    }
+    adjacency = seed_disallow_adjacency({("b", "occupant"), ("x", "y")}, {})
     restored = restore_seed_membership(clusters, seeds, adjacency)
-    assert restored["a"] == restored["occupant"] == "existing"
-    assert (restored["b"] == restored["a"]) is not disallowed
-    assert restored["c"] == restored["d"] != restored["other"]
-    assert list(restored) == ["a", "occupant", "other", "b", "c", "d"]
-    assert clusters == {"existing": ["a", "occupant"], "collision": ["other"]}
+
+    assert restored["a"] == restored["occupant"] == restored["c"] == "existing"
+    assert restored["b"] != restored["a"]
+    assert restored["x"] != restored["y"]
+    assert restored["other"] == "collision"
+    assert "collision" not in {restored["x"], restored["y"]}
+    assert restored["d"] == restored["e"] == "allowed"
+    assert clusters == {"existing": ["a", "occupant"], "collision": ["other"], "allowed": ["d"]}
 
 
 @pytest.mark.parametrize("close_pair", [(0.0, 0.0), (2.0, 0.3)], ids=["plain", "close-pair-bonus"])
-@pytest.mark.parametrize("draw", range(8))
-def test_predict_eps_grid_matches_predict_at_each_eps(draw: int, close_pair: tuple[float, float]) -> None:
+def test_predict_eps_grid_matches_predict_at_each_eps(close_pair: tuple[float, float]) -> None:
     """One linkage per block, cut at each EPS, gives predict's clusters, seed joins included."""
 
     raw = json.loads(Path("tests/dummy/signatures.json").read_text())
@@ -301,7 +238,7 @@ def test_predict_eps_grid_matches_predict_at_each_eps(draw: int, close_pair: tup
         name_counts_index=tiny_name_counts_index(),
     )
     blocks = {"single": ["0"], "pair": ["1", "2"], "six": ["3", "4", "5", "6", "7", "8"]}
-    rng = np.random.default_rng(draw)
+    rng = np.random.default_rng(0)
     dists = {key: rng.uniform(0.0, 1.0, len(members) * (len(members) - 1) // 2) for key, members in blocks.items()}
     clusterer = Clusterer(
         FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),

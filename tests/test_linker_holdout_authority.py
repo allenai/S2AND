@@ -112,25 +112,24 @@ def test_removing_query_preserves_retained_native_retrieval_and_row_features(tmp
             np.testing.assert_equal(retained[key], full[key][:2], err_msg=key)
 
 
-def test_fit_rejects_reintroduced_overlap_before_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_fit_requires_early_holdout_exclusion_and_retains_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bundle = write_classic_tiny_bundle(tmp_path / "bundle")
+    identities = classic.read_classic_holdout_identities(bundle)
+
     rows = pd.read_csv(bundle.root / "train.csv.gz")
-    identities = classic.ClassicHoldoutIdentities(frozenset(rows.query_group_id.astype(str)), frozenset(), ())
 
     def no_classifier(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("classifier construction must not precede overlap rejection")
 
-    monkeypatch.setattr(classic, "_build_classic_classifier", no_classifier)
-    with pytest.raises(ValueError, match="Materialized training rows overlap"):
-        classic.fit_classic(
-            bundle, n_jobs=1, holdout_identities=identities, pre_materialization_holdout_summary={"rows_removed": 2}
-        )
+    with monkeypatch.context() as patch:
+        patch.setattr(classic, "_build_classic_classifier", no_classifier)
+        with pytest.raises(ValueError, match="Materialized training rows overlap"):
+            classic.fit_classic(
+                bundle, n_jobs=1, holdout_identities=identities, pre_materialization_holdout_summary={"rows_removed": 2}
+            )
 
-
-def test_real_fit_retains_early_exclusion_counts(tmp_path: Path) -> None:
-    bundle = write_classic_tiny_bundle(tmp_path / "bundle")
-    identities = classic.read_classic_holdout_identities(bundle)
-    rows = pd.read_csv(bundle.root / "train.csv.gz")
     rows, early = classic._apply_classic_train_holdout_filter(
         rows,
         holdout_query_group_ids=set(identities.query_group_ids),

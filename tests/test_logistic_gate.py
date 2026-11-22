@@ -23,17 +23,6 @@ def test_load_logistic_gate_config_rejects_unknown_model_type() -> None:
         load_logistic_gate_config({"model_type": "unknown"})
 
 
-def test_logistic_gate_config_rejects_feature_outside_runtime_safe_universe() -> None:
-    with pytest.raises(ValueError, match="unsupported runtime features.*top_raw_unwired_source"):
-        logistic_gate_config(
-            feature_names=("top_raw_unwired_source",),
-            weights=np.zeros((1, 3), dtype=np.float64),
-            bias=np.zeros(3, dtype=np.float64),
-            missing_values=np.zeros(1, dtype=np.float64),
-            calibration_mode="test",
-        )
-
-
 def test_load_logistic_gate_config_rejects_feature_outside_runtime_safe_universe() -> None:
     config = logistic_gate_config(
         feature_names=("chosen_probability",),
@@ -327,27 +316,20 @@ def _per_query_probability_feature(name: str, probs: np.ndarray) -> float:
     return simple[name]
 
 
-@pytest.mark.parametrize("seed", range(5))
-def test_build_logistic_gate_matrix_matches_per_query_definitions(seed: int) -> None:
+def test_build_logistic_gate_matrix_matches_per_query_definitions() -> None:
     """Grouped NumPy reductions must equal the per-query definitions bit for bit.
 
     Source x has missing values and takes the per-source path. Sources y and z have none and are
     reduced together, which needs contiguous rows to keep NumPy's pairwise sums.
     """
-    rng = np.random.default_rng(seed)
-    lengths = rng.integers(1, 40, size=30)
-    lengths[:3] = [1, 2, 3]
-    if seed == 4:
-        # Many queries share each length, and one length has a single query.
-        lengths = np.concatenate([rng.choice([9, 17], size=300), [5]])
+    rng = np.random.default_rng(0)
+    lengths = [1, 2, 3, 5, 9, 9, 9, 17, 17, 17]
     query_indices = np.repeat(np.arange(len(lengths)), lengths)
     rng.shuffle(query_indices)
     row_count = len(query_indices)
     probabilities = rng.random(row_count)
-    if seed == 1:
-        probabilities = rng.choice([0.0, -0.0, 0.25, 0.5, 0.75, 1.0], size=row_count)
-    if seed == 2:
-        probabilities[rng.random(row_count) < 0.1] = np.nan
+    probabilities[query_indices == 0] = 0.0
+    probabilities[query_indices == 2] = [0.5, 0.5, -0.0]
     values = {}
     for source, specials in (
         ("x", [0.0, -0.0, np.nan, np.inf, -np.inf, 5e-324]),

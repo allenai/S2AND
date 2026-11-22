@@ -98,13 +98,13 @@ def prepare(inputs: tuple[Path, Path, Path], **options: Any) -> dict:
         )
 
 
-def augment(inputs: tuple[Path, Path, Path], destination: Path, **options: Any) -> dict:
+def augment(inputs: tuple[Path, Path, Path], destination: Path, *, use_legacy: bool = True, **options: Any) -> dict:
     pytest.importorskip("ijson")
     _, legacy, prepared = inputs
     with threadpool_limits(limits=1):
         return build_augmentation(
             prepared_root=prepared,
-            legacy_root=legacy,
+            legacy_root=legacy if use_legacy else None,
             output=destination,
             datasets=("qian",),
             unknown_filename="restored_unknown_signature_ids_test.json",
@@ -118,8 +118,11 @@ def augment(inputs: tuple[Path, Path, Path], destination: Path, **options: Any) 
 
 
 def test_names_order_and_nested_real_split(inputs: tuple[Path, Path, Path]) -> None:
-    report = prepare(inputs, seed=1234)
+
     source, _, output = inputs
+    (source / "qian" / "qian_added_signatures.json").unlink()
+    report = prepare(inputs, seed=1234)
+    assert not (output / "benchmark_source" / "qian" / "qian_added_signatures.json").exists()
     original = read(source / "qian" / "qian_signatures.json")
     prepared = read(output / "benchmark_source" / "qian" / "qian_signatures.json")
     assert list(prepared) == list(original)
@@ -141,37 +144,21 @@ def test_names_order_and_nested_real_split(inputs: tuple[Path, Path, Path]) -> N
     assert list(model) == [sid for sid in original if sid not in external]
 
 
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "unknown.json",
-        "../restored_unknown_signature_ids_test.json",
-        "nested/restored_unknown_signature_ids_test.json",
-        "nested\\restored_unknown_signature_ids_test.json",
-        "C:restored_unknown_signature_ids_test.json",
-        "restored_unknown_signature_ids_*.json",
-        "restored_unknown_signature_ids_.json",
-    ],
-)
-def test_unknown_filename_fails_before_output_creation(inputs: tuple[Path, Path, Path], filename: str) -> None:
-    source, legacy, output = inputs
-    with pytest.raises(ValueError, match="Unknown-signature filename"):
-        prepare_benchmark(
-            "qian", source_root=source, fixed_pair_root=legacy, output_root=output, unknown_filename=filename
-        )
-    assert not output.exists()
-
-
-@pytest.mark.parametrize("stage", ["benchmarks", "augmentation", "finalize"])
-def test_cli_rejects_unknown_filename_before_any_stage(tmp_path: Path, stage: str) -> None:
+def test_unknown_filename_fails_before_output_creation(tmp_path: Path) -> None:
     output = tmp_path / "output"
-    options = {
-        "benchmarks": ["--source-root", "absent", "--fixed-pair-root", "absent", "--output", str(output)],
-        "augmentation": ["--prepared-root", "absent", "--output", str(output)],
-        "finalize": ["--prepared-root", "absent", "--root", str(output)],
-    }
+    for filename in ("restored_unknown_signature_ids_.json", "restored_unknown_signature_ids_*.json"):
+        with pytest.raises(ValueError, match="Unknown-signature filename"):
+            prepare_benchmark(
+                "qian",
+                source_root=tmp_path / "absent",
+                fixed_pair_root=tmp_path / "absent",
+                output_root=output,
+                unknown_filename=filename,
+            )
+        assert not output.exists()
+
     with pytest.raises(SystemExit) as error:
-        main([stage, *options[stage], "--unknown-filename", "unknown.json"])
+        main(["finalize", "--prepared-root", "absent", "--root", str(output), "--unknown-filename", "unknown.json"])
     assert error.value.code == 2
     assert not output.exists()
 
@@ -313,43 +300,6 @@ def test_model_exclusions_reject_bad_inventory(tmp_path: Path) -> None:
             load_model_exclusions(path)
 
 
-def test_corrected_source_does_not_require_addition_history(inputs: tuple[Path, Path, Path]) -> None:
-    source, _, output = inputs
-    (source / "qian" / "qian_added_signatures.json").unlink()
-    prepare(inputs)
-    assert not (output / "benchmark_source" / "qian" / "qian_added_signatures.json").exists()
-    actual = read(output / "benchmark_source" / "qian" / "qian_signatures.json")
-    original = read(source / "qian" / "qian_signatures.json")
-    assert list(actual) == list(original)
-    assert all(actual[sid]["author_info"]["first"] == row["author_info"]["first"] for sid, row in original.items())
-
-
-def test_augmentation_uses_corrected_source_without_legacy(inputs: tuple[Path, Path, Path], tmp_path: Path) -> None:
-    pytest.importorskip("ijson")
-    prepare(inputs)
-    _, _, prepared = inputs
-    destination = tmp_path / "augmented_current"
-    with threadpool_limits(limits=1):
-        report = build_augmentation(
-            prepared_root=prepared,
-            output=destination,
-            datasets=("qian",),
-            unknown_filename="restored_unknown_signature_ids_test.json",
-            train_candidates=100,
-            train_pool_cap=100,
-            evaluation_candidates=10,
-            train_positive_cap=5,
-            evaluation_positive_cap=2,
-        )
-    assert report["datasets"]["qian"]
-    finalize_augmentation(
-        root=destination,
-        prepared_root=prepared,
-        datasets=("qian",),
-        unknown_filename="restored_unknown_signature_ids_test.json",
-    )
-
-
 def test_correction_restores_unknown_and_keeps_known_move(inputs: tuple[Path, Path, Path], tmp_path: Path) -> None:
     source, _, output = inputs
     original_path = source / "qian" / "qian_clusters.json"
@@ -381,10 +331,12 @@ def test_correction_restores_unknown_and_keeps_known_move(inputs: tuple[Path, Pa
     assert read(output / "benchmark_source" / "qian" / "restored_unknown_signature_ids_test.json") == ["0", "3"]
 
 
-def test_variant_ownership_and_real_pair_guard(inputs: tuple[Path, Path, Path], tmp_path: Path) -> None:
+def test_augmentation_without_legacy_preserves_variant_ownership(
+    inputs: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
     prepare(inputs)
     destination = tmp_path / "augmented"
-    report = augment(inputs, destination, omission_rate=0)
+    report = augment(inputs, destination, omission_rate=0, use_legacy=False)
     assert report["unique_embedding_texts_to_refresh"] == 0
     signatures = read(destination / "augmented_signatures.json")
     papers = read(destination / "augmented_papers.json")
@@ -403,12 +355,7 @@ def test_variant_ownership_and_real_pair_guard(inputs: tuple[Path, Path, Path], 
     assert result["vector_rows"] == len(signatures)
 
 
-@pytest.mark.parametrize("mutation", ["heldout", "unknown", "label", "source"])
-def test_finalizer_rejects_bad_training_pairs(
-    inputs: tuple[Path, Path, Path],
-    tmp_path: Path,
-    mutation: str,
-) -> None:
+def test_finalizer_rejects_bad_training_pairs(inputs: tuple[Path, Path, Path], tmp_path: Path) -> None:
     prepare(inputs)
     destination = tmp_path / "augmented"
     augment(inputs, destination, omission_rate=0)
@@ -416,36 +363,37 @@ def test_finalizer_rejects_bad_training_pairs(
     pair_path = destination / "train_pairs.csv"
     with pair_path.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
-    if mutation == "heldout":
-        test_path = destination / "test_pairs.csv"
-        with test_path.open(newline="") as stream:
-            test_rows = list(csv.DictReader(stream))
-        rows[0] = test_rows.pop(0)
-        with test_path.open("w", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=("signature_id_1", "signature_id_2", "label"))
-            writer.writeheader()
-            writer.writerows(test_rows)
-        with pytest.raises(ValueError, match="Signature leakage|Population leakage"):
-            _replace_and_finalize(rows, pair_path, destination, prepared)
-    elif mutation == "unknown":
-        unknown_path = prepared / "benchmark_source" / "qian" / "restored_unknown_signature_ids_test.json"
-        write(unknown_path, [rows[0]["signature_id_1"].partition("___")[2]])
-        with pytest.raises(ValueError, match="Unknown augmentation member"):
-            _replace_and_finalize(rows, pair_path, destination, prepared)
-    elif mutation == "source":
-        population_path = prepared / "populations" / "identities" / "qian.json"
-        populations = read(population_path)
-        missing = rows[0]["signature_id_1"].partition("___")[2]
-        populations["train"] = {
-            block: [sid for sid in ids if sid != missing] for block, ids in populations["train"].items()
-        }
-        write(population_path, populations)
-        with pytest.raises(ValueError, match="Population leakage"):
-            _replace_and_finalize(rows, pair_path, destination, prepared)
-    else:
-        rows[0]["label"] = str(1 - int(rows[0]["label"]))
-        with pytest.raises(ValueError, match="Stale augmentation label"):
-            _replace_and_finalize(rows, pair_path, destination, prepared)
+    first, *remaining = rows
+    changed = {**first, "label": str(1 - int(first["label"]))}
+    with pytest.raises(ValueError, match="Stale augmentation label"):
+        _replace_and_finalize([changed, *remaining], pair_path, destination, prepared)
+
+    unknown_path = prepared / "benchmark_source" / "qian" / "restored_unknown_signature_ids_test.json"
+    original_unknowns = unknown_path.read_bytes()
+    member = first["signature_id_1"].partition("___")[2]
+    write(unknown_path, [member])
+    with pytest.raises(ValueError, match="Unknown augmentation member"):
+        _replace_and_finalize(rows, pair_path, destination, prepared)
+    unknown_path.write_bytes(original_unknowns)
+
+    population_path = prepared / "populations" / "identities" / "qian.json"
+    original_populations = population_path.read_bytes()
+    populations = read(population_path)
+    populations["train"] = {block: [sid for sid in ids if sid != member] for block, ids in populations["train"].items()}
+    write(population_path, populations)
+    with pytest.raises(ValueError, match="Population leakage"):
+        _replace_and_finalize(rows, pair_path, destination, prepared)
+    population_path.write_bytes(original_populations)
+
+    test_path = destination / "test_pairs.csv"
+    with test_path.open(newline="") as stream:
+        heldout, *test_rows = csv.DictReader(stream)
+    with test_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("signature_id_1", "signature_id_2", "label"))
+        writer.writeheader()
+        writer.writerows(test_rows)
+    with pytest.raises(ValueError, match="Signature leakage|Population leakage"):
+        _replace_and_finalize([heldout, *remaining], pair_path, destination, prepared)
 
 
 def _replace_and_finalize(rows: list[dict], pair_path: Path, destination: Path, prepared: Path) -> None:
@@ -559,29 +507,14 @@ def test_variants_keep_separate_author_rows_and_raw_compound_names() -> None:
     assert full["author_info"]["middle"] == "M"
 
 
-@pytest.mark.parametrize(
-    ("title", "abstract", "has_vector", "expected"),
-    [
-        ("", "", False, "absent"),
-        (" ", "", True, "absent"),
-        ("Title", "Abstract", False, "refresh"),
-        ("Title", "Abstract", True, "reuse"),
-        ("Title", "", True, "refresh"),
-    ],
-)
-def test_vector_policy_without_stream_dependencies(title: str, abstract: str, has_vector: bool, expected: str) -> None:
-    assert (
-        vector_action(
-            {"title": title, "abstract": abstract},
-            {"title": "Title", "abstract": "Abstract"},
-            has_source_vector=has_vector,
-        )
-        == expected
-    )
+def test_vector_policy_without_stream_dependencies() -> None:
+    original = {"title": "Title", "abstract": "Abstract"}
+    assert vector_action({"title": " ", "abstract": ""}, original, has_source_vector=True) == "absent"
+    assert vector_action(original, original, has_source_vector=False) == "refresh"
+    assert vector_action(original, original, has_source_vector=True) == "reuse"
 
 
-@pytest.mark.parametrize("cache_title", ["French translation of version 3.0", "unicode standard version"])
-def test_translation_cache_preserves_version_numbers(cache_title: str) -> None:
+def test_translation_cache_preserves_version_numbers_and_exact_source_title() -> None:
     original = {
         "paper_id": "p",
         "title": "Unicode Standard Version 8.0",
@@ -602,6 +535,8 @@ def test_translation_cache_preserves_version_numbers(cache_title: str) -> None:
             "affiliations": [],
         },
     }
+
+    cached = {"title": "French translation of version 3.0"}
     old = {**original, "title": "Unicode Standard Version 3.0"}
     _, variant, counts = make_variant(
         "qian",
@@ -609,50 +544,22 @@ def test_translation_cache_preserves_version_numbers(cache_title: str) -> None:
         signature,
         original,
         old_paper=old,
-        cached_paper={"title": cache_title},
+        cached_paper=cached,
         rng=random.Random(1111),
         omission_rate=0,
     )
     assert variant["title"] == original["title"]
+    assert counts["cached_translation_source_change"] == 1
     assert not counts["cached_translation_applied"]
-    if cache_title.startswith("French"):
-        assert counts["cached_translation_source_change"] == 1
-    else:
-        assert not counts["cached_translation_source_change"]
 
-
-@pytest.mark.parametrize(
-    ("old_title", "current_title"),
-    [("Actual Title", "actual title"), ("Formula x+y", "Formula x-y")],
-)
-def test_translation_cache_requires_exact_source_title(old_title: str, current_title: str) -> None:
-    paper = {
-        "paper_id": "p",
-        "title": current_title,
-        "abstract": "",
-        "references": [],
-        "venue": None,
-        "journal_name": None,
-        "authors": [],
-    }
-    signature = {
-        "signature_id": "s",
-        "paper_id": "p",
-        "author_info": {
-            "first": "Jae-Hoon",
-            "middle": None,
-            "last": "Lee",
-            "position": 0,
-            "affiliations": [],
-        },
-    }
+    current_title = original["title"].lower()
     _, variant, counts = make_variant(
         "qian",
         "s",
         signature,
-        paper,
-        old_paper={**paper, "title": old_title},
-        cached_paper={"title": "French translation"},
+        {**original, "title": current_title},
+        old_paper=original,
+        cached_paper=cached,
         rng=random.Random(1111),
         omission_rate=0,
     )

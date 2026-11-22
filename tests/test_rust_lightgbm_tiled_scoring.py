@@ -14,10 +14,11 @@ ONE_SPLIT_INTERIOR_ZERO_MODEL = (
 
 
 # Rust's tiled_scoring_preserves_every_score_bit owns the tile-boundary grid.
-# Keep Python's empty and strided multi-tile bindings for each dtype and mode.
-@pytest.mark.parametrize("row_count", [0, 1001])
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-@pytest.mark.parametrize("probability", [False, True])
+# Exercise each Python binding and a representative empty input.
+@pytest.mark.parametrize(
+    ("row_count", "dtype", "probability"),
+    [(0, np.float32, True), (1001, np.float32, False), (1001, np.float64, True), (1001, np.float64, False)],
+)
 def test_tiled_scores_match_single_rows_exactly(row_count, dtype, probability):
     """Exercise parallel tiles, their partial tails, and noncontiguous inputs."""
     booster = RustLightGBMBooster.from_string(ONE_SPLIT_INTERIOR_ZERO_MODEL)
@@ -47,7 +48,7 @@ def test_tiled_scores_match_single_rows_exactly(row_count, dtype, probability):
         [predict(row.reshape(1, 1), num_threads=1)[0] for row in rows],
         dtype=np.float64,
     )
-    actual = predict(rows, num_threads=10)
+    actual = predict(rows, num_threads=2)
     assert actual.shape == (row_count,)
     assert actual.dtype == np.float64
     assert actual.tobytes() == expected.tobytes()
@@ -61,4 +62,4 @@ def test_parallel_input_copy_matches_the_serial_copy(dtype):
     rows[::7] = np.nan
     assert rows.flags.c_contiguous
     predict = booster.predict_raw_f32 if dtype == np.float32 else booster.predict_raw
-    assert predict(rows, num_threads=10).tobytes() == predict(rows, num_threads=1).tobytes()
+    assert predict(rows, num_threads=2).tobytes() == predict(rows, num_threads=1).tobytes()

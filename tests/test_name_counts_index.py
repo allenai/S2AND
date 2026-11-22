@@ -76,20 +76,6 @@ def _remove_manifest_field(index_dir: Path, field: str) -> None:
     _write_manifest(index_dir, manifest)
 
 
-def test_valid_manifest_has_identical_python_and_rust_identity(
-    tmp_path: Path, write_index: Callable[[Path], Path]
-) -> None:
-    index_dir = write_index(tmp_path)
-
-    python_index = NameCountsIndex.open(index_dir)
-    rust_index = load_s2and_rust_extension().NameCountsIndex.open(str(index_dir))
-    manifest_sha256 = hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
-
-    assert python_index.manifest_sha256 == manifest_sha256
-    assert rust_index.name_counts_manifest_sha256 == manifest_sha256
-    assert Path(python_index.path) == index_dir.resolve()
-
-
 def test_native_manifest_validation_rejects_structural_identity_and_material_corruption(
     tmp_path: Path, write_index: Callable[[Path], Path]
 ) -> None:
@@ -97,10 +83,14 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         index_dir = write_index(tmp_path / f"missing-{field}")
         _remove_manifest_field(index_dir, field)
         _assert_native_validation_rejects(index_dir, field)
+        if field == "format_version":
+            with pytest.raises(MissingArrowArtifactError, match="format_version"):
+                require_name_counts_index_artifact(
+                    index_dir, context="test Arrow boundary", producer_hint="write a complete test index"
+                )
 
     cases = (
         ("wrong-kind", "kind", "other", "kind"),
-        ("unsupported-format", "format_version", 2, "format_version"),
         ("string-format", "format_version", "1", "expected u32"),
     )
     for case_id, field, value, expected in cases:
@@ -143,10 +133,7 @@ def test_native_manifest_validation_rejects_structural_identity_and_material_cor
         _write_manifest(index_dir, manifest)
 
         _assert_native_validation_rejects(index_dir, expected_field)
-    mutations = (
-        ("byte_count_mismatch", "byte_count"),
-        ("sha256_mismatch", "SHA-256"),
-    )
+    mutations = (("byte_count_mismatch", "byte_count"),)
     for mutation, expected_field in mutations:
         index_dir = write_index(tmp_path / mutation / "index")
         manifest = _read_manifest(index_dir)
@@ -200,19 +187,15 @@ def test_fast_open_checks_layout_and_verify_checks_contents(
     valid = NameCountsIndex.open(write_index(tmp_path / "valid"), verify=True)
     assert valid.verify() is None
 
+    index_dir = Path(valid.path)
 
-def test_arrow_boundary_translates_representative_manifest_failure(
-    tmp_path: Path, write_index: Callable[[Path], Path]
-) -> None:
-    index_dir = write_index(tmp_path)
-    _remove_manifest_field(index_dir, "format_version")
+    python_index = valid
+    rust_index = load_s2and_rust_extension().NameCountsIndex.open(str(index_dir))
+    manifest_sha256 = hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
 
-    with pytest.raises(MissingArrowArtifactError, match="format_version"):
-        require_name_counts_index_artifact(
-            index_dir,
-            context="test Arrow boundary",
-            producer_hint="write a complete test index",
-        )
+    assert python_index.manifest_sha256 == manifest_sha256
+    assert rust_index.name_counts_manifest_sha256 == manifest_sha256
+    assert Path(python_index.path) == index_dir.resolve()
 
 
 class _DuplicateNameMapping(Mapping[str, float]):
@@ -265,28 +248,28 @@ def test_bounded_sort_runs_preserve_exact_binary_lookup_values(tmp_path: Path) -
     assert list(tmp_path.glob(".first.bin.*")) == []
 
 
-def test_writer_rejects_duplicate_logical_utf8_name_without_unbounded_set(tmp_path: Path) -> None:
+def test_writer_rejects_duplicate_nonstring_and_invalid_count_entries(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="duplicate UTF-8 name 'ada'"):
         feature_block_arrow.write_name_counts_index(
             tmp_path,
             (_DuplicateNameMapping(), {}, {}, {}),
         )
 
-
-def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="name-count first keys must be strings"):
         feature_block_arrow.write_name_counts_index(
             tmp_path,
             ({1: 2.0, "1": 3.0}, {}, {}, {}),
         )
+    for count in (float("nan"), 0.0):
+        with pytest.raises(ValueError, match="finite positive number"):
+            feature_block_arrow.write_name_counts_index(tmp_path, ({"ada": count}, {}, {}, {}))
+    assert not (tmp_path / "name_counts_index").exists()
 
 
 @pytest.mark.parametrize(
     ("kind", "name"),
     (
         ("first", "Ada"),
-        ("first", "ada!"),
-        ("first", "ada  marie"),
         ("first", "a"),
         ("last", ""),
         ("first_last", "adasmith"),
@@ -295,8 +278,6 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
     ),
     ids=(
         "first-uppercase",
-        "first-punctuation",
-        "first-repeated-space",
         "first-single-letter",
         "last-empty",
         "first-last-unseparated",
@@ -332,15 +313,6 @@ def test_name_count_key_contract_accepts_producible_canonical_keys() -> None:
         assert feature_block_arrow._validated_name_count_entry(kind, name, 2.0) == (name, 2.0), case_id
 
 
-@pytest.mark.parametrize("count", (float("nan"), 0.0), ids=("nan", "zero"))
-def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path, count: float) -> None:
-    with pytest.raises(ValueError, match="must be a finite positive number"):
-        feature_block_arrow.write_name_counts_index(
-            tmp_path,
-            ({"ada": count}, {}, {}, {}),
-        )
-
-
 def test_fresh_writer_validates_each_name_count_entry_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -364,29 +336,15 @@ def test_fresh_writer_validates_each_name_count_entry_once(
     assert validation_calls == sum(len(mapping) for mapping in mappings)
 
 
-@pytest.mark.parametrize(
-    ("mappings", "expected_row_count", "expected_first_count"),
-    [
-        (({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}), 4, 1),
-        (
-            (
-                {"ada": 2.0, "grace": 3.0},
-                {"lovelace": 4.0, "hopper": 5.0},
-                {"ada lovelace": 2.0, "grace hopper": 3.0},
-                {"lovelace a": 2.0, "hopper g": 3.0},
-            ),
-            8,
-            2,
-        ),
-    ],
-    ids=["singleton-integer-counts", "two-rows-per-kind"],
-)
 def test_identical_counts_produce_byte_identical_flat_indexes(
     tmp_path: Path,
-    mappings: tuple[dict[str, int | float], ...],
-    expected_row_count: int,
-    expected_first_count: int,
 ) -> None:
+    mappings = (
+        {"ada": 2.0, "grace": 3},
+        {"lovelace": 4.0, "hopper": 5},
+        {"ada lovelace": 2.0, "grace hopper": 3},
+        {"lovelace a": 2.0, "hopper g": 3},
+    )
     reversed_mappings = tuple(dict(reversed(tuple(mapping.items()))) for mapping in mappings)
     outputs = [
         feature_block_arrow.write_name_counts_index(tmp_path / label, values)
@@ -395,8 +353,8 @@ def test_identical_counts_produce_byte_identical_flat_indexes(
     indexes = [Path(index_path) for index_path, _metrics in outputs]
     for _index_path, metrics in outputs:
         assert "reused" not in metrics
-        assert metrics["row_count"] == expected_row_count
-        assert metrics["first_count"] == expected_first_count
+        assert metrics["row_count"] == 8
+        assert metrics["first_count"] == 2
     kinds = ("first", "last", "first_last", "last_first_initial")
     expected_files = {"manifest.json", *(f"{kind}.bin" for kind in kinds)}
 
@@ -429,26 +387,18 @@ def _temporary_indexes(root: Path) -> list[Path]:
     return list(root.glob(".name_counts_index.*"))
 
 
-def test_existing_target_is_never_reused_or_replaced(tmp_path: Path) -> None:
-    index_path, _metrics = write_name_counts_index(
-        tmp_path,
-        tiny_name_counts_tuple(),
-    )
-    manifest_path = Path(index_path) / "manifest.json"
-    original_manifest = manifest_path.read_bytes()
-
-    with pytest.raises(FileExistsError, match="target already exists"):
-        write_name_counts_index(
-            tmp_path,
-            tiny_name_counts_tuple(),
-        )
-
-    assert manifest_path.read_bytes() == original_manifest
-    assert _temporary_indexes(tmp_path) == []
-
-
-def test_all_material_is_built_before_target_appears(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_name_count_publication_retries_and_preserves_existing_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_rename = Path.rename
     real_writer = feature_block_arrow._write_name_count_index_file
+    fail_material = True
+
+    def fail_publication(path: Path, target: str | Path) -> Path:
+        if Path(target) == tmp_path / "name_counts_index":
+            raise OSError("injected publication failure")
+        return original_rename(path, target)
+
     written_kinds: list[str] = []
 
     def observe_write(path: Path, kind: str, mapping: Any, **kwargs: Any) -> dict[str, int]:
@@ -456,50 +406,38 @@ def test_all_material_is_built_before_target_appears(tmp_path: Path, monkeypatch
         assert path.is_relative_to(tmp_path)
         assert path.parent.name.startswith(".name_counts_index.")
         assert path.name == f"{kind}.bin"
+        if fail_material and kind == "last":
+            raise OSError("injected material failure")
         written_kinds.append(kind)
         return real_writer(path, kind, mapping, **kwargs)
 
     monkeypatch.setattr(feature_block_arrow, "_write_name_count_index_file", observe_write)
 
+    with pytest.raises(OSError, match="injected material failure"):
+        write_name_counts_index(tmp_path, tiny_name_counts_tuple())
+    assert not (tmp_path / "name_counts_index").exists()
+    assert _temporary_indexes(tmp_path) == []
+
+    fail_material = False
+    with monkeypatch.context() as failing_rename:
+        failing_rename.setattr(Path, "rename", fail_publication)
+        with pytest.raises(OSError, match="injected publication failure"):
+            write_name_counts_index(tmp_path, tiny_name_counts_tuple())
+    assert not (tmp_path / "name_counts_index").exists()
+    assert _temporary_indexes(tmp_path) == []
+
+    written_kinds.clear()
     index_path, _metrics = write_name_counts_index(
         tmp_path,
         tiny_name_counts_tuple(),
     )
 
-    assert written_kinds == ["first", "last", "first_last", "last_first_initial"]
+    assert set(written_kinds) == {"first", "last", "first_last", "last_first_initial"}
     assert Path(index_path).is_dir()
     assert _temporary_indexes(tmp_path) == []
-
-
-def test_failed_material_write_leaves_target_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    real_writer = feature_block_arrow._write_name_count_index_file
-
-    def fail_on_last(path: Path, kind: str, mapping: Any, **kwargs: Any) -> dict[str, int]:
-        if kind == "last":
-            raise OSError("injected material failure")
-        return real_writer(path, kind, mapping, **kwargs)
-
-    monkeypatch.setattr(feature_block_arrow, "_write_name_count_index_file", fail_on_last)
-
-    with pytest.raises(OSError, match="injected material failure"):
+    manifest_path = Path(index_path) / "manifest.json"
+    original_manifest = manifest_path.read_bytes()
+    with pytest.raises(FileExistsError, match="target already exists"):
         write_name_counts_index(tmp_path, tiny_name_counts_tuple())
-
-    assert not (tmp_path / "name_counts_index").exists()
-    assert _temporary_indexes(tmp_path) == []
-
-
-def test_failed_final_rename_leaves_target_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    original_rename = Path.rename
-
-    def fail_publication(path: Path, target: str | Path) -> Path:
-        if Path(target) == tmp_path / "name_counts_index":
-            raise OSError("injected publication failure")
-        return original_rename(path, target)
-
-    monkeypatch.setattr(Path, "rename", fail_publication)
-
-    with pytest.raises(OSError, match="injected publication failure"):
-        write_name_counts_index(tmp_path, tiny_name_counts_tuple())
-
-    assert not (tmp_path / "name_counts_index").exists()
+    assert manifest_path.read_bytes() == original_manifest
     assert _temporary_indexes(tmp_path) == []

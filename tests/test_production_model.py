@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import pickle
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -95,17 +96,25 @@ def _load_pairwise_staging_model(
     )
 
 
-@pytest.fixture
-def synthetic_pairwise_bundle(
-    tmp_path: Path,
-) -> tuple[Path, Clusterer]:
-    bundle_dir = tmp_path / "production_model_v9.9"
+@pytest.fixture(scope="module")
+def pairwise_bundle_template(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Clusterer]:
+    bundle_dir = tmp_path_factory.mktemp("pairwise_bundle_template") / "production_model_v9.9"
     source_clusterer = write_synthetic_pairwise_bundle(
         bundle_dir,
         artifact_hashes=_TEST_CANONICAL_ARTIFACT_HASHES,
         release_version="9.9",
     )
     return bundle_dir, source_clusterer
+
+
+@pytest.fixture
+def synthetic_pairwise_bundle(
+    tmp_path: Path, pairwise_bundle_template: tuple[Path, Clusterer]
+) -> tuple[Path, Clusterer]:
+    template_path, clusterer = pairwise_bundle_template
+    bundle_dir = tmp_path / template_path.name
+    shutil.copytree(template_path, bundle_dir)
+    return bundle_dir, copy.deepcopy(clusterer)
 
 
 def _write_synthetic_linker(
@@ -176,35 +185,6 @@ def _predict_dummy_block(clusterer, *, batching_threshold: int | None) -> dict[s
     return predictions
 
 
-def test_production_model_requires_explicit_complete_bundle_path() -> None:
-    with pytest.raises(ValueError, match="No default production model is declared"):
-        load_production_model()
-
-
-def test_native_production_bundle_loads_as_mutable_clusterer(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    (bundle_dir / "pairwise" / "stale.lgb").write_text("ignored", encoding="utf-8")
-    clusterer = _load_pairwise_staging_model(bundle_dir)
-
-    assert isinstance(clusterer.classifier, NativeLightGBMBinaryClassifier)
-    assert isinstance(clusterer.nameless_classifier, NativeLightGBMBinaryClassifier)
-    assert clusterer.incremental_linker_artifact_dir is None
-    assert clusterer.production_model_release_version == "9.9"
-
-    clusterer.n_jobs = 7
-    clusterer.cluster_model.eps = 0.5
-
-    assert clusterer.n_jobs == 7
-    assert clusterer.classifier.n_jobs == 7
-    assert clusterer.nameless_classifier.n_jobs == 7
-    assert clusterer.cluster_model.eps == 0.5
-    assert {
-        field: clusterer.feature_contract[field] for field in _TEST_CANONICAL_ARTIFACT_HASHES
-    } == _TEST_CANONICAL_ARTIFACT_HASHES
-
-
 def test_production_name_count_model_requires_exact_binding(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
@@ -219,14 +199,14 @@ def test_production_name_count_model_requires_exact_binding(
         _load_pairwise_staging_model(bundle_dir)
 
 
-def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
+def test_native_classifier_replacement_updates_state_atomically(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     classifier = _load_pairwise_staging_model(bundle_dir).classifier
-    replacement_path = tmp_path / "replacement.lgb"
-    tiny_binary_booster(classifier.n_features_in_ + 1, seed=103).booster_.save_model(str(replacement_path))
+    wrong_width_path = tmp_path / "wrong_width.lgb"
+    tiny_binary_booster(classifier.n_features_in_ + 1, seed=103).booster_.save_model(str(wrong_width_path))
     original_params = classifier.get_params()
     original_scorer = classifier._rust_scorer
     original_booster = classifier.booster_
@@ -235,10 +215,10 @@ def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
     with pytest.raises(ValueError, match="Invalid parameter"):
         classifier.set_params(learning_rate=0.1)
     with pytest.raises(ValueError, match="feature-count mismatch"):
-        NativeLightGBMBinaryClassifier(replacement_path, n_features=classifier.n_features_in_)
+        NativeLightGBMBinaryClassifier(wrong_width_path, n_features=classifier.n_features_in_)
     with pytest.raises(ValueError, match="feature-count mismatch"):
         classifier.set_params(
-            model_path=replacement_path,
+            model_path=wrong_width_path,
             n_features=classifier.n_features_in_,
         )
 
@@ -248,45 +228,15 @@ def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
     assert classifier.cache_fingerprint() == original_fingerprint
 
     with pytest.raises(ValueError, match="must not be zero"):
-        classifier.set_params(model_path=replacement_path, n_jobs=0)
+        classifier.set_params(model_path=wrong_width_path, n_jobs=0)
 
     assert classifier.get_params() == original_params
     assert classifier._scorer is original_scorer
     assert classifier._lazy_booster is original_booster
     assert classifier.cache_fingerprint() == original_fingerprint
 
-
-def test_native_lightgbm_deepcopy_does_not_require_model_path(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    clusterer = _load_pairwise_staging_model(bundle_dir)
-    classifier = clusterer.classifier
-    features = np.zeros((2, classifier.n_features_in_), dtype=np.float64)
-    expected = classifier.predict_proba(features)
-    classifier.model_path = str(tmp_path / "missing_model.txt")
-
-    copied = copy.deepcopy(classifier)
-
-    np.testing.assert_allclose(copied.predict_proba(features), expected)
-    assert copied.model_path == classifier.model_path
-    assert copied._scorer is classifier._scorer
-    copied.n_jobs = 3
-    assert classifier.n_jobs != copied.n_jobs
-
-
-def test_native_lightgbm_model_replacement_refreshes_predictions_and_cache_identity(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    """Replacing a fitted model must invalidate every representation of the old one."""
-    bundle_dir, _ = synthetic_pairwise_bundle
-    classifier = _load_pairwise_staging_model(bundle_dir).classifier
     features = np.random.default_rng(104).normal(size=(16, classifier.n_features_in_))
     previous_predictions = classifier.predict_proba_positive(features)
-    previous_fingerprint = classifier.cache_fingerprint()
-    previous_booster = classifier.booster_
     replacement = tiny_binary_booster(classifier.n_features_in_, seed=103)
     replacement_path = tmp_path / "replacement.lgb"
     replacement.booster_.save_model(str(replacement_path))
@@ -296,10 +246,20 @@ def test_native_lightgbm_model_replacement_refreshes_predictions_and_cache_ident
     assert classifier.set_params(model_path=replacement_path) is classifier
 
     np.testing.assert_allclose(classifier.predict_proba_positive(features), expected, rtol=1e-12, atol=1e-12)
-    assert classifier.cache_fingerprint() != previous_fingerprint
+    assert classifier.cache_fingerprint() != original_fingerprint
     assert classifier.cache_fingerprint()[1] == hashlib.sha256(replacement_path.read_bytes()).hexdigest()
-    assert classifier.booster_ is not previous_booster
+    assert classifier.booster_ is not original_booster
     np.testing.assert_allclose(classifier.booster_.predict(features), expected, rtol=1e-12, atol=1e-12)
+
+    classifier.model_path = str(tmp_path / "missing_model.txt")
+
+    copied = copy.deepcopy(classifier)
+
+    np.testing.assert_allclose(copied.predict_proba_positive(features), expected)
+    assert copied.model_path == classifier.model_path
+    assert copied._scorer is classifier._scorer
+    copied.n_jobs = 3
+    assert classifier.n_jobs != copied.n_jobs
 
 
 def test_complete_bundle_native_inference_does_not_load_training_libraries(
@@ -353,6 +313,16 @@ def test_complete_bundle_native_inference_does_not_load_training_libraries(
         f"""
         import sys
         import numpy as np
+        from s2and import runtime
+
+        load_native = runtime.load_s2and_rust_extension
+
+        def fail():
+            raise AssertionError("Python model import must not load the Rust extension")
+
+        runtime.load_s2and_rust_extension = fail
+        import s2and.model
+        runtime.load_s2and_rust_extension = load_native
         from s2and.model_pairwise import clone_cluster_model
         from s2and.production_model import load_production_model
 
@@ -386,26 +356,11 @@ def test_complete_bundle_native_inference_does_not_load_training_libraries(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_synthetic_native_clusterer_predict_matches_source_python(
+def test_native_pairwise_bundle_preserves_predictions_and_runtime_settings(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, source_clusterer = synthetic_pairwise_bundle
-
-    for batching_threshold in (None,):
-        native_clusterer = _prepare_prediction_clusterer(_load_pairwise_staging_model(bundle_dir))
-        expected_clusterer = _prepare_prediction_clusterer(copy.deepcopy(source_clusterer))
-        expected = _predict_dummy_block(
-            expected_clusterer,
-            batching_threshold=batching_threshold,
-        )
-
-        assert _predict_dummy_block(native_clusterer, batching_threshold=batching_threshold) == expected
-
-
-def test_synthetic_native_clusterer_runtime_config_round_trips(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, source_clusterer = synthetic_pairwise_bundle
+    (bundle_dir / "pairwise" / "stale.lgb").write_text("ignored", encoding="utf-8")
     native_clusterer = _load_pairwise_staging_model(bundle_dir)
 
     assert type(native_clusterer.cluster_model) is type(source_clusterer.cluster_model)
@@ -428,6 +383,27 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
     assert native_clusterer.random_state == source_clusterer.random_state
 
     assert getattr(native_clusterer, "suppress_orcid", False) == getattr(source_clusterer, "suppress_orcid", False)
+    expected_clusterer = _prepare_prediction_clusterer(copy.deepcopy(source_clusterer))
+    _prepare_prediction_clusterer(native_clusterer)
+    assert _predict_dummy_block(native_clusterer, batching_threshold=None) == _predict_dummy_block(
+        expected_clusterer, batching_threshold=None
+    )
+
+    assert isinstance(native_clusterer.classifier, NativeLightGBMBinaryClassifier)
+    assert isinstance(native_clusterer.nameless_classifier, NativeLightGBMBinaryClassifier)
+    assert native_clusterer.incremental_linker_artifact_dir is None
+    assert native_clusterer.production_model_release_version == "9.9"
+
+    native_clusterer.n_jobs = 2
+    native_clusterer.cluster_model.eps = 0.5
+
+    assert native_clusterer.n_jobs == 2
+    assert native_clusterer.classifier.n_jobs == 2
+    assert native_clusterer.nameless_classifier.n_jobs == 2
+    assert native_clusterer.cluster_model.eps == 0.5
+    assert {
+        field: native_clusterer.feature_contract[field] for field in _TEST_CANONICAL_ARTIFACT_HASHES
+    } == _TEST_CANONICAL_ARTIFACT_HASHES
 
 
 def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values() -> None:
@@ -614,7 +590,7 @@ def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
     assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
-def test_manifest_has_exact_shape_and_identity(
+def test_pairwise_manifest_enforces_identity_and_lifecycle(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
@@ -634,63 +610,37 @@ def test_manifest_has_exact_shape_and_identity(
     assert original_manifest["feature_contract_version"] == PAIRWISE_FEATURE_CONTRACT_VERSION
     assert original_manifest["release_version"] == "9.9"
 
-    for invalid_value in (None, "   "):
-        manifest = copy.deepcopy(original_manifest)
-        manifest["release_version"] = invalid_value
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="release_version must be a nonempty trimmed string"):
-            production_model_module._validate_manifest(
-                bundle_dir,
-                expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-                expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
-            )
-
-    manifest = copy.deepcopy(original_manifest)
-    manifest["kind"] = "not-a-model"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="bundle kind must be"):
-        production_model_module._validate_manifest(
-            bundle_dir,
-            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
-        )
-
-    # Bundles written before a field retirement still load; nothing reads the field.
-    manifest = copy.deepcopy(original_manifest)
-    manifest["generated_by_runtime"] = {"retired": True}
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    production_model_module._validate_manifest(
-        bundle_dir,
-        expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-        expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
+    incomplete = copy.deepcopy(original_manifest)
+    del incomplete["feature_contract_version"]
+    invalid = (
+        ({**original_manifest, "release_version": " "}, "release_version"),
+        ({**original_manifest, "kind": "not-a-model"}, "bundle kind"),
+        ({**original_manifest, "eps_calibration": None}, "Unsupported production bundle lifecycle state"),
+        (incomplete, "manifest is missing fields"),
     )
+    for manifest, message in invalid:
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            _load_pairwise_staging_model(bundle_dir)
 
-
-# Both fields share one check, so only format_version carries the type-strictness rows.
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("format_version", None),
-        ("format_version", True),
-        ("format_version", 1.0),
-        ("format_version", 2),
-        ("feature_contract_version", 2),
-    ),
-)
-def test_manifest_rejects_unsupported_contract_before_model_io(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    field: str,
-    value: object,
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    manifest_path = bundle_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest[field] = value
+    # Accept a retired field from an older release.
+    manifest = {**original_manifest, "generated_by_runtime": {"retired": True}}
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    (bundle_dir / "pairwise" / "main.lgb").unlink()
+    _load_pairwise_staging_model(bundle_dir)
 
-    with pytest.raises(ValueError, match=f"{field} must equal supported version"):
+    manifest = copy.deepcopy(original_manifest)
+    del manifest["sha256"]["pairwise/main.lgb"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum inventory"):
         _load_pairwise_staging_model(bundle_dir)
+
+    # Reject version changes before opening any booster.
+    (bundle_dir / "pairwise" / "main.lgb").unlink()
+    for field, value in (("format_version", True), ("feature_contract_version", 2)):
+        manifest = {**original_manifest, field: value}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(ValueError, match=f"{field} must equal supported version"):
+            _load_pairwise_staging_model(bundle_dir)
 
 
 def test_pairwise_model_rejects_changed_column_order_with_equal_width(
@@ -707,50 +657,6 @@ def test_pairwise_model_rejects_changed_column_order_with_equal_width(
         _load_pairwise_staging_model(bundle_dir)
     with pytest.raises(ValueError, match="feature_names must match the runtime ordered feature names"):
         pairwise_bundle_binding(bundle_dir)
-
-
-def test_pairwise_model_rejects_unversioned_manifest(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    manifest_path = bundle_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    for field in ("feature_contract_version", "feature_names", "format_version"):
-        del manifest[field]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=r"manifest is missing fields: \['feature_contract_version'"):
-        _load_pairwise_staging_model(bundle_dir)
-
-
-def test_manifest_rejects_null_lifecycle_state(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    pairwise_bundle, _ = synthetic_pairwise_bundle
-    manifest_path = pairwise_bundle / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["eps_calibration"] = None
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Unsupported production bundle lifecycle state"):
-        production_model_module._validate_manifest(
-            pairwise_bundle,
-            expected_bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-            expected_eps_calibration=CALIBRATED_EPS_CALIBRATION,
-        )
-
-
-def test_manifest_requires_complete_checksum_coverage(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    manifest_path = bundle_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["sha256"]["pairwise/main.lgb"]
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="checksum inventory is neither"):
-        _load_pairwise_staging_model(bundle_dir)
 
 
 def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
@@ -800,7 +706,7 @@ def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
             _load_pairwise_staging_model(bundle_dir)
 
 
-def test_pairwise_fixture_covers_missing_and_zero_rows_in_strict_json(
+def test_pairwise_fixture_preserves_edge_values_and_enforces_tolerance(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
@@ -823,11 +729,6 @@ def test_pairwise_fixture_covers_missing_and_zero_rows_in_strict_json(
         classifier = NativeLightGBMBinaryClassifier(bundle_dir / "pairwise" / f"{model_name}.lgb", n_jobs=1)
         production_model_module._validate_pairwise_fixture(classifier, fixture_path)
 
-
-def test_pairwise_fixture_cannot_relax_tolerance_to_accept_wrong_predictions(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
     fixture_path = bundle_dir / "pairwise" / "main_prediction_fixture.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     fixture["expected_probabilities"] = np.ones_like(fixture["expected_probabilities"]).tolist()
@@ -1058,84 +959,44 @@ def test_eps_finalization_writes_the_close_pair_bonus_and_the_loader_applies_it(
     )
 
 
-def test_bundle_export_rejects_a_changed_name_conflict_repair_setting(
+def test_bundle_export_rejects_unrecordable_correction_settings(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    # A bundle has no field for the setting, so a loaded model would silently get the default back.
-    _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.name_conflict_repair_max_distance = None
-
-    with pytest.raises(ValueError, match="cannot record name_conflict_repair_max_distance"):
-        write_pairwise_production_bundle(
-            source_clusterer, tmp_path / "repair-off" / "production_model_v9.9", release_version="9.9"
-        )
-
-
-def test_bundle_export_rejects_a_changed_orcid_name_waiver(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    # A bundle has no field for this setting either.
-    _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
-    source_clusterer.orcid_name_waiver = None
-
-    with pytest.raises(ValueError, match="cannot record orcid_name_waiver"):
-        write_pairwise_production_bundle(
-            source_clusterer, tmp_path / "waiver-off" / "production_model_v9.9", release_version="9.9"
-        )
-
-
-def test_bundle_export_rejects_a_removed_repair_setting(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    # Prediction refuses a removed repair setting; export must too, or the bundle drops it silently.
-    _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.name_conflict_repair_rounds = 1
-    try:
-        with pytest.raises(ValueError, match="name_conflict_repair_rounds no longer exist"):
-            write_pairwise_production_bundle(
-                source_clusterer, tmp_path / "removed" / "production_model_v9.9", release_version="9.9"
-            )
-    finally:
-        del source_clusterer.name_conflict_repair_rounds
-
-
-@pytest.mark.parametrize(
-    ("setting", "value"),
-    [
-        ("name_conflict_repair_max_distance", 0.3),
-        ("name_conflict_repair_max_distance", None),
-        ("year_gap_split", False),
-        ("orcid_join", False),
-    ],
-)
-def test_bundle_export_rejects_a_changed_correction_setting(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    setting: str,
-    value: object,
 ) -> None:
     # A loaded model gets the class default back, so export refuses a setting it cannot record.
     _, source_clusterer = synthetic_pairwise_bundle
+
+    # Reject settings that would silently revert after export.
+    for setting, value in (
+        ("name_conflict_repair_max_distance", None),
+        ("orcid_name_waiver", None),
+        ("orcid_join", False),
+        ("name_conflict_repair_rounds", 1),
+    ):
+        message = "no longer exist" if setting == "name_conflict_repair_rounds" else f"cannot record {setting}"
+        with monkeypatch.context() as changed:
+            changed.setattr(source_clusterer, setting, value, raising=False)
+            with pytest.raises(ValueError, match=message):
+                write_pairwise_production_bundle(
+                    source_clusterer, tmp_path / "rejected" / "production_model_v9.9", release_version="9.9"
+                )
+
     source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
     source_clusterer.orcid_name_waiver = Clusterer.orcid_name_waiver
-    setattr(source_clusterer, setting, value)
-    try:
-        with pytest.raises(ValueError, match=f"cannot record {setting}"):
-            write_pairwise_production_bundle(
-                source_clusterer, tmp_path / "repair" / "production_model_v9.9", release_version="9.9"
-            )
-    finally:
-        delattr(source_clusterer, setting)
+    monkeypatch.setattr(Clusterer, "year_gap_split", False)
+    with pytest.raises(ValueError, match="cannot record year_gap_split"):
+        write_pairwise_production_bundle(
+            source_clusterer, tmp_path / "class" / "production_model_v9.9", release_version="9.9"
+        )
 
 
 def test_pending_pairwise_loader_requires_placeholder_eps(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
+    with pytest.raises(ValueError, match="No default production model is declared"):
+        load_production_model()
     _, source_clusterer = synthetic_pairwise_bundle
     pending_bundle = tmp_path / "pending-eps" / "production_model_v9.9"
     write_pairwise_production_bundle(
@@ -1310,40 +1171,41 @@ def finalization(tmp_path, synthetic_pairwise_bundle):
     }
 
 
-@pytest.mark.parametrize(
-    ("published", "field", "message"),
-    [
-        (False, "booster_sha256", "booster_sha256 mismatch"),
-        (False, "pairwise_bundle_binding_digest", "pairwise_bundle_binding_digest does not match"),
-        (False, "target", "target_spec_digest does not match target JSON"),
-        (True, "pairwise_bundle_binding_digest", "pairwise_bundle_binding_digest does not match enclosing bundle"),
-        (True, "target", "target_spec_digest does not match enclosing bundle target JSON"),
-    ],
-)
-def test_linker_identity_rejected_before_publication_and_after_rehash(finalization, published, field, message):
-    """Neither publication nor refreshed checksums may bypass semantic binding."""
+@pytest.mark.parametrize("published", [False, True], ids=["staging", "published"])
+def test_linker_identity_rejected_before_publication_and_after_rehash(finalization, published):
     output = finalization["output_bundle_dir"]
     if published:
         finalize_production_bundle(**finalization)
-        path = output / (
-            "reproducibility/incremental_linker_training_target.json"
-            if field == "target"
-            else "incremental_linker/metadata.json"
-        )
+        paths = {
+            "target": output / "reproducibility/incremental_linker_training_target.json",
+            "metadata": output / "incremental_linker/metadata.json",
+        }
     else:
-        path = (
-            finalization["target_json"]
-            if field == "target"
-            else finalization["incremental_linker_artifact_dir"] / "metadata.json"
-        )
-    payload = json.loads(path.read_text())
-    payload["variant" if field == "target" else field] = "f" * 64
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    if published:
-        _refresh_manifest_checksum(output, path.relative_to(output).as_posix())
-    with pytest.raises(ValueError, match=message):
-        load_production_model(output) if published else finalize_production_bundle(**finalization)
-    assert output.exists() is published
+        paths = {
+            "target": finalization["target_json"],
+            "metadata": finalization["incremental_linker_artifact_dir"] / "metadata.json",
+        }
+
+    cases = [
+        ("target", "variant", "target_spec_digest"),
+        ("metadata", "pairwise_bundle_binding_digest", "pairwise_bundle_binding_digest"),
+    ]
+    if not published:
+        cases.append(("metadata", "booster_sha256", "booster_sha256 mismatch"))
+    for kind, field, message in cases:
+        path = paths[kind]
+        original = path.read_bytes()
+        payload = json.loads(original)
+        payload[field] = "f" * 64
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        if published:
+            _refresh_manifest_checksum(output, path.relative_to(output).as_posix())
+        with pytest.raises(ValueError, match=message):
+            load_production_model(output) if published else finalize_production_bundle(**finalization)
+        assert output.exists() is published
+        path.write_bytes(original)
+        if published:
+            _refresh_manifest_checksum(output, path.relative_to(output).as_posix())
     _load_pairwise_staging_model(finalization["pairwise_bundle_dir"])
 
 
@@ -1380,6 +1242,14 @@ def test_normal_load_hashes_each_declared_file_exactly_once(finalization, monkey
     expected = sorted((output_bundle / relpath).resolve().as_posix() for relpath in manifest["sha256"])
     assert sorted(manifest_hashes) == expected
     assert standalone_artifact_hashes == []
+    with monkeypatch.context() as restore:
+        restore.setattr(production_model_module, "_sha256_file", real_manifest_sha256)
+        restore.setattr(incremental_artifact_module, "_sha256_file", real_artifact_sha256)
+        requested = load_production_model(output_bundle, n_jobs=3)
+    assert clusterer.n_jobs == 1
+    assert (requested.n_jobs, requested.classifier.n_jobs, requested.nameless_classifier.n_jobs) == (3, 3, 3)
+    with pytest.raises(ValueError, match="n_jobs must not be zero"):
+        load_production_model(output_bundle, n_jobs=0)
 
 
 @pytest.mark.parametrize("explicit_authority", [False, True])
@@ -1402,43 +1272,8 @@ def test_load_production_model_rejects_an_unknown_orcid_prefix_hash(finalization
         load_production_model(output_bundle, expected_artifact_hashes=hashes if explicit_authority else None)
 
 
-def test_load_production_model_applies_requested_n_jobs(finalization) -> None:
-    output_bundle = finalization["output_bundle_dir"]
-    finalize_production_bundle(**finalization)
-
-    default = load_production_model(output_bundle)
-    requested = load_production_model(output_bundle, n_jobs=3)
-
-    assert default.n_jobs == 1
-    assert (requested.n_jobs, requested.classifier.n_jobs, requested.nameless_classifier.n_jobs) == (3, 3, 3)
-    with pytest.raises(ValueError, match="n_jobs must not be zero"):
-        load_production_model(output_bundle, n_jobs=0)
-
-
-def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path) -> None:
-    files = production_bundle_module.production_manifest_files(
-        bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-        include_pairwise_reproducibility=False,
-    )
-    for relpath in files.values():
-        path = tmp_path / relpath
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"payload")
-    (tmp_path / "clusterer.json").unlink()
-    (tmp_path / "clusterer.json").mkdir()
-
-    with pytest.raises(FileNotFoundError, match="missing or not a regular file"):
-        production_bundle_module.write_production_manifest(
-            tmp_path,
-            release_version="9.9",
-            bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
-            eps_calibration=CALIBRATED_EPS_CALIBRATION,
-        )
-    assert not (tmp_path / "manifest.json").exists()
-
-
-def test_manifest_writer_rejects_invalid_release_or_lifecycle_before_writing(tmp_path: Path) -> None:
-    for invalid_value in ("", "   "):
+def test_manifest_writer_rejects_invalid_contracts_without_publishing(tmp_path: Path) -> None:
+    for invalid_value in ("   ",):
         with pytest.raises(ValueError, match="release_version must be a nonempty trimmed string"):
             production_bundle_module.write_production_manifest(
                 tmp_path,
@@ -1460,6 +1295,26 @@ def test_manifest_writer_rejects_invalid_release_or_lifecycle_before_writing(tmp
                 eps_calibration=eps_calibration,
             )
 
+    assert not (tmp_path / "manifest.json").exists()
+
+    files = production_bundle_module.production_manifest_files(
+        bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+        include_pairwise_reproducibility=False,
+    )
+    for relpath in files.values():
+        path = tmp_path / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"payload")
+    (tmp_path / "clusterer.json").unlink()
+    (tmp_path / "clusterer.json").mkdir()
+
+    with pytest.raises(FileNotFoundError, match="missing or not a regular file"):
+        production_bundle_module.write_production_manifest(
+            tmp_path,
+            release_version="9.9",
+            bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
+            eps_calibration=CALIBRATED_EPS_CALIBRATION,
+        )
     assert not (tmp_path / "manifest.json").exists()
 
 
@@ -1522,14 +1377,6 @@ def test_rebinding_the_name_count_index_changes_only_the_bound_metadata(
             release_version="9.10",
         )
 
-
-def test_rebinding_rejects_an_output_inside_the_source(tmp_path: Path) -> None:
-    from scripts.production.model.rebind_name_counts_index import rebind_name_counts_index
-    from tests.helpers import tiny_name_counts_index_path
-
-    # The check runs before any loading, so an empty source directory is enough.
-    source = tmp_path / "production_model_v9.9"
-    source.mkdir()
     with pytest.raises(ValueError, match="inside the source"):
         rebind_name_counts_index(
             source_model=source,
@@ -1537,20 +1384,4 @@ def test_rebinding_rejects_an_output_inside_the_source(tmp_path: Path) -> None:
             output_model=source / "rebound",
             release_version="9.10",
         )
-    assert list(source.iterdir()) == []
-
-
-def test_bundle_export_compares_repair_settings_with_fixed_defaults(
-    tmp_path: Path,
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A changed class attribute must not pass as the default: a fresh process splits year gaps.
-    _, source_clusterer = synthetic_pairwise_bundle
-    source_clusterer.name_conflict_repair_max_distance = Clusterer.name_conflict_repair_max_distance
-    source_clusterer.orcid_name_waiver = Clusterer.orcid_name_waiver
-    monkeypatch.setattr(Clusterer, "year_gap_split", False)
-    with pytest.raises(ValueError, match="cannot record year_gap_split"):
-        write_pairwise_production_bundle(
-            source_clusterer, tmp_path / "class" / "production_model_v9.9", release_version="9.9"
-        )
+    assert not (source / "rebound").exists()

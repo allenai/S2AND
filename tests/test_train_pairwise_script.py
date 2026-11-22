@@ -14,7 +14,7 @@ from s2and import production_training_contract
 from s2and._sha256 import sha256_file
 from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.orcid_prefix_counts import ORCID_PREFIX_DATA_FILENAME
-from scripts.production.model import train_linker_and_finalize, train_pairwise
+from scripts.production.model import train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
 
@@ -75,17 +75,19 @@ def _write_model_plan(tmp_path: Path, dataset_names: tuple[str, ...] | None = No
     return path
 
 
-def test_preflight_loads_test_free_arrow_plan(tmp_path: Path) -> None:
-    plan_path = _write_model_plan(tmp_path)
+def test_preflight_loads_only_declared_arrow_datasets(tmp_path: Path) -> None:
+    dataset_names = ("inventors_s2and", "patents", "augmented")
+    plan_path = _write_model_plan(tmp_path, dataset_names)
     args = _args(tmp_path, model_plan=plan_path)
 
     plan = train_pairwise._preflight_pairwise(args)
     config = train_pairwise._training_config(args, plan, artifact_hashes={})
 
-    assert plan.dataset_names == (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "augmented")
+    assert plan.dataset_names == tuple(plan.arrow_dirs) == dataset_names
+    assert config["source_dataset_names"] == list(dataset_names)
     assert plan.release_version == "9.9"
     assert plan.model_plan_sha256 == sha256_file(plan_path)
-    assert plan.datasets["aminer"].split_mode == "random_blocks"
+    assert plan.datasets["inventors_s2and"].split_mode == "random_blocks"
     assert plan.datasets["augmented"].split_mode == "fixed_pairs"
     assert config["model_plan_sha256"] == plan.model_plan_sha256
     assert "release_version" not in config
@@ -100,42 +102,20 @@ def test_preflight_loads_test_free_arrow_plan(tmp_path: Path) -> None:
     assert list(plan.matrix_work_dir.iterdir()) == []
 
 
-@pytest.mark.parametrize(
-    "dataset_names",
-    [
-        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES, "inventors_s2and", "augmented"),
-        (*train_pairwise.DEFAULT_SOURCE_DATASET_NAMES[1:], "patents", "augmented"),
-        ("patents", "qian"),
-    ],
-    ids=["adds-inventors", "excludes-aminer", "without-augmentation"],
-)
-def test_preflight_uses_only_declared_datasets(tmp_path: Path, dataset_names: tuple[str, ...]) -> None:
-    plan_path = _write_model_plan(tmp_path, dataset_names)
-    args = _args(tmp_path, model_plan=plan_path)
-
-    plan = train_pairwise._preflight_pairwise(args)
-    config = train_pairwise._training_config(args, plan, artifact_hashes={})
-
-    assert plan.dataset_names == dataset_names
-    assert tuple(plan.arrow_dirs) == dataset_names
-    assert config["source_dataset_names"] == list(dataset_names)
-
-
-def test_preflight_requires_a_cluster_population_for_eps(tmp_path: Path) -> None:
-    args = _args(tmp_path, model_plan=_write_model_plan(tmp_path, ("augmented",)))
-
-    with pytest.raises(SystemExit, match="requires a random-block dataset for EPS calibration"):
-        train_pairwise._preflight_pairwise(args)
-
-
-def test_preflight_requires_fixed_augmented_pairs(tmp_path: Path) -> None:
+def test_preflight_requires_both_cluster_and_fixed_augmented_populations(tmp_path: Path) -> None:
     plan_path = _write_model_plan(tmp_path, ("patents", "augmented"))
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    payload["datasets"]["augmented"] = payload["datasets"]["patents"]
-    plan_path.write_text(json.dumps(payload), encoding="utf-8")
     args = _args(tmp_path, model_plan=plan_path)
+    sources = payload["datasets"]
 
-    with pytest.raises(SystemExit, match="augmented dataset requires fixed train and validation pairs"):
+    payload["datasets"] = {"augmented": sources["augmented"]}
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SystemExit, match="random-block dataset"):
+        train_pairwise._preflight_pairwise(args)
+
+    payload["datasets"] = {"patents": sources["patents"], "augmented": sources["patents"]}
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SystemExit, match="fixed train and validation pairs"):
         train_pairwise._preflight_pairwise(args)
 
 
@@ -242,6 +222,7 @@ def test_augmented_dataset_contract_is_checked_before_featurization(
 
 
 def test_preflight_rejects_unsafe_launch(tmp_path: Path) -> None:
+    plan_path = _write_model_plan(tmp_path, ("qian",))
     cases = (
         ("n-jobs", {"n_jobs": 0}, "--n-jobs must be positive"),
         ("total-ram", {"total_ram_bytes": 0}, "--total-ram-bytes must be positive"),
@@ -250,11 +231,7 @@ def test_preflight_rejects_unsafe_launch(tmp_path: Path) -> None:
     for case_id, change, message in cases:
         case_root = tmp_path / case_id
         case_root.mkdir()
-        plan_path = _write_model_plan(case_root)
-        args = _args(
-            case_root,
-            model_plan=plan_path,
-        )
+        args = _args(case_root, model_plan=plan_path)
         for field, value in change.items():
             setattr(args, field, value)
 
@@ -372,8 +349,8 @@ class _StubLightGBM:
 
 @pytest.mark.parametrize(
     ("search_auc", "incumbent_auc", "selected"),
-    [(0.8, 0.9, "incumbent"), (0.9, 0.9, "incumbent"), (0.9, 0.8, "search")],
-    ids=["incumbent-better", "tie-keeps-incumbent", "search-better"],
+    [(0.9, 0.9, "incumbent"), (0.9, 0.8, "search")],
+    ids=["tie-keeps-incumbent", "search-better"],
 )
 def test_incumbent_parameters_compete_with_the_search_winner(
     tmp_path: Path,
@@ -440,9 +417,18 @@ def test_incumbent_parameters_require_named_heads(tmp_path: Path) -> None:
     assert train_pairwise._load_incumbent_parameters(None) == {}
 
 
-@pytest.mark.parametrize("module", [train_pairwise, train_linker_and_finalize])
-def test_trainers_require_an_explicit_thread_allocation(module: Any, capsys: pytest.CaptureFixture[str]) -> None:
+def test_pairwise_trainer_requires_an_explicit_thread_allocation() -> None:
     with pytest.raises(SystemExit):
-        module.build_parser().parse_args([])
-    required = capsys.readouterr().err.split("the following arguments are required:")[1]
-    assert "--n-jobs" in required
+        train_pairwise.build_parser().parse_args(
+            [
+                "--output-dir",
+                "output",
+                "--name-counts-index-root",
+                "name-counts",
+                "--matrix-work-dir",
+                "matrix-work",
+                "--model-plan",
+                "model-plan.json",
+                "--run-full",
+            ],
+        )

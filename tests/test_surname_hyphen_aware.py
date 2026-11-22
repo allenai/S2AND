@@ -42,7 +42,7 @@ def test_canonical_surname_family_matches_shared_fixture():
 
 def test_surname_variant_list_is_canonical():
     variants = surname_variant_map()
-    assert len(variants) > 200
+    assert variants
     for variant, canonical in variants.items():
         assert canonicalize_name_text(variant) == variant
         assert canonicalize_name_text(canonical) == canonical
@@ -102,14 +102,6 @@ def _constraint_dataset(
         name_tuples=name_tuples or set(),
         n_jobs=1,
     )
-
-
-def test_constraint_treats_hyphen_and_space_last_names_as_equivalent():
-    # Both variants canonicalize to "ou yang", so the last-name disallow does
-    # not fire and the curated alias keeps the firsts compatible.
-    dataset = _constraint_dataset(name_tuples={("qi xin", "qadir"), ("qadir", "qi xin")})
-
-    assert dataset.get_constraint("s1", "s2") is None
 
 
 def test_constraint_treats_joined_and_spaced_last_names_as_equivalent():

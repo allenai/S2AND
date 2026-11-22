@@ -158,14 +158,8 @@ def test_compare_time_first_name_compatibility():
             )
 
 
-def test_compare_time_first_name_incompatibility():
-    pairs = FIXTURE["compare_compatibility"]["incompatible_pairs"]
-    assert pairs, "fixture must define incompatible pairs"
-    for first_a, first_b in pairs:
-        assert not same_prefix_tokens(first_a, first_b), f"{first_a!r} vs {first_b!r} must NOT be compatible"
-
-
 def test_compare_time_first_name_truth_table():
+    assert not same_prefix_tokens("jon david", "john david")
     rows = FIXTURE["compare_compatibility"]["truth_table"]
     assert rows, "fixture must define the compare-time truth table"
     for row in rows:

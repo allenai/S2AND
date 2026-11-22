@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -81,32 +78,31 @@ def _build(manifest: Path, output: Path, *, resume: bool = False) -> dict:
     )
 
 
-def test_module_cli_matches_the_production_writer_bytes_and_native_lookups(tmp_path: Path) -> None:
+def test_count_publication_matches_reference_and_only_resumes_identical_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    normalizer = tmp_path / "text.py"
+    normalizer.write_bytes(Path(producer.text_normalizer.__file__).read_bytes())
+    monkeypatch.setattr(producer.text_normalizer, "__file__", str(normalizer))
     manifest = _source(tmp_path / "source")
     output = tmp_path / "actual"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "scripts.production.counts.generate_name_counts_from_parquet",
-            "--input-manifest",
-            str(manifest),
-            "--output-dir",
-            str(output),
-            "--expected-source-rows",
-            str(len(ROWS)),
-            "--expected-source-mentions",
-            str(sum(row[2] for row in ROWS)),
-            "--threads",
-            "1",
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        env={**os.environ, "OMP_NUM_THREADS": "1", "RAYON_NUM_THREADS": "1"},
-        capture_output=True,
-        text=True,
-        check=False,
+    assert (
+        producer.main(
+            [
+                "--input-manifest",
+                str(manifest),
+                "--output-dir",
+                str(output),
+                "--expected-source-rows",
+                str(len(ROWS)),
+                "--expected-source-mentions",
+                str(sum(row[2] for row in ROWS)),
+                "--threads",
+                "1",
+            ]
+        )
+        == 0
     )
-    assert completed.returncode == 0, completed.stderr
     mappings, _ = build_name_count_dicts([(first or "", last or "", count) for first, last, count in ROWS])
     reference_path, _ = write_name_counts_index(tmp_path / "reference", mappings)
     actual = output / "name_counts_index"
@@ -129,11 +125,6 @@ def test_module_cli_matches_the_production_writer_bytes_and_native_lookups(tmp_p
     assert record["source_rows"] == len(ROWS)
     assert record["source_mentions"] == sum(row[2] for row in ROWS)
 
-
-def test_completed_resume_preserves_every_artifact_and_rejects_changed_bounds(tmp_path: Path) -> None:
-    manifest = _source(tmp_path / "source")
-    output = tmp_path / "actual"
-    _build(manifest, output)
     before = {
         path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in (output / "name_counts_index").iterdir()
     }
@@ -152,6 +143,12 @@ def test_completed_resume_preserves_every_artifact_and_rejects_changed_bounds(tm
             expected_source_mentions=999,
             resume=True,
         )
+
+    published_manifest = (output / "name_counts_index/manifest.json").read_bytes()
+    normalizer.write_bytes(normalizer.read_bytes() + b"\n# Source identity changes.\n")
+    with pytest.raises(ValueError, match="producer identity differ"):
+        _build(manifest, output, resume=True)
+    assert (output / "name_counts_index/manifest.json").read_bytes() == published_manifest
 
 
 def test_initial_only_source_preserves_empty_informative_name_mappings(tmp_path: Path) -> None:
@@ -173,20 +170,6 @@ def test_initial_only_source_preserves_empty_informative_name_mappings(tmp_path:
         assert (output / "name_counts_index" / f"{kind}.bin").read_bytes() == (
             Path(reference) / f"{kind}.bin"
         ).read_bytes()
-
-
-def test_resume_rejects_changed_normalizer_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    normalizer = tmp_path / "text.py"
-    normalizer.write_bytes(Path(producer.text_normalizer.__file__).read_bytes())
-    monkeypatch.setattr(producer.text_normalizer, "__file__", str(normalizer))
-    manifest = _source(tmp_path / "source")
-    output = tmp_path / "actual"
-    _build(manifest, output)
-    before = (output / "name_counts_index/manifest.json").read_bytes()
-    normalizer.write_bytes(normalizer.read_bytes() + b"\n# Source identity changes.\n")
-    with pytest.raises(ValueError, match="producer identity differ"):
-        _build(manifest, output, resume=True)
-    assert (output / "name_counts_index/manifest.json").read_bytes() == before
 
 
 def test_source_checksum_and_population_fail_before_publication(tmp_path: Path) -> None:

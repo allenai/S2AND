@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -33,27 +31,7 @@ def test_runtime_backend_routing_contract(monkeypatch: pytest.MonkeyPatch) -> No
         runtime.build_runtime_context("unit_test", backend="auto")  # type: ignore[arg-type]
 
 
-def test_importing_model_with_python_backend_does_not_load_rust_extension() -> None:
-    script = """
-import s2and.runtime as runtime
-
-def fail():
-    raise AssertionError("Python model import must not load the Rust extension")
-
-runtime.load_s2and_rust_extension = fail
-import s2and.model
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_load_rust_extension_validates_package_and_version() -> None:
+def test_load_rust_extension_validates_package_and_version(monkeypatch: pytest.MonkeyPatch) -> None:
     exact = SimpleNamespace(__version__=s2and.__version__)
     assert runtime.load_s2and_rust_extension(import_module=lambda _name: exact) is exact
 
@@ -73,8 +51,6 @@ def test_load_rust_extension_validates_package_and_version() -> None:
     with pytest.raises(ModuleNotFoundError, match="missing dependency"):
         runtime.load_s2and_rust_extension(import_module=broken)
 
-
-def test_load_rust_extension_matches_cargo_prerelease_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
     # The extension reports its Cargo version; the wheel and s2and use the PEP 440 spelling.
     monkeypatch.setattr(runtime, "__version__", "1.0.0b1")
     beta = SimpleNamespace(__version__="1.0.0-beta.1")

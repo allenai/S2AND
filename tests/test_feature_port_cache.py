@@ -101,6 +101,12 @@ def test_cache_is_owned_by_each_dataset_and_evicts() -> None:
     assert feature_port._rust_featurizer_build_count(first_dataset) == 0
     assert feature_port._get_rust_featurizer(first_dataset) is not first
     assert feature_port._get_rust_featurizer(second_dataset).backing is second.backing
+    # Feature batches and warming reuse the cached backing without applying seeds.
+    base = feature_port._get_rust_feature_data(second_dataset)
+    base.fail_updates = True
+    feature_port.warm_rust_featurizer(second_dataset)
+    assert feature_port._get_rust_feature_data(second_dataset) is base
+    assert feature_port._rust_featurizer_build_count(second_dataset) == 1
 
 
 def test_missing_mandatory_build_input_fails_fast() -> None:
@@ -174,11 +180,17 @@ def test_request_seeds_are_independent_and_do_not_replace_dataset_collections() 
     assert feature_port._rust_featurizer_build_count(dataset) == 1
 
 
-def test_dataset_seed_edits_leave_existing_handles_unchanged() -> None:
+def test_seed_edit_and_overlay_failure_preserve_existing_handles() -> None:
     dataset = DummyDataset("seed-edits")
     dataset.cluster_seeds_require = {"s1": "a"}
     first = feature_port._get_rust_featurizer(dataset)
     dataset.cluster_seeds_require["s1"] = "b"
+    base = feature_port._rust_featurizer_state(dataset).featurizer
+    base.fail_updates = True
+    with pytest.raises(RuntimeError, match="seed overlay failed"):
+        feature_port._get_rust_featurizer(dataset)
+    assert base.require == {}
+    base.fail_updates = False
     second = feature_port._get_rust_featurizer(dataset)
     assert first.require == {"s1": "a"}
     assert second.require == {"s1": "b"}
@@ -187,23 +199,6 @@ def test_dataset_seed_edits_leave_existing_handles_unchanged() -> None:
     rebuilt = feature_port._get_rust_featurizer(dataset)
     assert rebuilt.require == second.require
     assert rebuilt.backing is not second.backing
-
-
-def test_failed_overlay_does_not_change_prior_request_or_cached_seeds() -> None:
-    dataset = DummyDataset("seed-failure")
-    dataset.cluster_seeds_require = {"s1": "a"}
-    first = feature_port._get_rust_featurizer(dataset)
-    base = feature_port._rust_featurizer_state(dataset).featurizer
-    base.fail_updates = True
-    dataset.cluster_seeds_require = {"s1": "b"}
-    with pytest.raises(RuntimeError, match="seed overlay failed"):
-        feature_port._get_rust_featurizer(dataset)
-    assert first.require == {"s1": "a"}
-    assert base.require == {}
-    base.fail_updates = False
-    second = feature_port._get_rust_featurizer(dataset)
-    assert second.require == {"s1": "b"}
-    assert first.backing is second.backing
 
 
 def test_inputs_changing_during_build_are_not_cached(
@@ -226,7 +221,7 @@ def test_inputs_changing_during_build_are_not_cached(
     assert feature_port._rust_featurizer_state(dataset).featurizer is None
 
 
-def test_concurrent_gets_for_same_dataset_build_once(
+def test_concurrent_seed_requests_share_only_the_backing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset = DummyDataset("same-dataset")
@@ -245,9 +240,12 @@ def test_concurrent_gets_for_same_dataset_build_once(
 
     monkeypatch.setattr(feature_port, "build_rust_featurizer", blocking_build)
     results: list[DummyRustFeaturizer] = []
-    threads = [
-        threading.Thread(target=lambda: results.append(feature_port._get_rust_featurizer(dataset))) for _ in range(2)
-    ]
+
+    def get_handle(cluster: str) -> None:
+        state = SimpleNamespace(cluster_seeds_require={"s1": cluster}, cluster_seeds_disallow=set())
+        results.append(feature_port._get_rust_featurizer(dataset, prediction_state=state))
+
+    threads = [threading.Thread(target=get_handle, args=(cluster,)) for cluster in ("a", "b")]
 
     threads[0].start()
     assert build_started.wait(timeout=2)
@@ -263,32 +261,7 @@ def test_concurrent_gets_for_same_dataset_build_once(
     assert len(results) == 2
     assert results[0] is not results[1]
     assert results[0].backing is results[1].backing
-
-
-def test_concurrent_requests_keep_their_seeds_when_interleaved() -> None:
-    dataset = DummyDataset("concurrent-seeds")
-    ready = threading.Barrier(2)
-    results = {}
-    errors = []
-
-    def worker(cluster):
-        try:
-            state = SimpleNamespace(cluster_seeds_require={"s1": cluster}, cluster_seeds_disallow=set())
-            handle = feature_port._get_rust_featurizer(dataset, prediction_state=state)
-            ready.wait(timeout=2)
-            results[cluster] = handle.require["s1"]
-        except Exception as exc:
-            errors.append(exc)
-
-    threads = [threading.Thread(target=worker, args=(cluster,)) for cluster in ("a", "b")]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
-    assert all(not thread.is_alive() for thread in threads)
-    assert errors == []
-    assert results == {"a": "a", "b": "b"}
-    assert feature_port._rust_featurizer_build_count(dataset) == 1
+    assert {handle.require["s1"] for handle in results} == {"a", "b"}
 
 
 def test_distinct_datasets_build_without_a_global_lock(
@@ -324,14 +297,3 @@ def test_distinct_datasets_build_without_a_global_lock(
     assert all(not thread.is_alive() for thread in threads)
     assert errors == []
     assert sorted(DummyRustFeaturizer.created) == ["parallel-first", "parallel-second"]
-
-
-def test_feature_only_hits_reuse_backing_without_reading_seeds() -> None:
-    """Feature batches and warming never construct a seed overlay."""
-    dataset = DummyDataset("feature-only")
-    base = feature_port._get_rust_feature_data(dataset)
-    base.fail_updates = True
-    for _ in range(3):
-        assert feature_port._get_rust_feature_data(dataset) is base
-        feature_port.warm_rust_featurizer(dataset)
-    assert feature_port._rust_featurizer_build_count(dataset) == 1

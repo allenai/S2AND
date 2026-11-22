@@ -3,19 +3,14 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from s2and.data import ANDData
 from s2and.incremental_linking.completion_metadata import SignatureFirstNames, signature_first
 
 
-@pytest.mark.parametrize(
-    ("raw_first", "expected"),
-    [("Dr. Jean–Paul Henry", "jean paul"), (None, "")],
-)
-def test_completion_first_canonicalizes_unprepared_names(raw_first: str | None, expected: str) -> None:
+def test_completion_first_uses_prepared_names_and_canonicalizes_missing_values() -> None:
     signatures = json.loads(Path("tests/dummy/signatures.json").read_text(encoding="utf-8"))
-    signatures["0"]["author_info"]["first"] = raw_first
+    signatures["0"]["author_info"]["first"] = "Dr. Jean–Paul Henry"
+    signatures["1"]["author_info"]["first"] = None
     dataset = ANDData(
         signatures=signatures,
         papers="tests/dummy/papers.json",
@@ -25,23 +20,8 @@ def test_completion_first_canonicalizes_unprepared_names(raw_first: str | None, 
         name_counts_index=None,
         name_tuples=set(),
     )
-
     assert dataset.signatures["0"].author_info_first_normalized is None
-    assert signature_first(dataset.signatures["0"]) == expected
-    assert SignatureFirstNames(dataset.signatures)["0"] == expected
-
-
-@pytest.mark.parametrize("prepared_first", ["", "prepared"])
-def test_completion_first_preserves_prepared_name(prepared_first: str) -> None:
-    dataset = ANDData(
-        signatures="tests/dummy/signatures.json",
-        papers="tests/dummy/papers.json",
-        name="completion-prepared-first",
-        mode="inference",
-        preprocess=False,
-        name_counts_index=None,
-        name_tuples=set(),
-    )
-    signature = dataset.signatures["0"]._replace(author_info_first="Ada", author_info_first_normalized=prepared_first)
-
-    assert signature_first(signature) == prepared_first
+    first_names = SignatureFirstNames(dataset.signatures)
+    assert (first_names["0"], first_names["1"]) == ("jean paul", "")
+    assert signature_first(dataset.signatures["0"]._replace(author_info_first_normalized="")) == ""
+    assert signature_first(dataset.signatures["0"]._replace(author_info_first_normalized="prepared")) == "prepared"

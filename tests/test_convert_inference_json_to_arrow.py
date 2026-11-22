@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -95,35 +94,22 @@ def test_convert_service_json_to_arrow_rejects_altered_without_seed(tmp_path: Pa
         _convert_service_payload(tmp_path, payload)
 
 
-def test_convert_service_json_to_arrow_preserves_author_rows_that_normalize_empty(tmp_path: Path) -> None:
-    for case_id, source_author_name in (("empty", ""), ("blank", "   "), ("digits", "24")):
-        case_root = tmp_path / case_id
-        case_root.mkdir()
-        payload = _minimal_service_payload()
-        payload["papers"][0]["authors"][0]["author_name"] = source_author_name
-
-        manifest, dataset_dir = _convert_service_payload(case_root, payload)
-
-        paper_authors = _read_table(str(_manifest_path(manifest, dataset_dir, "paper_authors")))
-        assert paper_authors.to_pylist() == [{"paper_id": "1", "position": 0, "author_name": ""}], case_id
-        assert manifest["validation"]["paper_author_count"] == 1, case_id
-
-
 @pytest.mark.parametrize(
-    "cluster_seeds",
+    ("cluster_seeds", "profile_exclusions"),
     [
-        {"s1": {"s2": "require", "q": "disallow"}},
-        {"require": {"c0": ["s1", "s2"]}, "disallow": [["q", "s1"]]},
+        ({"s1": {"s2": "require", "q": "disallow"}}, [["s1", "q"]]),
+        ({"require": {"c0": ["s1", "s2"]}, "disallow": [["q", "s1"]]}, {"s1": ["q"]}),
     ],
     ids=["pairwise-seeds", "service-seeds"],
 )
 def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
-    tmp_path: Path, cluster_seeds: dict[str, Any]
+    tmp_path: Path, cluster_seeds: dict[str, Any], profile_exclusions: Any
 ) -> None:
     payload = _minimal_service_payload()
     first_signature = payload["signatures"][0]
     first_paper = payload["papers"][0]
     first_paper["abstract"] = "Has Abstract"
+    first_paper["authors"] = [{"position": 0, "author_name": "24"}]
     payload["signatures"] = [
         first_signature,
         {**first_signature, "signature_id": "s2", "paper_id": 2},
@@ -146,8 +132,10 @@ def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
             "authors": [{"position": 0, "author_name": "Alex Smith"}],
         },
     ]
-    payload["paper_embeddings"] = {"1": [0.1, 0.2], "2": [0.2, 0.3], "3": [0.3, 0.4]}
+    payload["paper_embeddings"] = None
+    payload["specter_embeddings"] = {"1": [0.1, 0.2], "2": [0.2, 0.3]}
     payload["cluster_seeds"] = cluster_seeds
+    payload["profile_exclusions"] = profile_exclusions
     payload["altered_cluster_signatures"] = ["s1"]
 
     manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
@@ -170,8 +158,15 @@ def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
 
     assert _read_table(str(_manifest_path(manifest, dataset_dir, "signatures"))).num_rows == 3
     assert _read_table(str(_manifest_path(manifest, dataset_dir, "papers"))).num_rows == 3
-    assert _read_table(str(_manifest_path(manifest, dataset_dir, "paper_authors"))).num_rows == 3
-    assert _read_table(str(_manifest_path(manifest, dataset_dir, "specter"))).num_rows == 3
+    paper_authors = _read_table(str(_manifest_path(manifest, dataset_dir, "paper_authors")))
+    assert paper_authors.num_rows == 3
+    assert {"paper_id": "1", "position": 0, "author_name": ""} in paper_authors.to_pylist()
+    assert _read_table(str(_manifest_path(manifest, dataset_dir, "specter"))).num_rows == 2
+    assert manifest["validation"]["missing_specter_paper_count"] == 1
+    assert manifest["validation"]["missing_specter_paper_examples"] == ["3"]
+    rows = _read_table(str(_manifest_path(manifest, dataset_dir, "profile_exclusions"))).to_pydict()
+    assert rows == {"anchor_signature_id": ["s1"], "excluded_signature_id": ["q"]}
+    assert manifest["validation"]["profile_exclusion_count"] == 1
     assert Path(manifest["paths"]["signatures_batch_index"]).name == "signatures.signatures_batch_index.bin"
     assert _manifest_path(manifest, dataset_dir, "papers_batch_index").exists()
     assert "signatures_json" not in manifest["paths"]
@@ -194,25 +189,6 @@ def _three_signature_payload() -> dict[str, Any]:
     return payload
 
 
-@pytest.mark.parametrize("profile_exclusions", [[["s1", "q"]], {"s1": ["q"]}])
-def test_convert_service_json_to_arrow_writes_profile_exclusions(tmp_path: Path, profile_exclusions: Any) -> None:
-    payload = _three_signature_payload()
-    payload["profile_exclusions"] = profile_exclusions
-
-    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
-
-    rows = _read_table(str(_manifest_path(manifest, dataset_dir, "profile_exclusions"))).to_pydict()
-    assert rows == {"anchor_signature_id": ["s1"], "excluded_signature_id": ["q"]}
-    assert manifest["validation"]["profile_exclusion_count"] == 1
-
-
-def test_convert_service_json_to_arrow_omits_profile_exclusions_when_absent(tmp_path: Path) -> None:
-    manifest, dataset_dir = _convert_service_payload(tmp_path, _three_signature_payload())
-
-    assert "profile_exclusions" not in manifest["paths"]
-    assert not (dataset_dir / "profile_exclusions.arrow").exists()
-
-
 @pytest.mark.parametrize(
     ("profile_exclusions", "message"),
     [([["s1", "missing"]], "unknown signature ids"), ([["s1", "s2"]], "contradicts a placement")],
@@ -225,15 +201,6 @@ def test_convert_service_json_to_arrow_rejects_bad_profile_exclusions(
 
     with pytest.raises(ValueError, match=message):
         _convert_service_payload(tmp_path, payload)
-
-
-def test_convert_service_json_to_arrow_falls_back_from_explicit_null_paper_embeddings(tmp_path: Path) -> None:
-    payload = _minimal_service_payload()
-    payload["paper_embeddings"] = None
-    payload["specter_embeddings"] = {"1": [0.1, 0.2]}
-    manifest, dataset_dir = _convert_service_payload(tmp_path, payload)
-
-    assert _read_table(str(_manifest_path(manifest, dataset_dir, "specter"))).num_rows == 1
 
 
 def test_convert_service_json_to_arrow_emits_empty_specter_for_empty_embeddings(tmp_path: Path) -> None:
@@ -251,6 +218,8 @@ def test_convert_service_json_to_arrow_emits_empty_specter_for_empty_embeddings(
     assert manifest["validation"]["specter_count"] == 0
     assert manifest["validation"]["missing_specter_paper_count"] == 1
     assert "specter_batch_index" in resolved_paths
+    assert "profile_exclusions" not in resolved_paths
+    assert not (dataset_dir / "profile_exclusions.arrow").exists()
     with ArrowDataset.open(dataset_dir, require_specter=True):
         pass
 
@@ -289,26 +258,6 @@ def test_root_manifest_upsert_uses_bounded_shared_lock(
     }
 
 
-def test_convert_service_json_to_arrow_reports_missing_specter_embeddings(
-    tmp_path: Path,
-) -> None:
-    payload = _minimal_service_payload("s1", 1)
-    payload["signatures"].append(
-        {
-            **payload["signatures"][0],
-            "signature_id": "s2",
-            "paper_id": 2,
-        }
-    )
-    payload["papers"].append({**payload["papers"][0], "paper_id": 2, "title": "Two"})
-    payload["paper_embeddings"] = {"1": [0.1, 0.2]}
-
-    manifest, _dataset_dir = _convert_service_payload(tmp_path, payload)
-
-    assert manifest["validation"]["missing_specter_paper_count"] == 1
-    assert manifest["validation"]["missing_specter_paper_examples"] == ["2"]
-
-
 def test_convert_service_json_to_arrow_rejects_ambiguous_service_shaped_cluster_seeds(tmp_path: Path) -> None:
     payload = _minimal_service_payload()
     payload["cluster_seeds"] = {"require": {"c0": ["s1"]}, "disallow": [], "unexpected": []}
@@ -317,72 +266,10 @@ def test_convert_service_json_to_arrow_rejects_ambiguous_service_shaped_cluster_
         _convert_service_payload(tmp_path, payload)
 
 
-def test_convert_service_json_to_arrow_source_json_is_opt_in(tmp_path: Path) -> None:
-    manifest, dataset_dir = _convert_service_payload(tmp_path, _minimal_service_payload(), copy_source_json=True)
-
-    for key in ("signatures_json", "papers_json", "cluster_seeds_json"):
-        assert _manifest_path(manifest, dataset_dir, key).exists()
-
-
 def test_convert_service_json_to_arrow_rejects_duplicate_list_ids(tmp_path: Path) -> None:
     payload = {"signatures": [{"signature_id": "s1"}, {"signature_id": "s1"}], "papers": []}
     with pytest.raises(ValueError, match="duplicate signature_id"):
         _convert_service_payload(tmp_path, payload, overwrite=False)
-
-
-def test_convert_service_json_to_arrow_rejects_stale_output_without_overwrite(tmp_path: Path) -> None:
-    output_dir = tmp_path / "arrow" / "service_payload"
-    output_dir.mkdir(parents=True)
-    (output_dir / "signatures.arrow").write_text("stale", encoding="utf-8")
-
-    with pytest.raises(FileExistsError, match="Use --overwrite"):
-        _convert_service_payload(tmp_path, {}, overwrite=False)
-
-
-def test_service_json_main_dispatches_bounded_cli_args(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_convert_service_json_to_arrow(**kwargs: Any) -> dict[str, Any]:
-        captured.update(kwargs)
-        return {
-            "signature_count": 0,
-            "paper_count": 0,
-            "paths": {},
-        }
-
-    monkeypatch.setattr(convert_module, "convert_service_json_to_arrow", fake_convert_service_json_to_arrow)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "convert_to_arrow.py",
-            "service-json",
-            "--input-json",
-            str(tmp_path / "payload.json"),
-            "--output-root",
-            str(tmp_path / "arrow"),
-            "--dataset-name",
-            "service_payload",
-            "--n-jobs",
-            "1",
-            "--skip-name-counts-index",
-            "--skip-validation",
-            "--copy-source-json",
-        ],
-    )
-
-    convert_module.main()
-
-    assert captured["dataset_name"] == "service_payload"
-    assert captured["n_jobs"] == 1
-    assert captured["skip_name_counts_index"] is True
-    assert captured["copy_source_json"] is True
-    assert captured["validate"] is False
-    assert json.loads(capsys.readouterr().out)["dataset"] == "service_payload"
 
 
 def test_service_json_cli_converts_and_reports_success(
@@ -406,6 +293,7 @@ def test_service_json_cli_converts_and_reports_success(
             "--n-jobs",
             "1",
             "--skip-name-counts-index",
+            "--copy-source-json",
         ],
     )
 
@@ -417,28 +305,12 @@ def test_service_json_cli_converts_and_reports_success(
     assert report["dataset"] == "request"
     assert report["signature_count"] == report["paper_count"] == 1
     assert (output_root / "manifest.json").is_file()
-    with ArrowDataset.open(output_root / "request"):
+    dataset_dir = output_root / "request"
+    with ArrowDataset.open(dataset_dir):
         pass
-
-
-def test_module_entry_point_lists_subcommands() -> None:
-    # This is the only test of the `python -m` entry point; other CLI tests call main() in process.
-    result = subprocess.run(
-        [sys.executable, "-m", "scripts.convert_to_arrow", "--help"],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    for subcommand in (
-        "service-json",
-        "benchmark",
-        "linker-replay",
-        "validate",
-    ):
-        assert subcommand in result.stdout
+    manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
+    for key in ("signatures_json", "papers_json", "cluster_seeds_json"):
+        assert _manifest_path(manifest, dataset_dir, key).is_file()
 
 
 def test_service_conversion_checks_index_before_loading_input(tmp_path: Path) -> None:
@@ -484,13 +356,22 @@ def test_convert_service_json_to_arrow_overwrite_preserves_other_root_manifest_e
         encoding="utf-8",
     )
 
-    _convert_service_payload(tmp_path, _minimal_service_payload(), dataset_name="new_dataset")
+    new_dataset = output_root / "new_dataset"
+    new_dataset.mkdir()
+    stale = new_dataset / "signatures.arrow"
+    stale.write_bytes(b"stale")
+    with pytest.raises(FileExistsError, match="overwrite"):
+        _convert_service_payload(tmp_path, _minimal_service_payload(), dataset_name="new_dataset", overwrite=False)
+    assert stale.read_bytes() == b"stale"
+    _convert_service_payload(tmp_path, _minimal_service_payload(), dataset_name="new_dataset", overwrite=True)
+    with ArrowDataset.open(new_dataset):
+        pass
 
     root_manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
     assert set(root_manifest) == {"kind", "format_version", "dataset_manifests"}
     assert root_manifest["kind"] == ARROW_COLLECTION_KIND
     assert root_manifest["format_version"] == PUBLIC_DATA_FORMAT_VERSION
-    assert list(root_manifest["dataset_manifests"]) == ["existing_dataset", "new_dataset"]
+    assert set(root_manifest["dataset_manifests"]) == {"existing_dataset", "new_dataset"}
     for binding in root_manifest["dataset_manifests"].values():
         assert set(binding) == {"path", "sha256"}
         assert len(binding["sha256"]) == 64

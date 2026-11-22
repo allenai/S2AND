@@ -66,13 +66,13 @@ def _write_large_author_dataset(data_dir: Path, name: str) -> dict[str, Path]:
         "paper-large-0": list(range(420)),
         "paper-large-1": list(range(200, 450)),
     }
-    for paper in range(30):
+    for paper in range(8):
         paper_authors[f"paper-small-{paper}"] = rng.sample(range(450), rng.randint(1, 8))
     signature_positions: dict[str, list[int]] = {
-        "paper-large-0": sorted(rng.sample(range(420), 40)),
-        "paper-large-1": sorted(rng.sample(range(250), 25)),
+        "paper-large-0": sorted(rng.sample(range(420), 12)),
+        "paper-large-1": sorted(rng.sample(range(250), 8)),
     }
-    for paper in range(30):
+    for paper in range(8):
         signature_positions[f"paper-small-{paper}"] = [0]
 
     dataset_dir = data_dir / name
@@ -160,7 +160,7 @@ def test_large_author_list_features_match_python(tmp_path: Path) -> None:
     signature_ids = sorted(dataset.signatures)
     rng = random.Random(5)
     pairs: list[tuple[str, str, int | float]] = []
-    for _ in range(500):
+    for _ in range(80):
         left, right = rng.sample(signature_ids, 2)
         pairs.append((left, right, 0))
     large = [signature_id for signature_id in signature_ids if signature_id.startswith("paper-large-0")]

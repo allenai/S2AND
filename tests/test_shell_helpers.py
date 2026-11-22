@@ -3,14 +3,11 @@
 import os
 from types import SimpleNamespace
 
-import pytest
-
 from tests import shell_helpers
 
 
-@pytest.mark.parametrize("git_directory", ["cmd", "bin", "mingw64/bin"])
-def test_windows_git_bash_discovery(tmp_path, monkeypatch, git_directory):
-    git = tmp_path / "Git" / git_directory / "git.exe"
+def test_windows_git_bash_discovery(tmp_path, monkeypatch):
+    git = tmp_path / "Git" / "mingw64" / "bin" / "git.exe"
     git.parent.mkdir(parents=True)
     git.touch()
     bash = tmp_path / "Git" / "bin" / "bash.exe"

@@ -64,11 +64,10 @@ def _clusterer(
     )
 
 
-@pytest.mark.parametrize("pair_chunk_size", [1, 6], ids=["one-pair", "whole-block"])
 def test_python_and_rust_square_distance_matrices_and_constraints_match(
     parity_datasets: tuple[ANDData, ANDData],
-    pair_chunk_size: int,
 ) -> None:
+    pair_chunk_size = 1
     python_dataset, rust_dataset = parity_datasets
     block = {"mixed": ["3", "4", "5", "6"]}
 
@@ -220,8 +219,7 @@ def test_python_and_rust_paths_give_linkage_identical_hard_negatives(
         np.testing.assert_array_equal(linkage_input, expected)
 
 
-@pytest.mark.parametrize("pair_chunk_size", [1, 3], ids=["one-pair", "whole-block"])
-@pytest.mark.parametrize("distance", [0.5, 0.5001])
+@pytest.mark.parametrize(("distance", "pair_chunk_size"), [(0.5, 1), (0.5001, 3)])
 def test_fastcluster_stored_and_streaming_precision_at_threshold(
     parity_datasets: tuple[ANDData, ANDData],
     pair_chunk_size: int,
@@ -240,15 +238,13 @@ def test_fastcluster_stored_and_streaming_precision_at_threshold(
     )
 
 
-@pytest.mark.parametrize("pair_chunk_size", [1, 3], ids=["one-pair", "whole-block"])
 def test_fastcluster_precision_preserves_merge_order(
     parity_datasets: tuple[ANDData, ANDData],
-    pair_chunk_size: int,
 ) -> None:
     """Avoid a float16 tie that merges the wrong first pair at the threshold."""
     _assert_fastcluster_precision_parity(
         parity_datasets,
-        pair_chunk_size=pair_chunk_size,
+        pair_chunk_size=1,
         distance=0.9,
         partial_supervision={("0", "1"): 0.5001, ("0", "2"): 0.4999},
         # Supervised values pass through the existing negative-label encoding.

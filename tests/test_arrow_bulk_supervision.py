@@ -43,9 +43,8 @@ def _clusterer(distance):
     )
 
 
-@pytest.mark.parametrize("case", CASES)
-@pytest.mark.parametrize("route", ["arrow"])
-def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, route):
+@pytest.mark.parametrize("case", ["between_residual_queries", "outside_retrieval_window"])
+def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case):
     names, supervision, threshold, _ = CASES[case]
     dataset = _dataset(names, {})
     blocks = {"one": list(dataset.signatures)}
@@ -55,7 +54,7 @@ def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, ro
         tmp_path,
         dataset,
         blocks,
-        route,
+        "arrow",
         threshold=threshold,
         distance=0.9,
         partial_supervision=caller_supervision,
@@ -63,7 +62,6 @@ def test_bulk_zero_overrides_do_not_require_incremental_links(tmp_path, case, ro
 
     assert sorted(sid for members in clusters.values() for sid in members) == sorted(dataset.signatures)
     if case == "between_residual_queries":
-        # The exact zero must survive into residual pairwise clustering.
         assert any({"1", "2"} <= set(members) for members in clusters.values())
     assert caller_supervision == supervision
     assert dataset.cluster_seeds_require == {}
@@ -96,8 +94,7 @@ def test_standalone_arrow_incremental_keeps_strict_zero_requirements(tmp_path, c
 
 
 # Entry stringifies str and int keys alike, so int keys alone catch a missed stringify.
-@pytest.mark.parametrize("distance", [0.0, LARGE_DISTANCE])
-@pytest.mark.parametrize("threshold", [None, 3])
+@pytest.mark.parametrize(("distance", "threshold"), [(LARGE_DISTANCE, None), (0.0, 3)])
 def test_arrow_bulk_normalizes_ids_and_supervision_on_every_route(tmp_path, distance, threshold):
     names = [("Ada", "", "Smith")] * 4 + [("Bob", "", "Smith")] * 2
     dataset = _dataset(names, {})
@@ -130,19 +127,17 @@ def test_arrow_bulk_rejects_supervision_conflicts_after_id_normalization():
         )
 
 
-@pytest.mark.parametrize("route", ["arrow"])
-def test_all_initial_blocks_use_bulk_and_keep_zero_overrides(tmp_path, monkeypatch, route):
+def test_all_initial_blocks_use_bulk_and_keep_zero_overrides(tmp_path, monkeypatch):
     def reject_incremental(*_args, **_kwargs):
         pytest.fail("All-initial bulk blocks must not enter incremental attachment")
 
-    monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", reject_incremental)
     monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", reject_incremental)
     dataset = _dataset([("A", "", "Smith")] * 4, {})
     clusters = _predict(
         tmp_path,
         dataset,
         {"one": list(dataset.signatures)},
-        route,
+        "arrow",
         threshold=2,
         distance=0.9,
         partial_supervision={("0", "1"): 0.0},
@@ -150,8 +145,8 @@ def test_all_initial_blocks_use_bulk_and_keep_zero_overrides(tmp_path, monkeypat
     assert sorted(sid for members in clusters.values() for sid in members) == list(dataset.signatures)
 
 
-@pytest.mark.parametrize("fail_bulk", [False, True])
-def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path, fail_bulk):
+def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path):
+    fail_bulk = True
     dataset = _dataset([("Ada", "", "Smith"), ("A", "", "Smith"), ("A", "", "Smith")], {})
     prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
     calls = []
@@ -160,9 +155,8 @@ def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path, fail_bu
         def predict_incremental_from_arrow(self, *args, **kwargs):
             calls.append(kwargs)
             assert "partial_supervision_is_distance_override" not in kwargs
-            if len(calls) == 1:
-                # A concurrent standalone request must retain strict semantics
-                # while this thread is inside bulk attachment.
+            if fail_bulk and len(calls) == 1:
+                # Keep standalone validation strict during a concurrent bulk attachment.
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     standalone = executor.submit(
                         Clusterer.predict_incremental_from_arrow,
@@ -175,8 +169,7 @@ def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path, fail_bu
                     )
                     with pytest.raises(ValueError, match="partial_supervision_require_between_residual_queries"):
                         standalone.result()
-                if fail_bulk:
-                    raise RuntimeError("custom attachment failure")
+                raise RuntimeError("custom attachment failure")
             return super().predict_incremental_from_arrow(*args, **kwargs)
 
     clusterer = WrappedClusterer(
@@ -197,23 +190,24 @@ def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path, fail_bu
                 name_tuples=frozenset(),
             )
 
-        if fail_bulk:
-            with pytest.raises(RuntimeError, match="custom attachment failure"):
-                predict_bulk()
-        else:
-            clusters, _ = predict_bulk()
-            assert any({"1", "2"} <= set(members) for members in clusters.values())
-        assert len(calls) == 1
-        # Bulk context must reset on both success and an override exception.
-        with pytest.raises(ValueError, match="partial_supervision_require_between_residual_queries"):
-            clusterer.predict_incremental_from_arrow(
-                ["1", "2"],
-                arrow_dataset,
-                cluster_seeds_require={"0": "seed"},
-                partial_supervision={("1", "2"): 0.0},
-                name_tuples=frozenset(),
-            )
-        assert len(calls) == 2
+        def check_standalone():
+            with pytest.raises(ValueError, match="partial_supervision_require_between_residual_queries"):
+                clusterer.predict_incremental_from_arrow(
+                    ["1", "2"],
+                    arrow_dataset,
+                    cluster_seeds_require={"0": "seed"},
+                    partial_supervision={("1", "2"): 0.0},
+                    name_tuples=frozenset(),
+                )
+
+        with pytest.raises(RuntimeError, match="custom attachment failure"):
+            predict_bulk()
+        check_standalone()
+        fail_bulk = False
+        clusters, _ = predict_bulk()
+        assert any({"1", "2"} <= set(members) for members in clusters.values())
+        check_standalone()
+        assert len(calls) == 4
 
 
 def test_attach_name_check_covers_only_initial_only_attachment(tmp_path, monkeypatch):
@@ -294,94 +288,46 @@ def test_incremental_residuals_keep_equivalent_cjk_given_names_together(tmp_path
     assert sorted(sorted(members) for members in result["clusters"].values()) == [["0"], ["1", "2"]]
 
 
-@pytest.mark.parametrize("distance", [0.0, 0.2, LARGE_DISTANCE - 1])
 @pytest.mark.parametrize("route", ["python", "arrow"])
-def test_bulk_rejects_a_caller_distance_that_joins_two_seed_groups(tmp_path, route, distance):
-    # Seed restoration would merge both profiles through the one pair, past the hard pair (1, 2).
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
-    blocks = {"probe": ["0", "2", "1"]}
-    supervision = {("2", "0"): distance, ("0", "1"): 0.2}
+def test_bulk_caller_distances_preserve_seed_groups(tmp_path, route):
+    dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "profileA", "1": "profileA", "2": "profileB", "3": "profileA"})
     clusterer = _clusterer(0.1)
-    with pytest.raises(ValueError, match=r"partial_supervision_joins_seed_groups: pair=\('0', '2'\)"):
-        if route == "python":
-            clusterer.predict(blocks, dataset, partial_supervision=supervision)
-        else:
-            prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
-            with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
-                clusterer.predict_from_arrow(
+    blocks = {"probe": ["0", "2", "1"], "other": ["3"]}
+
+    def check(predict):
+        # Restoring seeds would merge profiles through a caller-supplied soft distance.
+        with pytest.raises(ValueError, match="partial_supervision_joins_seed_groups"):
+            predict({("2", "0"): 0.2})
+        clusters, _ = predict({("0", "2"): LARGE_DISTANCE, ("2", "3"): 0.0, ("0", "1"): 0.2})
+        assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"], ["3"]]
+
+    if route == "python":
+        check(lambda supervision: clusterer.predict(blocks, dataset, partial_supervision=supervision))
+    else:
+        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+        with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+            check(
+                lambda supervision: clusterer.predict_from_arrow(
                     blocks,
                     arrow_dataset,
                     partial_supervision=supervision,
                     cluster_seeds_require=dataset.cluster_seeds_require,
                     name_tuples=frozenset(),
                 )
-
-
-@pytest.mark.parametrize("route", ["python", "arrow"])
-def test_bulk_accepts_a_hard_distance_between_seed_groups(tmp_path, route):
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
-    blocks = {"probe": ["0", "2", "1"]}
-    supervision = {("0", "2"): LARGE_DISTANCE, ("0", "1"): 0.2}
-    clusterer = _clusterer(0.1)
-    if route == "python":
-        clusters, _ = clusterer.predict(blocks, dataset, partial_supervision=supervision)
-    else:
-        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
-        with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
-            clusters, _ = clusterer.predict_from_arrow(
-                blocks,
-                arrow_dataset,
-                partial_supervision=supervision,
-                cluster_seeds_require=dataset.cluster_seeds_require,
-                name_tuples=frozenset(),
             )
-    assert sorted(sorted(members) for members in clusters.values()) == [["0", "1"], ["2"]]
 
 
-@pytest.mark.parametrize("route", ["python", "arrow"])
-@pytest.mark.parametrize("other_block", [False, True])
-def test_bulk_ignores_a_caller_distance_outside_the_blocks(tmp_path, route, other_block):
-    # Pair (2, 3) joins two seed groups, but signature 3 is in no block of this request, or
-    # in another block, which clusters apart.
-    dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "profileA", "1": "profileA", "2": "profileB", "3": "profileA"})
-    blocks = {"probe": ["0", "2", "1"], **({"other": ["3"]} if other_block else {})}
-    supervision = {("2", "3"): 0.0, ("0", "1"): 0.2}
-    clusterer = _clusterer(0.1)
-    if route == "python":
-        clusters, _ = clusterer.predict(blocks, dataset, partial_supervision=supervision)
-    else:
-        prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
-        with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
-            clusters, _ = clusterer.predict_from_arrow(
-                blocks,
-                arrow_dataset,
-                partial_supervision=supervision,
-                cluster_seeds_require=dataset.cluster_seeds_require,
-                name_tuples=frozenset(),
-            )
-    expected = [["0", "1"], ["2"]] + ([["3"]] if other_block else [])
-    assert sorted(sorted(members) for members in clusters.values()) == expected
-
-
-def test_predict_helper_rejects_a_caller_distance_that_joins_two_seed_groups():
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "profileA", "1": "profileA", "2": "profileB"})
-    with pytest.raises(ValueError, match="partial_supervision_joins_seed_groups"):
-        _clusterer(0.1).predict_helper({"probe": ["0", "1", "2"]}, dataset, partial_supervision={("0", "2"): 0.0})
-
-
-def test_python_seed_check_follows_the_default_constraint_switch():
-    # Without default constraints the Python route does not separate seed groups.
-    dataset = _dataset([("Ada", "", "Smith")] * 2, {"0": "profileA", "1": "profileB"})
-    clusterer = _clusterer(0.1)
-    clusterer.use_default_constraints_as_supervision = False
-    clusters, _ = clusterer.predict({"probe": ["0", "1"]}, dataset, partial_supervision={("0", "1"): 0.1})
-    assert sorted(len(members) for members in clusters.values()) == [2]
-
-
-def test_seed_check_skips_pairs_outside_the_requested_blocks():
-    # Residual clustering clusters queries only; seed pairs elsewhere are not its concern.
+def test_predict_helper_limits_seed_validation_to_the_requested_block():
     dataset = _dataset([("Ada", "", "Smith")] * 4, {"0": "profileA", "1": "profileB"})
-    clusters, _ = _clusterer(0.1).predict_helper(
-        {"probe": ["2", "3"]}, dataset, partial_supervision={("0", "1"): 0.0, ("2", "3"): 0.1}
-    )
-    assert sorted(len(members) for members in clusters.values()) == [2]
+    clusterer = _clusterer(0.1)
+    supervision = {("0", "1"): 0.0, ("2", "3"): 0.1}
+
+    with pytest.raises(ValueError, match="partial_supervision_joins_seed_groups"):
+        clusterer.predict_helper({"probe": ["0", "1"]}, dataset, partial_supervision=supervision)
+
+    clusters, _ = clusterer.predict_helper({"probe": ["2", "3"]}, dataset, partial_supervision=supervision)
+    assert list(clusters.values()) == [["2", "3"]]
+
+    clusterer.use_default_constraints_as_supervision = False
+    clusters, _ = clusterer.predict({"probe": ["0", "1"]}, dataset, partial_supervision=supervision)
+    assert list(clusters.values()) == [["0", "1"]]

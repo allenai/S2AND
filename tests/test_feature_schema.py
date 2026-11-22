@@ -50,16 +50,6 @@ GOLDEN_GROUPS = tuple(dict.fromkeys(row[2] for row in GOLDEN_FEATURES))
 GOLDEN_NAME_GROUPS = frozenset({"name_similarity", "name_counts", "advanced_name_similarity"})
 
 
-def test_schema_preserves_frozen_columns():
-    assert (
-        tuple(
-            (index, feature.name, feature.group, feature.monotone_constraint)
-            for index, feature in enumerate(FEATURE_SCHEMA)
-        )
-        == GOLDEN_FEATURES
-    )
-
-
 def _assert_selected_contract(groups: list[str]) -> None:
     info = FeaturizationInfo(groups)
     selected = [row for row in GOLDEN_FEATURES if row[2] in groups]
@@ -73,7 +63,17 @@ def _assert_selected_contract(groups: list[str]) -> None:
     )
 
 
-def test_default_metadata_preserves_fitted_model_contract():
+def test_schema_preserves_fitted_model_contract():
+    assert (
+        tuple(
+            (index, feature.name, feature.group, feature.monotone_constraint)
+            for index, feature in enumerate(FEATURE_SCHEMA)
+        )
+        == GOLDEN_FEATURES
+    )
+    assert tuple(name for _function, name in TEXT_FUNCTIONS) == tuple(
+        row[1] for row in GOLDEN_FEATURES if row[2] == "advanced_name_similarity"
+    )
     info = FeaturizationInfo()
     assert tuple(info.features_to_use) == GOLDEN_GROUPS
     assert DEFAULT_FEATURE_GROUPS == GOLDEN_GROUPS
@@ -83,17 +83,5 @@ def test_default_metadata_preserves_fitted_model_contract():
         group: [row[0] for row in GOLDEN_FEATURES if row[2] == group] for group in GOLDEN_GROUPS
     }
     _assert_selected_contract(list(GOLDEN_GROUPS))
-
-
-def test_selected_groups_preserve_canonical_metadata():
-    # Selection is independent per group; cover each membership plus ordering,
-    # duplication, empty selection, and the production nameless combination.
-    for groups in ([], *([group] for group in GOLDEN_GROUPS), list(DEFAULT_NAMELESS_FEATURE_GROUPS)):
-        _assert_selected_contract(groups)
-    _assert_selected_contract(list(reversed(GOLDEN_GROUPS)) + list(GOLDEN_GROUPS))
-
-
-def test_advanced_feature_calculation_order_matches_fitted_model_contract():
-    assert tuple(name for _function, name in TEXT_FUNCTIONS) == tuple(
-        row[1] for row in GOLDEN_FEATURES if row[2] == "advanced_name_similarity"
-    )
+    _assert_selected_contract([])
+    _assert_selected_contract(list(reversed(DEFAULT_NAMELESS_FEATURE_GROUPS)) + ["year_diff"])

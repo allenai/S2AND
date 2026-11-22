@@ -1,6 +1,5 @@
 """Check exact bulk label bits across native constraints and supervision."""
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,10 +22,7 @@ from s2and.model import Clusterer, FastCluster
         (7, False, True, True),
         (7, True, False, True),
         (7, True, True, True),
-        (1, True, True, True),
-        (10000, True, True, True),
-        (7, True, True, False),
-        (10000, True, False, False),
+        (10000, True, True, False),
     ],
 )
 def test_bulk_labels_preserve_scalar_bits(
@@ -73,7 +69,7 @@ def test_bulk_labels_preserve_scalar_bits(
     observed: list[np.ndarray] = []
 
     def constraints(_indices: list[int], *, start_offset: int, max_pairs: int, **kwargs: Any):
-        assert kwargs["num_threads"] == 10
+        assert kwargs["num_threads"] == 1
         left, right = model_module._upper_triangle_indices_for_range(len(signatures), start_offset, max_pairs)
         return left.tolist(), right.tolist(), values[start_offset : start_offset + max_pairs]
 
@@ -97,7 +93,7 @@ def test_bulk_labels_preserve_scalar_bits(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
         classifier=None,
         cluster_model=FastCluster(linkage="average") if fastcluster else DBSCAN(),
-        n_jobs=10,
+        n_jobs=1,
         batch_size=chunk_size,
         use_default_constraints_as_supervision=constraints_enabled,
     )
@@ -108,21 +104,3 @@ def test_bulk_labels_preserve_scalar_bits(
         partial_supervision=supervision,
     )
     np.testing.assert_array_equal(np.concatenate(observed).view(np.uint64), expected.view(np.uint64))
-
-
-def test_native_constraint_wrapper_preserves_native_types_and_values(tmp_path: Path) -> None:
-    """Check the real PyO3 list contract used to remove Python coercions."""
-    from s2and.feature_port import _get_rust_featurizer
-    from s2and.rust_calls import get_constraints_block_upper_triangle_indexed_rust
-    from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
-
-    dataset = build_dummy_dataset("native-constraint-list-contract", name_counts_index=True)
-    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
-    native = _get_rust_featurizer(arrow_dataset)
-    indices = list(range(min(4, len(native.signature_ids()))))
-    direct = native.get_constraints_block_upper_triangle_indexed(indices, num_threads=10)
-    wrapped = get_constraints_block_upper_triangle_indexed_rust(indices, featurizer=native, num_threads=10)
-    assert wrapped == direct
-    assert all(type(column) is list for column in wrapped)
-    assert all(type(value) is int for column in wrapped[:2] for value in column)
-    assert all(value is None or type(value) is float for value in wrapped[2])

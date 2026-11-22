@@ -154,6 +154,24 @@ def _user_root(output: Path, root: Path) -> Path:
 
 
 def test_bundles_rebuild_the_prepared_training_population(snapshot: Path, tmp_path: Path) -> None:
+    model = snapshot / "pairwise/sources/model/qian"
+    signatures = json.loads((model / "qian_signatures.json").read_text(encoding="utf-8"))
+    reserved = sorted(signatures)[-1]
+    del signatures[reserved]
+    _write(model / "qian_signatures.json", signatures)
+    clusters = json.loads((model / "qian_clusters.json").read_text(encoding="utf-8"))
+    _write(model / "qian_clusters.json", _subset(clusters, set(signatures)))
+
+    giant = snapshot / "datasets/a_khan"
+    shutil.copytree(snapshot / "benchmarks/qian", giant)
+    _write(snapshot / "replay_manifest.json", {"dataset_manifests": {"a_khan": {"sha256": "old"}}})
+    _write(snapshot / "manifest.json", {"replay_bundles": {"incremental": {"sha256": "old"}}})
+    source = snapshot / "corrected_replay/raw/a_khan/signatures.json"
+    _write(source, {"s1": {"author_info": {"email": "J.Smith@MIT.edu."}}})
+    original_sha = sha256_file(giant / "signatures.arrow")
+    with pa.memory_map(str(giant / "signatures.arrow"), "r") as stream:
+        original_emails = pa.ipc.open_file(stream).read_all()["author_email"].to_pylist()
+
     output = tmp_path / "bundles"
     summary = write_release_bundles(snapshot, output)
 
@@ -161,13 +179,14 @@ def test_bundles_rebuild_the_prepared_training_population(snapshot: Path, tmp_pa
         assert b"\r\n" not in (output / "dataset" / written).read_bytes()
     plan = load_model_plan(output / "dataset" / "pairwise" / "model_plan.json")
     assert summary["model_plan_sha256"] == sha256_file(output / "dataset" / "pairwise" / "model_plan.json")
-    assert list(plan.datasets) == ["qian", "augmented"]
+    assert set(plan.datasets) == {"qian", "augmented"}
     assert set(plan.datasets["qian"].files) == {
         "arrow",
         "clusters",
         "heldout_blocks",
         "heldout_pairs",
         "unknown_signatures",
+        "excluded_signatures",
     }
     assert set(plan.datasets["augmented"].files) == {"arrow", "train_pairs", "val_pairs", "heldout_pairs"}
     assert plan.eps.grid == (0.5, 0.6)
@@ -195,37 +214,8 @@ def test_bundles_rebuild_the_prepared_training_population(snapshot: Path, tmp_pa
         assert arrow_dataset.name_counts_index is not None
     assert plan_unknown_signatures(user_plan.datasets["qian"]).ids == {"signature-0-3", "signature-1-0"}
 
-
-def test_bundles_declare_signatures_reserved_outside_both_populations(snapshot: Path, tmp_path: Path) -> None:
-    model = snapshot / "pairwise/sources/model/qian"
-    signatures = json.loads((model / "qian_signatures.json").read_text(encoding="utf-8"))
-    reserved = sorted(signatures)[-1]
-    del signatures[reserved]
-    _write(model / "qian_signatures.json", signatures)
-    clusters = json.loads((model / "qian_clusters.json").read_text(encoding="utf-8"))
-    _write(model / "qian_clusters.json", _subset(clusters, set(signatures)))
-
-    output = tmp_path / "bundles"
-    write_release_bundles(snapshot, output)
-
-    plan = load_model_plan(output / "dataset" / "pairwise" / "model_plan.json")
     excluded = plan.datasets["qian"].files["excluded_signatures"]
     assert json.loads(excluded.read_text(encoding="utf-8")) == [reserved]
-
-
-def test_bundles_hash_giant_emails_before_publication(snapshot: Path, tmp_path: Path) -> None:
-    giant = snapshot / "datasets/a_khan"
-    shutil.copytree(snapshot / "benchmarks/qian", giant)
-    _write(snapshot / "replay_manifest.json", {"dataset_manifests": {"a_khan": {"sha256": "old"}}})
-    _write(snapshot / "manifest.json", {"replay_bundles": {"incremental": {"sha256": "old"}}})
-    source = snapshot / "corrected_replay/raw/a_khan/signatures.json"
-    _write(source, {"s1": {"author_info": {"email": "J.Smith@MIT.edu."}}})
-    original_sha = sha256_file(giant / "signatures.arrow")
-    with pa.memory_map(str(giant / "signatures.arrow"), "r") as stream:
-        original_emails = pa.ipc.open_file(stream).read_all()["author_email"].to_pylist()
-
-    output = tmp_path / "bundles"
-    write_release_bundles(snapshot, output)
 
     assert sha256_file(giant / "signatures.arrow") == original_sha
     with pa.memory_map(str(output / "dataset/datasets/a_khan/signatures.arrow"), "r") as stream:
@@ -234,6 +224,9 @@ def test_bundles_hash_giant_emails_before_publication(snapshot: Path, tmp_path: 
     public_source = json.loads((output / "source/corrected_replay/raw/a_khan/signatures.json").read_text())
     assert public_source["s1"]["author_info"]["email"] == hash_feature_email("J.Smith@MIT.edu.")
     assert json.loads(source.read_text())["s1"]["author_info"]["email"] == "J.Smith@MIT.edu."
+
+    with pytest.raises(FileExistsError):
+        write_release_bundles(snapshot, output)
 
 
 @pytest.mark.parametrize(
@@ -265,12 +258,6 @@ def test_bundles_reject_a_snapshot_that_arrow_cannot_rebuild(
         (snapshot / "orcid_error_query_signatures.json").unlink()
 
     with pytest.raises((ValueError, FileNotFoundError), match=message):
-        write_release_bundles(snapshot, tmp_path / "bundles")
-
-
-def test_bundles_require_a_fresh_output(snapshot: Path, tmp_path: Path) -> None:
-    (tmp_path / "bundles").mkdir()
-    with pytest.raises(FileExistsError):
         write_release_bundles(snapshot, tmp_path / "bundles")
 
 

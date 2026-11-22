@@ -15,11 +15,10 @@ def _unexpected_residual_clustering(signature_ids: list[str]) -> dict[str, list[
 
 
 @pytest.mark.parametrize(
-    ("query_disallow", "batch_size"),
-    [(False, 1), (True, 1), (True, 2)],
+    ("query_disallow", "batch_size", "external_fallback"),
+    [(False, 1, False), (True, 1, True), (True, 2, False)],
     ids=["single-query", "query-conflict-cross-batch", "query-conflict-same-batch"],
 )
-@pytest.mark.parametrize("external_fallback", [False, True])
 def test_altered_profile_disallows_survive_native_planning_and_restoration(
     tmp_path, monkeypatch, query_disallow, batch_size, external_fallback
 ) -> None:
@@ -337,8 +336,7 @@ def test_reject_conflicting_new_links_keeps_forced_then_score_order() -> None:
         reject_conflicting_new_links(linked, priorities={}, recluster_map={}, conflict=lambda _a, _b: False)
 
 
-@pytest.mark.parametrize("batch_size", [1, 3], ids=["cross-batch", "same-batch"])
-@pytest.mark.parametrize("name_check", [False, True], ids=["check-off", "check-on"])
+@pytest.mark.parametrize(("batch_size", "name_check"), [(1, True), (3, False)])
 def test_attach_name_check_rejects_conflicting_links_in_one_pass(tmp_path, monkeypatch, batch_size, name_check) -> None:
     from s2and.arrow_inputs import ArrowDataset
     from s2and.featurizer import FeaturizationInfo

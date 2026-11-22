@@ -6,27 +6,18 @@ from sklearn.base import clone
 from s2and.model import FastCluster
 
 
-def test_fastcluster_invalid_linkage_raises_value_error():
+def test_fastcluster_rejects_invalid_configuration_and_input():
     with pytest.raises(ValueError, match="linkage"):
         FastCluster(linkage="invalid")
 
-
-def test_fastcluster_fit_rejects_1d_input_when_observation_matrix_expected():
-    clusterer = FastCluster(input_as_observation_matrix=True)
+    observations = FastCluster(input_as_observation_matrix=True)
+    condensed = FastCluster(input_as_observation_matrix=False)
     with pytest.raises(ValueError, match="one-dimensional"):
-        clusterer.fit(np.array([0.1, 0.2, 0.3]))
-
-
-def test_fastcluster_fit_rejects_2d_input_when_distance_matrix_expected():
-    clusterer = FastCluster(input_as_observation_matrix=False)
+        observations.fit(np.array([0.1, 0.2, 0.3]))
     with pytest.raises(ValueError, match="two-dimensional"):
-        clusterer.fit(np.array([[0.1, 0.2], [0.3, 0.4]]))
-
-
-def test_fastcluster_fit_rejects_inputs_above_2_dimensions():
-    clusterer = FastCluster(input_as_observation_matrix=False)
+        condensed.fit(np.array([[0.1, 0.2], [0.3, 0.4]]))
     with pytest.raises(ValueError, match="one-dimensional or two-dimensional"):
-        clusterer.fit(np.zeros((2, 2, 2)))
+        condensed.fit(np.zeros((2, 2, 2)))
 
 
 def test_fastcluster_transform_raises_not_implemented_error():

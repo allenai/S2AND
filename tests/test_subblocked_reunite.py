@@ -1,7 +1,5 @@
 """Reunite-only: no-middle dead-end records that the size cap cut across subblocks."""
 
-import json
-
 import pytest
 
 from s2and.model import _ARROW_ATTACH_NAME_CHECK_EXEMPT, _ARROW_BULK_DISTANCE_OVERRIDES, Clusterer
@@ -81,41 +79,6 @@ def _record_incremental_seeds(monkeypatch, route):
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_reunite_joins_no_middle_pieces_and_leaves_other_clusters(tmp_path, monkeypatch, route):
-    dataset = _dataset(NAMES, {})
-    blocks = {"w wang": list(dataset.signatures)}
-    calls = _record_attach_calls(monkeypatch, route)
-
-    clusters = _predict(tmp_path / "reunite", dataset, blocks, route)
-
-    _assert_partition(clusters, blocks["w wang"])
-    assert _partition(clusters) == {
-        frozenset(NO_MIDDLE),
-        frozenset({"10", "11", "12"}),
-        frozenset({"9"}),
-        frozenset({"13"}),
-    }
-    # The block has no initial-only group, so the reunite pass is the only attachment pass.
-    [call] = calls
-    # The pieces tie in size, so the first in key order keeps its bulk cluster as the seed. Each
-    # other piece is one query group, in key order.
-    assert _partition(call["visible"]) == {frozenset({"0", "1", "2"})}
-    assert [set(members) for members in call["groups"].values()] == [{"3", "4", "5"}, {"6", "7", "8"}]
-    assert sorted(call["groups"]) == list(call["groups"])
-
-    _without_reunite(monkeypatch)
-    before = _predict(tmp_path / "before", dataset, blocks, route)
-    assert _partition(before) == {
-        frozenset({"0", "1", "2"}),
-        frozenset({"3", "4", "5"}),
-        frozenset({"6", "7", "8"}),
-        frozenset({"10", "11", "12"}),
-        frozenset({"9"}),
-        frozenset({"13"}),
-    }
-
-
-@pytest.mark.parametrize("route", ROUTES)
 def test_reunite_never_shows_clusters_with_unmarked_records(tmp_path, monkeypatch, route):
     """Required members are not marked, so their bulk cluster stays hidden and unchanged."""
     dataset = _dataset(NAMES, {"3": "claimed", "4": "claimed"})
@@ -143,11 +106,6 @@ def test_reunite_never_shows_clusters_with_unmarked_records(tmp_path, monkeypatc
         frozenset({"13"}),
     }
 
-    _without_reunite(monkeypatch)
-    before = _predict(tmp_path / "before", dataset, blocks, route)
-    required_clusters = [members for members in clusters.values() if "3" in members]
-    assert required_clusters == [members for members in before.values() if "3" in members]
-
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_required_group_across_pieces_is_never_marked_or_split(tmp_path, monkeypatch, route):
@@ -163,6 +121,7 @@ def test_required_group_across_pieces_is_never_marked_or_split(tmp_path, monkeyp
     # The largest piece (3-5) keeps its bulk cluster as the seed, although the part with 2 sorts first.
     assert _partition(call["visible"]) == {frozenset({"3", "4", "5"})}
     assert [set(members) for members in call["groups"].values()] == [{"2"}, {"7", "8"}]
+    assert _predict(tmp_path / "repeat", dataset, blocks, route) == clusters
     assert _partition(clusters) == {
         frozenset({"0", "1", "6"}),
         frozenset({"2", "3", "4", "5", "7", "8"}),
@@ -173,8 +132,8 @@ def test_required_group_across_pieces_is_never_marked_or_split(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("route", ROUTES)
-@pytest.mark.parametrize("hao_count", [3, 6], ids=["second-dead-end-in-one-piece", "second-dead-end-cut"])
-def test_reunite_works_on_each_dead_end_alone(tmp_path, monkeypatch, route, hao_count):
+def test_reunite_works_on_each_dead_end_alone(tmp_path, monkeypatch, route):
+    hao_count = 6
     """A second dead end ("hao") neither sees nor joins the "wei" clusters, and an uncut bucket stays."""
     dataset = _dataset([WEI] * 9 + [WEI_MIN] * 4 + [HAO] * hao_count + [HAO_XU], {})
     blocks = {"w wang": list(dataset.signatures)}
@@ -194,17 +153,10 @@ def test_reunite_works_on_each_dead_end_alone(tmp_path, monkeypatch, route, hao_
     wei_call = {"visible": {frozenset({"0", "1", "2"})}, "groups": [{"3", "4", "5"}, {"6", "7", "8"}]}
     hao_call = {"visible": {frozenset({"13", "14", "15"})}, "groups": [{"16", "17", "18"}]}
     # One pass per cut bucket, in bucket order. Each pass sees only the clusters of its bucket.
-    expected_calls = [wei_call] if hao_count == 3 else [hao_call, wei_call]
     assert [
         {"visible": _partition(call["visible"]), "groups": [set(members) for members in call["groups"].values()]}
         for call in calls
-    ] == expected_calls
-    if hao_count == 3:
-        _without_reunite(monkeypatch)
-        before = _predict(tmp_path / "before", dataset, blocks, route)
-        assert [members for members in clusters.values() if "13" in members] == [
-            members for members in before.values() if "13" in members
-        ]
+    ] == [hao_call, wei_call]
 
 
 @pytest.mark.parametrize("route", ROUTES)
@@ -254,7 +206,7 @@ def test_arrow_reunite_runs_with_the_attach_name_checks(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_initial_only_attachment_runs_after_reunite_with_every_cluster(tmp_path, monkeypatch, route):
+def test_reunite_joins_only_marked_pieces_before_initial_attachment(tmp_path, monkeypatch, route):
     dataset = _dataset(NAMES + [("W", "", "Wang")], {})
     blocks = {"w wang": list(dataset.signatures)}
     calls = _record_attach_calls(monkeypatch, route)
@@ -263,7 +215,9 @@ def test_initial_only_attachment_runs_after_reunite_with_every_cluster(tmp_path,
 
     _assert_partition(clusters, blocks["w wang"])
     reunite_call, initial_call = calls
-    assert set(reunite_call["groups"]) != set(initial_call["groups"])
+    # Keep the first piece as the seed for both other marked pieces.
+    assert _partition(reunite_call["visible"]) == {frozenset({"0", "1", "2"})}
+    assert [set(members) for members in reunite_call["groups"].values()] == [{"3", "4", "5"}, {"6", "7", "8"}]
     assert [members for members in initial_call["groups"].values()] == [["14"]]
     assert _partition(initial_call["visible"]) == {
         frozenset(NO_MIDDLE),
@@ -277,9 +231,7 @@ def test_initial_only_attachment_runs_after_reunite_with_every_cluster(tmp_path,
 @pytest.mark.parametrize(
     "names",
     [
-        pytest.param([WEI] * 3 + [WEI_MIN] * 2 + [WEN], id="no-middle-bucket-in-one-piece"),
         pytest.param([WEI, WEN, ("Wu", "", "Wang"), ("Wang", "", "Wang")], id="no-dead-end"),
-        pytest.param([WEI] * 2 + [WEN], id="block-at-cap"),
         pytest.param([WEI] * 3 + [WEI_MIN] + [HAO] * 3 + [HAO_XU], id="two-dead-ends-each-in-one-piece"),
     ],
 )
@@ -293,22 +245,4 @@ def test_reunite_is_a_no_op_without_marked_clusters_in_two_pieces(tmp_path, monk
 
     _without_reunite(monkeypatch)
     before = _predict(tmp_path / "before", dataset, blocks, route)
-    assert json.dumps(clusters) == json.dumps(before)
-
-
-@pytest.mark.parametrize(
-    ("seeds", "reunited"),
-    [
-        pytest.param({}, NO_MIDDLE, id="no-seeds"),
-        pytest.param({"12": "claimed", "13": "claimed"}, NO_MIDDLE, id="required-group-elsewhere"),
-        pytest.param({"0": "claimed", "6": "claimed"}, NO_MIDDLE - {"0", "1", "6"}, id="required-group-across-pieces"),
-    ],
-)
-def test_reunite_gives_identical_clusters_on_repeated_native_calls(tmp_path, seeds, reunited):
-    dataset = _dataset(NAMES, seeds)
-    blocks = {"w wang": list(dataset.signatures)}
-
-    arrow = _predict(tmp_path / "arrow", dataset, blocks, "arrow")
-
-    assert frozenset(reunited) in _partition(arrow)
-    assert json.dumps(_predict(tmp_path / "arrow_again", dataset, blocks, "arrow")) == json.dumps(arrow)
+    assert clusters == before

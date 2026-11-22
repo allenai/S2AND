@@ -49,8 +49,8 @@ def _write_curve(root: Path) -> Path:
     return dataset
 
 
-def test_star_uses_requested_weights_and_overall_scope(tmp_path: Path) -> None:
-    _write_curve(tmp_path)
+def test_plot_uses_requested_weights_and_rejects_stale_scores(tmp_path: Path) -> None:
+    dataset = _write_curve(tmp_path)
     original = tradeoff._load_q_class(tmp_path, "j_smith", "weight_query_label_balanced")
     previous = tradeoff._load_q_class(tmp_path, "j_smith")
     assert tradeoff._best_accuracy_point(original)["eps"] == 0.65
@@ -58,18 +58,6 @@ def test_star_uses_requested_weights_and_overall_scope(tmp_path: Path) -> None:
     assert original["positive_recall"].tolist() == [0.7, 0.9]
     tied = original.assign(accuracy=0.8).iloc[::-1]
     assert tradeoff._best_accuracy_point(tied)["eps"] == 0.55
-
-
-def test_plot_rejects_stale_scores(tmp_path: Path) -> None:
-    dataset = _write_curve(tmp_path)
-    with (dataset / "eps_overall.tsv").open("a", encoding="utf-8") as stream:
-        stream.write("\n")
-    with pytest.raises(ValueError, match="scores change after completion"):
-        tradeoff._load_q_class(tmp_path, "j_smith", "weight_query_label_balanced")
-
-
-def test_original_style_plot_runs_with_verified_curves(tmp_path: Path) -> None:
-    _write_curve(tmp_path)
     output = tmp_path / "tradeoff.png"
     args = tradeoff.parse_args(
         [
@@ -87,3 +75,8 @@ def test_original_style_plot_runs_with_verified_curves(tmp_path: Path) -> None:
     )
     assert tradeoff.plot(args) == output.resolve()
     assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    with (dataset / "eps_overall.tsv").open("a", encoding="utf-8") as stream:
+        stream.write("\n")
+    with pytest.raises(ValueError, match="scores change after completion"):
+        tradeoff._load_q_class(tmp_path, "j_smith", "weight_query_label_balanced")

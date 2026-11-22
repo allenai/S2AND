@@ -8,7 +8,6 @@ from s2and.consts import LARGE_DISTANCE
 from s2and.incremental_linking.completion import (
     complete_incremental_prediction,
     first_initials,
-    next_unused_cluster_id,
     residual_first_initial_groups,
 )
 from s2and.incremental_linking.seed_assignment import SeedLinkAssignment
@@ -16,7 +15,7 @@ from s2and.prediction_state import PredictionState
 
 
 def test_completion_preserves_order_allocates_ids_and_owns_results():
-    assignment = SeedLinkAssignment({"0": ["seed0"], "2": ["seed2"], "profile": ["seedp"]}, ["a", "b", "c", "d"], [])
+    assignment = SeedLinkAssignment({"0": ["seed0"], "2": ["seed2"], "04": ["seedp"]}, ["a", "b", "c", "d"], [])
     backend_output = {"unrelated_id": ["a"], "0": ["c"]}
     callback = Mock(return_value=backend_output)
     state = PredictionState()
@@ -34,13 +33,12 @@ def test_completion_preserves_order_allocates_ids_and_owns_results():
     assert result == {
         "0": ["seed0"],
         "2": ["seed2"],
-        "profile": ["seedp"],
+        "04": ["seedp"],
         "1": ["a"],
         "3": ["c"],
         "4": ["b"],
         "5": ["d"],
     }
-    assert list(result) == ["0", "2", "profile", "1", "3", "4", "5"]
     callback.assert_called_once_with(["a", "c"])
     assert state.telemetry["incremental_residual_phase_b"] == {
         "residual_phase_b_signature_count": 4,
@@ -109,30 +107,7 @@ def test_callback_failure_propagates_without_mutating_assignment():
     assert assignment == SeedLinkAssignment({"1": ["seed"]}, ["a", "b"], [])
 
 
-@pytest.mark.parametrize(
-    "orcids,suppress,supervision,expected",
-    [
-        ({}, False, {("b", "d"): LARGE_DISTANCE - 1}, [["a", "c"], ["b", "d"]]),
-        ({}, False, {("outside", "a"): 0}, [["a", "c"], ["b"], ["d"]]),
-    ],
-)
-def test_grouping_preserves_orcid_and_supervision_bridges(orcids, suppress, supervision, expected):
-    assert (
-        residual_first_initial_groups(
-            ["a", "b", "c", "d"],
-            first_names={"a": "alice", "b": "bob", "c": "amy", "d": "dan"},
-            orcids=orcids,
-            partial_supervision=supervision,
-            use_default_constraints_as_supervision=True,
-            suppress_orcid=suppress,
-        )
-        == expected
-    )
-
-
-@pytest.mark.parametrize(
-    "names,enabled", [({}, True), ({"a": "amy", "b": " "}, True), ({"a": "amy", "b": "bob"}, False)]
-)
+@pytest.mark.parametrize("names,enabled", [({"a": "amy", "b": " "}, True), ({"a": "amy", "b": "bob"}, False)])
 def test_grouping_requires_complete_names_and_default_constraints(names, enabled):
     assert residual_first_initial_groups(
         ["a", "b"],
@@ -163,7 +138,7 @@ def test_residual_partition_preserves_transitive_mixed_bridges(suppress_orcid: b
         ["d", "a", "e", "b", "c", "aa"],
         first_names={"a": "alice", "aa": "amy", "b": "bob", "c": "carol", "d": "dan", "e": "eve"},
         orcids={"aa": "shared", "b": "shared"},
-        partial_supervision={("c", "b"): 0.25, ("e", "d"): LARGE_DISTANCE},
+        partial_supervision={("c", "b"): LARGE_DISTANCE - 1, ("e", "d"): LARGE_DISTANCE, ("outside", "a"): 0},
         use_default_constraints_as_supervision=True,
         suppress_orcid=suppress_orcid,
     )
@@ -173,33 +148,22 @@ def test_residual_partition_preserves_transitive_mixed_bridges(suppress_orcid: b
     )
 
 
-def test_cluster_id_allocation_only_skips_exact_numeric_keys():
-    assert next_unused_cluster_id({"4": [], "5": [], "07": [], "named": []}, 4) == 6
-    assert next_unused_cluster_id({"07": []}, 7) == 7
-
-
-@pytest.mark.parametrize(
-    ("cjk", "expected"),
-    [
-        # Same whole CJK name: the full-block rule keeps them together, so grouping must too.
-        ({"compat": "Hhaituo", "standard": "Hhaituo", "other": None}, [["compat", "standard"], ["other"]]),
-        # Different whole CJK names conflict, so the old initials may split them.
-        ({"compat": "Htuo", "standard": "Hhaituo", "other": None}, [["compat"], ["standard"], ["other"]]),
-        # Incomplete or cross-script names keep the ordinary rules, which the old initials follow.
-        ({"compat": "", "standard": "Hhaituo", "other": None}, [["compat"], ["standard"], ["other"]]),
-        ({"compat": "Ghaituo", "standard": "Hhaituo", "other": None}, [["compat", "standard"], ["other"]]),
-    ],
-)
-def test_residual_grouping_follows_the_whole_cjk_given_name(cjk, expected):
-    # The prepared first name drops the compatibility kanji U+FA45, leaving "tuo" against "hai".
+def test_residual_grouping_uses_complete_cjk_given_name_initials():
+    # The prepared first name can drop the compatibility kanji U+FA45.
     groups = residual_first_initial_groups(
-        ["compat", "standard", "other"],
-        first_names={"compat": "tuo", "standard": "hai", "other": "mark"},
+        ["compat", "standard", "different", "incomplete", "hangul"],
+        first_names={"compat": "tuo", "standard": "hai", "different": "ming", "incomplete": "lu", "hangul": "rong"},
         orcids={},
         partial_supervision={},
         use_default_constraints_as_supervision=True,
         suppress_orcid=False,
-        cjk_given_names=cjk,
+        cjk_given_names={
+            "compat": "Hhaituo",
+            "standard": "Hhaituo",
+            "different": "Hmai",
+            "incomplete": "",
+            "hangul": "Ghaituo",
+        },
     )
 
-    assert groups == expected
+    assert groups == [["compat", "standard", "hangul"], ["different"], ["incomplete"]]

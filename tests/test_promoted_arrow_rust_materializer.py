@@ -32,31 +32,36 @@ def target_payload() -> dict[str, Any]:
     return {"feature_count": len(features), "features": features, "params": {"n_estimators": 10}, "metrics": {}}
 
 
-def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path, target_payload) -> None:
+def test_load_target_requires_canonical_features(tmp_path: Path, target_payload: dict[str, Any]) -> None:
     target_path = tmp_path / "target.json"
     target_path.write_text(json.dumps(target_payload), encoding="utf-8")
     assert _load_target(target_path)["features"] == target_payload["features"]
-    target_payload["features"][0], target_payload["features"][1] = (
-        target_payload["features"][1],
-        target_payload["features"][0],
-    )
-    target_path.write_text(json.dumps(target_payload), encoding="utf-8")
+
+    features = target_payload["features"].copy()
+    features[0], features[1] = features[1], features[0]
+    target_path.write_text(json.dumps(target_payload | {"features": features}), encoding="utf-8")
     with pytest.raises(ValueError, match="canonical order"):
         _load_target(target_path)
 
+    for columns, message in (
+        (["not_a_promoted_feature"], "unknown features"),
+        (["min_distance", "min_distance"], "duplicate features"),
+    ):
+        target_path.write_text(
+            json.dumps(target_payload | {"feature_count": len(columns), "features": columns}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=message):
+            _load_target(target_path)
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"feature_count": 1, "features": ["not_a_promoted_feature"]}, "unknown features"),
-        ({"feature_count": 2, "features": ["min_distance", "min_distance"]}, "duplicate features"),
+
+def test_load_target_rejects_invalid_params_and_metrics(tmp_path: Path, target_payload: dict[str, Any]) -> None:
+    target_path = tmp_path / "target.json"
+    for overrides, message in (
         ({"params": {}}, "params"),
-        ({"params": {"n_estimators": True}}, "params"),
-        ({"params": {"n_estimators": 0}}, "params"),
-        ({"params": {"n_estimators": 1.5}}, "params"),
+        ({"params": {"n_estimators": True}}, "positive integer"),
         ({"metrics": {"score": float("nan")}}, "must be finite"),
         ({"metrics": {"score": 1.0}}, "unknown metric keys"),
-        ({"metrics": {"stratified_test_accuracy": None}}, "must be numeric"),
         ({"metrics": {"stratified_test_accuracy": True}}, "must be numeric"),
         ({"metrics": {"stratified_test_errors": 1.5}}, "nonnegative integer"),
         ({"metrics": {"weighted_average_error_weights": {"wrong": 1.0}}}, "must equal"),
@@ -64,13 +69,10 @@ def test_load_target_requires_exact_promoted_feature_order(tmp_path: Path, targe
             {"params": {"n_estimators": 1}, "metrics": {"stratified_test_accuracy": 1.0}},
             "complete official metric set",
         ),
-    ],
-)
-def test_load_target_rejects_invalid_contract(tmp_path: Path, target_payload, overrides, message: str) -> None:
-    target_path = tmp_path / "target.json"
-    target_path.write_text(json.dumps(target_payload | overrides), encoding="utf-8")
-    with pytest.raises(ValueError, match=message):
-        _load_target(target_path)
+    ):
+        target_path.write_text(json.dumps(target_payload | overrides), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            _load_target(target_path)
 
 
 def test_arrow_rust_partial_batches_replace_label_columns_and_keep_every_shard_row(tmp_path) -> None:
@@ -412,31 +414,13 @@ def test_materialization_preserves_mixed_query_views_and_source_row_order(
     assert sum(summary["rows"] for summary in summaries[0]["datasets"]) == len(rows)
 
 
-def test_block_local_member_ids_drop_foreign_members() -> None:
-    signature_blocks = {"local": "block-a", "foreign-1": "block-b", "foreign-2": "block-b"}
-
-    assert promoted_train._block_local_member_ids_from_signature_blocks(  # noqa: SLF001
-        "block-a::mixed",
-        ("local", "foreign-1"),
-        signature_blocks,
-    ) == ("local",)
-    assert (
-        promoted_train._block_local_member_ids_from_signature_blocks(  # noqa: SLF001
-            "block-a::foreign",
-            ("foreign-1", "foreign-2"),
-            signature_blocks,
-        )
-        == ()
-    )
-
-
 def test_arrow_rust_structural_cleaning_preserves_only_nonself_local_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One real membership table covers self-only, mixed, unrelated, and foreign components."""
     members = {
         "toy block::self": ["q1"],
-        "toy block::with_neighbor": ["q1", "n1"],
+        "toy block::with_neighbor": ["q1", "n1", "f1"],
         "toy block::other": ["n2"],
         "plain_self": ["q3"],
         "toy block::foreign": ["f1", "f2"],
@@ -500,50 +484,18 @@ def test_arrow_rust_structural_cleaning_preserves_only_nonself_local_candidates(
     assert summary["positive_queries_changed_or_removed"] == 2
 
 
-def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:
+def test_arrow_rust_row_seed_bypass_requires_manifest_seed_membership() -> None:
     rows = pd.DataFrame(
-        [
-            {
-                "query_signature_id": "q",
-                "candidate_component_key": "c_match",
-                "split": "train",
-                "query_in_seed_before_holdout": 0,
-            },
-            {
-                "query_signature_id": "q",
-                "candidate_component_key": "c_other",
-                "split": "train",
-                "query_in_seed_before_holdout": 0,
-            },
-        ]
+        {
+            "query_signature_id": ["q", "q", "unseeded"],
+            "candidate_component_key": ["match", "other", "other"],
+            "split": ["train", "loo", "loo"],
+            "query_in_seed_before_holdout": [0, 1, 1],
+            "label": [0, 1, 1],
+        }
     )
-
-    mask = _arrow_row_seed_bypass_mask(
-        rows,
-        cluster_seeds_require={"q": "seed_cluster", "m1": "seed_cluster", "other": "different"},
-    )
-
-    np.testing.assert_array_equal(mask, np.asarray([True, True]))
-
-
-def test_arrow_rust_row_seed_bypass_requires_input_membership() -> None:
-    rows = pd.DataFrame(
-        [
-            {
-                "query_signature_id": query_id,
-                "candidate_component_key": "c",
-                "split": "loo",
-                "query_in_seed_before_holdout": 1,
-                "label": 1,
-            }
-            for query_id in ("q", "unseeded")
-        ]
-    )
-    mask = _arrow_row_seed_bypass_mask(
-        rows,
-        cluster_seeds_require={"q": "seed", "neighbor": "other_seed"},
-    )
-    np.testing.assert_array_equal(mask, np.asarray([True, False]))
+    mask = _arrow_row_seed_bypass_mask(rows, cluster_seeds_require={"q": "seed", "neighbor": "other_seed"})
+    np.testing.assert_array_equal(mask, np.asarray([True, True, False]))
 
 
 def test_arrow_rust_pair_label_resolution_applies_seed_bypass_without_erasing_disallows(

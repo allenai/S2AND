@@ -13,20 +13,20 @@ def _assert_partition(clusters, blocks):
     assert all(any(set(members) <= set(block) for block in blocks.values()) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize("claimed", [False, True])
-@pytest.mark.parametrize(("count", "threshold"), [(20, 45), (2, 3)])
-def test_mixed_initial_claim_keeps_compatible_full_name_neighbors(tmp_path, route, claimed, count, threshold):
-    names = [("A", "", "Smith")] * count + [("Ada", "", "Smith")] * count + [("Bob", "", "Smith")] * count
-    dataset = _dataset(names, {"0": "claimed", str(count): "claimed"} if claimed else {})
-    blocks = {"one": list(dataset.signatures)}
+def test_subblocking_normalizes_integer_ids_and_keeps_compatible_neighbors(tmp_path):
+    names = [("A", "", "Smith")] * 2 + [("Ada", "", "Smith")] * 2 + [("Bob", "", "Smith")] * 2
+    dataset = _dataset(names * 2 + [("A", "", "Smith")] * 2, {"0": "claimed", "2": "claimed"})
+    blocks = {"claimed": list(range(6)), "unclaimed": list(range(6, 12)), "initials": [12, 13]}
 
-    clusters = _predict(tmp_path, dataset, blocks, route, threshold=threshold)
+    clusters = _predict(tmp_path, dataset, blocks, "arrow", threshold=3)
 
-    _assert_partition(clusters, blocks)
+    _assert_partition(clusters, {block: [str(sid) for sid in ids] for block, ids in blocks.items()})
     assert {frozenset(members) for members in clusters.values()} == {
-        frozenset(str(index) for index in range(count * 2)),
-        frozenset(str(index) for index in range(count * 2, count * 3)),
+        frozenset({"0", "1", "2", "3"}),
+        frozenset({"4", "5"}),
+        frozenset({"6", "7", "8", "9"}),
+        frozenset({"10", "11"}),
+        frozenset({"12", "13"}),
     }
 
 
@@ -41,35 +41,6 @@ def test_mixed_initial_claim_at_capacity_preserves_membership_and_name_constrain
     _assert_partition(clusters, blocks)
     assert any({"0", "2"} <= set(members) for members in clusters.values())
     assert all(not (set(members) & {"0", "1", "2", "3"} and set(members) & {"4", "5"}) for members in clusters.values())
-
-
-@pytest.mark.parametrize("initials", [False, True])
-def test_arrow_subblocking_normalizes_integer_signature_ids(tmp_path, initials):
-    names = [("Ada", "", "Smith")] * 4
-    if initials:
-        names = [("A", "", "Smith")] * 2 + [("Ada", "", "Smith")] * 2 + [("Bob", "", "Smith")] * 2
-    dataset = _dataset(names, {})
-    string_blocks = {"one": list(dataset.signatures)}
-    integer_blocks = {"one": [int(signature_id) for signature_id in dataset.signatures]}
-
-    expected = _predict(tmp_path / "strings", dataset, string_blocks, "arrow", threshold=3)
-    actual = _predict(tmp_path / "integers", dataset, integer_blocks, "arrow", threshold=3)
-
-    assert actual == expected
-    _assert_partition(actual, string_blocks)
-
-
-@pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize("same_last", [False, True])
-def test_claimed_profile_and_initial_attachment_stay_in_original_block(tmp_path, route, same_last):
-    names = [("Ada", "", "Smith")] * 3 + [("Ada", "", "Smith" if same_last else "Jones")] * 3
-    names.append(("A", "", "Smith" if same_last else "Jones"))
-    dataset = _dataset(names, {"0": "claimed", "3": "claimed"})
-    blocks = {"left": ["0", "1", "2"], "right": ["3", "4", "5", "6"]}
-    clusters = _predict(tmp_path, dataset, blocks, route)
-    _assert_partition(clusters, blocks)
-    assert any({"0", "1", "2"} <= set(members) for members in clusters.values())
-    assert any({"3", "4", "5"} <= set(members) for members in clusters.values())
 
 
 @pytest.mark.parametrize("route", ["arrow"])
@@ -95,33 +66,15 @@ def test_claimed_component_does_not_absorb_incompatible_names(tmp_path, route):
     assert not any({"1", "4"} <= set(members) for members in clusters.values())
 
 
-@pytest.mark.parametrize("route", ["arrow"])
-def test_initial_only_block_uses_bulk_even_beside_full_name_block(tmp_path, route):
-    dataset = _dataset([("Ada", "", "Smith")] + [("A", "", "Smith")] * 4, {})
-    blocks = {"full": ["0"], "initial": ["1", "2", "3", "4"]}
-    clusters = _predict(tmp_path, dataset, blocks, route, threshold=2)
-    _assert_partition(clusters, blocks)
-
-
-@pytest.mark.parametrize("route", ["arrow"])
-def test_profile_size_limit_applies_to_each_original_block(tmp_path, route):
+def test_subblocked_profile_capacity_and_residual_ids_are_block_local(tmp_path):
     dataset = _dataset(
         [("Ada", "", "Smith"), ("Ada", "", "Smith"), ("A", "", "Smith")] * 2,
         dict.fromkeys(["0", "1", "3", "4"], "claimed"),
     )
-    blocks = {"left": ["0", "1", "2"], "right": ["3", "4", "5"]}
-    clusters = _predict(tmp_path, dataset, blocks, route, threshold=2)
-    _assert_partition(clusters, blocks)
-    assert any({"0", "1"} <= set(members) for members in clusters.values())
-    assert any({"3", "4"} <= set(members) for members in clusters.values())
-
-
-@pytest.mark.parametrize("route", ["arrow"])
-def test_residual_cluster_ids_from_independent_blocks_preserve_all_outputs(tmp_path, route):
-    dataset = _dataset([("Ada", "", "Smith"), ("Ada", "", "Smith"), ("A", "", "Smith")] * 2, {})
     dataset.cluster_seeds_disallow = {("0", "2"), ("1", "2"), ("3", "5"), ("4", "5")}
     blocks = {"left": ["0", "1", "2"], "right": ["3", "4", "5"]}
-    clusters = _predict(tmp_path, dataset, blocks, route, threshold=2)
+    clusters = _predict(tmp_path, dataset, blocks, "arrow", threshold=2)
+
     _assert_partition(clusters, blocks)
     assert {frozenset(members) for members in clusters.values()} == {
         frozenset({"0", "1"}),
@@ -132,8 +85,10 @@ def test_residual_cluster_ids_from_independent_blocks_preserve_all_outputs(tmp_p
 
 
 @pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize("constraint_source", ["explicit_disallow", "partial_supervision", "ignored_seeds"])
-@pytest.mark.parametrize("disallow", [("1", "3"), ("1", "2")])
+@pytest.mark.parametrize(
+    ("constraint_source", "disallow"),
+    [("explicit_disallow", ("1", "2")), ("partial_supervision", ("1", "3")), ("ignored_seeds", ("1", "3"))],
+)
 def test_query_disallows_survive_subblocked_attachment(tmp_path, route, constraint_source, disallow):
     dataset = _dataset(
         [
@@ -226,8 +181,7 @@ class _YearDistanceClassifier:
 
 
 @pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize("source", ["dataset", "caller"])
-@pytest.mark.parametrize("exclude_query", [False, True])
+@pytest.mark.parametrize(("source", "exclude_query"), [("dataset", False), ("caller", True)])
 def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path, route, source, exclude_query):
     """Real bulk linkage can contain a negative without being a caller seed claim."""
     dataset = _dataset([("Ada", "", "Smith")] * 3 + [("A", "", "Smith")], {})
@@ -265,7 +219,7 @@ def test_generated_bulk_seed_negatives_do_not_reject_initial_attachment(tmp_path
 @pytest.mark.parametrize("route", ["arrow"])
 def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, route):
     """A negative stays hard when a large average-linkage merge would dilute it."""
-    dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")], {})
+    dataset = _dataset([("Ada", "", "Smith")] * 400 + [("A", "", "Smith")] + [("Bea", "", "Smith")] * 11, {})
     for index in range(200, 400):
         paper_id = str(100 + index)
         dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=2001)
@@ -273,7 +227,9 @@ def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, rout
     partial_supervision = {}
     original_disallows = dataset.cluster_seeds_disallow.copy()
     original_supervision = partial_supervision.copy()
-    blocks = {"one": list(dataset.signatures)}
+    # Let an independent block with no hard negatives keep its ordinary merge.
+    ordinary = [str(index) for index in range(401, 412)]
+    blocks = {"one": list(dataset.signatures)[:401], "ordinary": ordinary}
 
     clusters = _predict(
         tmp_path,
@@ -291,6 +247,7 @@ def test_average_linkage_keeps_bulk_negative_apart_in_large_merge(tmp_path, rout
     expected = {
         frozenset(str(index) for index in range(200)),
         frozenset(str(index) for index in range(200, 401)),
+        frozenset(ordinary),
     }
     assert {frozenset(members) for members in clusters.values()} == expected
     assert dataset.cluster_seeds_require == {}
@@ -331,15 +288,21 @@ def test_dash_initial_compound_subblock_is_classified_by_its_key_first(tmp_path,
         assert observed["attach"] == {"one|subblock=j": ["0"]}
 
 
-@pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize(("neighbour", "attaches"), [("Jean-Daniel", True), ("Jean-Marc", False)])
-def test_dash_initial_compound_attaches_under_cluster_name_checks(tmp_path, route, neighbour, attaches):
-    """The key rule routes "J.-D." to initial-only attachment; the attach name checks then decide the link."""
-    dataset = _dataset([("J.-D.", "", "Smith")] + [(neighbour, "", "Smith")] * 3, {})
-    blocks = {"one": list(dataset.signatures)}
+def test_dash_initial_compound_attaches_under_cluster_name_checks(tmp_path):
+    dataset = _dataset(
+        [("J.-D.", "", "Smith")]
+        + [("Jean-Daniel", "", "Smith")] * 3
+        + [("J.-D.", "", "Smith")]
+        + [("Jean-Marc", "", "Smith")] * 3,
+        {},
+    )
+    blocks = {"compatible": ["0", "1", "2", "3"], "incompatible": ["4", "5", "6", "7"]}
 
-    clusters = _predict(tmp_path, dataset, blocks, route, threshold=3)
+    clusters = _predict(tmp_path, dataset, blocks, "arrow", threshold=3)
 
     _assert_partition(clusters, blocks)
-    assert any({"1", "2", "3"} <= set(members) for members in clusters.values())
-    assert any({"0", "1", "2", "3"} <= set(members) for members in clusters.values()) is attaches
+    assert {frozenset(members) for members in clusters.values()} == {
+        frozenset({"0", "1", "2", "3"}),
+        frozenset({"4"}),
+        frozenset({"5", "6", "7"}),
+    }

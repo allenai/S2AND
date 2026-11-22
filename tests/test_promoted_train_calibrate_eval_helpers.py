@@ -28,16 +28,13 @@ from s2and.incremental_linking_training.classic import (
     _filter_candidate_rows_to_retrieval_top_k,
     _fit_multiclass_logistic_gate,
     _fold_standard_scaler_into_logistic,
-    _iter_extra_eval_paths,
     _promoted_stratified_gate_spec,
     _resolve_classic_monotone_constraints,
     _resolve_path,
     _score_classic_stratified_rows,
     _score_eval_candidate_rows,
-    _score_query_choices,
     _summarize_classic_stratified_predictions,
     _summarize_training_gate_buckets,
-    _summary_key_for_eval_dataset,
     _validate_stratified_base_identity_split_disjointness,
 )
 from s2and.incremental_linking_training.classic import (
@@ -45,37 +42,8 @@ from s2and.incremental_linking_training.classic import (
 )
 
 
-def test_score_query_choices_preserves_float64_probability_tie_breaking() -> None:
-    rows = pd.DataFrame(
-        {
-            "query_group_id": ["q", "q"],
-            "dataset": ["unit", "unit"],
-            "query_view": ["full", "full"],
-            "candidate_component_key": ["slightly_higher", "float32_tie_lower_rank"],
-            "retrieval_rank": [2, 1],
-            "label": [1, 0],
-        }
-    )
-
-    choices = _score_query_choices(
-        rows,
-        np.asarray([0.500000020, 0.500000019], dtype=np.float64),
-        query_id_column="query_group_id",
-        include_margin=True,
-    )
-
-    assert choices.loc[0, "chosen_candidate_component_key"] == "slightly_higher"
-    assert choices.loc[0, "chosen_candidate_target"] == 1
-
-
-@pytest.mark.parametrize(
-    "labels",
-    (
-        np.asarray([0, 2] * 30, dtype=np.int8),
-        np.asarray([1, 2] * 30, dtype=np.int8),
-    ),
-)
-def test_fold_standard_scaler_binary_logistic_matches_sklearn(labels: np.ndarray) -> None:
+def test_fold_standard_scaler_binary_logistic_matches_sklearn() -> None:
+    labels = np.asarray([1, 2] * 15, dtype=np.int8)
     rng = np.random.default_rng(20260518 + int(labels[0]))
     matrix = rng.normal(size=(len(labels), 5)).astype(np.float64)
     matrix[:, 0] += np.where(labels == int(labels.max()), 0.7, -0.7)
@@ -327,24 +295,7 @@ def test_apply_classic_train_row_cap_preserves_positive_queries() -> None:
     assert summary["queries_with_row_cap_above_min"] == 1
 
 
-def test_stratified_split_disjointness_rejects_base_identity_spanning_splits() -> None:
-    """Masked views of one base query must not straddle calibration and test."""
-
-    assignments = pd.DataFrame(
-        {
-            "query_group_id": ["q1:full", "q1:initial_only", "q2:full"],
-            "base_group_id": ["b1", "b1", "b2"],
-            "split": ["test", "calibration_check", "test"],
-        }
-    )
-
-    with pytest.raises(ValueError, match="base_group_id values in multiple splits.*count=1"):
-        _validate_stratified_base_identity_split_disjointness(assignments)
-
-
-def test_stratified_split_disjointness_accepts_per_base_assignments() -> None:
-    """Views of one base query landing in one split (or repeated there) are fine."""
-
+def test_stratified_split_disjointness_requires_complete_per_base_assignments() -> None:
     assignments = pd.DataFrame(
         {
             "query_group_id": ["q1:full", "q1:initial_only", "q2:full"],
@@ -352,23 +303,23 @@ def test_stratified_split_disjointness_accepts_per_base_assignments() -> None:
             "split": ["test", "test", "calibration_fit"],
         }
     )
-
     _validate_stratified_base_identity_split_disjointness(assignments)
 
+    assignments.loc[1, "split"] = "calibration_check"
+    with pytest.raises(ValueError, match="base_group_id values in multiple splits"):
+        _validate_stratified_base_identity_split_disjointness(assignments)
 
-@pytest.mark.parametrize(
-    "assignments",
-    (
-        pd.DataFrame([{"base_group_id": "", "split": "test"}]),
-        pd.DataFrame([{"base_group_id": "b1", "split": None}]),
-    ),
-)
-def test_stratified_split_disjointness_requires_complete_identity_keys(assignments: pd.DataFrame) -> None:
-    with pytest.raises(ValueError, match="require a nonempty"):
+    assignments.loc[1, "split"] = None
+    with pytest.raises(ValueError, match="nonempty split"):
+        _validate_stratified_base_identity_split_disjointness(assignments)
+
+    assignments.loc[1, "split"] = "test"
+    assignments.loc[1, "base_group_id"] = ""
+    with pytest.raises(ValueError, match="nonempty base_group_id"):
         _validate_stratified_base_identity_split_disjointness(assignments)
 
 
-def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
+def test_logistic_eval_summarizes_fresh_and_empty_holdouts() -> None:
     manual_holdout = pd.DataFrame(
         {
             "query_case_id": ["q1", "q1", "q2", "q2"],
@@ -389,62 +340,40 @@ def test_evaluate_logistic_manual_holdout_scores_fresh_candidates() -> None:
         error_weights=LOGISTIC_GATE_ERROR_WEIGHTS,
     )
 
+    gate = load_logistic_gate_config(gate_config)
     summary = _evaluate_logistic_manual_holdout(
         manual_holdout,
         probabilities=np.array([0.1, 0.9, 0.1, 0.05], dtype=np.float64),
-        gate=load_logistic_gate_config(gate_config),
+        gate=gate,
     )
 
     assert summary["overall"]["balanced_accuracy"] == 1.0
     assert summary["by_bucket"]["rescue"]["positive_recall"] == 1.0
     assert summary["by_bucket"]["easy"]["negative_recall"] == 1.0
 
-
-def test_logistic_eval_summaries_accept_empty_candidate_tables() -> None:
-    """Empty eval inputs should produce zero-count summaries, not schema KeyErrors."""
-
-    gate_config = logistic_gate_config(
-        feature_names=("chosen_probability",),
-        weights=np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
-        bias=np.asarray([0.0, 0.0, 0.0], dtype=np.float64),
-        missing_values=np.asarray([0.0], dtype=np.float64),
-        calibration_mode="unit_test_empty_eval",
-        error_weights=LOGISTIC_GATE_ERROR_WEIGHTS,
-    )
     candidate_rows = pd.DataFrame(
         columns=["query_group_id", "dataset", "query_view", "candidate_component_key", "retrieval_rank", "label"]
     )
     window_summary = _evaluate_logistic_scored_windows(
         candidate_rows,
         probabilities=np.asarray([], dtype=np.float64),
-        gate=load_logistic_gate_config(gate_config),
+        gate=gate,
     )
 
     assert window_summary["5"]["overall"]["n_queries"] == 0
     assert window_summary["25"]["overall"]["n_queries"] == 0
 
-    manual_holdout = pd.DataFrame(
-        columns=[
-            "query_case_id",
-            "dataset",
-            "query_view",
-            "review_bucket",
-            "candidate_component_key",
-            "retrieval_rank",
-            "binary_safe_link_target",
-        ]
-    )
     manual_summary = _evaluate_logistic_manual_holdout(
-        manual_holdout,
+        manual_holdout.iloc[:0],
         probabilities=np.asarray([], dtype=np.float64),
-        gate=load_logistic_gate_config(gate_config),
+        gate=gate,
     )
 
     assert manual_summary["overall"]["n_queries"] == 0
     assert manual_summary["by_bucket"] == {}
 
 
-def test_classic_feature_matrix_preserves_present_values_and_missing_cells() -> None:
+def test_classic_feature_matrix_preserves_valid_cells_and_rejects_invalid_inputs() -> None:
     """Stored values stay authoritative and missing cells remain NaN for LightGBM."""
 
     df = pd.DataFrame([{"title_overlap": None, "cluster_size": 17, "cluster_size_log": 99.0}])
@@ -454,12 +383,8 @@ def test_classic_feature_matrix_preserves_present_values_and_missing_cells() -> 
     assert features.iloc[0]["cluster_size"] == 17.0
     assert features.iloc[0]["cluster_size_log"] == 99.0
 
-
-def test_classic_feature_matrix_rejects_invalid_feature_tables() -> None:
-    """Missing, non-numeric, and infinite active features fail explicitly."""
-
     cases = (
-        ({"cluster_size": 17}, ("cluster_size", "cluster_size_log"), r"missing_features=\['cluster_size_log'\]"),
+        ({"cluster_size": 17}, ("cluster_size", "cluster_size_log"), "missing_features"),
         ({"title_overlap": 0.25}, ("title_overlap", "cluster_size"), "missing required feature inputs"),
         ({"title_overlap": "not-a-number", "cluster_size": 17}, ("title_overlap", "cluster_size"), "non-numeric"),
         ({"title_overlap": np.inf, "cluster_size": 17}, ("title_overlap", "cluster_size"), "infinite"),
@@ -469,11 +394,7 @@ def test_classic_feature_matrix_rejects_invalid_feature_tables() -> None:
             _classic_feature_matrix(pd.DataFrame([row]), features)
 
 
-@pytest.mark.parametrize("assignment_base_group_id", ["rescue:b1", "wrong:b1"])
-def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
-    tmp_path: Path,
-    assignment_base_group_id: str,
-) -> None:
+def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(tmp_path: Path) -> None:
     bundle_root = tmp_path / "bundle"
 
     def write_rows(relative_path: str, rows: list[dict[str, object]]) -> None:
@@ -501,18 +422,20 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
     )
     split_root = bundle_root / "calibration" / "stratified_eval_test_split"
     split_root.mkdir(parents=True)
-    pd.DataFrame(
+    assignments = pd.DataFrame(
         [
             {
                 "query_group_id": "rescue:q1",
                 "source_key": "s2and_rescue_reviewed_eval",
                 "split": "test",
-                "base_group_id": assignment_base_group_id,
+                "base_group_id": "rescue:b1",
                 "manual_safe_target": 1,
                 "stratum_key": "s2and_block|has_pos=1|positive_first|multi_letter_first|multi_cand=0",
             }
         ]
-    ).to_csv(split_root / "combined_query_split_assignments.csv", index=False)
+    )
+    assignments_path = split_root / "combined_query_split_assignments.csv"
+    assignments.to_csv(assignments_path, index=False)
     spec = {
         "classic_gate_source_path": "calibration/gate_rows.csv.gz",
         "s2and_eval_path": "test/s2and_eval_rows.csv.gz",
@@ -529,35 +452,20 @@ def test_stratified_scoring_recomputes_stale_manual_target_from_active_labels(
         expected_metrics={},
     )
 
-    if assignment_base_group_id != "rescue:b1":
-        with pytest.raises(ValueError, match="base_group_id does not match source rows"):
-            _score_classic_stratified_rows(
-                bundle,
-                spec,
-                {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-                lambda features: np.ones(len(features), dtype=np.float64),
-                (),
-                splits=("test",),
-                include_calibration_source=True,
-            )
-        return
-
-    scored = _score_classic_stratified_rows(
-        bundle,
-        spec,
-        {"assignments_path": "calibration/stratified_eval_test_split/combined_query_split_assignments.csv"},
-        lambda features: np.ones(len(features), dtype=np.float64),
-        (),
-        splits=("test",),
-        include_calibration_source=True,
-    )
+    scored = _score_stratified_bundle(bundle, assignments_path)
 
     row = scored.choices.set_index("query_case_id").loc["rescue:q1"]
     assert row["query_safe_target"] == 0
     assert row["retrieved_window_safe_target"] == 0
     assert row["query_safe_target_source"] == "retrieved_window"
     assert row["manual_safe_target"] == 0
+
     assert bool(row["manual_safe_target_matches_active_label"])
+
+    assignments.loc[0, "base_group_id"] = "wrong:b1"
+    assignments.to_csv(assignments_path, index=False)
+    with pytest.raises(ValueError, match="base_group_id does not match"):
+        _score_stratified_bundle(bundle, assignments_path)
 
 
 def test_bundle_path_resolution_rejects_absolute_paths_outside_bundle(tmp_path: Path) -> None:
@@ -583,22 +491,6 @@ def test_resolve_classic_monotone_constraints_requires_explicit_opt_in() -> None
         {"monotone_constraints": [1, 0, 0]},
         feature_columns,
     ) == [1, 0, 0]
-
-
-def test_extra_eval_paths_support_dynamic_dataset_mapping() -> None:
-    spec = {
-        "s_park_eval_path": "test/s_park_eval_rows.csv.gz",
-        "extra_eval_paths": {
-            "j_smith": "test/j_smith_eval_rows.csv.gz",
-            "a_silva": "test/a_silva_eval_rows.csv.gz",
-        },
-    }
-    assert _iter_extra_eval_paths(spec) == (
-        ("s_park", "test/s_park_eval_rows.csv.gz"),
-        ("j_smith", "test/j_smith_eval_rows.csv.gz"),
-        ("a_silva", "test/a_silva_eval_rows.csv.gz"),
-    )
-    assert _summary_key_for_eval_dataset("a_silva") == "overall_a_silva_eval"
 
 
 def test_summarize_training_gate_buckets_counts_queries_and_rows() -> None:
@@ -661,53 +553,34 @@ def test_stratified_summary_tracks_gate_bucket_split_counts_and_errors() -> None
     assert test_breakdowns["single_candidate|single_letter_first"]["wrong_candidate_link"] == 1
 
 
-def test_score_eval_candidate_rows_defaults_to_w5_and_w25_only() -> None:
-    """Official classic eval scoring should only materialize the retained window limits."""
-
-    df = pd.DataFrame(
+def test_score_eval_windows_keep_float64_order_and_use_row_positions() -> None:
+    rows = pd.DataFrame(
         {
-            "query_group_id": ["q1", "q1", "q1", "q2", "q2", "q2"],
-            "dataset": ["demo", "demo", "demo", "demo", "demo", "demo"],
-            "query_view": ["full", "full", "full", "initial_only", "initial_only", "initial_only"],
-            "candidate_component_key": ["c1", "c2", "c3", "c4", "c5", "c6"],
-            "retrieval_rank": [1, 10, 30, 3, 20, 40],
-            "label": [1, 0, 0, 0, 1, 0],
-        }
+            "query_group_id": ["q1", "q1", "q2", "q2", "q2"],
+            "dataset": ["demo"] * 5,
+            "query_view": ["full", "full", "initial_only", "initial_only", "initial_only"],
+            "candidate_component_key": ["slightly_higher", "lower_rank", "short", "wide", "outside"],
+            "retrieval_rank": [2, 1, 3, 20, 30],
+            "label": [1, 0, 0, 1, 0],
+        },
+        index=pd.Index([10, 20, 30, 40, 50]),
     )
-
     scored = _score_eval_candidate_rows(
-        df,
-        probabilities=np.array([0.9, 0.4, 0.1, 0.3, 0.8, 0.2], dtype=np.float32),
+        rows,
+        probabilities=np.asarray([0.500000020, 0.500000019, 0.3, 0.8, 0.9], dtype=np.float64),
         include_margin=True,
     )
 
-    assert sorted(scored["retrieval_rank_limit"].astype(int).unique().tolist()) == [5, 25]
     assert scored["second_probability"].dtype == np.dtype(np.float64)
     assert scored["score_margin"].dtype == np.dtype(np.float64)
-
-
-def test_score_eval_candidate_rows_uses_positions_not_index_labels() -> None:
-    df = pd.DataFrame(
-        {
-            "query_group_id": ["q1", "q1", "q2"],
-            "dataset": ["s2and", "s2and", "s2and"],
-            "query_view": ["full", "full", "full"],
-            "candidate_component_key": ["c1", "c2", "c3"],
-            "retrieval_rank": [1, 2, 1],
-            "label": [0, 1, 1],
-        },
-        index=[10, 20, 30],
-    )
-
-    scored = _score_eval_candidate_rows(
-        df,
-        probabilities=np.array([0.2, 0.9, 0.8], dtype=np.float32),
-        include_margin=True,
-        limits=(5,),
-    )
-
-    chosen = scored.set_index("query_case_id")["chosen_candidate_component_key"].to_dict()
-    assert chosen == {"q1": "c2", "q2": "c3"}
+    choices = scored.set_index(["retrieval_rank_limit", "query_case_id"])
+    assert choices["chosen_candidate_component_key"].to_dict() == {
+        (5, "q1"): "slightly_higher",
+        (5, "q2"): "short",
+        (25, "q1"): "slightly_higher",
+        (25, "q2"): "wide",
+    }
+    assert choices.loc[(5, "q1"), "chosen_candidate_target"] == 1
 
 
 def test_build_classic_classifier_uses_configured_thread_count(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -265,145 +265,101 @@ def test_native_eps_featurizer_hides_orcid_ids(tmp_path: Path) -> None:
     assert np.isnan(labels[1])
 
 
-@pytest.mark.parametrize("field", ["plan", "scores"])
-def test_completed_curve_rejects_stale_bytes(tmp_path: Path, field: str) -> None:
+def test_completed_curve_rejects_stale_or_incomplete_files(tmp_path: Path) -> None:
     dataset = _curve(tmp_path)
-    path = dataset / ("plan.json" if field == "plan" else "eps_b3.tsv")
-    path.write_bytes(path.read_bytes() + b"\n")
-    with pytest.raises(ValueError, match="does not match|change after"):
+    plan = dataset / "plan.json"
+    plan_bytes = plan.read_bytes()
+    plan.write_bytes(plan_bytes + b"\n")
+    with pytest.raises(ValueError, match="plan"):
+        read_sweep_curve(tmp_path, "unit", "orcid-b3")
+    plan.write_bytes(plan_bytes)
+
+    scores = dataset / "eps_b3.tsv"
+    pd.read_csv(scores, sep="\t").iloc[:1].to_csv(scores, sep="\t", index=False)
+    with pytest.raises(ValueError, match="scores change"):
         read_sweep_curve(tmp_path, "unit", "orcid-b3")
 
-
-def test_plot_rejects_incomplete_grid_even_with_updated_score_hash(tmp_path: Path) -> None:
-    dataset = _curve(tmp_path)
-    path = dataset / "eps_b3.tsv"
-    pd.read_csv(path, sep="\t").iloc[:1].to_csv(path, sep="\t", index=False)
-    write_json(
-        dataset / "summary.json", {"plan_sha256": sha256_file(dataset / "plan.json"), "score_sha256": sha256_file(path)}
-    )
+    summary = dataset / "summary.json"
+    completed = json.loads(summary.read_bytes())
+    write_json(summary, completed | {"score_sha256": sha256_file(scores)})
     with pytest.raises(ValueError, match="Incomplete EPS"):
         plot_b3_eps_sweeps.plot(tmp_path, ["unit"], tmp_path / "plot.png")
 
 
-@pytest.mark.parametrize(
-    "mode,limited,message", [("safe-action-proxy", False, "diagnostic"), ("orcid-b3", True, "bounded smoke")]
-)
-def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path, mode: str, limited: bool, message: str) -> None:
+def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
-    (source / "manifest.json").write_text("{}", encoding="utf-8")
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), limited, mode)
-    with pytest.raises(ValueError, match=message):
+    manifest = source / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    dataset = _curve(tmp_path / "curves", sha256_file(manifest), limited=True)
+    with pytest.raises(ValueError, match="bounded smoke"):
+        _apply(tmp_path, source)
+
+    # Validate a complete diagnostic curve before rejecting it for release.
+    shutil.rmtree(dataset)
+    _curve(tmp_path / "curves", sha256_file(manifest), mode="safe-action-proxy")
+    with pytest.raises(ValueError, match="diagnostic"):
         _apply(tmp_path, source)
 
 
-def test_review_rejects_a_sweep_from_before_production_block_clustering(tmp_path: Path) -> None:
+def _update_curve_plan(dataset: Path, plan: dict) -> None:
+    plan_path = dataset / "plan.json"
+    write_json(plan_path, plan)
+    summary_path = dataset / "summary.json"
+    summary = json.loads(summary_path.read_bytes())
+    write_json(summary_path, summary | {"plan_sha256": sha256_file(plan_path)})
+
+
+def test_review_requires_a_production_sweep_with_current_policies(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
-    (source / "manifest.json").write_text("{}", encoding="utf-8")
-    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
-    # An older sweep cut its own linkage trees and recorded no clustering source.
-    plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
-    del plan["clustering_source"]
-    write_json(dataset / "plan.json", plan)
-    summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
-    summary["plan_sha256"] = sha256_file(dataset / "plan.json")
-    write_json(dataset / "summary.json", summary)
+    manifest = source / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    dataset = _curve(tmp_path / "curves", sha256_file(manifest))
+    plan = json.loads((dataset / "plan.json").read_bytes())
 
+    _update_curve_plan(dataset, {key: value for key, value in plan.items() if key != "clustering_source"})
     with pytest.raises(ValueError, match="production block clustering"):
         _apply(tmp_path, source)
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("route", "bulk", "attachment passes"),
-        ("route", None, "attachment passes"),
-        ("distance_policy_version", 11, "another distance policy"),
-        ("distance_policy_version", None, "another distance policy"),
-    ],
-)
-def test_review_rejects_a_bulk_route_or_old_policy_curve(
-    tmp_path: Path, field: str, value: object, message: str
-) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "manifest.json").write_text("{}", encoding="utf-8")
-    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
-    plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
-    if value is None:
-        del plan[field]
-    else:
-        plan[field] = value
-    write_json(dataset / "plan.json", plan)
-    summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
-    summary["plan_sha256"] = sha256_file(dataset / "plan.json")
-    write_json(dataset / "summary.json", summary)
-
-    with pytest.raises(ValueError, match=message):
+    _update_curve_plan(dataset, plan | {"route": "bulk"})
+    with pytest.raises(ValueError, match="attachment passes"):
+        _apply(tmp_path, source)
+    _update_curve_plan(dataset, plan | {"distance_policy_version": 11})
+    with pytest.raises(ValueError, match="another distance policy"):
+        _apply(tmp_path, source)
+    _update_curve_plan(dataset, plan | {"reference": plan["reference"] | {"reference_policy": "old"}})
+    with pytest.raises(ValueError, match="does not exclude final-test"):
         _apply(tmp_path, source)
 
 
-@pytest.mark.parametrize(
-    "change", ["partial-datasets", "old-policy", "test-overlap", "stale-diagnostic", "no-diagnostic"]
-)
-def test_review_requires_frozen_test_separated_curves(tmp_path: Path, change: str) -> None:
+def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
-    (source / "manifest.json").write_text("{}", encoding="utf-8")
-    dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
-    test_ids = frozenset()
-    datasets: tuple[str, ...] = ("unit",)
-    message = {
-        "partial-datasets": "exactly the frozen datasets",
-        "old-policy": "does not exclude final-test",
-        "test-overlap": "contains final-test records",
-        "stale-diagnostic": "singleton-inclusive EPS scores change",
-        "no-diagnostic": "singleton-inclusive EPS scores change|No such file",
-    }[change]
-    if change == "partial-datasets":
-        datasets = ("unit", "unit")
-    elif change == "old-policy":
-        plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
-        del plan["reference"]["reference_policy"]
-        write_json(dataset / "plan.json", plan)
-        summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
-        summary["plan_sha256"] = sha256_file(dataset / "plan.json")
-        write_json(dataset / "summary.json", summary)
-    elif change == "test-overlap":
-        test_ids = frozenset({"r2"})
-    elif change == "stale-diagnostic":
-        path = dataset / "eps_b3_with_singletons.tsv"
-        path.write_bytes(path.read_bytes() + b"\n")
-    else:
-        (dataset / "eps_b3_with_singletons.tsv").unlink()
-    with pytest.raises((ValueError, FileNotFoundError), match=message):
-        _apply(tmp_path, source, test_ids=test_ids, datasets=datasets)
-    assert not (tmp_path / "output").exists()
+    manifest = source / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    dataset = _curve(tmp_path / "curves", sha256_file(manifest))
 
-
-def test_release_review_requires_every_frozen_giant(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "manifest.json").write_text("{}", encoding="utf-8")
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
     with pytest.raises(ValueError, match="exactly the frozen datasets"):
         apply_reviewed_eps(
             source, tmp_path / "output", tmp_path / "curves", ["unit"], 0.65, "Fixture review", tmp_path / "review.json"
         )
+    with pytest.raises(ValueError, match="contains final-test records"):
+        _apply(tmp_path, source, test_ids=frozenset({"r2"}))
+
+    diagnostic = dataset / "eps_b3_with_singletons.tsv"
+    diagnostic.write_bytes(diagnostic.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="singleton-inclusive EPS scores change"):
+        _apply(tmp_path, source)
+    assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("change", ["bytes", "missing"])
-def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_path: Path, change: str) -> None:
+def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "manifest.json").write_text("{}", encoding="utf-8")
     _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=True)
     map_path = tmp_path / "curves/snapshot/incremental_patent_tasks/initial_query_source_map.jsonl"
-    if change == "bytes":
-        map_path.write_text(" " + map_path.read_text(encoding="utf-8"), encoding="utf-8")
-    else:
-        map_path.unlink()
+    map_path.write_text(" " + map_path.read_text(encoding="utf-8"), encoding="utf-8")
     with pytest.raises(ValueError, match="SHA-256 differs"):
         apply_reviewed_eps(
             source,
@@ -418,8 +374,7 @@ def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_pa
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("command", ["sweep", "gold"])
-@pytest.mark.parametrize("with_source_map", [False, True])
+@pytest.mark.parametrize(("command", "with_source_map"), [("sweep", False), ("gold", True)])
 def test_eps_commands_reject_an_unmatched_expected_source_map(
     tmp_path: Path, command: str, with_source_map: bool
 ) -> None:
@@ -462,25 +417,15 @@ def _changed_files(source: Path, output: Path) -> set[str]:
     return {path for path in before if before[path] != after[path]}
 
 
-@pytest.mark.parametrize("with_source_map", [False, True])
-def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path, with_source_map: bool) -> None:
+def test_eps_only_update_preserves_real_complete_artifacts(tmp_path: Path) -> None:
     source = _complete_model(tmp_path)
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=with_source_map)
+    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"), with_source_map=True)
     output = tmp_path / "output"
     report = _apply(tmp_path, source)
     assert report["sweep_plans"]["unit"]["reference"]["reference_policy"] == orcid_b3.REFERENCE_POLICY
     assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
     assert load_production_model(output).cluster_model.eps == 0.65
     assert load_production_model(source).cluster_model.eps == 0.5
-
-
-def test_owner_eps_from_internal_review_preserves_real_complete_artifacts(tmp_path: Path) -> None:
-    source = _complete_model(tmp_path)
-    output = tmp_path / "output"
-    report = apply_reviewed_eps(source, output, None, [], 0.53, "Internal review", tmp_path / "review.json")
-    assert report["sweep_plans"] is None
-    assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
-    assert load_production_model(output).cluster_model.eps == 0.53
 
 
 def test_owner_review_can_set_the_close_pair_bonus_and_release_version(tmp_path: Path) -> None:
@@ -504,6 +449,7 @@ def test_owner_review_can_set_the_close_pair_bonus_and_release_version(tmp_path:
         8.0,
         0.05,
     )
+    assert report["sweep_plans"] is None
     assert model.production_model_release_version == "9.9.1" == report["release_version"]
     assert load_production_model(source).cluster_model.close_pair_bonus == 0.0
 
@@ -536,37 +482,6 @@ def _uneven_curve(tmp_path: Path, source: Path) -> None:
     write_json(dataset / "summary.json", summary | {"score_sha256": sha256_file(dataset / "eps_b3.tsv")})
 
 
-@pytest.mark.parametrize(("eps", "accepted"), [(0.65, True), (0.55, False)])
-def test_giant_f1_tolerance_rejects_an_eps_far_below_the_best_swept_f1(
-    tmp_path: Path, eps: float, accepted: bool
-) -> None:
-    source = _complete_model(tmp_path)
-    _uneven_curve(tmp_path, source)
-
-    def review() -> dict:
-        return apply_reviewed_eps(
-            source,
-            tmp_path / "output",
-            tmp_path / "curves",
-            ["unit"],
-            eps,
-            "Fixture review",
-            tmp_path / "review.json",
-            release_datasets=("unit",),
-            test_identities=lambda _root, _dataset, _sources: frozenset(),
-            precision_f1_tolerance=0.01,
-        )
-
-    if not accepted:
-        with pytest.raises(ValueError, match="below the best swept F1"):
-            review()
-        assert not (tmp_path / "output").exists()
-        return
-    record = review()["giant_f1_tolerance"]
-    assert (record["best_eps"], record["tolerance"]) == (0.65, 0.01)
-    assert record["selected_f1"] == pytest.approx(8 / 9)
-
-
 def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path) -> None:
     # The owner review writes a bundle with the bonus; its sweep review may not skip the F1 check.
     plain = _complete_model(tmp_path)
@@ -576,13 +491,13 @@ def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path
     )
     _uneven_curve(tmp_path, bonus)
 
-    def review(tolerance: float | None) -> dict:
+    def review(tolerance: float | None, eps: float = 0.65) -> dict:
         return apply_reviewed_eps(
             bonus,
             tmp_path / "output",
             tmp_path / "curves",
             ["unit"],
-            0.65,
+            eps,
             "Fixture review",
             tmp_path / "review.json",
             release_datasets=("unit",),
@@ -593,7 +508,13 @@ def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path
     with pytest.raises(ValueError, match="needs --precision-f1-tolerance"):
         review(None)
     assert not (tmp_path / "output").exists()
-    assert review(0.01)["giant_f1_tolerance"]["best_eps"] == 0.65
+    with pytest.raises(ValueError, match="below the best swept F1"):
+        review(0.01, eps=0.55)
+    assert not (tmp_path / "output").exists()
+
+    record = review(0.01)["giant_f1_tolerance"]
+    assert (record["best_eps"], record["tolerance"]) == (0.65, 0.01)
+    assert record["selected_f1"] == pytest.approx(8 / 9)
 
 
 def _second_block(tmp_path: Path, *, eps: list[float], recall: list[float], references: int) -> None:
@@ -618,8 +539,7 @@ def _second_block(tmp_path: Path, *, eps: list[float], recall: list[float], refe
 
 
 def test_pooled_curve_weights_each_scored_reference_equally(tmp_path: Path) -> None:
-    source = _complete_model(tmp_path)
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    _curve(tmp_path / "curves")
     # "unit" has 2 references with recall 0.8 and 1.0; "other" has 6 with recall 0.4 and 0.6.
     _second_block(tmp_path, eps=[0.55, 0.65], recall=[0.4, 0.6], references=6)
 
@@ -628,10 +548,7 @@ def test_pooled_curve_weights_each_scored_reference_equally(tmp_path: Path) -> N
     assert pooled["recall"].tolist() == pytest.approx([(2 * 0.8 + 6 * 0.4) / 8, (2 * 1.0 + 6 * 0.6) / 8])
     assert pooled["precision"].tolist() == pytest.approx([1.0, (2 * 0.8 + 6 * 1.0) / 8])
 
-
-def test_pooled_curve_rejects_blocks_swept_on_different_eps_grids(tmp_path: Path) -> None:
-    source = _complete_model(tmp_path)
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
+    shutil.rmtree(tmp_path / "curves" / "other")
     _second_block(tmp_path, eps=[0.65, 0.75], recall=[0.4, 0.6], references=6)
 
     with pytest.raises(ValueError, match="different EPS values"):
@@ -655,21 +572,18 @@ def test_giant_f1_tolerance_needs_a_snapshot_sweep(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize(("sweep_root", "datasets"), [("curves", []), (None, ["unit"])])
-def test_review_requires_sweep_root_and_datasets_together(
-    tmp_path: Path, sweep_root: str | None, datasets: list[str]
-) -> None:
+def test_review_requires_sweep_root_and_datasets_together(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "manifest.json").write_text("{}", encoding="utf-8")
-    root = None if sweep_root is None else tmp_path / sweep_root
     with pytest.raises(ValueError, match="together"):
-        apply_reviewed_eps(source, tmp_path / "output", root, datasets, 0.53, "Review", tmp_path / "review.json")
+        apply_reviewed_eps(
+            source, tmp_path / "output", tmp_path / "curves", [], 0.53, "Review", tmp_path / "review.json"
+        )
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("valid_origin", [False, True])
-def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path, valid_origin: bool) -> None:
+def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path) -> None:
     components = tmp_path / "components"
     components.mkdir()
     pd.DataFrame(
@@ -699,20 +613,19 @@ def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path, valid_origi
             }
         ]
     )
-    if not valid_origin:
-        map_path.write_text(
-            json.dumps({"dataset": "unit", "source_query_signature_id": "absent", "initial_query_signature_id": clone})
-            + "\n",
-            encoding="utf-8",
-        )
-        with pytest.raises(ValueError, match="records are absent"):
-            _build_dataset_constraints(tmp_path, "unit", labels)
-        return
     pairs, conflicts, summary = _build_dataset_constraints(tmp_path, "unit", labels)
     assert pairs["member_signature_id"].tolist() == ["other"]
     assert conflicts.empty
     assert summary["excluded_initial_origin_rows"] == 1
     assert summary[MAP_SHA256_FIELD] == sha256_file(map_path)
+
+    map_path.write_text(
+        json.dumps({"dataset": "unit", "source_query_signature_id": "absent", "initial_query_signature_id": clone})
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="records are absent"):
+        _build_dataset_constraints(tmp_path, "unit", labels)
 
 
 def test_proxy_builder_cli_rejects_test_assignment() -> None:

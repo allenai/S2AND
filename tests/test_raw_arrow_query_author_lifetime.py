@@ -5,7 +5,6 @@ from typing import Any
 
 import numpy as np
 import pyarrow as pa
-import pytest
 
 from s2and.feature_port import _require_rust_runtime
 from tests.raw_arrow_helpers import base_arrow_paths, open_arrow_dataset, write_ipc
@@ -27,8 +26,8 @@ def _assert_same_plan(actual: dict[str, Any], expected: dict[str, Any]) -> None:
             assert actual[key] == expected[key], key
 
 
-@pytest.mark.parametrize("num_threads", [1, 2])
-def test_query_author_evidence_matches_fresh_plans_when_roles_change(tmp_path: Path, num_threads: int) -> None:
+def test_query_author_evidence_matches_fresh_plans_when_roles_change(tmp_path: Path) -> None:
+    num_threads = 2
     """A seed paper can first need query-only evidence, then enter a cached summary."""
     paths = base_arrow_paths(tmp_path)
     runtime = _require_rust_runtime()

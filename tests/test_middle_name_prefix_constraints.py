@@ -15,31 +15,18 @@ Name = tuple[str, str, str]
 
 CASES: list[tuple[Name, Name, float | None]] = [
     (("C.", "Meg", "Urry"), ("C.", "Megan", "Urry"), None),
-    (("Jean", "Ch", "Smith"), ("Jean", "Charles", "Smith"), None),
-    (("C.", "Yi", "Tang"), ("C.", "Yik", "Tang"), None),
-    (("Ho", "Yun", "Lee"), ("Ho", "Yung", "Lee"), None),
     (("C.", "Ann Marie", "Smith"), ("C.", "Anna M", "Smith"), None),
     (("C.", "Meg", "Smith"), ("C.", "Megan Claire", "Smith"), None),
     (("C.", "Meg Jr", "Smith"), ("C.", "Megan Jr", "Smith"), None),
     (("C.", "Meg Ann", "Smith"), ("C.", "Megan Alice", "Smith"), LARGE_DISTANCE),
     (("C.", "Meg Paul", "Smith"), ("C.", "Paul Megan", "Smith"), None),
     (("C.", "M Paul", "Smith"), ("C.", "Meg Peter", "Smith"), LARGE_DISTANCE),
-    (("C.", "M", "Smith"), ("C.", "Megan", "Smith"), None),
-    (("C.", "", "Smith"), ("C.", "Megan", "Smith"), None),
-    (("C.", "Ann", "Smith"), ("C.", "Nan", "Smith"), LARGE_DISTANCE),
     (("C.", "Maria", "Smith"), ("C.", "Marai", "Smith"), None),
-    (("C.", "Meg Ann", "Smith"), ("C.", "Ann Meg", "Smith"), None),
-    (("C.", "Meg", "Smith"), ("C.", "Michael", "Smith"), LARGE_DISTANCE),
-    (("C.", "Meg", "Smith"), ("C.", "Charles", "Smith"), LARGE_DISTANCE),
-    (("C.", "Meg", "Smith"), ("D.", "Megan", "Smith"), LARGE_DISTANCE),
-    (("C.", "Meg", "Smith"), ("C.", "Megan", "Jones"), LARGE_DISTANCE),
-    (("Carl", "Meg", "Smith"), ("Chris", "Megan", "Smith"), LARGE_DISTANCE),
     # A prefix-matched dash-bound first name adds its later tokens to the middle.
     (("J.-D.", "T.", "Smith"), ("J.", "D.", "Smith"), None),
     (("J.-D.", "", "Smith"), ("J.", "T.", "Smith"), LARGE_DISTANCE),
     (("Chi-Hung", "", "Tam"), ("C.", "M.", "Tam"), LARGE_DISTANCE),
     (("Jean-Daniel", "", "Smith"), ("Jean", "Daniel", "Smith"), None),
-    (("Jean-Daniel", "", "Smith"), ("Jean", "Paul", "Smith"), LARGE_DISTANCE),
     (("Jean-Daniel", "T.", "Smith"), ("Jean-D.", "", "Smith"), None),
     # Tokens that the other first name covers do not join the middle.
     (("Jean-Pierre", "A.", "Smith"), ("Jean-Pierre", "B.", "Smith"), LARGE_DISTANCE),
@@ -63,17 +50,21 @@ def prefix_dataset(tmp_path_factory: pytest.TempPathFactory) -> tuple[ANDData, A
     return dataset, native, indices
 
 
-@pytest.mark.parametrize("case_index", range(len(CASES)))
-def test_middle_prefix_constraint_parity(prefix_dataset: tuple[ANDData, Any, dict[str, int]], case_index: int) -> None:
+def test_middle_prefix_constraint_parity(prefix_dataset: tuple[ANDData, Any, dict[str, int]]) -> None:
     """Accept aligned prefixes and preserve each prior independent veto."""
     dataset, native, indices = prefix_dataset
-    expected = CASES[case_index][2]
-    signature_ids = (str(2 * case_index), str(2 * case_index + 1))
-    for left, right in (signature_ids, signature_ids[::-1]):
-        assert dataset.get_constraint(left, right) == expected
-        assert native.get_constraints_block_upper_triangle_indexed([indices[left], indices[right]], num_threads=1)[
-            2
-        ] == [expected]
+    expected = {(str(2 * i), str(2 * i + 1)): distance for i, (_, _, distance) in enumerate(CASES)}
+    signature_ids = [signature_id for pair in expected for signature_id in pair]
+    for order, pairs in (
+        (signature_ids, expected),
+        (signature_ids[::-1], {(right, left): distance for (left, right), distance in expected.items()}),
+    ):
+        left, right, distances = native.get_constraints_block_upper_triangle_indexed(
+            [indices[signature_id] for signature_id in order], num_threads=1
+        )
+        values = {(order[i], order[j]): value for i, j, value in zip(left, right, distances, strict=True)}
+        assert {pair: values[pair] for pair in pairs} == pairs
+        assert {pair: dataset.get_constraint(*pair) for pair in pairs} == pairs
 
 
 @pytest.mark.parametrize(

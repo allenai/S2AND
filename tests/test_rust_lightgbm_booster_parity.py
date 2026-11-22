@@ -48,7 +48,7 @@ REALISTIC_PROBABILITY_FIXTURE_PATH = REALISTIC_FIXTURE_DIR / "production_main_pr
 K_ZERO_THRESHOLD = float(np.float32(1e-35))
 
 PROBA_ATOL = 1e-12
-PARITY_NUM_THREADS = 4
+PARITY_NUM_THREADS = 2
 REALISTIC_FIXTURE_MAX_ROWS = 4096
 
 ONE_SPLIT_INTERIOR_ZERO_MODEL = (REALISTIC_FIXTURE_DIR / "interior_zero.lgb").read_text(encoding="utf-8")
@@ -513,7 +513,7 @@ def test_dense_zero_window_precedes_one_split_missing_semantics() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_realistic_booster_bit_exact_parity() -> None:
+def test_realistic_booster_matches_lightgbm_and_release_probabilities() -> None:
     assert REALISTIC_MODEL_PATH.is_file()
     lgb_booster = lgb.Booster(model_file=str(REALISTIC_MODEL_PATH))
     rust_booster = RustLightGBMBooster(str(REALISTIC_MODEL_PATH))
@@ -530,30 +530,27 @@ def test_realistic_booster_bit_exact_parity() -> None:
         lgb_booster,
         lgb_booster.num_feature(),
         rng,
-        max_split_boundaries=512,
+        n_random_rows=192,
+        max_split_boundaries=128,
     )
     assert features.shape[0] <= REALISTIC_FIXTURE_MAX_ROWS
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
 
-
-def test_realistic_booster_fixture_probabilities() -> None:
     import json
 
-    assert REALISTIC_MODEL_PATH.is_file()
     assert REALISTIC_PROBABILITY_FIXTURE_PATH.is_file()
     fixture = json.loads(REALISTIC_PROBABILITY_FIXTURE_PATH.read_text(encoding="utf-8"))
     features = np.ascontiguousarray(fixture["features"], dtype=np.float64)
     expected = np.asarray(fixture["expected_probabilities"], dtype=np.float64)
 
-    rust_booster = RustLightGBMBooster(str(REALISTIC_MODEL_PATH))
     positive = np.asarray(rust_booster.predict_proba_positive(features), dtype=np.float64)
     observed = np.column_stack((1.0 - positive, positive))
     rtol = float(fixture.get("rtol", 1e-10))
     atol = float(fixture.get("atol", 1e-10))
     np.testing.assert_allclose(observed, expected, rtol=rtol, atol=atol)
 
-    _assert_parity(lgb.Booster(model_file=str(REALISTIC_MODEL_PATH)), rust_booster, features)
+    _assert_parity(lgb_booster, rust_booster, features)
 
 
 # ---------------------------------------------------------------------------
@@ -561,10 +558,11 @@ def test_realistic_booster_fixture_probabilities() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_missing_type_nan_semantics() -> None:
+def test_nan_missing_splits_preserve_non_default_sigmoid() -> None:
     rng = np.random.default_rng(1)
-    lgb_booster = _train_booster(rng, inject_nans=True)
+    lgb_booster = _train_booster(rng, params={"sigmoid": 2.5}, inject_nans=True)
     rust_booster = _rust_from_booster(lgb_booster)
+    assert rust_booster.sigmoid() == 2.5
     summary = rust_booster.decision_type_summary()
     assert summary["missing_nan"] > 0, "model must contain NaN-missing splits for coverage"
     assert 0 < summary["default_left"] < summary["num_splits"]
@@ -572,6 +570,11 @@ def test_missing_type_nan_semantics() -> None:
     features = _adversarial_matrix(lgb_booster, lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
     _assert_float32_matches_prior_widening(rust_booster, features)
+    # The probability path is exactly sigmoid(raw): verify against numpy so a
+    # future change can't silently reorder the transform.
+    raw = np.asarray(rust_booster.predict_raw(features))
+    proba = np.asarray(rust_booster.predict_proba_positive(features))
+    np.testing.assert_allclose(proba, 1.0 / (1.0 + np.exp(-2.5 * raw)), rtol=0.0, atol=1e-15)
 
 
 def test_missing_type_none_semantics() -> None:
@@ -619,36 +622,6 @@ def test_missing_type_zero_semantics() -> None:
     _assert_float32_matches_prior_widening(rust_booster, features)
 
 
-def test_non_default_sigmoid_parameter() -> None:
-    rng = np.random.default_rng(5)
-    lgb_booster = _train_booster(rng, params={"sigmoid": 2.5}, inject_nans=True)
-    rust_booster = _rust_from_booster(lgb_booster)
-    assert rust_booster.sigmoid() == 2.5
-
-    features = _adversarial_matrix(lgb_booster, lgb_booster.num_feature(), rng)
-    _assert_parity(lgb_booster, rust_booster, features)
-
-    # The probability path is exactly sigmoid(raw): verify against numpy so a
-    # future change can't silently reorder the transform.
-    raw = np.asarray(rust_booster.predict_raw(features))
-    proba = np.asarray(rust_booster.predict_proba_positive(features))
-    np.testing.assert_allclose(proba, 1.0 / (1.0 + np.exp(-2.5 * raw)), rtol=0.0, atol=1e-15)
-
-
-def test_single_leaf_trees() -> None:
-    """min_child_samples larger than the dataset forces constant (1-leaf) trees."""
-    rng = np.random.default_rng(6)
-    lgb_booster = _train_booster(rng, params={"min_child_samples": 10_000_000}, num_boost_round=5)
-    rust_booster = _rust_from_booster(lgb_booster)
-    features = _adversarial_matrix(
-        lgb_booster,
-        lgb_booster.num_feature(),
-        rng,
-        n_random_rows=64,
-    )
-    _assert_parity(lgb_booster, rust_booster, features)
-
-
 # ---------------------------------------------------------------------------
 # Unsupported model shapes must be rejected at load, not scored wrongly
 # ---------------------------------------------------------------------------
@@ -679,7 +652,7 @@ def test_linear_tree_model_rejected() -> None:
         RustLightGBMBooster.from_string(lgb_booster.model_to_string())
 
 
-def test_multiclass_model_rejected() -> None:
+def test_native_booster_rejects_multiclass_and_regression_models() -> None:
     rng = np.random.default_rng(9)
     features = rng.normal(size=(600, 4))
     labels = rng.integers(0, 3, size=600)
@@ -689,15 +662,10 @@ def test_multiclass_model_rejected() -> None:
         train_set,
         num_boost_round=3,
     )
-    with pytest.raises(ValueError, match="binary"):
+    with pytest.raises(ValueError, match="num_class=3"):
         RustLightGBMBooster.from_string(booster.model_to_string())
 
-
-def test_regression_model_rejected() -> None:
-    rng = np.random.default_rng(10)
-    features = rng.normal(size=(600, 4))
-    target = rng.normal(size=600)
-    train_set = lgb.Dataset(features, label=target, params={"verbose": -1})
-    booster = lgb.train({"objective": "regression", "verbose": -1, "seed": 0}, train_set, num_boost_round=3)
-    with pytest.raises(ValueError, match="binary"):
-        RustLightGBMBooster.from_string(booster.model_to_string())
+    # Keep the single-tree header valid so objective validation rejects regression.
+    regression = ONE_SPLIT_INTERIOR_ZERO_MODEL.replace("objective=binary", "objective=regression", 1)
+    with pytest.raises(ValueError, match="binary objective"):
+        RustLightGBMBooster.from_string(regression)

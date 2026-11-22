@@ -23,22 +23,7 @@ def validate_step(release_workflow, name):
     return next(step for step in steps if step.get("name") == name)
 
 
-@pytest.mark.parametrize(
-    ("version", "ref", "allowed"),
-    [
-        ("1.0.0", "refs/heads/main", True),
-        ("1.0.0", "refs/heads/main-backup", False),
-        ("1.0.0", "refs/tags/main", False),
-        ("1.0.0", "", False),
-        # Pre-releases build on any branch; the publish jobs still require main.
-        ("1.0.0b1", "refs/heads/feature", True),
-        ("1.0.0rc2", "", True),
-        ("1.0.0b1.post1", "refs/heads/feature", False),
-    ],
-)
-def test_release_ref_gate_rejects_unapproved_refs(
-    release_workflow, tmp_path: Path, version: str, ref: str, allowed: bool
-) -> None:
+def test_release_ref_gate_rejects_unapproved_refs(release_workflow, tmp_path: Path) -> None:
     steps = release_workflow["jobs"]["validate"]["steps"]
     names = [step.get("name") for step in steps]
     # The decision reads VERSION and git history, so only the checkout may run before it.
@@ -49,13 +34,31 @@ def test_release_ref_gate_rejects_unapproved_refs(
     assert names.index("Require main for final releases") < names.index("Run the full CI policy")
     assert gate["if"] == "steps.decide.outputs.release == 'true'"
     assert gate.get("continue-on-error", "false") == "false"
-    (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
-    result = run_bash("set -euo pipefail\n" + gate["run"], cwd=tmp_path, env={"GITHUB_REF": ref})
-    assert (result.returncode == 0) is allowed, result.stdout + result.stderr
+
+    setup = r"""
+check_ref() {
+    printf '%s\n' "$1" > VERSION
+    export GITHUB_REF="$2"
+    set +e
+    ( set -euo pipefail; release_gate )
+    actual=$?
+    set -e
+    test "$actual" -eq "$3"
+}
+"""
+    gates = """
+check_ref 1.0.0 refs/heads/main 0
+check_ref 1.0.0 refs/tags/main 1
+check_ref 1.0.0b1 refs/heads/feature 0
+check_ref 1.0.0b1.post1 refs/heads/feature 1
+"""
+    result = run_bash("set -euo pipefail\nrelease_gate() {\n" + gate["run"] + "\n}\n" + setup + gates, cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
-def git_repo_with_version_bump(path: Path) -> tuple[str, str]:
-    """Commits VERSION 0.9.0, then 1.0.0b6; returns both commit ids."""
+@pytest.fixture(scope="module")
+def version_bump(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str, str]:
+    path = tmp_path_factory.mktemp("release_version_bump")
 
     def git(*args: str) -> str:
         return subprocess.run(
@@ -73,48 +76,73 @@ def git_repo_with_version_bump(path: Path) -> tuple[str, str]:
     old = git("rev-parse", "HEAD")
     (path / "VERSION").write_text("1.0.0b6\n", encoding="utf-8")
     git("commit", "-qam", "bump")
-    return old, git("rev-parse", "HEAD")
+    return path, old, git("rev-parse", "HEAD")
 
 
-@pytest.mark.parametrize(
-    ("event", "before", "status", "exit_ok", "release"),
-    [
-        # A push that changes VERSION releases a version PyPI lacks.
-        ("push", "old", "404", True, "true"),
-        # A push that keeps VERSION, or whose version PyPI has, releases nothing.
-        ("push", "new", "404", True, "false"),
-        ("push", "old", "200", True, "false"),
-        # A push with no usable previous commit compares with nothing.
-        ("push", "zero", "404", True, "true"),
-        ("push", "old", "503", False, None),
-        # A manual run releases only an unpublished version.
-        ("workflow_dispatch", "", "404", True, "true"),
-        ("workflow_dispatch", "", "200", False, None),
-        ("workflow_dispatch", "", "503", False, None),
-    ],
-)
-def test_release_runs_for_new_unpublished_versions(
-    release_workflow, tmp_path: Path, event: str, before: str, status: str, exit_ok: bool, release
+def _check_release_decisions(
+    release_workflow, version_bump: tuple[Path, str, str], tmp_path: Path, event: str, checks: str
 ) -> None:
     decide = validate_step(release_workflow, "Decide whether to release")
     assert decide["id"] == "decide"
-    old, new = git_repo_with_version_bump(tmp_path)
-    before_sha = {"old": old, "new": new, "zero": "0" * 40, "": ""}[before]
-    # A shell function stands in for curl so the test never contacts PyPI.
-    fake_curl = 'curl() { printf "%s\\n" "$*" > curl_args; printf "%s" "$FAKE_HTTP_STATUS"; }\n'
-    output = tmp_path / "github_output"
-    output.write_text("", encoding="utf-8")
-    env = {
-        "FAKE_HTTP_STATUS": status,
-        "GITHUB_EVENT_NAME": event,
-        "BEFORE_SHA": before_sha,
-        "GITHUB_OUTPUT": str(output),
-    }
-    result = run_bash("set -euo pipefail\n" + fake_curl + decide["run"], cwd=tmp_path, env=env)
-    assert (result.returncode == 0) is exit_ok, result.stdout + result.stderr
-    assert f"https://pypi.org/pypi/{PACKAGE}/1.0.0b6/json" in (tmp_path / "curl_args").read_text(encoding="utf-8")
-    if release is not None:
-        assert output.read_text(encoding="utf-8").split() == [f"release={release}"]
+    repo, old, new = version_bump
+    setup = """
+curl() {
+    test "${!#}" = "$PACKAGE_URL" || return 99
+    printf '%s' "$FAKE_HTTP_STATUS"
+}
+check_release() {
+    export BEFORE_SHA="$1" FAKE_HTTP_STATUS="$2"
+    : > "$GITHUB_OUTPUT"
+    set +e
+    ( set -euo pipefail; release_decision )
+    actual=$?
+    set -e
+    test "$actual" -eq "$3"
+    test "$(cat "$GITHUB_OUTPUT")" = "$4"
+}
+"""
+    result = run_bash(
+        "set -euo pipefail\nrelease_decision() {\n" + decide["run"] + "\n}\n" + setup + checks,
+        cwd=repo,
+        env={
+            "PACKAGE_URL": f"https://pypi.org/pypi/{PACKAGE}/1.0.0b6/json",
+            "GITHUB_EVENT_NAME": event,
+            "GITHUB_OUTPUT": str(tmp_path / "github_output"),
+            "OLD_SHA": old,
+            "NEW_SHA": new,
+            "ZERO_SHA": "0" * 40,
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_push_releases_only_a_version_bump_missing_from_pypi(release_workflow, version_bump, tmp_path: Path) -> None:
+    _check_release_decisions(
+        release_workflow,
+        version_bump,
+        tmp_path,
+        "push",
+        """
+check_release "$OLD_SHA" 404 0 release=true
+check_release "$NEW_SHA" 404 0 release=false
+check_release "$OLD_SHA" 200 0 release=false
+check_release "$ZERO_SHA" 404 0 release=true
+check_release "$OLD_SHA" 503 1 ""
+""",
+    )
+
+
+def test_manual_release_requires_an_unpublished_version(release_workflow, version_bump, tmp_path: Path) -> None:
+    _check_release_decisions(
+        release_workflow,
+        version_bump,
+        tmp_path,
+        "workflow_dispatch",
+        """
+check_release "" 404 0 release=true
+check_release "" 200 1 ""
+""",
+    )
 
 
 def test_release_publication_requires_successful_validation_and_smoke(release_workflow) -> None:

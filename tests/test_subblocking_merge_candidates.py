@@ -7,8 +7,6 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from s2and.arrow_inputs import ArrowDataset
-from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
 from s2and.subblocking import (
     GraphSubblockingConfig,
     _pack_component_ids_greedy,
@@ -20,53 +18,6 @@ from s2and.subblocking import (
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks_with_telemetry,
 )
-from tests.helpers import write_test_arrow_artifact_manifest
-
-
-def _open_graph_dataset(paths: dict[str, Any], tmp_path) -> ArrowDataset:
-    import pyarrow as pa
-
-    with pa.memory_map(str(paths["signatures"]), "r") as source:
-        signatures = pa.ipc.open_file(source).read_all()
-    for column_name, value in (
-        ("author_last", ""),
-        ("author_suffix", ""),
-        ("author_block", "h test"),
-    ):
-        if column_name not in signatures.column_names:
-            signatures = signatures.append_column(
-                column_name,
-                pa.array([value] * signatures.num_rows, type=pa.string()),
-            )
-    signatures_path = tmp_path / "signatures.complete.arrow"
-    write_arrow_ipc_table(signatures, signatures_path)
-    paths["signatures"] = signatures_path
-    paper_ids = {str(value) for value in signatures["paper_id"].to_pylist() if value is not None and str(value)}
-    papers_path = tmp_path / "papers.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(sorted(paper_ids) or ["p1"], type=pa.string()),
-                "title": pa.array([""] * max(1, len(paper_ids)), type=pa.string()),
-                "venue": pa.array([""] * max(1, len(paper_ids)), type=pa.string()),
-                "journal_name": pa.array([""] * max(1, len(paper_ids)), type=pa.string()),
-            }
-        ),
-        papers_path,
-    )
-    paths["papers"] = papers_path
-    index_specs = (
-        ("signatures", "signatures_batch_index", "signature_id"),
-        ("papers", "papers_batch_index", "paper_id"),
-        ("paper_authors", "paper_authors_batch_index", "paper_id"),
-        ("specter", "specter_batch_index", "paper_id"),
-    )
-    for table_key, index_key, key_column in index_specs:
-        index_path = tmp_path / f"{table_key}.{index_key}.bin"
-        write_arrow_batch_lookup_index(paths[table_key], index_path, key_column=key_column, table_name=table_key)
-        paths[index_key] = index_path
-    write_test_arrow_artifact_manifest(tmp_path, {key: str(path) for key, path in paths.items()})
-    return ArrowDataset.open(tmp_path, require_specter=True)
 
 
 def test_sorted_subblock_merge_candidates_handles_edge_cases() -> None:
@@ -95,52 +46,22 @@ def test_sorted_subblock_merge_candidates_handles_edge_cases() -> None:
     assert any(pair == ("a|middle=wei", "a|middle=weijun") for pair, _score in observed)
 
 
-def test_sorted_subblock_merge_candidates_middle_prefix_score_is_order_invariant() -> None:
-    def score_for(output):
-        candidates = _sorted_subblock_merge_candidates(output, maximum_size=3, first_k_letter_counts_sorted={})
-        assert len(candidates) == 1
-        return candidates[0][1]
-
-    short_first = {
-        "alex|middle=jo": ["s1"],
-        "alex|middle=john": ["s2"],
-    }
-    long_first = {
-        "alex|middle=john": ["s2"],
-        "alex|middle=jo": ["s1"],
-    }
-
-    assert score_for(short_first) == score_for(long_first) == 1e10 + 2
-
-
-def test_sorted_subblock_merge_candidates_orcid_counts_are_order_invariant() -> None:
-    counts = {"li": {"wei": 7}}
-    forward = _sorted_subblock_merge_candidates(
-        {"a|middle=wei": ["s1"], "a|middle=li": ["s2"]},
-        maximum_size=3,
-        first_k_letter_counts_sorted=counts,
-    )
-    reverse = _sorted_subblock_merge_candidates(
-        {"a|middle=li": ["s2"], "a|middle=wei": ["s1"]},
-        maximum_size=3,
-        first_k_letter_counts_sorted=counts,
-    )
-
-    assert [(frozenset(pair), score) for pair, score in forward] == [
-        (frozenset(pair), score) for pair, score in reverse
-    ]
-    assert forward[0][1] == 7
-
-
-def test_sorted_subblock_merge_candidates_keeps_exact_maximum_size_pair() -> None:
+def test_sorted_subblock_merge_candidates_score_prefixes_and_orcid_in_either_order() -> None:
     output = {
-        "alex|middle=a": ["s1", "s2"],
-        "alex|middle=b": ["s3", "s4", "s5"],
+        "alex|middle=jo": ["s1", "s2"],
+        "alex|middle=john": ["s3", "s4", "s5"],
+        "a|middle=wei": ["s6"],
+        "a|middle=li": ["s7"],
     }
+    counts = {"li": {"wei": 7}}
+    prefix_pair = frozenset({"alex|middle=jo", "alex|middle=john"})
+    orcid_pair = frozenset({"a|middle=wei", "a|middle=li"})
 
-    assert _sorted_subblock_merge_candidates(output, maximum_size=5, first_k_letter_counts_sorted={}) == [
-        (("alex|middle=a", "alex|middle=b"), 1e10)
-    ]
+    for ordered in (output, dict(reversed(list(output.items())))):
+        candidates = _sorted_subblock_merge_candidates(ordered, maximum_size=5, first_k_letter_counts_sorted=counts)
+        scores = {frozenset(pair): score for pair, score in candidates}
+        assert scores[prefix_pair] == 1e10 + 2
+        assert scores[orcid_pair] == 7
 
 
 def _score_candidate_edge(

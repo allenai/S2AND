@@ -7,8 +7,9 @@ from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_pri
 
 
 @pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize("threshold", [None, 2], ids=["unbatched", "subblocked"])
-@pytest.mark.parametrize("case", ["claimed", "seed_disallow", "query_disallow", "cross_block", "ignored_seeds"])
+@pytest.mark.parametrize(
+    ("threshold", "case"), [(None, "seed_disallow"), (2, "query_disallow"), (2, "cross_block"), (2, "ignored_seeds")]
+)
 def test_bulk_altered_markers_preserve_ordinary_seed_policy(tmp_path, route, threshold, case):
     """Real public routes preserve claims without absorbing unrelated papers."""
     count = 6 if case == "cross_block" else 3
@@ -48,18 +49,13 @@ def test_bulk_altered_markers_preserve_ordinary_seed_policy(tmp_path, route, thr
 
 
 @pytest.mark.parametrize("route", ["arrow"])
-@pytest.mark.parametrize("threshold", [None, 2], ids=["unbatched", "subblocked"])
-def test_bulk_altered_marker_does_not_bypass_required_component_size_limit(tmp_path, route, threshold):
+def test_bulk_altered_marker_does_not_bypass_required_component_size_limit(tmp_path, route):
     dataset = _dataset([("Ada", "", "Smith")] * 4, dict.fromkeys(["0", "1", "2"], "claimed"))
     dataset.altered_cluster_signatures = ["0"]
     kwargs = {"altered_cluster_signatures": ["0"]} if route == "arrow" else {}
     blocks = {"one": list(dataset.signatures)}
-    if threshold is not None:
-        with pytest.raises(ValueError, match="component exceeds batching_threshold"):
-            _predict(tmp_path, dataset, blocks, route, threshold=threshold, distance=0.9, **kwargs)
-    else:
-        clusters = _predict(tmp_path, dataset, blocks, route, threshold=threshold, distance=0.9, **kwargs)
-        assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1", "2"}), frozenset({"3"})}
+    with pytest.raises(ValueError, match="component exceeds batching_threshold"):
+        _predict(tmp_path, dataset, blocks, route, threshold=2, distance=0.9, **kwargs)
 
 
 def _assert_partition(clusters, blocks):

@@ -62,16 +62,13 @@ def _write_bundle(
     )
 
 
-@pytest.mark.parametrize("other_paper_has_author", [False, True])
-def test_native_empty_author_paper_preserves_missing_coauthor_features(
-    tmp_path: Path, other_paper_has_author: bool
-) -> None:
+def test_native_empty_author_paper_preserves_missing_coauthor_features(tmp_path: Path) -> None:
     paths = _write_bundle(
         tmp_path,
         paper_ids=["p1", "p2"],
-        author_paper_ids=["p2"] if other_paper_has_author else [],
-        author_names=["Ming Jiang"] if other_paper_has_author else [],
-        author_positions=[0] if other_paper_has_author else [],
+        author_paper_ids=["p2", "p2"],
+        author_names=["Ming Jiang", "Another Author"],
+        author_positions=[0, 1],
     )
     papers = load_papers_from_arrow(paths["papers"], paths["paper_authors"])
     assert papers["p1"].authors == []

@@ -215,11 +215,10 @@ def test_metadata_rejects_invalid_fields() -> None:
         with pytest.raises(ValueError, match=f"{field_name} is not a SHA-256"):
             artifact_module._validated_metadata(payload)
 
-    for invalid_value in (0, 1.5, True):
-        payload = _valid_metadata_payload()
-        payload["retrieval_top_k"] = invalid_value
-        with pytest.raises(ValueError, match="retrieval_top_k must be a positive integer"):
-            artifact_module._validated_metadata(payload)
+    payload = _valid_metadata_payload()
+    payload["retrieval_top_k"] = 0
+    with pytest.raises(ValueError, match="retrieval_top_k must be a positive integer"):
+        artifact_module._validated_metadata(payload)
 
     missing = _valid_metadata_payload()
     del missing["booster_sha256"]
@@ -249,8 +248,7 @@ def test_load_rejects_wrong_kind_before_booster_io(tmp_path: Path) -> None:
         load_incremental_linking_artifact(artifact_dir)
 
 
-@pytest.mark.parametrize("field", ("format_version", "feature_contract_version"))
-@pytest.mark.parametrize("value", (True, 1.0, 2))
+@pytest.mark.parametrize(("field", "value"), [("format_version", True), ("feature_contract_version", 2)])
 def test_load_rejects_unsupported_contract_before_booster_io(tmp_path: Path, field: str, value: object) -> None:
     artifact_dir = _write_fake_artifact(tmp_path / "artifact")
     metadata_path = artifact_dir / METADATA_FILENAME
@@ -276,18 +274,6 @@ def test_load_rejects_changed_column_order_with_equal_width(tmp_path: Path) -> N
         load_incremental_linking_artifact(artifact_dir)
 
 
-def test_load_rejects_unversioned_metadata(tmp_path: Path) -> None:
-    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
-    metadata_path = artifact_dir / METADATA_FILENAME
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    for field in ("feature_contract_version", "feature_names", "format_version"):
-        del payload[field]
-    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="metadata is missing fields"):
-        load_incremental_linking_artifact(artifact_dir)
-
-
 def test_load_always_verifies_booster_hash_before_loading_scorer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -306,26 +292,14 @@ def test_load_always_verifies_booster_hash_before_loading_scorer(
     assert loaded.artifact_dir == artifact_dir.resolve()
     assert load_count == 1
 
-    (artifact_dir / BOOSTER_FILENAME).write_bytes(b"mutated-booster")
+    booster_path = artifact_dir / BOOSTER_FILENAME
+    booster_path.write_bytes(b"mutated-booster")
     with pytest.raises(ValueError, match="booster_sha256 mismatch"):
         load_incremental_linking_artifact(artifact_dir)
-    assert load_count == 1
-
-
-def test_load_rejects_deleted_booster_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
-    (artifact_dir / BOOSTER_FILENAME).unlink()
-    monkeypatch.setattr(
-        artifact_module,
-        "_load_rust_lightgbm_booster",
-        lambda booster_path: _ConstantRustBooster(),
-    )
-
+    booster_path.unlink()
     with pytest.raises(FileNotFoundError):
         load_incremental_linking_artifact(artifact_dir)
+    assert load_count == 1
 
 
 def test_load_rejects_wrong_booster_feature_count(

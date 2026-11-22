@@ -168,55 +168,7 @@ def test_concurrent_python_featurization_uses_each_request_dataset(monkeypatch: 
     assert second_future.result() == 20.0
 
 
-def test_zero_specter_embedding_is_missing_for_lists_and_arrays() -> None:
-    for case_id, zero_embedding in (
-        ("list", [0.0, 0.0]),
-        ("array", np.asarray([0.0, 0.0])),
-    ):
-        dataset = _dummy_dataset("dummy_zero_specter")
-        paper_id_0 = str(dataset.signatures["0"].paper_id)
-        paper_id_1 = str(dataset.signatures["1"].paper_id)
-        dataset.specter_embeddings = {
-            paper_id_0: zero_embedding,
-            paper_id_1: [1.0, 0.0],
-        }
-        featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
-
-        features, _labels, _ = many_pairs_featurize(
-            [("0", "1", 0)],
-            dataset,
-            featurizer,
-            n_jobs=1,
-            chunk_size=1,
-            nan_value=np.nan,
-        )
-
-        assert features.shape == (1, 1), case_id
-        assert np.isnan(features[0, 0]), case_id
-
-
-def test_specter_embedding_must_be_one_dimensional() -> None:
-    dataset = _dummy_dataset("dummy_invalid_specter")
-    paper_id_0 = str(dataset.signatures["0"].paper_id)
-    paper_id_1 = str(dataset.signatures["1"].paper_id)
-    dataset.specter_embeddings = {
-        paper_id_0: [[1.0, 0.0]],
-        paper_id_1: [1.0, 0.0],
-    }
-    featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
-
-    with pytest.raises(ValueError, match="one-dimensional"):
-        many_pairs_featurize(
-            [("0", "1", 0)],
-            dataset,
-            featurizer,
-            n_jobs=1,
-            chunk_size=1,
-            nan_value=np.nan,
-        )
-
-
-def test_numeric_specter_tuple_keys_are_available_to_pair_featurization() -> None:
+def test_pair_featurization_validates_specter_embeddings() -> None:
     dataset = ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
@@ -240,6 +192,16 @@ def test_numeric_specter_tuple_keys_are_available_to_pair_featurization() -> Non
     )
 
     np.testing.assert_array_equal(features, np.asarray([[2.0]]))
+    left_paper = str(dataset.signatures["0"].paper_id)
+    right_paper = str(dataset.signatures["1"].paper_id)
+    dataset.specter_embeddings = {left_paper: np.zeros(2), right_paper: [1.0, 0.0]}
+    missing, _, _ = many_pairs_featurize([("0", "1", 0)], dataset, featurizer, n_jobs=1, nan_value=np.nan)
+    assert missing.shape == (1, 1)
+    assert np.isnan(missing[0, 0])
+
+    dataset.specter_embeddings[left_paper] = [[1.0, 0.0]]
+    with pytest.raises(ValueError, match="one-dimensional"):
+        many_pairs_featurize([("0", "1", 0)], dataset, featurizer, n_jobs=1, nan_value=np.nan)
 
 
 def test_empty_python_pair_featurization_does_not_mark_missing_ngrams_ready() -> None:
@@ -433,15 +395,10 @@ def test_multiprocessing_featurization_consistency() -> None:
     np.testing.assert_array_equal(labels_single, labels_multi)
 
 
-def test_signature_id_to_index_or_raise_accepts_non_string_pair_ids() -> None:
+def test_signature_id_lookup_converts_ids_and_rejects_missing_ids() -> None:
     signature_id_to_index = {"1": 10, "2": 20}
 
     assert _signature_id_to_index_or_raise(signature_id_to_index, 1) == 10
-    assert _signature_id_to_index_or_raise(signature_id_to_index, 2) == 20
-
-
-def test_signature_id_to_index_or_raise_reports_missing_signature_id() -> None:
-    signature_id_to_index = {"1": 10}
 
     with pytest.raises(ValueError, match="999"):
         _signature_id_to_index_or_raise(signature_id_to_index, 999)

@@ -222,7 +222,7 @@ def constraint_pairs(source_dataset, sample_pairs):
     return pairs
 
 
-def test_rust_indexed_pair_featurization_preserves_empty_selected_width(arrow_dataset):
+def test_rust_indexed_featurization_keeps_empty_shape_and_validation(arrow_dataset):
     rust_featurizer = _get_rust_featurizer(arrow_dataset)
 
     matrix = np.asarray(
@@ -234,11 +234,7 @@ def test_rust_indexed_pair_featurization_preserves_empty_selected_width(arrow_da
     with pytest.raises(ValueError, match="selected_indices contains out-of-range index"):
         rust_featurizer.featurize_pairs_matrix_indexed([], [10_000], 1, np.nan)
 
-
-def test_rust_indexed_block_featurization_preserves_empty_selected_width(arrow_dataset):
-    rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_count = len(rust_featurizer.signature_ids())
-    assert signature_count >= 2
 
     singleton = np.asarray(
         rust_featurizer.featurize_block_upper_triangle_matrix_indexed([0], 0, None, [0, 1], 1, np.nan),
@@ -257,11 +253,6 @@ def test_rust_indexed_block_featurization_preserves_empty_selected_width(arrow_d
     assert empty_block.shape == (0, 2)
     assert capped_empty.shape == (0, 2)
 
-
-def test_rust_indexed_block_featurization_validates_empty_inputs(arrow_dataset):
-    rust_featurizer = _get_rust_featurizer(arrow_dataset)
-    signature_count = len(rust_featurizer.signature_ids())
-
     with pytest.raises(ValueError, match="selected_indices contains out-of-range index"):
         rust_featurizer.featurize_block_upper_triangle_matrix_indexed([0], 0, None, [10_000], 1, np.nan)
     with pytest.raises(ValueError, match="selected_indices contains out-of-range index"):
@@ -275,14 +266,6 @@ def test_rust_indexed_block_featurization_validates_empty_inputs(arrow_dataset):
             1,
             np.nan,
         )
-
-
-def test_arrow_training_helper_does_not_reuse_source_records(source_dataset, arrow_dataset):
-    signature_id = next(iter(source_dataset.signatures))
-    paper_id = str(source_dataset.signatures[signature_id].paper_id)
-
-    assert arrow_dataset.signatures[signature_id] is not source_dataset.signatures[signature_id]
-    assert arrow_dataset.papers[paper_id] is not source_dataset.papers[paper_id]
 
 
 def test_single_initial_name_text_features_match_rust(tmp_path):
@@ -483,9 +466,11 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(tmp_path):
     )
 
     _reset_featurizer_env_caches()
-    ds_rust = _load_dataset_from_dir(data_dir, "dummy_rust_end_to_end")
-    ds_rust = _attach_fake_specter_embeddings(ds_rust)
-    ds_rust = build_arrow_training_dataset(ds_rust, tmp_path)
+    ds_rust = build_arrow_training_dataset(ds_python, tmp_path)
+    signature = ds_python.signatures[sig_ids[0]]
+    paper_id = str(signature.paper_id)
+    assert ds_rust.signatures[sig_ids[0]] is not signature
+    assert ds_rust.papers[paper_id] is not ds_python.papers[paper_id]
     features_rust, labels_rust, _ = featurizer_mod.many_pairs_featurize(
         pairs,
         ds_rust,
@@ -568,19 +553,15 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     assert _constraint_indexed_rust(ds, "s1", "s2", featurizer=rust_featurizer) is None
 
 
-@pytest.mark.parametrize(
-    "constraint_kwargs", [{}, {"dont_merge_cluster_seeds": False}, {"incremental_dont_use_cluster_seeds": True}]
-)
-def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_dataset, constraint_pairs, constraint_kwargs):
+def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_dataset, constraint_pairs):
     rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_index = {sid: index for index, sid in enumerate(rust_featurizer.signature_ids())}
     indexed_pairs = [(signature_index[left], signature_index[right]) for left, right in constraint_pairs]
-    expected = [source_dataset.get_constraint(left, right, **constraint_kwargs) for left, right in constraint_pairs]
-    actual = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer, **constraint_kwargs)
+    expected = [source_dataset.get_constraint(left, right) for left, right in constraint_pairs]
+    actual = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer)
     assert actual == expected
 
 
-@pytest.mark.parametrize("backend", ["python", "rust"])
 @pytest.mark.parametrize(
     ("constraint_kwargs", "expected"),
     [
@@ -589,7 +570,7 @@ def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_datase
         ({"incremental_dont_use_cluster_seeds": True}, [None, None, None, None]),
     ],
 )
-def test_seed_group_constraints_have_independent_expected_values(tmp_path, backend, constraint_kwargs, expected):
+def test_seed_group_constraints_have_independent_expected_values(tmp_path, constraint_kwargs, expected):
     """Seed rules alone distinguish otherwise compatible signatures in two groups."""
     signature_ids = ["s1", "s2", "s3", "s4"]
     signatures = {
@@ -638,18 +619,15 @@ def test_seed_group_constraints_have_independent_expected_values(tmp_path, backe
     assert dataset.cluster_seeds_disallow == set()
     assert all(signature.author_info_orcid is None for signature in dataset.signatures.values())
     pairs = [("s1", "s2"), ("s3", "s4"), ("s1", "s3"), ("s4", "s2")]
-    if backend == "python":
-        actual = [dataset.get_constraint(left, right, **constraint_kwargs) for left, right in pairs]
-    else:
-        arrow_dataset = build_arrow_training_dataset(dataset, tmp_path, name_counts="empty")
-        rust_featurizer = _get_rust_featurizer(arrow_dataset)
-        signature_index = {sid: index for index, sid in enumerate(rust_featurizer.signature_ids())}
-        actual = get_constraints_matrix_indexed_rust(
-            [(signature_index[left], signature_index[right]) for left, right in pairs],
-            featurizer=rust_featurizer,
-            **constraint_kwargs,
-        )
-    assert actual == expected
+
+    assert [dataset.get_constraint(left, right, **constraint_kwargs) for left, right in pairs] == expected
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path, name_counts="empty")
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
+    signature_index = {sid: index for index, sid in enumerate(rust_featurizer.signature_ids())}
+    indexed_pairs = [(signature_index[left], signature_index[right]) for left, right in pairs]
+    assert (
+        get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer, **constraint_kwargs) == expected
+    )
 
 
 def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(arrow_dataset, constraint_pairs):

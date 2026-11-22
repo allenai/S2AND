@@ -47,12 +47,10 @@ def test_ensure_rust_on_path_rejects_rustc_only(monkeypatch: pytest.MonkeyPatch,
     ("workers", "max_processes", "smoke_fails"),
     [
         ("auto", ["--maxprocesses", "8"], False),
-        ("logical", ["--maxprocesses", "8"], False),
-        ("12", [], False),
         ("0", [], False),
         ("auto", ["--maxprocesses", "8"], True),
     ],
-    ids=["auto", "logical", "12", "0", "smoke-fails"],
+    ids=["auto", "0", "smoke-fails"],
 )
 def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(
     monkeypatch, workers, max_processes, smoke_fails

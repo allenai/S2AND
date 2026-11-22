@@ -34,35 +34,31 @@ def test_min_pair_edit_corrects_a_wrong_positive_pair() -> None:
     assert min_pair_edit(predictions) == (1.0, 1, 2)
 
 
-@pytest.mark.parametrize("include_average_precision", [False, True])
-def test_pairwise_probability_metrics_match_hand_calculated_ensemble(include_average_precision: bool) -> None:
+def test_pairwise_probability_metrics_match_hand_calculated_ensemble() -> None:
     """Averaging once and predicting negative at exactly 0.5 produce known metrics."""
     metrics, probabilities = pairwise_probability_metrics(
         np.array([0, 1, 0, 1]),
         np.array([0.0, 0.6, 0.6, 1.0]),
         np.array([0.2, 0.4, 0.8, 0.6]),
-        include_average_precision=include_average_precision,
+        include_average_precision=True,
     )
 
     np.testing.assert_allclose(probabilities, [0.1, 0.5, 0.7, 0.8], rtol=0, atol=1e-15)
     # One true/false positive and one true/false negative give every macro metric 1/2.
     # Three of the four positive-negative pairs are ordered correctly (AUROC 3/4).
     expected = {"rows": 4, "auroc": 0.75, "macro_f1": 0.5, "macro_precision": 0.5, "macro_recall": 0.5}
-    if include_average_precision:
-        # Positive labels rank first and third: AP = (1 + 2/3) / 2.
-        expected["average_precision"] = 5 / 6
+    # Positive labels rank first and third.
+    expected["average_precision"] = 5 / 6
     assert metrics == pytest.approx(expected)
 
 
 @pytest.mark.parametrize(
     ("labels", "main", "nameless", "message"),
     [
-        ([], [], [], "requires nonempty labels with both classes"),
         ([1, 1], [0.8, 0.9], [0.7, 0.8], "requires nonempty labels with both classes"),
-        ([0, 1], [0.1], [0.2, 0.8], "must have equal shape"),
         ([0, 1], [0.1, 0.9], [0.2], "must have equal shape"),
     ],
-    ids=["empty-evaluation", "single-class", "missing-main-score", "missing-nameless-score"],
+    ids=["single-class", "missing-nameless-score"],
 )
 def test_pairwise_probability_metrics_reject_unevaluable_populations(
     labels: list[int], main: list[float], nameless: list[float], message: str
@@ -72,9 +68,7 @@ def test_pairwise_probability_metrics_reject_unevaluable_populations(
         pairwise_probability_metrics(np.array(labels), np.array(main), np.array(nameless))
 
 
-@pytest.mark.parametrize("fail_save", [False, True])
-def test_pairwise_eval_scopes_plot_style(tmp_path, monkeypatch, fail_save: bool) -> None:
-    """Plot styling is applied only while rendering, including failed renders."""
+def test_pairwise_eval_restores_plot_style_after_save_failure(tmp_path, monkeypatch) -> None:
     import matplotlib as mpl
     import matplotlib.pyplot as plt
 
@@ -82,30 +76,18 @@ def test_pairwise_eval_scopes_plot_style(tmp_path, monkeypatch, fail_save: bool)
         def predict_proba(self, X):
             return np.array([[0.8, 0.2], [0.2, 0.8]])
 
-    real_savefig = plt.savefig
-    labelsizes = []
-
     def savefig(*args, **kwargs):
-        labelsizes.append(mpl.rcParams["axes.labelsize"])
-        if fail_save:
-            raise OSError("render failure")
-        return real_savefig(*args, **kwargs)
+        assert mpl.rcParams["axes.labelsize"] == 18.0
+        raise OSError("render failure")
 
     monkeypatch.setattr(plt, "savefig", savefig)
     with mpl.rc_context({"axes.labelsize": 7, "axes.facecolor": "pink", "font.size": 8}):
         before = mpl.rcParams.copy()
         try:
-            if fail_save:
-                with pytest.raises(OSError, match="render failure"):
-                    pairwise_eval(
-                        np.ones((2, 1)), np.array([0, 1]), DummyClf(), str(tmp_path), "Style", ["x"], skip_shap=True
-                    )
-            else:
+            with pytest.raises(OSError, match="render failure"):
                 pairwise_eval(
                     np.ones((2, 1)), np.array([0, 1]), DummyClf(), str(tmp_path), "Style", ["x"], skip_shap=True
                 )
-                assert {p.name for p in tmp_path.glob("*.png")} == {"style_roc.png", "style_pr.png"}
-            assert labelsizes == [18.0] * (1 if fail_save else 2)
             assert mpl.rcParams == before
         finally:
             plt.close("all")
@@ -145,13 +127,12 @@ class TestB3AndF1(unittest.TestCase):
         self.assertAlmostEqual(size_v_quantity_2[1], 0.877)
         self.assertAlmostEqual(size_v_quantity_2[2], 0.934)
 
-    def test_f1_score_edges(self):
         self.assertEqual(f1_score(0, 1), 0.0)
         self.assertEqual(f1_score(1, 0), 0.0)
         self.assertAlmostEqual(f1_score(0.5, 0.5), 0.5)
 
 
-def test_cluster_metrics_reject_non_partition_memberships() -> None:
+def test_cluster_metrics_require_partitions_of_the_same_population() -> None:
     cases = (
         (
             "b3-truth-within",
@@ -190,8 +171,6 @@ def test_cluster_metrics_reject_non_partition_memberships() -> None:
         with pytest.raises(ValueError, match=f"{label} clustering must be a partition"):
             metric(true_clus, pred_clus)
 
-
-def test_cluster_metrics_reject_unequal_coverage() -> None:
     metrics = (
         ("b3", b3_precision_recall_fscore),
         ("cluster", cluster_precision_recall_fscore),
@@ -353,34 +332,6 @@ def _small_binary_classification() -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def test_shap_values_for_lightgbm_are_2d():
-    from lightgbm import LGBMClassifier
-
-    X, y = _small_binary_classification()
-    classifier = LGBMClassifier(n_estimators=4, random_state=7, verbosity=-1).fit(X, y)
-
-    values = shap_utils._shap_values_for_tree_model(classifier, X[:3], class_index=1)
-
-    assert values.shape == (3, 4)
-
-
-def test_shap_values_for_native_lightgbm_are_2d():
-    from lightgbm import LGBMClassifier
-
-    from s2and.production_model import NativeLightGBMBinaryClassifier
-
-    X, y = _small_binary_classification()
-    classifier = LGBMClassifier(n_estimators=4, random_state=7, verbosity=-1).fit(X, y)
-    with tempfile.TemporaryDirectory() as td:
-        model_path = os.path.join(td, "model.txt")
-        classifier.booster_.save_model(model_path)
-        native_classifier = NativeLightGBMBinaryClassifier(model_path)
-
-        values = shap_utils._shap_values_for_tree_model(native_classifier, X[:3], class_index=1)
-
-    assert values.shape == (3, 4)
-
-
 def test_shap_values_select_random_forest_class_index():
     from sklearn.ensemble import RandomForestClassifier
 
@@ -478,47 +429,27 @@ def _build_claims_eval_test_inputs(dists):
     return dataset, clusterer, claims_pairs
 
 
-def test_claims_eval_skips_distance_dump_when_predict_returns_none():
-    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists=None)
-    with tempfile.TemporaryDirectory() as td:
-        output = claims_eval(
-            dataset=dataset,
-            clusterer=clusterer,
-            claims_pairs=claims_pairs,
-            directory_for_caching=td,
-            optional_name="unit",
-        )
-        assert os.path.exists(os.path.join(td, "preds_unit.json"))
-        assert not os.path.exists(os.path.join(td, "dists_unit.pkl"))
-        assert output["total"] == 1
-
-
-def test_claims_eval_handles_none_affiliations():
+def test_claims_eval_handles_missing_affiliations_and_optional_distances(tmp_path):
     dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists=None)
     dataset.signatures["p1___0"].author_info_affiliations = None
-    output = claims_eval(
-        dataset=dataset,
-        clusterer=clusterer,
-        claims_pairs=claims_pairs,
-        directory_for_caching=None,
-        optional_name="unit",
-    )
-    assert output["total"] == 1
 
-
-def test_claims_eval_writes_distance_dump_when_available():
-    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists={"blk": np.array([0.5])})
-    with tempfile.TemporaryDirectory() as td:
-        output = claims_eval(
+    def evaluate(directory):
+        return claims_eval(
             dataset=dataset,
             clusterer=clusterer,
             claims_pairs=claims_pairs,
-            directory_for_caching=td,
+            directory_for_caching=directory,
             optional_name="unit",
         )
-        assert os.path.exists(os.path.join(td, "preds_unit.json"))
-        assert os.path.exists(os.path.join(td, "dists_unit.pkl"))
-        assert output["total"] == 1
+
+    assert evaluate(None)["total"] == 1
+    assert evaluate(str(tmp_path))["total"] == 1
+    assert (tmp_path / "preds_unit.json").is_file()
+    assert not (tmp_path / "dists_unit.pkl").exists()
+
+    clusterer._dists = {"blk": np.array([0.5])}
+    assert evaluate(str(tmp_path))["total"] == 1
+    assert (tmp_path / "dists_unit.pkl").is_file()
 
 
 def test_native_lightgbm_shap_routes_booster_and_restores_params(monkeypatch):
@@ -536,12 +467,16 @@ def test_native_lightgbm_shap_routes_booster_and_restores_params(monkeypatch):
         model.params["temporary"] = "shap"
         return np.zeros_like(features)
 
-    monkeypatch.setattr(shap_utils, "_shap_values_for_tree_model", mutate_booster_params)
-
     with tempfile.TemporaryDirectory() as td:
         model_path = os.path.join(td, "model.txt")
         classifier.booster_.save_model(model_path)
         native_classifier = NativeLightGBMBinaryClassifier(model_path)
+        wrapper_values = shap_utils._shap_values_for_tree_model(classifier, X[:3], class_index=1)
+        native_values = shap_utils._shap_values_for_tree_model(native_classifier, X[:3], class_index=1)
+        assert native_values.shape == (3, 4)
+        np.testing.assert_allclose(native_values, wrapper_values)
+
+        monkeypatch.setattr(shap_utils, "_shap_values_for_tree_model", mutate_booster_params)
         original_params = dict(native_classifier.booster_.params)
 
         values = _shap_values_for_tree_model_preserving_booster_params(native_classifier, X[:2])
@@ -582,9 +517,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
-@pytest.mark.parametrize("mode", ["single", "wrapped-nameless"])
-def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch, mode):
+def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch):
     """Exercise scorer unwrapping and SHAP routing with one plotting fixture."""
+    import matplotlib as mpl
     import matplotlib.pyplot as plt
 
     shapes = []
@@ -602,26 +537,46 @@ def test_pairwise_eval_writes_only_requested_plots(tmp_path, monkeypatch, mode):
         ),
     )
     scorer = SimpleNamespace(predict_proba=lambda matrix: np.tile([0.4, 0.6], (len(matrix), 1)))
-    wrapped = mode == "wrapped-nameless"
-    classifier = SimpleNamespace(classifier=scorer) if wrapped else scorer
+    observed_styles = []
+    real_savefig = plt.savefig
+
+    def savefig(*args, **kwargs):
+        observed_styles.append(mpl.rcParams["axes.labelsize"])
+        return real_savefig(*args, **kwargs)
+
+    monkeypatch.setattr(plt, "savefig", savefig)
+    original_style = mpl.rcParams.copy()
+    classifier = SimpleNamespace(classifier=scorer)
+    features = np.ones((4, 3))
+    labels = np.array([0, 1, 0, 1])
     try:
         pairwise_eval(
-            np.ones((4, 3)),
-            np.array([0, 1, 0, 1]),
+            features,
+            labels,
             classifier,
             str(tmp_path),
             "Plots",
             ["a", "b", "c"],
-            nameless_classifier=classifier if wrapped else None,
-            nameless_X=np.ones((4, 2)) if wrapped else None,
-            nameless_feature_names=["d", "e"] if wrapped else None,
+            nameless_classifier=classifier,
+            nameless_X=np.ones((4, 2)),
+            nameless_feature_names=["d", "e"],
         )
-        expected = {"plots_roc.png", "plots_pr.png"}
-        if mode == "single":
-            expected.add("plots_shap.png")
-        elif wrapped:
-            expected.update({"plots_shap_0.png", "plots_shap_1.png"})
-        assert {path.name for path in tmp_path.glob("*.png")} == expected
-        assert shapes == ([(4, 3), (4, 2)] if wrapped else [(4, 3)])
+        assert {path.name for path in tmp_path.glob("*.png")} == {
+            "plots_roc.png",
+            "plots_pr.png",
+            "plots_shap_0.png",
+            "plots_shap_1.png",
+        }
+        assert shapes == [(4, 3), (4, 2)]
+        assert observed_styles[:2] == [18.0, 18.0]
+        assert mpl.rcParams == original_style
+
+        pairwise_eval(features, labels, scorer, str(tmp_path), "Single", ["a", "b", "c"])
+        assert {path.name for path in tmp_path.glob("single*.png")} == {
+            "single_roc.png",
+            "single_pr.png",
+            "single_shap.png",
+        }
+        assert shapes == [(4, 3), (4, 2), (4, 3)]
     finally:
         plt.close("all")

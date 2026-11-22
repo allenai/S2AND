@@ -31,22 +31,20 @@ class ConstantPairwise:
 
 
 @pytest.mark.parametrize(
-    ("candidate_first", "seed_holdout", "explicit_disallow"),
+    ("seed_holdout", "explicit_disallow"),
     [
-        ("Abdul", False, False),
-        ("Alice", False, False),
-        ("Abdul", True, False),
-        ("Alice", True, False),
-        ("Abdul", True, True),
+        (False, False),
+        (True, False),
+        (True, True),
     ],
-    ids=["compatible", "name-conflict", "seed-holdout", "seed-name-conflict", "explicit-disallow"],
+    ids=["compatible", "seed-holdout", "explicit-disallow"],
 )
 def test_materialized_features_ignore_labels_and_match_runtime(
-    tmp_path: Path, candidate_first: str, seed_holdout: bool, explicit_disallow: bool
+    tmp_path: Path, seed_holdout: bool, explicit_disallow: bool
 ) -> None:
     """Real planner, constraints, and all 53 features agree after label flips/removal."""
     source = build_dummy_dataset("label_independence", mode="train")
-    source.signatures["1"] = source.signatures["1"]._replace(author_info_first=candidate_first)
+    source.signatures["1"] = source.signatures["1"]._replace(author_info_first="Abdul")
     training = build_arrow_training_dataset(source, tmp_path / "arrow")
     arrow = training.arrow_dataset
     assert arrow is not None
@@ -89,7 +87,7 @@ def test_materialized_features_ignore_labels_and_match_runtime(
     )
     try:
         results = []
-        for label in (None, [1, 0], [0, 1]):
+        for label in (None, [1, 0]):
             candidate_rows = rows if label is None else rows.assign(label=label)
             features, summary, selected = materializer._materialize_arrow_rust_dataset_rows(
                 context=context,
@@ -109,7 +107,6 @@ def test_materialized_features_ignore_labels_and_match_runtime(
             assert summary["constraint_seed_bypass_pair_count"] == 2 * int(seed_holdout)
             results.append(np.column_stack([features[column] for column in columns]))
         np.testing.assert_array_equal(results[0], results[1])
-        np.testing.assert_array_equal(results[0], results[2])
 
         # The production inference resolver never sees target labels. Run its
         # real feature assembly on the same native-planned candidate identities.
@@ -177,7 +174,7 @@ def test_materialized_features_ignore_labels_and_match_runtime(
             featurizer=featurizer,
         )
         np.testing.assert_array_equal(results[0], runtime_features.matrix)
-        expected_distance = 0.2 if candidate_first == "Abdul" and not explicit_disallow else LARGE_DISTANCE
+        expected_distance = LARGE_DISTANCE if explicit_disallow else 0.2
         assert results[0][0, columns.index("min_distance")] == pytest.approx(expected_distance)
         assert results[0][1, columns.index("min_distance")] == pytest.approx(0.2)
     finally:

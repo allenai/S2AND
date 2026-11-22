@@ -5,11 +5,9 @@ import pytest
 from scripts import sync_feature_schema
 
 
-def test_checked_in_schema_is_current():
+def test_schema_check_and_stale_output_recovery(tmp_path, monkeypatch):
     sync_feature_schema.main(["--check"])
 
-
-def test_schema_check_rejects_stale_output_without_rewriting(tmp_path, monkeypatch):
     output = tmp_path / "feature_schema.rs"
     monkeypatch.setattr(sync_feature_schema, "RUST_PATH", output)
     sync_feature_schema.main([])

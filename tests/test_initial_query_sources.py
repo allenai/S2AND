@@ -45,105 +45,62 @@ def _write(path: Path, rows: list[dict[str, str]]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-@pytest.mark.parametrize("missing", ["file", "entry"])
-def test_derived_queries_require_complete_origins(tmp_path: Path, missing: str) -> None:
-    path, _rows = _snapshot(tmp_path)
-    if missing == "entry":
-        _write(path, [])
-    with pytest.raises(ValueError, match="[Mm]ap|origin"):
+def test_derived_queries_require_valid_origins(tmp_path: Path) -> None:
+    path, rows = _snapshot(tmp_path)
+    _write(path, [])
+    with pytest.raises(ValueError, match="no source-map origin"):
         load_initial_query_sources(tmp_path)
 
+    for field, value, message in (
+        ("source_query_signature_id", "unbound-source", "absent"),
+        ("source_paper_id", "wrong-paper", "source paper differs"),
+        ("initial_paper_id", "wrong-copy-paper", "initial paper differs"),
+    ):
+        _write(path, [{**rows[0], field: value}])
+        with pytest.raises(ValueError, match=message):
+            load_initial_query_sources(tmp_path)
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("source_query_signature_id", "unbound-source"),
-        ("source_query_signature_id", "other"),
-        ("source_paper_id", "wrong-paper"),
-        ("initial_paper_id", "wrong-copy-paper"),
-        ("dataset", "different-dataset"),
-    ],
-)
-def test_origin_must_match_source_and_derived_records(tmp_path: Path, field: str, value: str) -> None:
-    path, rows = _snapshot(tmp_path)
-    rows[0][field] = value
-    _write(path, rows)
-    with pytest.raises(ValueError, match="[Mm]ap|origin|[Ss]ource|[Dd]erived"):
-        load_initial_query_sources(tmp_path)
-
-
-def test_declared_map_digest_is_enforced(tmp_path: Path) -> None:
-    path, rows = _snapshot(tmp_path)
-    _write(path, rows)
-    (tmp_path / "bundle.json").write_text(json.dumps({"initial_query_sources_sha256": "0" * 64}), encoding="utf-8")
-    with pytest.raises(ValueError, match="digest|SHA-256"):
-        load_initial_query_sources(tmp_path)
-
-
-def test_valid_map_and_plain_source_preserve_origins(tmp_path: Path) -> None:
-    path, rows = _snapshot(tmp_path)
-    _write(path, rows)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    (tmp_path / "bundle.json").write_text(json.dumps({"initial_query_sources_sha256": digest}), encoding="utf-8")
-    assert load_initial_query_sources(tmp_path).origins == {"unit": {rows[0]["initial_query_signature_id"]: "q"}}
-    plain = tmp_path / "plain"
-    _snapshot(plain, clones=False)
-    assert load_initial_query_sources(plain).origins == {}
-
-
-def test_supplied_digest_requires_exact_bytes_and_agrees_with_declaration(tmp_path: Path) -> None:
-    path, rows = _snapshot(tmp_path)
-    _write(path, rows)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert load_initial_query_sources(tmp_path, expected_sha256=digest).sha256 == digest
-    with pytest.raises(ValueError, match="SHA-256"):
-        load_initial_query_sources(tmp_path, expected_sha256="0" * 64)
-    (tmp_path / "bundle.json").write_text(json.dumps({"initial_query_sources_sha256": digest}), encoding="utf-8")
-    with pytest.raises(ValueError, match="conflict"):
-        load_initial_query_sources(tmp_path, expected_sha256="0" * 64)
-
-
-@pytest.mark.parametrize("digest", [12])
-def test_declared_digest_has_a_strict_type_and_format(tmp_path: Path, digest: object) -> None:
-    _snapshot(tmp_path, clones=False)
-    (tmp_path / "bundle.json").write_text(json.dumps({"initial_query_sources_sha256": digest}), encoding="utf-8")
-    with pytest.raises(ValueError, match="lowercase SHA-256"):
-        load_initial_query_sources(tmp_path)
-
-
-def test_supplied_digest_requires_a_map_even_without_derived_queries(tmp_path: Path) -> None:
-    _snapshot(tmp_path, clones=False)
-    with pytest.raises(ValueError, match="SHA-256"):
-        load_initial_query_sources(tmp_path, expected_sha256="0" * 64)
-
-
-def test_three_field_map_uses_actual_paper_identities(tmp_path: Path) -> None:
-    path, rows = _snapshot(tmp_path)
-    rows[0].pop("source_paper_id")
-    rows[0].pop("initial_paper_id")
-    _write(path, rows)
-    assert load_initial_query_sources(tmp_path).origins["unit"][rows[0]["initial_query_signature_id"]] == "q"
-    rows[0]["source_query_signature_id"] = "other"
-    _write(path, rows)
+    compact = {key: value for key, value in rows[0].items() if key not in {"source_paper_id", "initial_paper_id"}}
+    _write(path, [compact])
+    assert load_initial_query_sources(tmp_path).origins == {"unit": {compact["initial_query_signature_id"]: "q"}}
+    _write(path, [{**compact, "source_query_signature_id": "other"}])
     with pytest.raises(ValueError, match="Derived query IDs"):
         load_initial_query_sources(tmp_path)
 
 
-@pytest.mark.parametrize("variant", ["duplicate-clone", "duplicate-source", "self", "clone-source", "dataset-parent"])
-def test_ambiguous_and_invalid_origin_records_are_rejected(tmp_path: Path, variant: str) -> None:
+def test_source_map_rejects_invalid_or_duplicate_identities(tmp_path: Path) -> None:
+    path, [row] = _snapshot(tmp_path)
+    _write(path, [row, {**row, "initial_query_signature_id": "different-copy"}])
+    with pytest.raises(ValueError, match="Duplicate"):
+        load_initial_query_sources(tmp_path)
+    _write(path, [{**row, "source_query_signature_id": row["initial_query_signature_id"]}])
+    with pytest.raises(ValueError, match="original signature"):
+        load_initial_query_sources(tmp_path)
+    _write(path, [{**row, "dataset": ".."}])
+    with pytest.raises(ValueError, match="Invalid source-map dataset"):
+        load_initial_query_sources(tmp_path)
+    _write(path, [{**row, "dataset": "different-dataset"}])
+    with pytest.raises(ValueError, match="no signature manifest"):
+        load_initial_query_sources(tmp_path)
+
+
+def test_source_map_digest_binds_the_exact_bytes(tmp_path: Path) -> None:
     path, rows = _snapshot(tmp_path)
-    if variant.startswith("duplicate"):
-        rows.append(dict(rows[0]))
-        if variant == "duplicate-source":
-            rows[1]["initial_query_signature_id"] = "different-copy"
-    elif variant == "self":
-        rows[0]["source_query_signature_id"] = rows[0]["initial_query_signature_id"]
-    elif variant == "clone-source":
-        rows[0]["source_query_signature_id"] = "visibleq:source"
-    else:
-        rows[0]["dataset"] = ".."
     _write(path, rows)
-    with pytest.raises(ValueError, match="[Ss]ource-map|[Dd]uplicate"):
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = tmp_path / "bundle.json"
+    manifest.write_text(json.dumps({"initial_query_sources_sha256": 12}), encoding="utf-8")
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        load_initial_query_sources(tmp_path)
+    manifest.write_text(json.dumps({"initial_query_sources_sha256": digest}), encoding="utf-8")
+    verified = load_initial_query_sources(tmp_path, expected_sha256=digest)
+    assert verified.sha256 == digest
+    assert verified.origins == {"unit": {rows[0]["initial_query_signature_id"]: "q"}}
+
+    with pytest.raises(ValueError, match="conflict"):
+        load_initial_query_sources(tmp_path, expected_sha256="0" * 64)
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="SHA-256"):
         load_initial_query_sources(tmp_path)
 
 
@@ -169,6 +126,10 @@ def test_feature_bundle_preserves_map_bytes_and_records_digest(tmp_path: Path) -
 
 def test_original_signature_cannot_be_declared_as_a_derived_query(tmp_path: Path) -> None:
     path, rows = _snapshot(tmp_path, clones=False)
+    assert load_initial_query_sources(tmp_path).origins == {}
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_initial_query_sources(tmp_path, expected_sha256="0" * 64)
+
     rows[0]["initial_query_signature_id"] = "other"
     rows[0]["initial_paper_id"] = "other-paper"
     _write(path, rows)

@@ -38,8 +38,7 @@ def _snapshot(*, available_bytes: int, total_ram_bytes: int = 1_000) -> memory_b
     )
 
 
-@pytest.mark.parametrize("route", ["make_distance_matrices", "predict_helper"])
-def test_fastcluster_matrix_budget_uses_float64(monkeypatch, route):
+def test_fastcluster_matrix_budget_uses_float64(monkeypatch):
     """Stored Python matrices must budget eight bytes for each condensed pair."""
     clusterer, dataset = _build_dummy_clusterer_and_dataset(name="stored_matrix_precision_budget")
     # Without the corrections no block keeps a one-byte copy, so the budget is the matrix alone.
@@ -53,26 +52,19 @@ def test_fastcluster_matrix_budget_uses_float64(monkeypatch, route):
         lambda **_kwargs: _snapshot(available_bytes=16),
     )
 
-    with pytest.raises(MemoryError, match="matrix_bytes=24 available_bytes=16"):
-        getattr(clusterer, route)(block, dataset, total_ram_bytes=1_000)
+    for predict in (clusterer.make_distance_matrices, clusterer.predict_helper):
+        with pytest.raises(MemoryError, match="matrix_bytes=24"):
+            predict(block, dataset, total_ram_bytes=1_000)
 
-
-def test_predict_helper_matches_baseline_when_budget_allows(monkeypatch):
-    clusterer, dataset = _build_dummy_clusterer_and_dataset(name="dummy_predict_memory_large_budget")
-    block = {"a sattar": ["0", "1", "2", "3", "4", "5", "6", "7", "8"]}
-
-    baseline_clusters, baseline_dists = clusterer.predict_helper(block, dataset)
-    assert baseline_dists is None
-
+    baseline, _ = clusterer.predict_helper(block, dataset)
     monkeypatch.setattr(
         model_module.memory_budget,
         "memory_snapshot_for_stage",
         lambda **_kwargs: _snapshot(available_bytes=10_000_000, total_ram_bytes=20_000_000),
     )
-    budgeted_clusters, budgeted_dists = clusterer.predict_helper(block, dataset, total_ram_bytes=20_000_000)
-
-    assert budgeted_dists is None
-    assert budgeted_clusters == baseline_clusters
+    budgeted, distances = clusterer.predict_helper(block, dataset, total_ram_bytes=20_000_000)
+    assert distances is None
+    assert budgeted == baseline
 
 
 def test_python_calibration_bounds_features_and_native_scoring_without_changing_distances(monkeypatch):

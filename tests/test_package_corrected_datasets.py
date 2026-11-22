@@ -85,16 +85,15 @@ def _package(
     )
 
 
-@pytest.mark.parametrize("tolerance", [0.0, 0.001])
-def test_model_plan_carries_the_precision_tolerance_only_when_set(
-    package_inputs: dict[str, Path], tolerance: float
-) -> None:
+def test_model_plan_carries_a_set_precision_tolerance(package_inputs: dict[str, Path]) -> None:
+    # test_complete_snapshot_preserves_current_sources_and_uses_one_index checks the unset default.
+    tolerance = 0.001
     _package(package_inputs, precision_f1_tolerance=tolerance)
 
     plan_path = package_inputs["output_root"] / "pairwise" / "model_plan.json"
     eps = json.loads(plan_path.read_text(encoding="utf-8"))["eps"]
     # A plan without a precision lean keeps the three fields that earlier releases wrote.
-    assert ("precision_f1_tolerance" in eps) == (tolerance > 0)
+    assert eps["precision_f1_tolerance"] == tolerance
     assert load_model_plan(plan_path).eps.precision_f1_tolerance == tolerance
 
 
@@ -136,6 +135,9 @@ def test_complete_snapshot_preserves_current_sources_and_uses_one_index(
     plan = load_model_plan(root / "pairwise" / "model_plan.json")
     assert list(plan.datasets) == ["qian", "augmented"]
     assert plan.eps.grid == tuple(step / 100 for step in range(101))
+    # A plan without a precision lean keeps the three fields that earlier releases wrote.
+    assert "precision_f1_tolerance" not in json.loads((root / "pairwise" / "model_plan.json").read_text())["eps"]
+    assert plan.eps.precision_f1_tolerance == 0.0
     assert plan.datasets["qian"].files["papers"] == root / "corrected_sources" / "qian" / "qian_papers.json"
     for name, filename in (
         ("public_data_root", "manifest.json"),
@@ -162,19 +164,39 @@ def test_complete_snapshot_preserves_current_sources_and_uses_one_index(
         assert counts[0][0] == 20
 
 
+def test_snapshot_validation_rejects_changed_outputs(package_inputs: dict[str, Path], tmp_path: Path) -> None:
+    # Package once and mutate copies: each packaging run costs about a second.
+    _package(package_inputs)
+    packaged = package_inputs["output_root"]
+
+    def changed_copy(name: str) -> Path:
+        root = tmp_path / "changed" / name
+        shutil.copytree(packaged, root)
+        return root
+
+    root = changed_copy("duplicate_index")
+    shutil.copytree(root / "name_counts_index", root / "pairwise" / "name_counts_index")
+    with pytest.raises(ValueError, match="Require one shared"):
+        validate_corrected_datasets(root)
+
+    # Benchmark and replay datasets share the name qian; validation must check the benchmark copy.
+    root = changed_copy("benchmark_payload")
+    paper_table = root / "benchmarks" / "qian" / "papers.arrow"
+    paper_table.write_bytes(paper_table.read_bytes().replace(b"Notes", b"WRONG"))
+    with pytest.raises(ValueError, match="mismatch"):
+        validate_portable_source_bundle(root)
+
+    root = changed_copy("master_bytes")
+    (root / "corrected_sources" / "qian" / "qian_clusters.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="Corrected source SHA-256 mismatch"):
+        validate_corrected_datasets(root)
+
+
 def test_complete_snapshot_rejects_changed_pairwise_source(package_inputs: dict[str, Path]) -> None:
     papers = package_inputs["pairwise_inputs_root"] / "sources" / "common" / "qian" / "qian_papers.json"
     papers.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="Source SHA-256 mismatch"):
         _package(package_inputs)
-
-
-def test_complete_snapshot_rejects_duplicate_indices(package_inputs: dict[str, Path]) -> None:
-    _package(package_inputs)
-    root = package_inputs["output_root"]
-    shutil.copytree(root / "name_counts_index", root / "pairwise" / "name_counts_index")
-    with pytest.raises(ValueError, match="Require one shared"):
-        validate_corrected_datasets(root)
 
 
 def test_complete_snapshot_rejects_invalid_eps_before_copy(package_inputs: dict[str, Path]) -> None:
@@ -222,15 +244,6 @@ def test_complete_snapshot_rejects_a_linked_input_before_copy(package_inputs: di
     assert (target / "train.parquet").is_file()
 
 
-def test_portable_validation_checks_benchmark_and_replay_with_the_same_name(package_inputs: dict[str, Path]) -> None:
-    _package(package_inputs)
-    root = package_inputs["output_root"]
-    paper_table = root / "benchmarks" / "qian" / "papers.arrow"
-    paper_table.write_bytes(paper_table.read_bytes().replace(b"Notes", b"WRONG"))
-    with pytest.raises(ValueError, match="mismatch"):
-        validate_portable_source_bundle(root)
-
-
 def test_complete_snapshot_preserves_current_replay_text_and_vectors(
     package_inputs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -255,15 +268,6 @@ def test_complete_snapshot_preserves_current_replay_text_and_vectors(
     shutil.rmtree(replay_raw)
     shutil.rmtree(replay_embeddings)
     assert validate_corrected_datasets(relocated)["corrected_datasets"] == ["patents", "qian"]
-
-
-def test_complete_snapshot_checks_full_master_bytes(package_inputs: dict[str, Path]) -> None:
-    _package(package_inputs)
-    root = package_inputs["output_root"]
-    source = root / "corrected_sources" / "qian" / "qian_clusters.json"
-    source.write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="Corrected source SHA-256 mismatch"):
-        validate_corrected_datasets(root)
 
 
 def test_complete_snapshot_preserves_the_population_uncertainty_sidecar(package_inputs: dict[str, Path]) -> None:

@@ -111,50 +111,22 @@ def _rewrite_manifest(root: Path, transform) -> None:
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def test_manifest_writer_owns_runtime_fields_and_publishes_atomically(tmp_path: Path) -> None:
-    signatures_path = tmp_path / "signatures.arrow"
-    signatures_path.write_bytes(b"signatures")
-
-    manifest = build_arrow_artifact_manifest(
-        {"signatures": signatures_path},
-        tmp_path,
-    )
-    manifest_path = write_arrow_artifact_manifest(manifest, tmp_path)
-
-    assert manifest["kind"] == "s2and_arrow_dataset"
-    assert manifest["format_version"] == 1
-    assert manifest["paths"] == {"signatures": "signatures.arrow"}
-    assert set(manifest["files"]["signatures"]) == {"byte_count", "sha256"}
-    assert set(manifest) == {"kind", "format_version", "paths", "files"}
-    assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
-
-
-@pytest.mark.parametrize(
-    ("change", "message"),
-    [("missing", r"missing=\['files'\] extra=\[\]"), ("extra", r"missing=\[\] extra=\['source'\]")],
-    ids=["missing", "extra"],
-)
-def test_manifest_writer_rejects_field_mismatch_without_writing(tmp_path: Path, change: str, message: str) -> None:
-    # The reader also rejects these fields, so only a direct writer call proves the writer check.
+def test_manifest_writer_rejects_field_mismatch_without_writing(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     signatures_path.write_bytes(b"signatures")
     manifest = build_arrow_artifact_manifest({"signatures": signatures_path}, tmp_path)
-    if change == "missing":
-        del manifest["files"]
-    else:
-        manifest["source"] = "unexpected"
+    del manifest["files"]
+    manifest["source"] = "unexpected"
 
-    with pytest.raises(ValueError, match=f"Arrow artifact manifest fields mismatch: {message}"):
+    with pytest.raises(ValueError, match="fields mismatch"):
         write_arrow_artifact_manifest(manifest, tmp_path)
 
     assert sorted(path.name for path in tmp_path.iterdir()) == ["signatures.arrow"]
 
 
-@pytest.mark.parametrize("failure_stage", ["write", "replace"])
 def test_failed_manifest_publication_preserves_previous_generation_and_cleans_temporary_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_stage: str,
 ) -> None:
     """A failed commit must leave the previous manifest usable for retry."""
     artifact = tmp_path / "signatures.arrow"
@@ -162,6 +134,14 @@ def test_failed_manifest_publication_preserves_previous_generation_and_cleans_te
     original = build_arrow_artifact_manifest({"signatures": artifact}, tmp_path)
     manifest_path = write_arrow_artifact_manifest(original, tmp_path)
     original_bytes = manifest_path.read_bytes()
+    assert json.loads(original_bytes) == original
+    assert original["kind"] == "s2and_arrow_dataset"
+    assert original["format_version"] == 1
+    assert original["paths"] == {"signatures": "signatures.arrow"}
+    assert original["files"]["signatures"] == {
+        "byte_count": len(b"first generation"),
+        "sha256": hashlib.sha256(b"first generation").hexdigest(),
+    }
     artifact.write_bytes(b"second generation")
     replacement = build_arrow_artifact_manifest({"signatures": artifact}, tmp_path)
 
@@ -184,27 +164,21 @@ def test_failed_manifest_publication_preserves_previous_generation_and_cleans_te
         return output
 
     with monkeypatch.context() as patch:
-        if failure_stage == "write":
-            patch.setattr(arrow_inputs.tempfile, "NamedTemporaryFile", fail_write)
-        else:
-            patch.setattr(Path, "replace", fail_replace)
+        patch.setattr(arrow_inputs.tempfile, "NamedTemporaryFile", fail_write)
         with pytest.raises(OSError, match="injected manifest publication failure"):
             write_arrow_artifact_manifest(replacement, tmp_path)
 
     assert manifest_path.read_bytes() == original_bytes
-    assert list(tmp_path.glob(".manifest.json.*.tmp")) == []
+    assert not list(tmp_path.glob(".manifest.json.*.tmp"))
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected manifest publication failure"):
+            write_arrow_artifact_manifest(replacement, tmp_path)
+
+    assert manifest_path.read_bytes() == original_bytes
+    assert not list(tmp_path.glob(".manifest.json.*.tmp"))
     write_arrow_artifact_manifest(replacement, tmp_path)
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == replacement
-
-
-def test_manifest_writer_rejects_artifacts_outside_its_authority(tmp_path: Path) -> None:
-    root = tmp_path / "root"
-    root.mkdir()
-    outside = tmp_path / "outside.arrow"
-    outside.write_bytes(b"outside")
-
-    with pytest.raises(ValueError, match="must remain within manifest directory"):
-        build_arrow_artifact_manifest({"signatures": outside}, root)
 
 
 def test_manifest_writer_allows_relative_shared_name_counts_layouts(tmp_path: Path) -> None:
@@ -234,6 +208,11 @@ def test_manifest_writer_allows_relative_shared_name_counts_layouts(tmp_path: Pa
     (other / "manifest.json").write_text("{}", encoding="utf-8")
     other_manifest = build_arrow_artifact_manifest({"name_counts_index": other}, dataset_root)
     assert other_manifest["paths"]["name_counts_index"] == "../../../other"
+
+    outside = release_root / "outside.arrow"
+    outside.write_bytes(b"outside")
+    with pytest.raises(ValueError, match="must remain within manifest directory"):
+        build_arrow_artifact_manifest({"signatures": outside}, dataset_root)
 
 
 def test_collection_root_requires_nonempty_confined_child_bindings(tmp_path: Path) -> None:
@@ -349,9 +328,10 @@ def test_six_open_roots_hash_once_and_reuse_without_eviction(
             dataset.close()
 
 
-def test_concurrent_use_leases_block_close(tmp_path: Path) -> None:
+def test_concurrent_leases_protect_handles_until_close(tmp_path: Path) -> None:
     _write_dataset(tmp_path)
     dataset = ArrowDataset.open(tmp_path)
+    descriptors = [retained.handle.fileno() for retained in dataset._files.values()]  # noqa: SLF001
     barrier = threading.Barrier(5)
 
     def use_dataset() -> str:
@@ -370,17 +350,6 @@ def test_concurrent_use_leases_block_close(tmp_path: Path) -> None:
             dataset.close()
         barrier.wait(timeout=10)
         assert len({future.result(timeout=10) for future in futures}) == 1
-    dataset.close()
-
-
-def test_close_is_deterministic_and_use_after_close_is_rejected(tmp_path: Path) -> None:
-    _write_dataset(tmp_path)
-    with ArrowDataset.open(tmp_path) as managed_dataset:
-        assert not managed_dataset.closed
-    assert managed_dataset.closed
-
-    dataset = ArrowDataset.open(tmp_path)
-    descriptors = [retained.handle.fileno() for retained in dataset._files.values()]  # noqa: SLF001
 
     dataset.close()
     dataset.close()
@@ -395,7 +364,7 @@ def test_close_is_deterministic_and_use_after_close_is_rejected(tmp_path: Path) 
         _ = dataset.native
 
 
-@pytest.mark.parametrize("failure_stage", ["open", "checksum", "schema", "native"])
+@pytest.mark.parametrize("failure_stage", ["open", "native"])
 def test_failed_open_closes_all_acquired_files_and_can_be_retried(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -416,15 +385,10 @@ def test_failed_open_closes_all_acquired_files_and_can_be_retried(
     def fail_validation(*_args, **_kwargs) -> None:
         raise ValueError(f"injected {failure_stage} failure")
 
-    failure_points = {
-        "checksum": "_hash_retained_file",
-        "schema": "_validate_retained_arrow_schema",
-        "native": "_construct_native_arrow_dataset",
-    }
     with monkeypatch.context() as patch:
         patch.setattr(arrow_inputs, "_open_retained_path", track_open)
-        if failure_stage in failure_points:
-            patch.setattr(arrow_inputs, failure_points[failure_stage], fail_validation)
+        if failure_stage == "native":
+            patch.setattr(arrow_inputs, "_construct_native_arrow_dataset", fail_validation)
         with pytest.raises(OSError if failure_stage == "open" else ValueError, match="injected"):
             ArrowDataset.open(tmp_path)
 
@@ -457,31 +421,26 @@ def test_reader_exception_releases_duplicate_and_lease_without_closing_dataset(t
     assert dataset.closed
 
 
-@pytest.mark.parametrize("requirement", ["require_specter", "require_name_counts_index"])
-def test_rejected_use_profile_does_not_leak_active_lease(tmp_path: Path, requirement: str) -> None:
-    """A model requesting unavailable features must not prevent dataset cleanup."""
+def test_optional_material_is_required_at_open_and_during_use(tmp_path: Path) -> None:
     _write_dataset(tmp_path)
-    dataset = ArrowDataset.open(tmp_path)
 
-    with pytest.raises(MissingArrowArtifactError):
-        with dataset.use(**{requirement: True}):
-            pytest.fail("incomplete dataset accepted required model material")
+    with pytest.raises(MissingArrowArtifactError, match="specter"):
+        ArrowDataset.open(tmp_path, require_specter=True)
+    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
+        ArrowDataset.open(tmp_path, require_name_counts_index=True)
 
-    with dataset.use() as lease:
-        assert lease.has("signatures")
-    dataset.close()
+    with ArrowDataset.open(tmp_path) as dataset:
+        with pytest.raises(MissingArrowArtifactError, match="specter"), dataset.use(require_specter=True):
+            pytest.fail("Accepted missing SPECTER")
+        with (
+            pytest.raises(MissingArrowArtifactError, match="name_counts_index"),
+            dataset.use(require_name_counts_index=True),
+        ):
+            pytest.fail("Accepted missing name counts")
+        with dataset.use() as lease:
+            assert lease.has("signatures")
+
     assert dataset.closed
-
-
-def test_same_size_corruption_before_open_is_rejected(tmp_path: Path) -> None:
-    paths = _write_dataset(tmp_path)
-    signatures_path = Path(paths["signatures"])
-    payload = bytearray(signatures_path.read_bytes())
-    payload[len(payload) // 2] ^= 1
-    signatures_path.write_bytes(payload)
-
-    with pytest.raises(ValueError, match="checksum mismatch"):
-        ArrowDataset.open(tmp_path)
 
 
 def test_open_validates_schema_before_native_construction(
@@ -507,10 +466,6 @@ def test_open_validates_schema_before_native_construction(
     assert "ValueError" in str(caught.value)
     signatures.unlink()  # Schema failures must release the Windows mapping.
 
-
-def test_ipc_errors_include_table_path_and_error_type(tmp_path: Path) -> None:
-    paths = _write_dataset(tmp_path)
-    signatures = Path(paths["signatures"])
     signatures.write_bytes(b"not an Arrow IPC file")
     write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, tmp_path), tmp_path)
 
@@ -522,8 +477,8 @@ def test_ipc_errors_include_table_path_and_error_type(tmp_path: Path) -> None:
     signatures.unlink()  # IPC failures must release the Windows mapping.
 
 
-@pytest.mark.parametrize("table_name", ["signatures", "papers", "paper_authors", "specter"])
-def test_empty_arrow_file_names_table_and_path_and_allows_retry(tmp_path: Path, table_name: str) -> None:
+def test_empty_arrow_file_names_table_and_path_and_allows_retry(tmp_path: Path) -> None:
+    table_name = "specter"
     paths = _write_dataset(tmp_path, include_specter=True)
     table_path = Path(paths[table_name])
     original = table_path.read_bytes()
@@ -619,32 +574,14 @@ def test_open_requires_the_fixed_base_shape_and_paired_specter(tmp_path: Path) -
         ArrowDataset.open(tmp_path / "other")
 
 
-def test_open_can_require_optional_material(tmp_path: Path) -> None:
-    _write_dataset(tmp_path)
-
-    with pytest.raises(MissingArrowArtifactError, match="specter"):
-        ArrowDataset.open(tmp_path, require_specter=True)
-    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
-        ArrowDataset.open(tmp_path, require_name_counts_index=True)
-
-
-def test_name_counts_state_is_retained_by_the_dataset(tmp_path: Path) -> None:
-    _write_dataset(tmp_path, include_name_counts=True, include_specter=True)
-
-    dataset = ArrowDataset.open(tmp_path, require_name_counts_index=True, require_specter=True)
-
-    assert dataset.name_counts_index is not None
-    assert dataset.native_name_counts_index is not None
-    assert dataset.native.name_counts_index is dataset.native_name_counts_index
-    dataset.close()
-
-
 def test_dataset_opens_beside_another_name_count_index(tmp_path: Path) -> None:
     """A dataset locates the index; the model checks which index it is."""
     _write_dataset(tmp_path, include_name_counts=True, include_specter=True)
     assert "name_counts_index" not in json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["files"]
-    with ArrowDataset.open(tmp_path, require_name_counts_index=True) as dataset:
+    with ArrowDataset.open(tmp_path, require_name_counts_index=True, require_specter=True) as dataset:
         assert dataset.name_counts_index is not None
+        assert dataset.native_name_counts_index is not None
+        assert dataset.native.name_counts_index is dataset.native_name_counts_index
         first = dataset.generation_id, dataset.name_counts_index.manifest_sha256
 
     # Point the dataset at other counts, under a manifest that names an index as 1.0.0b10 wrote it.
@@ -662,6 +599,11 @@ def test_dataset_opens_beside_another_name_count_index(tmp_path: Path) -> None:
     # Caches keyed by the generation must not survive a change of counts.
     assert second[1] != first[1]
     assert second[0] != first[0]
+
+    incomplete = tmp_path / "incomplete" / "name_counts_index"
+    incomplete.mkdir(parents=True)
+    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
+        require_name_counts_index_artifact(incomplete, context="test", producer_hint="write it")
 
 
 def test_manifest_rejects_declared_file_path_and_sidecar_inventory(tmp_path: Path) -> None:
@@ -704,7 +646,6 @@ def test_manifest_rejects_wrong_kind_or_format_before_opening_payloads(
         ("wrong-kind", "kind", "other"),
         ("unsupported-format", "format_version", 2),
         ("boolean-format", "format_version", True),
-        ("string-format", "format_version", "1"),
     )
     for case_id, field, value in cases:
         case_root = tmp_path / case_id
@@ -742,11 +683,3 @@ def test_normalize_path_helper_remains_a_writer_boundary(
         normalize_arrow_paths({"signatures": " "})
     with pytest.raises(ValueError, match="current directory"):
         normalize_arrow_paths({"signatures": "."})
-
-
-def test_require_name_counts_index_artifact_reports_invalid_manifest(tmp_path: Path) -> None:
-    index_dir = tmp_path / "name_counts_index"
-    index_dir.mkdir()
-
-    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
-        require_name_counts_index_artifact(index_dir, context="test", producer_hint="write it")

@@ -23,59 +23,29 @@ def _year_diff_clusterer() -> Clusterer:
     )
 
 
-def test_filtered_arrow_prediction_rejects_disabling_required_name_counts(tmp_path: Path) -> None:
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]),
-        classifier=None,
-        cluster_model=None,
-        n_jobs=1,
-    )
+def test_filtered_arrow_prediction_validates_requested_profiles_and_subblocking(tmp_path: Path) -> None:
     write_minimal_arrow_prediction_bundle(tmp_path)
-    arrow_dataset = ArrowDataset.open(tmp_path)
-
-    with pytest.raises(
-        ValueError,
-        match="cannot run with load_name_counts=False when the clusterer selects name_counts features",
-    ):
-        clusterer.predict_from_arrow(
-            {"block": ["s1"]},
-            arrow_dataset,
-            load_name_counts=False,
+    with ArrowDataset.open(tmp_path) as arrow_dataset:
+        blocks = {"block": ["s0", "s1"]}
+        name_counts_clusterer = Clusterer(
+            FeaturizationInfo(["name_counts"]),
+            classifier=None,
+            n_jobs=1,
         )
+        with pytest.raises(ValueError, match="load_name_counts=False"):
+            name_counts_clusterer.predict_from_arrow(blocks, arrow_dataset, load_name_counts=False)
+
+        clusterer = _year_diff_clusterer()
+        with pytest.raises(ValueError, match="batching_threshold must be positive"):
+            clusterer.predict_from_arrow(blocks, arrow_dataset, batching_threshold=0)
+        with pytest.raises(ValueError, match="cannot be used with precomputed dists"):
+            clusterer.predict_from_arrow(blocks, arrow_dataset, batching_threshold=1, dists={"block": np.zeros((2, 2))})
+        with pytest.raises(MissingArrowArtifactError) as exc_info:
+            clusterer.predict_from_arrow(blocks, arrow_dataset, batching_threshold=1)
+        assert "specter" in exc_info.value.required_keys
 
 
-def test_filtered_arrow_prediction_rejects_invalid_subblocking_arguments(tmp_path: Path) -> None:
-    write_minimal_arrow_prediction_bundle(tmp_path)
-    arrow_dataset = ArrowDataset.open(tmp_path)
-    cases = (
-        ("zero-threshold", 0, None, "batching_threshold must be positive"),
-        ("negative-threshold", -1, None, "batching_threshold must be positive"),
-        ("precomputed-dists", 1, {"block": np.zeros((2, 2))}, "cannot be used with precomputed dists"),
-    )
-    for _case_id, batching_threshold, dists, message in cases:
-        with pytest.raises(ValueError, match=message):
-            _year_diff_clusterer().predict_from_arrow(
-                {"block": ["s0", "s1"]},
-                arrow_dataset,
-                dists=dists,
-                batching_threshold=batching_threshold,
-            )
-
-
-def test_filtered_arrow_prediction_requires_specter_for_subblocking(tmp_path: Path) -> None:
-    write_minimal_arrow_prediction_bundle(tmp_path)
-    arrow_dataset = ArrowDataset.open(tmp_path)
-    with pytest.raises(MissingArrowArtifactError) as exc_info:
-        _year_diff_clusterer().predict_from_arrow(
-            {"block": ["s0", "s1"]},
-            arrow_dataset,
-            batching_threshold=1,
-        )
-
-    assert "specter" in exc_info.value.required_keys
-
-
-def test_classic_predict_rejects_rust_context() -> None:
+def test_classic_predict_keeps_rust_and_incremental_routes_out() -> None:
     clusterer = _year_diff_clusterer()
     runtime_context = runtime.RuntimeContext(
         operation="cluster_predict",
@@ -90,9 +60,6 @@ def test_classic_predict_rejects_rust_context() -> None:
             runtime_context=runtime_context,
         )
 
-
-def test_classic_incremental_is_retired():
-    clusterer = _year_diff_clusterer()
     assert not hasattr(clusterer, "predict_incremental")
     assert not hasattr(clusterer, "_predict_incremental_python")
     for name in (

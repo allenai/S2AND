@@ -2,9 +2,8 @@
 
 from copy import deepcopy
 
-import pytest
-
 from s2and.incremental_linking.seed_assignment import apply_seed_links
+from s2and.text import canonicalize_name_parts, given_name_for_constraint
 
 
 def test_assignment_preserves_order_and_coalesces_output_cluster_ids():
@@ -19,203 +18,159 @@ def test_assignment_preserves_order_and_coalesces_output_cluster_ids():
     )
 
     assert result.clusters == {"1": ["s2", "s1", "s3", "q2", "q1"], "2": ["s4"], "9": ["new"]}
-    assert list(result.clusters) == ["1", "2", "9"]
     assert result.residual_signature_ids == ["abstain"]
     assert result.rejected_signature_ids == []
 
 
-def test_incompatible_links_are_distinguished_from_abstentions():
-    result = apply_seed_links(
-        unassigned_signature_ids=["absent", "bad2", "good", "bad1"],
-        linked_signature_to_cluster={"bad1": 10, "good": 10, "bad2": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
-        prevent_new_incompatibilities=True,
-        first_names={"seed": "alice", "good": "ali", "bad1": "bob", "bad2": "charles"},
-        name_tuples=set(),
-    )
-
-    assert result.clusters == {"1": ["seed", "good"]}
-    assert result.residual_signature_ids == ["absent", "bad2", "bad1"]
-    assert result.rejected_signature_ids == ["bad2", "bad1"]
-
-
-def test_forced_link_skips_the_final_name_check():
-    # A require constraint already decided the forced link; the name check must not undo it.
-    inputs = dict(
-        unassigned_signature_ids=["forced", "free"],
-        linked_signature_to_cluster={"forced": 10, "free": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
-        prevent_new_incompatibilities=True,
-        first_names={"seed": "alice", "forced": "bob", "free": "bob"},
-        name_tuples=set(),
-    )
-    result = apply_seed_links(**inputs, forced_signature_ids={"forced"})
-
-    assert result.clusters == {"1": ["seed", "forced"]}
-    assert result.residual_signature_ids == ["free"]
-    assert result.rejected_signature_ids == ["free"]
-
-
-@pytest.mark.parametrize("query_name", ["rob", "robert", "r", "", "bob"])
-def test_prefix_alias_and_unknown_names_are_compatible(query_name):
-    result = apply_seed_links(
-        unassigned_signature_ids=["query"],
-        linked_signature_to_cluster={"query": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
-        prevent_new_incompatibilities=True,
-        first_names={"seed": "robert", "query": query_name},
-        name_tuples={("bob", "robert")},
-    )
-
-    assert result.clusters == {"1": ["seed", "query"]}
-    assert result.residual_signature_ids == []
-    assert result.rejected_signature_ids == []
-
-
-def test_any_full_name_in_compatibility_group_can_match():
-    result = apply_seed_links(
-        unassigned_signature_ids=["query"],
-        linked_signature_to_cluster={"query": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["alice", "bob", "initial"]},
-        prevent_new_incompatibilities=True,
-        first_names={"alice": "alice", "bob": "bob", "initial": "z", "query": "bob"},
-        name_tuples=set(),
-    )
-
-    assert result.clusters == {"1": ["alice", "bob", "initial", "query"]}
-    assert result.residual_signature_ids == []
-
-
-@pytest.mark.parametrize(
-    ("split_seeds", "accepted"),
-    [({10: ["split_seed"]}, True), ({10: []}, True), ({99: ["split_seed"]}, False), (None, False)],
-)
-def test_split_membership_takes_precedence_including_empty_group(split_seeds, accepted):
-    result = apply_seed_links(
-        unassigned_signature_ids=["query"],
-        linked_signature_to_cluster={"query": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["original_seed"]},
-        split_cluster_seeds_require_inverse=split_seeds,
-        prevent_new_incompatibilities=True,
-        first_names={"original_seed": "alice", "split_seed": "bob", "query": "bob"},
-        name_tuples=set(),
-    )
-
-    assert result.clusters == {"1": ["original_seed", "query"] if accepted else ["original_seed"]}
-    assert result.residual_signature_ids == ([] if accepted else ["query"])
-    assert result.rejected_signature_ids == ([] if accepted else ["query"])
-
-
-@pytest.mark.parametrize("seed_name", ["r", ""])
-def test_initial_only_or_unknown_seed_group_does_not_read_query_name(seed_name):
-    result = apply_seed_links(
-        unassigned_signature_ids=["query"],
-        linked_signature_to_cluster={"query": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
-        prevent_new_incompatibilities=True,
-        first_names={"seed": seed_name},
-        name_tuples=set(),
-    )
-
-    assert result.clusters == {"1": ["seed", "query"]}
-    assert result.residual_signature_ids == []
-
-
-def test_unremapped_links_do_not_read_names_even_with_other_remappings():
-    result = apply_seed_links(
-        unassigned_signature_ids=["query", "abstain"],
-        linked_signature_to_cluster={"query": 1},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
-        prevent_new_incompatibilities=True,
-        first_names={},
-        name_tuples=set(),
-    )
-
-    assert result.clusters == {"1": ["seed", "query"]}
-    assert result.residual_signature_ids == ["abstain"]
-    assert result.rejected_signature_ids == []
-
-
-def test_assignment_does_not_mutate_or_alias_inputs():
-    inputs = {
-        "unassigned_signature_ids": ["good", "bad", "abstain"],
-        "linked_signature_to_cluster": {"good": 10, "bad": 10},
-        "recluster_map": {10: 1},
-        "cluster_seeds_require_inverse": {1: ["seed"]},
-        "split_cluster_seeds_require_inverse": {10: ["seed"]},
-        "prevent_new_incompatibilities": True,
-        "first_names": {"seed": "alice", "good": "alice", "bad": "bob"},
-        "name_tuples": set(),
-    }
+def test_assignment_keeps_forced_and_unremapped_links_and_owns_results():
+    queries = ["absent", "bad2", "forced", "unremapped", "bad1"]
+    links = {"bad1": 10, "forced": 10, "bad2": 10, "unremapped": 1}
+    restored: dict[int | str, int | str] = {10: 1}
+    seed_members: dict[int | str, list[str]] = {1: ["seed"]}
+    first_names = {"seed": "alice", "forced": "bob", "bad1": "bob", "bad2": "charles"}
+    forced = {"forced"}
+    inputs = (queries, links, restored, seed_members, first_names, forced)
     original = deepcopy(inputs)
 
-    result = apply_seed_links(**inputs)
+    result = apply_seed_links(
+        unassigned_signature_ids=queries,
+        linked_signature_to_cluster=links,
+        recluster_map=restored,
+        cluster_seeds_require_inverse=seed_members,
+        prevent_new_incompatibilities=True,
+        first_names=first_names,
+        name_tuples=set(),
+        forced_signature_ids=forced,
+    )
 
     assert inputs == original
+    assert result.clusters == {"1": ["seed", "forced", "unremapped"]}
+    assert result.residual_signature_ids == ["absent", "bad2", "bad1"]
+    assert result.rejected_signature_ids == ["bad2", "bad1"]
     result.clusters["1"].append("output_only")
     result.residual_signature_ids.append("output_only")
     result.rejected_signature_ids.append("output_only")
     assert inputs == original
-    assert result.residual_signature_ids == ["bad", "abstain", "output_only"]
-    assert result.rejected_signature_ids == ["bad", "output_only"]
 
 
-@pytest.mark.parametrize(
-    ("query_first", "query_cjk", "accepted"),
-    [
-        # 重郷 shares the prefix "zhong" with 重喜 but is a different whole CJK name.
-        ("zhong", "Hzhongxiang", False),
-        ("zhong", "Hzhongxi", True),
-        # Hangul and Han forms compare by the first-name rule.
-        ("zhong", "Gzhongxiang", True),
-    ],
-)
-def test_restored_profile_name_check_applies_the_cjk_rule(query_first, query_cjk, accepted):
+def test_prefix_alias_initial_and_unknown_query_names_are_compatible():
+    queries = {"prefix": "rob", "initial": "r", "unknown": "", "alias": "bob"}
+    result = apply_seed_links(
+        unassigned_signature_ids=list(queries),
+        linked_signature_to_cluster=dict.fromkeys(queries, 10),
+        recluster_map={10: 1},
+        cluster_seeds_require_inverse={1: ["alice", "robert", "initial_seed"]},
+        prevent_new_incompatibilities=True,
+        first_names={"alice": "alice", "robert": "robert", "initial_seed": "z", **queries},
+        name_tuples={("bob", "robert")},
+    )
+
+    assert result.clusters == {"1": ["alice", "robert", "initial_seed", *queries]}
+    assert result.residual_signature_ids == []
+    assert result.rejected_signature_ids == []
+
+
+def test_split_membership_takes_precedence_including_empty_group():
+    result = apply_seed_links(
+        unassigned_signature_ids=["split", "empty", "fallback"],
+        linked_signature_to_cluster={"split": 10, "empty": 11, "fallback": 12},
+        recluster_map={10: 1, 11: 1, 12: 1},
+        cluster_seeds_require_inverse={1: ["original_seed"]},
+        split_cluster_seeds_require_inverse={10: ["split_seed"], 11: []},
+        prevent_new_incompatibilities=True,
+        first_names={"original_seed": "alice", "split_seed": "bob", "split": "bob", "fallback": "bob"},
+        name_tuples=set(),
+    )
+
+    assert result.clusters == {"1": ["original_seed", "split", "empty"]}
+    assert result.residual_signature_ids == ["fallback"]
+    assert result.rejected_signature_ids == ["fallback"]
+
+
+def test_initial_only_seed_group_does_not_read_query_name():
     result = apply_seed_links(
         unassigned_signature_ids=["query"],
         linked_signature_to_cluster={"query": 10},
         recluster_map={10: 1},
         cluster_seeds_require_inverse={1: ["seed"]},
         prevent_new_incompatibilities=True,
-        first_names={"seed": "zhong", "query": query_first},
+        first_names={"seed": "r"},
         name_tuples=set(),
-        cjk_given_names={"seed": "Hzhongxi", "query": query_cjk},
     )
 
-    assert (result.clusters == {"1": ["seed", "query"]}) is accepted
+    assert result.clusters == {"1": ["seed", "query"]}
+    assert result.residual_signature_ids == []
 
 
-@pytest.mark.parametrize(
-    ("seed", "query", "accepted"),
-    [
-        # A joined-initials reading that spells the other name exactly, on either side.
-        (("Kristan", "Allan"), ("Ka", ""), True),
-        (("Ka", ""), ("Kristan", "Allan"), True),
-        (("Marco Aurelio Lisboa", ""), ("Mal", ""), True),
-        (("Mohammad", "Arfan"), ("MArfan", ""), True),
-        (("Johanna", "IP"), ("Jip", ""), True),
-        (("Jip", ""), ("Johanna", "IP"), True),
-        # Other names keep the first-name rule.
-        (("Kristian", ""), ("Ka", ""), False),
-    ],
-)
-def test_restored_profile_name_check_applies_the_joined_initials_reading(seed, query, accepted):
-    from s2and.text import canonicalize_name_parts, given_name_for_constraint
+def test_restored_profile_name_check_applies_the_cjk_rule():
+    queries = {
+        "different_han": "Hzhongxiang",
+        "same_han": "Hzhongxi",
+        "hangul": "Gzhongxiang",
+        "different_one_letter": "Haqiang",
+    }
+    result = apply_seed_links(
+        unassigned_signature_ids=list(queries),
+        linked_signature_to_cluster={"different_han": 10, "same_han": 10, "hangul": 10, "different_one_letter": 20},
+        recluster_map={10: 1, 20: 2},
+        cluster_seeds_require_inverse={1: ["seed"], 2: ["one_letter_seed"]},
+        prevent_new_incompatibilities=True,
+        first_names={
+            "seed": "zhong",
+            "one_letter_seed": "a",
+            "different_han": "zhong",
+            "same_han": "zhong",
+            "hangul": "zhong",
+            "different_one_letter": "a",
+        },
+        name_tuples=set(),
+        cjk_given_names={"seed": "Hzhongxi", "one_letter_seed": "Haming", **queries},
+    )
 
-    names = {"seed": seed, "query": query}
+    assert result.clusters == {"1": ["seed", "same_han", "hangul"], "2": ["one_letter_seed"]}
+    assert result.rejected_signature_ids == ["different_han", "different_one_letter"]
+
+
+def test_restored_profile_name_check_applies_the_joined_initials_reading():
+    names = {
+        "full_seed": ("Kristan", "Allan"),
+        "short_seed": ("Ka", ""),
+        "expansion": ("Kristan", "Allan"),
+        "joined": ("Ka", ""),
+        "incompatible": ("Kristian", ""),
+        "three_initials_seed": ("Marco Aurelio Lisboa", ""),
+        "middle_initials_seed": ("Jip", ""),
+        "full_middle_seed": ("Mohammad", "Arfan"),
+        "three_initials": ("Mal", ""),
+        "middle_initials": ("Johanna", "IP"),
+        "full_middle": ("MArfan", ""),
+    }
     parts = {key: canonicalize_name_parts(first, middle, "Leite") for key, (first, middle) in names.items()}
     result = apply_seed_links(
-        unassigned_signature_ids=["query"],
-        linked_signature_to_cluster={"query": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
+        unassigned_signature_ids=[
+            "expansion",
+            "joined",
+            "incompatible",
+            "three_initials",
+            "middle_initials",
+            "full_middle",
+        ],
+        linked_signature_to_cluster={
+            "expansion": 10,
+            "joined": 20,
+            "incompatible": 10,
+            "three_initials": 30,
+            "middle_initials": 40,
+            "full_middle": 50,
+        },
+        recluster_map={10: 1, 20: 2, 30: 3, 40: 4, 50: 5},
+        cluster_seeds_require_inverse={
+            1: ["short_seed"],
+            2: ["full_seed"],
+            3: ["three_initials_seed"],
+            4: ["middle_initials_seed"],
+            5: ["full_middle_seed"],
+        },
         prevent_new_incompatibilities=True,
         first_names={key: value.first for key, value in parts.items()},
         name_tuples=set(),
@@ -223,20 +178,11 @@ def test_restored_profile_name_check_applies_the_joined_initials_reading(seed, q
         name_parts=parts.__getitem__,
     )
 
-    assert (result.clusters == {"1": ["seed", "query"]}) is accepted
-
-
-def test_restored_profile_name_check_keeps_one_letter_cjk_first_syllables():
-    # 阿明 has canonical first "a"; the CJK rule still vetoes 阿強.
-    result = apply_seed_links(
-        unassigned_signature_ids=["query"],
-        linked_signature_to_cluster={"query": 10},
-        recluster_map={10: 1},
-        cluster_seeds_require_inverse={1: ["seed"]},
-        prevent_new_incompatibilities=True,
-        first_names={"seed": "a", "query": "a"},
-        name_tuples=set(),
-        cjk_given_names={"seed": "Haming", "query": "Haqiang"},
-    )
-
-    assert result.rejected_signature_ids == ["query"]
+    assert result.clusters == {
+        "1": ["short_seed", "expansion"],
+        "2": ["full_seed", "joined"],
+        "3": ["three_initials_seed", "three_initials"],
+        "4": ["middle_initials_seed", "middle_initials"],
+        "5": ["full_middle_seed", "full_middle"],
+    }
+    assert result.rejected_signature_ids == ["incompatible"]

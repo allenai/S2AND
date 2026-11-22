@@ -17,7 +17,6 @@ from s2and.data import ANDData, Author, NameCounts
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
-    RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     IncrementalQuerySignatureRequest,
     arrow_ipc_physical_layout,
     normalize_cluster_seed_disallow_pairs,
@@ -28,7 +27,6 @@ from s2and.incremental_linking.feature_block import (
     read_incremental_query_signatures_arrow,
     temporary_cluster_seed_sidecars,
     write_altered_cluster_signatures_arrow,
-    write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
     write_incremental_query_signatures_arrow,
     write_name_counts_index,
@@ -271,6 +269,12 @@ def _with_query_signatures(
 
 def test_raw_planner_arrow_tables_from_anddata_builds_requested_mini_contract() -> None:
     dataset = _tiny_anddata()
+    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
+        authors=[Author(author_name="", position=0), Author(author_name="   ", position=1)],
+        predicted_language="en",
+        is_reliable=cast(Any, "false"),
+        language_reliability=0.0,
+    )
     tables = raw_planner_arrow_tables_from_anddata(
         dataset,
         signature_ids=["q", "s1"],
@@ -284,44 +288,15 @@ def test_raw_planner_arrow_tables_from_anddata_builds_requested_mini_contract() 
     assert tables["cluster_seed_disallows"].num_rows == 0
     assert tables["papers"]["paper_id"].to_pylist() == ["p_q", "p1"]
     assert tables["paper_authors"].to_pylist() == [
-        {"paper_id": "p_q", "position": 0, "author_name": "ada lovelace"},
-        {"paper_id": "p_q", "position": 1, "author_name": "charles babbage"},
+        {"paper_id": "p_q", "position": 0, "author_name": ""},
+        {"paper_id": "p_q", "position": 1, "author_name": "   "},
         {"paper_id": "p1", "position": 0, "author_name": "ada lovelace"},
         {"paper_id": "p1", "position": 1, "author_name": "charles babbage"},
     ]
     assert tables["signatures"]["author_orcid"].to_pylist()[0] == "0000-0000-0000-0001"
     assert tables["specter"]["paper_id"].to_pylist() == ["p_q", "p1"]
     np.testing.assert_allclose(tables["specter"]["embedding"].to_pylist(), [[1.0, 0.0], [1.0, 0.1]])
-
-
-def test_raw_planner_arrow_tables_from_anddata_preserves_blank_paper_author_rows() -> None:
-    dataset = _tiny_anddata()
-    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
-        authors=[Author(author_name="", position=0), Author(author_name="   ", position=1)]
-    )
-
-    tables = raw_planner_arrow_tables_from_anddata(dataset, signature_ids=["q"])
-
-    assert tables["paper_authors"].to_pylist() == [
-        {"paper_id": "p_q", "position": 0, "author_name": ""},
-        {"paper_id": "p_q", "position": 1, "author_name": "   "},
-    ]
-
-
-def test_raw_planner_arrow_tables_parse_false_language_reliability() -> None:
-    dataset = _tiny_anddata()
-    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
-        predicted_language="en",
-        is_reliable=cast(Any, "false"),
-        language_reliability=0.0,
-    )
-
-    tables = raw_planner_arrow_tables_from_anddata(
-        dataset,
-        signature_ids=["q"],
-    )
-
-    assert tables["papers"]["is_reliable"].to_pylist() == [False]
+    assert tables["papers"]["is_reliable"].to_pylist()[0] is False
 
 
 @pytest.mark.parametrize(
@@ -356,15 +331,21 @@ def test_raw_planner_arrow_tables_validate_language_metadata(
         )
 
 
-def test_raw_planner_arrow_tables_from_anddata_rejects_signature_missing_paper() -> None:
+def test_raw_planner_arrow_tables_reject_malformed_records() -> None:
     dataset = _tiny_anddata()
-    del dataset.papers["p1"]
-
+    paper = dataset.papers.pop("p1")
     with pytest.raises(ValueError, match="missing signature paper_id"):
-        raw_planner_arrow_tables_from_anddata(
-            dataset,
-            signature_ids=["q", "s1"],
-        )
+        raw_planner_arrow_tables_from_anddata(dataset, signature_ids=["s1"])
+
+    dataset.papers["p1"] = paper._replace(
+        authors=[Author(author_name="Alice Smith", position=0), Author(author_name="A. Smith", position=0)]
+    )
+    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
+        raw_planner_arrow_tables_from_anddata(dataset, signature_ids=["s1"])
+
+    dataset.signatures["q"] = dataset.signatures["q"]._replace(author_info_affiliations=cast(Any, "Lab"))
+    with pytest.raises(ValueError, match="signatures.author_info_affiliations"):
+        raw_planner_arrow_tables_from_anddata(dataset, signature_ids=["q"])
 
 
 def test_raw_planner_arrow_tables_keep_all_null_optional_columns_typed() -> None:
@@ -439,10 +420,6 @@ def test_incremental_query_signatures_arrow_round_trips_typed_rows(tmp_path: Pat
         "query_author": ["Ada Lovelace", "Grace Hopper"],
     }
 
-
-def test_incremental_query_signatures_arrow_keeps_empty_table_typed(tmp_path: Path) -> None:
-    import pyarrow as pa
-
     path = tmp_path / "empty_incremental_query_signatures.arrow"
 
     write_incremental_query_signatures_arrow(path, [])
@@ -456,65 +433,27 @@ def test_incremental_query_signatures_arrow_keeps_empty_table_typed(tmp_path: Pa
     assert table.schema.field("query_author").type == pa.string()
 
 
-def test_incremental_query_signatures_arrow_rejects_duplicate_rows(tmp_path: Path) -> None:
+def test_incremental_query_signatures_arrow_rejects_malformed_rows(tmp_path: Path) -> None:
     import pyarrow as pa
 
-    path = tmp_path / "duplicate_incremental_query_signatures.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["q1", "q1"], type=pa.string()),
-                "query_view": pa.array(["full", "initial_only"], type=pa.string()),
-                "query_author": pa.array(["Ada Lovelace", "Ada Lovelace"], type=pa.string()),
-            }
-        ),
-        path,
+    path = tmp_path / "incremental_query_signatures.arrow"
+    write_incremental_query_signatures_arrow(
+        path, ["q1", "q2"], query_views=["full", "initial_only"], query_authors=["Ada Lovelace", "Grace Hopper"]
     )
-
-    with pytest.raises(ValueError, match="duplicate signature_id"):
-        read_incremental_query_signatures_arrow(path)
-
-
-def test_incremental_query_signatures_arrow_rejects_unknown_query_view(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    path = tmp_path / "unknown_query_view_incremental_query_signatures.arrow"
-
+    with pa.OSFile(str(path), "rb") as source:
+        table = pa.ipc.open_file(source).read_all()
     with pytest.raises(ValueError, match="unknown query_view"):
         write_incremental_query_signatures_arrow(path, ["q1"], query_views=["profile"])
-
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["q1"], type=pa.string()),
-                "query_view": pa.array(["profile"], type=pa.string()),
-                "query_author": pa.array(["Ada Lovelace"], type=pa.string()),
-            }
-        ),
-        path,
-    )
-
-    with pytest.raises(ValueError, match="unknown query_view"):
-        read_incremental_query_signatures_arrow(path)
-
-
-def test_incremental_query_signatures_arrow_rejects_null_request_values(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    path = tmp_path / "null_incremental_query_signatures.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["q1"], type=pa.string()),
-                "query_view": pa.array(["full"], type=pa.string()),
-                "query_author": pa.array([None], type=pa.string()),
-            }
-        ),
-        path,
-    )
-
-    with pytest.raises(ValueError, match="null query_author"):
-        read_incremental_query_signatures_arrow(path)
+    for column, values, message in (
+        ("signature_id", ["q1", "q1"], "duplicate signature_id"),
+        ("query_view", ["profile", "initial_only"], "unknown query_view"),
+        ("query_author", [None, "Grace Hopper"], "null query_author"),
+    ):
+        field = table.schema.field(column)
+        invalid = table.set_column(table.schema.get_field_index(column), field, pa.array(values, type=field.type))
+        write_arrow_ipc_table(invalid, path)
+        with pytest.raises(ValueError, match=message):
+            read_incremental_query_signatures_arrow(path)
 
 
 def test_arrow_readers_reject_integer_id_columns(tmp_path: Path) -> None:
@@ -610,62 +549,52 @@ def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Pat
         read_cluster_seeds_arrow(path)
 
 
-def test_raw_planner_index_rejects_unbounded_large_batch(tmp_path: Path) -> None:
+def test_raw_planner_index_builds_and_reuses_bounded_batches(tmp_path: Path) -> None:
     import pyarrow as pa
 
     table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
     path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow")
+    max_rows = {"signatures": 2}
+    files = {"signatures": path, "specter": None}
+    with pytest.raises(ValueError, match="exceeding the raw-planner limit"):
+        write_raw_arrow_batch_lookup_indexes(files, tmp_path, max_record_batch_rows=max_rows)
 
-    with pytest.raises(ValueError, match="exceeding the raw-planner limit of 2"):
-        write_raw_arrow_batch_lookup_indexes(
-            {"signatures": path},
-            tmp_path,
-            max_record_batch_rows={"signatures": 2},
-        )
-
-
-def test_raw_planner_index_metadata_uses_stem_qualified_sidecar(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    table = pa.table({"signature_id": pa.array([str(index) for index in range(5)], type=pa.string())})
-    path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow", max_record_batch_rows=2)
+    write_arrow_ipc_table(table, path, max_record_batch_rows=2)
     assert arrow_ipc_physical_layout(path) == {
         "row_count": 5,
         "record_batch_count": 3,
         "actual_max_batch_rows": 2,
     }
-    indexed_paths, index_metrics = write_raw_arrow_batch_lookup_indexes(
-        {"signatures": path},
-        tmp_path,
-        max_record_batch_rows={"signatures": 2},
-    )
-    layout = raw_planner_arrow_physical_layout(indexed_paths, max_record_batch_rows={"signatures": 2})
-
-    assert Path(indexed_paths["signatures_batch_index"]).name == "signatures.signatures_batch_index.bin"
-    assert index_metrics["signatures_batch_index"]["record_batch_count"] == 3
-    assert index_metrics["signatures_batch_index"]["actual_max_batch_rows"] == 2
+    indexed_paths, index_metrics = write_raw_arrow_batch_lookup_indexes(files, tmp_path, max_record_batch_rows=max_rows)
+    layout = raw_planner_arrow_physical_layout(indexed_paths, max_record_batch_rows=max_rows)
+    assert set(indexed_paths) == {"signatures", "signatures_batch_index"}
+    assert indexed_paths["signatures"] == path
+    index_path = Path(indexed_paths["signatures_batch_index"])
+    assert index_path.name == "signatures.signatures_batch_index.bin"
+    assert "specter_batch_index" not in index_metrics
     assert layout["tables"]["signatures"]["batch_index_present"] is True
     assert layout["tables"]["signatures"]["max_record_batch_rows"] == 2
-    assert RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS["signatures"] == 16_384
 
+    _, reused = write_raw_arrow_batch_lookup_indexes(files, tmp_path, max_record_batch_rows=max_rows, overwrite=False)
+    fresh = index_metrics["signatures_batch_index"]
+    assert fresh["record_batch_count"] == 3
+    assert fresh["actual_max_batch_rows"] == 2
+    assert reused["signatures_batch_index"] == {**fresh, "reused": True}
 
-def test_raw_planner_index_omits_none_optional_paths(tmp_path: Path) -> None:
-    import pyarrow as pa
+    header_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT  # noqa: SLF001
+    header = index_path.read_bytes()
+    with index_path.open("r+b") as index_file:
+        values = list(header_struct.unpack(index_file.read(header_struct.size)))
+        values[1] = 4
+        index_file.seek(0)
+        index_file.write(header_struct.pack(*values))
+    with pytest.raises(ValueError, match="row count mismatch"):
+        write_raw_arrow_batch_lookup_indexes(files, tmp_path, max_record_batch_rows=max_rows, overwrite=False)
 
-    table = pa.table({"signature_id": pa.array(["s1"], type=pa.string())})
-    path = write_arrow_ipc_table(table, tmp_path / "signatures.arrow")
-    indexed_paths, index_metrics = write_raw_arrow_batch_lookup_indexes(
-        {
-            "signatures": path,
-            "specter": None,
-        },
-        tmp_path,
-    )
-
-    assert indexed_paths["signatures"] == path
-    assert "signatures_batch_index" in indexed_paths
-    assert "specter" not in indexed_paths
-    assert "specter_batch_index" not in index_metrics
+    index_path.write_bytes(header)
+    write_arrow_ipc_table(pa.table({"signature_id": ["replacement"]}), path)
+    with pytest.raises(ValueError, match="stale"):
+        write_raw_arrow_batch_lookup_indexes(files, tmp_path, max_record_batch_rows=max_rows, overwrite=False)
 
 
 def test_raw_planner_index_rejects_null_lookup_keys(tmp_path: Path) -> None:
@@ -678,90 +607,6 @@ def test_raw_planner_index_rejects_null_lookup_keys(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="null values in key column"):
         write_raw_arrow_batch_lookup_indexes({"signatures": path}, tmp_path)
-
-
-def test_raw_planner_index_rejects_stale_python_reuse(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    path = write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
-        tmp_path / "signatures.arrow",
-    )
-    write_raw_arrow_batch_lookup_indexes({"signatures": path}, tmp_path)
-    write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array([f"s{index}" for index in range(200)], type=pa.string())}),
-        path,
-    )
-
-    with pytest.raises(ValueError, match="stale"):
-        write_raw_arrow_batch_lookup_indexes({"signatures": path}, tmp_path, overwrite=False)
-
-
-def test_raw_planner_index_reuse_metrics_match_fresh_schema(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    path = write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=1,
-    )
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-
-    _, fresh_metrics = write_arrow_batch_lookup_index(
-        path,
-        index_path,
-        key_column="signature_id",
-        table_name="signatures",
-        max_record_batch_rows=1,
-        overwrite=True,
-    )
-    _, reused_metrics = write_arrow_batch_lookup_index(
-        path,
-        index_path,
-        key_column="signature_id",
-        table_name="signatures",
-        max_record_batch_rows=1,
-        overwrite=False,
-    )
-
-    assert set(reused_metrics) == set(fresh_metrics)
-    assert reused_metrics == {**fresh_metrics, "reused": True}
-
-
-def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    path = write_arrow_ipc_table(
-        pa.table({"signature_id": pa.array(["s1", "s2", "s3"], type=pa.string())}),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=2,
-    )
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(
-        path,
-        index_path,
-        key_column="signature_id",
-        table_name="signatures",
-        max_record_batch_rows=2,
-        overwrite=True,
-    )
-
-    header_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT  # noqa: SLF001
-    with index_path.open("r+b") as index_file:
-        values = list(header_struct.unpack(index_file.read(header_struct.size)))
-        values[1] = 2
-        index_file.seek(0)
-        index_file.write(header_struct.pack(*values))
-
-    with pytest.raises(ValueError, match="row count mismatch"):
-        write_arrow_batch_lookup_index(
-            path,
-            index_path,
-            key_column="signature_id",
-            table_name="signatures",
-            max_record_batch_rows=2,
-            overwrite=False,
-        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows prevents unlinking open sort-run files")
@@ -802,25 +647,12 @@ def test_disallow_contract_rejects_out_of_set_pair() -> None:
         )
 
 
-def test_raw_planner_arrow_tables_reject_scalar_sequence_fields() -> None:
-    dataset = _tiny_anddata()
-    dataset.signatures["q"] = dataset.signatures["q"]._replace(
-        author_info_affiliations=cast(Any, "Lab"),
-    )
-
-    with pytest.raises(ValueError, match="signatures.author_info_affiliations"):
-        raw_planner_arrow_tables_from_anddata(
-            dataset,
-            signature_ids=["q"],
-        )
-
-
-def test_raw_candidate_plan_bridge_accepts_feature_block_signature_order() -> None:
-    order = RawArrowPlanBundle.from_native_mapping(_raw_plan()).signature_order
+def test_raw_candidate_plan_bridge_resolves_feature_block_signature_order() -> None:
+    plan = RawArrowPlanBundle.from_native_mapping(_raw_plan())
 
     retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-        feature_block_signature_order=order,
+        plan,
+        feature_block_signature_order=plan.signature_order,
     )
 
     candidate_batch = retrieval_batch.candidate_batch
@@ -830,28 +662,10 @@ def test_raw_candidate_plan_bridge_accepts_feature_block_signature_order() -> No
     assert candidate_batch.row_component_keys == ("c_ada", "c_other")
     np.testing.assert_allclose(retrieval_batch.row_signals["retrieval_score"], [0.9, 0.2])
 
-
-def test_raw_candidate_plan_bridge_reports_missing_signature_id() -> None:
     with pytest.raises(KeyError, match="right_signature_ids contains signature_id not present"):
         build_linker_retrieval_batch_from_raw_plan_bundle(
-            RawArrowPlanBundle.from_native_mapping(_raw_plan()),
+            plan,
             signature_id_to_index={"q": 0, "s1": 1, "s2": 2},
-        )
-
-
-def test_raw_planner_arrow_tables_reject_duplicate_paper_author_positions() -> None:
-    dataset = _tiny_anddata()
-    dataset.papers["p1"] = dataset.papers["p1"]._replace(
-        authors=[
-            Author(author_name="Alice Smith", position=0),
-            Author(author_name="A. Smith", position=0),
-        ]
-    )
-
-    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
-        raw_planner_arrow_tables_from_anddata(
-            dataset,
-            signature_ids=["s1"],
         )
 
 
@@ -942,38 +756,33 @@ def test_arrow_validation_and_planner_share_one_native_name_count_snapshot(
         assert native_open_calls == 1
 
 
-def test_raw_arrow_partial_supervision_require_unknown_seed_rejected(tmp_path: Path) -> None:
-    class FakeFeaturizer:
-        def signature_ids(self) -> list[str]:
-            return ["q", "s1", "s2", "s3"]
-
+def test_preplanned_raw_arrow_scoring_validates_request_against_plan(tmp_path: Path) -> None:
+    featurizer = SimpleNamespace(signature_ids=lambda: ["q", "s1", "s2", "s3"])
     raw_plan = _raw_plan()
+    bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
     raw_plan["component_members"] = {}
+    empty_seed_bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
 
     with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
-        with pytest.raises(ValueError, match="partial_supervision_require_unknown_seed_signature"):
-            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-                _raw_test_clusterer(),
-                _raw_test_artifact(),
-                arrow_dataset=arrow_dataset,
-                query_signature_ids=["q"],
-                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(raw_plan),
-                rust_featurizer=FakeFeaturizer(),
-                partial_supervision={("q", "s1"): 0},
-            )
-
-
-def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(tmp_path: Path) -> None:
-    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
-        with pytest.raises(ValueError, match="preplanned raw Arrow scoring requires rust_featurizer"):
-            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-                _raw_test_clusterer(),
-                _raw_test_artifact(),
-                arrow_dataset=arrow_dataset,
-                query_signature_ids=["q"],
-                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-                rust_featurizer=None,
-            )
+        for overrides, message in (
+            ({"rust_featurizer": None}, "requires rust_featurizer"),
+            ({"query_signature_ids": ["s1"]}, "must exactly match requested query_signature_ids"),
+            ({"raw_plan_bundle": replace(bundle, query_authors=())}, "query_authors length"),
+            (
+                {"raw_plan_bundle": empty_seed_bundle, "partial_supervision": {("q", "s1"): 0}},
+                "partial_supervision_require_unknown_seed_signature",
+            ),
+        ):
+            kwargs: dict[str, Any] = {
+                "query_signature_ids": ["q"],
+                "raw_plan_bundle": bundle,
+                "rust_featurizer": featurizer,
+            }
+            kwargs.update(overrides)
+            with pytest.raises(ValueError, match=message):
+                _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
+                    _raw_test_clusterer(), _raw_test_artifact(), arrow_dataset=arrow_dataset, **kwargs
+                )
 
 
 @pytest.mark.parametrize(
@@ -1067,37 +876,3 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan_and_featurizer(
     assert result.telemetry["seed_component_count"] == expected_component_count
     assert result.telemetry["raw_arrow_seed_component_count"] == expected_component_count
     assert isinstance(result.telemetry["raw_arrow_featurizer_seconds"], float)
-
-
-def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids(tmp_path: Path) -> None:
-    class FakeFeaturizer:
-        def signature_ids(self) -> list[str]:
-            return ["q", "s1", "s2", "s3"]
-
-    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
-        with pytest.raises(ValueError, match="must exactly match requested query_signature_ids"):
-            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-                _raw_test_clusterer(),
-                _raw_test_artifact(),
-                arrow_dataset=arrow_dataset,
-                query_signature_ids=["s1"],
-                raw_plan_bundle=RawArrowPlanBundle.from_native_mapping(_raw_plan()),
-                rust_featurizer=FakeFeaturizer(),
-                top_k=2,
-                n_jobs=1,
-            )
-
-
-def test_preplanned_raw_arrow_scoring_rejects_mismatched_query_author_count(tmp_path: Path) -> None:
-    bundle = replace(RawArrowPlanBundle.from_native_mapping(_raw_plan()), query_authors=())
-    featurizer = SimpleNamespace(signature_ids=lambda: ["q", "s1", "s2", "s3"])
-    with _open_test_arrow_dataset(tmp_path) as arrow_dataset:
-        with pytest.raises(ValueError, match="query_authors length must match query_signature_ids: 0 != 1"):
-            _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
-                _raw_test_clusterer(),
-                _raw_test_artifact(),
-                arrow_dataset=arrow_dataset,
-                query_signature_ids=["q"],
-                raw_plan_bundle=bundle,
-                rust_featurizer=featurizer,
-            )

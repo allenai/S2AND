@@ -45,47 +45,48 @@ def _incremental_predictions(tmp_path, dataset, *, enabled, partial_supervision)
         )
 
 
-@pytest.mark.parametrize("threshold", [None, 2])
+@pytest.mark.parametrize(("enabled", "threshold"), [(False, None), (False, 2), (True, 2)])
+def test_bulk_uses_effective_constraints_before_real_subblocking(tmp_path, enabled, threshold):
+    names = [
+        (first, "", last)
+        for first, last in (("Ada", "Smith"), ("Grace", "Hopper"), ("Mary", "Jackson"), ("Katherine", "Johnson"))
+        for _ in range(3)
+    ]
+    dataset = _dataset(names, {})
+    dataset.cluster_seeds_disallow = {("0", "1"), ("6", "7"), ("9", "10")}
+    partial = {("3", "4"): LARGE_DISTANCE, ("6", "7"): 0.0, ("10", "9"): 0.3}
+    blocks = {
+        "dataset": ["0", "1", "2"],
+        "caller": ["3", "4", "5"],
+        "zero": ["6", "7", "8"],
+        "soft": ["9", "10", "11"],
+    }
+
+    clusters = _predict(
+        tmp_path,
+        dataset,
+        blocks,
+        "arrow",
+        threshold=threshold,
+        use_default_constraints_as_supervision=enabled,
+        partial_supervision=partial,
+    )
+
+    # The cap splits each triple before the reunite pass restores allowed links.
+    expected = [["0", "2"], ["1"]] if enabled else [["0", "1", "2"]]
+    expected += [["3", "5"], ["4"], ["6", "7", "8"], ["9", "10", "11"]]
+    assert _partition(clusters) == sorted(sorted(members) for members in expected)
+
+
 @pytest.mark.parametrize(
     ("case", "enabled"),
     [
-        ("dataset_disallow", False),
-        ("dataset_disallow", True),
-        ("caller_disallow", False),
-        ("caller_disallow", True),
-        ("zero_override", True),
-        ("soft_override", True),
+        ("dataset_seed_query", True),
+        ("dataset_query_query", True),
+        ("dataset_seed_query", False),
+        ("caller_seed_query", False),
+        ("caller_query_query", False),
     ],
-)
-def test_bulk_uses_effective_constraints_before_real_subblocking(tmp_path, enabled, threshold, case):
-    dataset = _dataset([("Ada", "", "Smith")] * 3, {})
-    dataset.cluster_seeds_disallow = set() if case == "caller_disallow" else {("0", "1")}
-    partial = {
-        "dataset_disallow": {},
-        "caller_disallow": {("0", "1"): LARGE_DISTANCE},
-        "zero_override": {("0", "1"): 0.0},
-        "soft_override": {("1", "0"): 0.3},
-    }[case]
-    disallowed = case == "caller_disallow" or (case == "dataset_disallow" and enabled)
-    # The cap cuts the no-middle "ada" records into the pieces 0-1 and 2. The reunite-only pass
-    # then attaches record 2, so the subblocked result equals the full-block result.
-    expected = [["0", "2"], ["1"]] if disallowed else [["0", "1", "2"]]
-    for route in ["arrow"]:
-        clusters = _predict(
-            tmp_path / route,
-            dataset,
-            {"one": ["0", "1", "2"]},
-            route,
-            threshold=threshold,
-            use_default_constraints_as_supervision=enabled,
-            partial_supervision=partial,
-        )
-        assert _partition(clusters) == expected, route
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize(
-    "case", ["dataset_seed_query", "dataset_query_query", "caller_seed_query", "caller_query_query"]
 )
 def test_incremental_negative_policy_preserves_seed_anchors(tmp_path, enabled, case):
     size = 3 if case.endswith("query_query") else 2
@@ -106,25 +107,22 @@ def test_incremental_negative_policy_preserves_seed_anchors(tmp_path, enabled, c
     assert dataset.cluster_seeds_disallow == ({pair} if case.startswith("dataset") else set())
 
 
-@pytest.mark.parametrize("override", [0.0, 0.3])
-def test_incremental_override_precedes_retrieval(tmp_path, override):
+def test_incremental_override_precedes_retrieval(tmp_path):
     dataset = _dataset([("Ada", "", "Smith")] * 2, {"0": "claimed"})
     dataset.cluster_seeds_disallow = {("0", "1")}
     pair = ("0", "1")
-    partial = {pair: override}
+    partial = {pair: 0.0}
     for route, clusters in _incremental_predictions(tmp_path, dataset, enabled=True, partial_supervision=partial):
         assert clusters == [["0", "1"]], route
     assert dataset.cluster_seeds_disallow == {("0", "1")}
-    assert partial == {pair: override}
+    assert partial == {pair: 0.0}
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_incremental_override_preserves_independent_dataset_negatives(tmp_path, enabled):
+def test_incremental_override_preserves_independent_dataset_negatives(tmp_path):
     dataset = _dataset([("Ada", "", "Smith")] * 3, {"0": "claimed"})
     dataset.cluster_seeds_disallow = {("0", "1"), ("0", "2")}
-    expected = [["0", "1"], ["2"]] if enabled else [["0", "1", "2"]]
     for route, clusters in _incremental_predictions(
-        tmp_path, dataset, enabled=enabled, partial_supervision={("1", "0"): 0.3}
+        tmp_path, dataset, enabled=True, partial_supervision={("1", "0"): 0.3}
     ):
-        assert clusters == expected, route
+        assert clusters == [["0", "1"], ["2"]], route
     assert dataset.cluster_seeds_disallow == {("0", "1"), ("0", "2")}

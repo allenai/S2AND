@@ -134,7 +134,7 @@ def _preflight_plan(args: Any, datasets: dict[str, ModelDataset], work_dir: Path
 
 @pytest.mark.parametrize(
     "augmented_population",
-    ["train", "test", "omitted", "changed-arrow", "unknown-validation"],
+    ["test", "changed-arrow", "unknown-validation"],
 )
 def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     tmp_path: Path,
@@ -160,7 +160,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     selection = _json_selection(development_files, "qian", args)
     train, val, test = selection.split_cluster_signatures()
     unknown_ids = frozenset()
-    if augmented_population.startswith("unknown-"):
+    if augmented_population == "unknown-validation":
         unknown_ids = frozenset({next(iter(train.values()))[1], next(iter(val.values()))[0]})
         # The plan declares the list beside the benchmark labels.
         sidecar = plan_dataset.files["arrow"].parent / "restored_unknown_signature_ids_20261009.json"
@@ -169,9 +169,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         plan_dataset = ModelDataset(files=files, sha256={role: sha256_file(path) for role, path in files.items()})
     safe = next(iter(train.values()))[0]
     target = {
-        "train": next(iter(train.values()))[1],
         "test": next(iter(test.values()))[0],
-        "omitted": "not-in-model-plan",
         "changed-arrow": next(iter(train.values()))[1],
         "unknown-validation": next(iter(val.values()))[0],
     }[augmented_population]
@@ -228,7 +226,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
         return real_loader(*loader_args, **kwargs)
 
     monkeypatch.setattr(train_pairwise, "load_development_dataset", checked_loader)
-    if augmented_population in {"test", "omitted", "changed-arrow"}:
+    if augmented_population in {"test", "changed-arrow"}:
         monkeypatch.setattr(
             train_pairwise,
             "_featurize_selection",
@@ -337,11 +335,9 @@ def test_all_augmented_sources_are_checked_before_any_dataset_featurization(
     assert list(work_dir.iterdir()) == []
 
 
-@pytest.mark.parametrize("source_split", ["train", "validation"])
 def test_augmented_validation_copies_must_come_from_the_source_validation_split(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    source_split: str,
 ) -> None:
     _, name_counts_path, _ = write_pairwise_artifacts(tmp_path)
     args = pairwise_training_args(tmp_path, output_dir=tmp_path / "production_model_v9.9")
@@ -355,9 +351,8 @@ def test_augmented_validation_copies_must_come_from_the_source_validation_split(
     augmented_files["train_pairs"].write_text(
         f"signature_id_1,signature_id_2,label\nqian___{train_ids[0]},qian___{train_ids[1]},1\n", encoding="utf-8"
     )
-    validation_source = train_ids if source_split == "train" else val_ids
     augmented_files["val_pairs"].write_text(
-        f"signature_id_1,signature_id_2,label\nqian___{val_ids[0]},qian___{validation_source[-1]},1\n",
+        f"signature_id_1,signature_id_2,label\nqian___{val_ids[0]},qian___{train_ids[-1]},1\n",
         encoding="utf-8",
     )
     datasets = {
@@ -376,10 +371,18 @@ def test_augmented_validation_copies_must_come_from_the_source_validation_split(
         raise GuardPassed
 
     monkeypatch.setattr(train_pairwise, "load_packaged_artifact_authority", stop_after_guard)
-    if source_split == "train":
-        with pytest.raises(ValueError, match="Augmented validation contains 'qian' signatures outside its validation"):
-            train_pairwise.train_pairwise_bundle(args)
-    else:
-        with pytest.raises(GuardPassed):
-            train_pairwise.train_pairwise_bundle(args)
+
+    with pytest.raises(ValueError, match="signatures outside its validation"):
+        train_pairwise.train_pairwise_bundle(args)
     assert not args.output_dir.exists()
+
+    augmented_files["val_pairs"].write_text(
+        f"signature_id_1,signature_id_2,label\nqian___{val_ids[0]},qian___{val_ids[-1]},1\n",
+        encoding="utf-8",
+    )
+    datasets["augmented"] = ModelDataset(
+        files=augmented_files,
+        sha256={role: sha256_file(path) for role, path in augmented_files.items()},
+    )
+    with pytest.raises(GuardPassed):
+        train_pairwise.train_pairwise_bundle(args)

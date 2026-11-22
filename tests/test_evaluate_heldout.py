@@ -281,14 +281,13 @@ def test_heldout_scores_complete_model_exact_pairs_and_full_unknown_context(
     assert {path: path.read_bytes() for path in source_bytes} == source_bytes
 
 
-@pytest.mark.parametrize("role", ["heldout_pairs", "unknown_signatures", "arrow"])
 def test_heldout_rejects_changed_plan_files_before_features(
     heldout_fixture: argparse.Namespace,
     monkeypatch: pytest.MonkeyPatch,
-    role: str,
 ) -> None:
     fixture = heldout_fixture
-    fixture.files[role].write_bytes(fixture.files[role].read_bytes() + b" ")
+    heldout_pairs = fixture.files["heldout_pairs"]
+    heldout_pairs.write_bytes(heldout_pairs.read_bytes() + b" ")
     monkeypatch.setattr(
         release_pairwise, "_pairwise_predictions", lambda *_args: pytest.fail("changed inputs reach prediction")
     )
@@ -301,17 +300,6 @@ def test_heldout_rejects_pairwise_only_stage(heldout_fixture: argparse.Namespace
     fixture = heldout_fixture
     fixture.model = fixture.pairwise_stage
     with pytest.raises(ValueError, match="complete"):
-        release_pairwise.evaluate_heldout(fixture)
-    assert not fixture.output_report.exists()
-
-
-def test_heldout_rejects_a_model_trained_on_other_blocks(heldout_fixture: argparse.Namespace) -> None:
-    fixture = heldout_fixture
-    excluded = _write(fixture.model_plan.parent / "excluded_signatures.json", [fixture.development[0]])
-    payload = json.loads(fixture.model_plan.read_text(encoding="utf-8"))
-    payload["datasets"]["qian"]["excluded_signatures"] = {"path": excluded.name, "sha256": sha256_file(excluded)}
-    _write(fixture.model_plan, payload)
-    with pytest.raises(ValueError, match="differ from the model's training population for 'qian'"):
         release_pairwise.evaluate_heldout(fixture)
     assert not fixture.output_report.exists()
 
@@ -330,7 +318,7 @@ def _development_digest(fixture: argparse.Namespace) -> str:
     return block_membership_sha256(blocks)
 
 
-def test_heldout_accepts_a_published_population_correction(
+def test_heldout_accepts_a_published_population_correction_after_relocation(
     heldout_fixture: argparse.Namespace, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # The published data lost one development signature after the model was fit.
@@ -342,6 +330,9 @@ def test_heldout_accepts_a_published_population_correction(
     _write(fixture.model_plan, payload)
     corrected = _development_digest(fixture)
     assert corrected != original
+    with pytest.raises(ValueError, match="differ from the model's training population for 'qian'"):
+        release_pairwise.evaluate_heldout(fixture)
+    assert not fixture.output_report.exists()
     corrections = fixture.model_plan.parent / release_pairwise.POPULATION_CORRECTIONS_NAME
 
     def write(original_digest: str, corrected_digest: str) -> None:
@@ -362,15 +353,7 @@ def test_heldout_accepts_a_published_population_correction(
     assert not fixture.output_report.exists()
 
     write(original, corrected)
-    report = release_pairwise.evaluate_heldout(fixture)
-
-    assert report["pairwise"]["aggregate"]["rows"] == 4
-    assert '"population_correction_applied"' in capsys.readouterr().out
-
-
-def test_heldout_accepts_a_relocated_dataset_root(heldout_fixture: argparse.Namespace, tmp_path: Path) -> None:
-    fixture = heldout_fixture
-    moved = tmp_path / "moved"
+    moved = fixture.dataset_root.parent / "moved"
     # Arrow manifests find the count index by relative path, so both move together.
     counts = fixture.name_counts_index_root.relative_to(fixture.dataset_root.parent)
     shutil.copytree(fixture.dataset_root, moved / fixture.dataset_root.name)
@@ -381,6 +364,7 @@ def test_heldout_accepts_a_relocated_dataset_root(heldout_fixture: argparse.Name
     report = release_pairwise.evaluate_heldout(fixture)
 
     assert report["pairwise"]["aggregate"]["rows"] == 4
+    assert '"population_correction_applied"' in capsys.readouterr().out
 
 
 def test_heldout_rejects_outer_test_pairs_outside_the_heldout_blocks(

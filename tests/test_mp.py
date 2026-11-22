@@ -58,14 +58,10 @@ def test_universal_pool_defaults_to_one_when_cpu_count_unknown(monkeypatch):
         assert pool.processes == 1
 
 
-def test_streaming_imap_rejects_non_positive_chunksize():
+def test_streaming_imap_rejects_non_positive_limits():
     with UniversalPool(processes=1, use_threads=True) as pool:
         with pytest.raises(ValueError, match="chunksize must be >= 1"):
             list(pool.imap(lambda item: item, [1, 2, 3], chunksize=0))
-
-
-def test_streaming_imap_rejects_non_positive_max_prefetch():
-    with UniversalPool(processes=1, use_threads=True) as pool:
         with pytest.raises(ValueError, match="max_prefetch must be >= 1"):
             list(pool.imap(lambda item: item, [1, 2, 3], chunksize=1, max_prefetch=0))
 

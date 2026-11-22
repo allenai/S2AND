@@ -34,11 +34,6 @@ from s2and.text import (
 )
 
 
-@pytest.mark.parametrize(("raw_first", "expected"), [("!!!", ""), (" D’Ángelo ", "dangelo")])
-def test_canonical_first_name_preserves_completion_literals(raw_first: str, expected: str) -> None:
-    assert canonicalize_name_parts(raw_first, None, None).first == expected
-
-
 class TestClusterer(unittest.TestCase):
     def test_normalize_text(self):
         assert "" == normalize_text(None)
@@ -67,8 +62,9 @@ class TestClusterer(unittest.TestCase):
         assert normalize_orcid("٠٠٠٠-٠٠٠٢-1825-009X") is None
         assert normalize_orcid("００００-0002-1825-0097") is None
 
-    def test_canonical_first_treats_unicode_dashes_as_hyphens(self):
-        assert canonicalize_name_parts("Amin-ul-Haq", None, None)[:2] == ("amin ul haq", "")
+    def test_canonical_first_cleans_punctuation_and_preserves_dashes(self):
+        assert canonicalize_name_parts("!!!", None, None).first == ""
+        assert canonicalize_name_parts(" D’Ángelo ", None, None).first == "dangelo"
         assert canonicalize_name_parts("Arif\u2010ullah", None, None)[:2] == ("arif ullah", "")
         assert canonicalize_name_parts("Hua\uff0dli", None, None)[:2] == ("hua li", "")
 
@@ -274,14 +270,13 @@ class TestClusterer(unittest.TestCase):
     def test_detect_language_uses_cld2_reliable_confidence(self):
         import s2and.text as text_module
 
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setattr(
-                text_module.cld2,
-                "detect",
-                lambda _text, **kwargs: (True, kwargs, [("ENGLISH", "en", 92, 0.0)]),
-            )
+        def fake_detect(_text: str, **kwargs: Any):
+            assert kwargs == {"isPlainText": True}
+            return True, None, [("ENGLISH", "en", 92, 0.0)]
 
-            detection = detect_language("hello world")
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(text_module.cld2, "detect", fake_detect)
+            detection = detect_language("<b>hello world</b>")
 
         assert detection.is_reliable is True
         assert detection.is_english is True
@@ -304,21 +299,6 @@ class TestClusterer(unittest.TestCase):
         assert detection.is_english is False
         assert detection.predicted_language == "fr"
         assert detection.language_reliability == 0.0
-
-    def test_detect_language_pins_plain_text_mode(self):
-        import s2and.text as text_module
-
-        captured: dict[str, Any] = {}
-
-        def fake_detect(_text: str, **kwargs: Any):
-            captured.update(kwargs)
-            return True, None, [("ENGLISH", "en", 99, 0.0)]
-
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setattr(text_module.cld2, "detect", fake_detect)
-            detect_language("<b>hello world</b>")
-
-        assert captured == {"isPlainText": True}
 
     def test_detect_language_returns_unknown_for_combining_marks_only_text(self):
         # str.isalpha counts general-category Letter (L*) characters only, so a

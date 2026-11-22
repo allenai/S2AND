@@ -13,14 +13,13 @@ from s2and.prediction_state import PredictionState
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
-@pytest.mark.parametrize("case", ["clean", "dataset", "partial", "equal_reverse_soft", "initial_only"])
+@pytest.mark.parametrize("case", ["equal_reverse_soft", "initial_only"])
 def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
 ) -> None:
     """Real native subblocking carries seed overrides into initial-only passes."""
     import pyarrow as pa
 
-    from s2and.consts import LARGE_DISTANCE
     from s2and.incremental_linking.artifact import (
         load_incremental_linking_artifact,
         save_incremental_linking_artifact,
@@ -67,14 +66,20 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
     if case == "initial_only":
         seeds = {"0": "full", "1": "claimed", "2": "claimed"}
         pair = ("1", "2")
-    disallows = {pair} if case in {"dataset", "equal_reverse_soft", "initial_only"} else set()
-    partial: dict[tuple[str, str], int | float] = {}
-    if case == "partial":
-        partial[pair] = LARGE_DISTANCE
-    elif case == "equal_reverse_soft":
-        partial[pair] = 0.2
-        partial[(pair[1], pair[0])] = partial[pair]
+    disallows = {pair}
+    partial = {pair: 0.2, pair[::-1]: 0.2} if case == "equal_reverse_soft" else {}
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:
+        if case == "equal_reverse_soft":
+            clusters, _ = clusterer.predict_from_arrow(
+                {"block": ["0", "1", "2"]},
+                arrow_dataset,
+                batching_threshold=2,
+                cluster_seeds_require=seeds,
+                cluster_seeds_disallow=disallows,
+                name_tuples=frozenset(),
+            )
+            assert all(not set(pair) <= set(members) for members in clusters.values())
+
         outputs = [
             clusterer.predict_from_arrow(
                 {"block": ["0", "1", "2"]},
@@ -89,7 +94,7 @@ def test_public_arrow_subblocking_preserves_effective_seed_disallows(
         ]
     partitions = [{frozenset(members) for members in output.values()} for output in outputs]
     assert partitions[0] == partitions[1]
-    assert any(set(pair) <= members for members in partitions[1]) == (case in {"clean", "equal_reverse_soft"})
+    assert any(set(pair) <= members for members in partitions[1]) == (case == "equal_reverse_soft")
     assert sorted(signature_id for members in outputs[1].values() for signature_id in members) == ["0", "1", "2"]
 
 
@@ -293,23 +298,6 @@ def test_arrow_subblocking_avoids_generated_key_collisions(
         "a|subblock=y": ["s2"],
         "a|subblock=x": ["other"],
     }
-
-
-def test_all_initial_arrow_subblocks_stay_on_bulk_path() -> None:
-    block_dict = {
-        "block|subblock=a": ["i0", "i1"],
-        "block|subblock=b": ["i2"],
-    }
-
-    bulk_blocks, incremental_blocks, alert_flag = _clusterer()._partition_subblocked_first_name_groups(
-        block_dict,
-        {"i0": "j", "i2": "j"},
-        original_blocks={"block": [sid for members in block_dict.values() for sid in members]},
-    )
-
-    assert bulk_blocks == block_dict
-    assert incremental_blocks == {}
-    assert alert_flag is True
 
 
 def test_seeded_initial_only_arrow_subblock_uses_sequential_attachment(

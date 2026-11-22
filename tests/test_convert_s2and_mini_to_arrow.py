@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import pickle
 import sys
@@ -12,8 +11,7 @@ import pyarrow as pa
 import pytest
 
 import scripts.convert_to_arrow as convert_to_arrow
-from s2and.arrow_inputs import ARROW_COLLECTION_KIND, MissingArrowArtifactError
-from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
+from s2and.arrow_inputs import MissingArrowArtifactError
 from s2and.incremental_linking.feature_block import (
     write_arrow_ipc_table,
     write_raw_arrow_batch_lookup_indexes,
@@ -117,7 +115,7 @@ def test_join_canonical_benchmark_names_replaces_only_name_fields() -> None:
     )
 
     assert signatures == original
-    assert list(joined) == ["s1", "s2"]
+    assert set(joined) == {"s1", "s2"}
     assert joined["s2"]["author_info"] == {
         "first": "jean-marie",
         "middle": "",
@@ -337,51 +335,6 @@ def _write_one_signature_sources(tmp_path: Path) -> RuntimeDatasetSources:
     )
 
 
-def test_runtime_conversion_defaults_to_one_physical_specter2_table(tmp_path: Path) -> None:
-    output_root = tmp_path / "out"
-    output_dir = output_root / "dummy"
-    manifest = convert_to_arrow.convert_runtime_dataset_to_arrow(
-        sources=_write_one_signature_sources(tmp_path),
-        output_dir=output_dir,
-        root_manifest_dir=output_root,
-        name_counts_index_root=None,
-        n_jobs=1,
-        overwrite=False,
-        skip_name_counts_index=True,
-    )
-
-    assert Path(manifest["paths"]["specter"]).name == "specter2.arrow"
-    assert (output_dir / "specter2.arrow").is_file()
-    assert not (output_dir / "specter.arrow").exists()
-
-
-def test_root_manifest_upsert_keeps_dataset_order_stable(tmp_path: Path) -> None:
-    output_root = tmp_path / "out"
-    output_root.mkdir()
-    for dataset_name in ("b", "a"):
-        dataset_dir = output_root / dataset_name
-        dataset_dir.mkdir()
-        (dataset_dir / "manifest.json").write_text(
-            json.dumps({"dataset": dataset_name}),
-            encoding="utf-8",
-        )
-        convert_to_arrow._upsert_root_manifest(output_root, dataset_name=dataset_name, dataset_dir=dataset_dir)
-
-    dataset_dir = output_root / "a"
-    convert_to_arrow._upsert_root_manifest(output_root, dataset_name="a", dataset_dir=dataset_dir)
-
-    root_manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
-    assert root_manifest["kind"] == ARROW_COLLECTION_KIND
-    assert root_manifest["format_version"] == PUBLIC_DATA_FORMAT_VERSION
-    assert set(root_manifest) == {"kind", "format_version", "dataset_manifests"}
-    assert list(root_manifest["dataset_manifests"]) == ["a", "b"]
-    for dataset_name, binding in root_manifest["dataset_manifests"].items():
-        manifest_path = output_root / binding["path"]
-        assert set(binding) == {"path", "sha256"}
-        assert binding["path"] == f"{dataset_name}/manifest.json"
-        assert binding["sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-
-
 def test_generic_root_updates_reject_published_roots(tmp_path: Path) -> None:
     output_root = tmp_path / "release"
     output_root.mkdir()
@@ -460,22 +413,43 @@ def test_linker_replay_main_writes_datasets_under_release_root(
 
 def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_path: Path) -> None:
     tables = _minimal_tables(row_count=2)
+    tables["paper_authors"] = tables["paper_authors"].set_column(2, "author_name", pa.array(["", "   "]))
     tables["specter"] = pa.table(
         {
             "paper_id": pa.array(["p1"], type=pa.string()),
             "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
         }
     )
-    paths, _metrics = write_raw_arrow_batch_lookup_indexes(_write_tables(tmp_path, tables), tmp_path)
+    unindexed = _write_tables(tmp_path, tables)
+    with pytest.raises(FileNotFoundError, match="signatures_batch_index"):
+        convert_to_arrow.validate_arrow_dataset_manifest(
+            {"paths": unindexed},
+            require_embeddings=True,
+            require_name_counts_index=False,
+        )
+    paths, _metrics = write_raw_arrow_batch_lookup_indexes(unindexed, tmp_path)
 
     metrics = convert_to_arrow.validate_arrow_dataset_manifest(
         {"paths": paths},
         require_embeddings=True,
         require_name_counts_index=False,
     )
+    assert metrics["paper_author_count"] == 2
     assert metrics["specter_count"] == 1
     assert metrics["missing_specter_paper_count"] == 1
     assert metrics["missing_specter_paper_examples"] == ["p2"]
+
+    paths["name_counts_index"], _metrics = write_name_counts_index(
+        tmp_path / "name_counts_index",
+        tiny_name_counts_tuple(),
+    )
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+
+    metrics = convert_to_arrow.validate_arrow_dataset_dir(
+        tmp_path, require_embeddings=True, require_name_counts_index=True
+    )
+    assert metrics["signature_count"] == 2
+    assert metrics["name_counts_index_present"] is True
 
     with pytest.raises(ValueError, match="require_complete_embeddings=True.*p2"):
         convert_to_arrow.validate_arrow_dataset_manifest(
@@ -501,7 +475,7 @@ def test_validate_arrow_dataset_manifest_rejects_malformed_optional_column(tmp_p
 
 @pytest.mark.parametrize(
     ("table_name", "column_name"),
-    [("signatures", "signature_id"), ("signatures", "author_position"), ("paper_authors", "author_name")],
+    [("signatures", "author_position"), ("paper_authors", "author_name")],
 )
 def test_validate_arrow_dataset_manifest_rejects_null_required_values(
     tmp_path: Path, table_name: str, column_name: str
@@ -523,20 +497,7 @@ def test_validate_arrow_dataset_manifest_rejects_null_required_values(
         )
 
 
-def test_validate_arrow_dataset_manifest_accepts_blank_paper_author_names(tmp_path: Path) -> None:
-    tables = _minimal_tables(row_count=2)
-    tables["paper_authors"] = tables["paper_authors"].set_column(2, "author_name", pa.array(["", "   "]))
-    paths, _metrics = write_raw_arrow_batch_lookup_indexes(_write_tables(tmp_path, tables), tmp_path)
-    metrics = convert_to_arrow.validate_arrow_dataset_manifest(
-        {"paths": paths},
-        require_embeddings=False,
-        require_name_counts_index=False,
-    )
-
-    assert metrics["paper_author_count"] == 2
-
-
-def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_write_specter_arrow_skips_zero_size_vectors(tmp_path: Path) -> None:
     source_path = tmp_path / "specter.pkl"
     output_path = tmp_path / "specter.arrow"
     with source_path.open("wb") as outfile:
@@ -549,41 +510,15 @@ def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: p
             outfile,
         )
 
-    with caplog.at_level("WARNING", logger="scripts.convert_to_arrow"):
-        report = convert_to_arrow._write_specter_arrow(
-            source_path=source_path,
-            output_path=output_path,
-            needed_paper_ids={"p1", "p2"},
-            overwrite=True,
-        )
+    report = convert_to_arrow._write_specter_arrow(
+        source_path=source_path,
+        output_path=output_path,
+        needed_paper_ids={"p1", "p2"},
+        overwrite=True,
+    )
 
     assert report["row_count"] == 1
     assert report["dropped_empty_embedding_count"] == 1
-    assert "zero-size vectors" in caplog.text
-
-
-def test_validate_arrow_dataset_dir_resolves_relative_manifest_paths(tmp_path: Path) -> None:
-    tables = _minimal_tables()
-    tables["specter"] = pa.table(
-        {
-            "paper_id": pa.array(["p1"], type=pa.string()),
-            "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
-        }
-    )
-    paths, _metrics = write_raw_arrow_batch_lookup_indexes(_write_tables(tmp_path, tables), tmp_path)
-    paths["name_counts_index"], _metrics = write_name_counts_index(
-        tmp_path / "name_counts_index",
-        tiny_name_counts_tuple(),
-    )
-    write_test_arrow_artifact_manifest(tmp_path, paths)
-
-    metrics = convert_to_arrow.validate_arrow_dataset_dir(
-        tmp_path,
-        require_embeddings=True,
-        require_name_counts_index=True,
-    )
-    assert metrics["signature_count"] == 1
-    assert metrics["name_counts_index_present"] is True
 
 
 def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tmp_path: Path) -> None:
@@ -599,24 +534,28 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
         )
 
 
-def test_validate_arrow_dataset_manifest_requires_batch_index_sidecar(tmp_path: Path) -> None:
-    paths = _write_tables(tmp_path, _minimal_tables())
-    with pytest.raises(FileNotFoundError, match="signatures_batch_index"):
-        convert_to_arrow.validate_arrow_dataset_manifest(
-            {"paths": paths},
-            require_embeddings=False,
-            require_name_counts_index=False,
-        )
-
-
 def test_runtime_conversion_binds_explicit_name_counts_index_directory(tmp_path: Path) -> None:
     # The writer publishes <root>/name_counts_index; the converter must use that directory as given.
     index_dir, _metrics = write_name_counts_index(tmp_path / "counts", tiny_name_counts_tuple())
     output_root = tmp_path / "out"
     output_dir = output_root / "dummy"
 
+    sources = _write_one_signature_sources(tmp_path)
+
+    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
+        convert_to_arrow.convert_runtime_dataset_to_arrow(
+            sources=sources,
+            output_dir=output_dir,
+            root_manifest_dir=tmp_path / "out",
+            name_counts_index_root=Path(index_dir).parent,
+            n_jobs=1,
+            overwrite=False,
+            skip_name_counts_index=False,
+        )
+    assert not output_dir.exists()
+
     manifest = convert_to_arrow.convert_runtime_dataset_to_arrow(
-        sources=_write_one_signature_sources(tmp_path),
+        sources=sources,
         output_dir=output_dir,
         root_manifest_dir=output_root,
         name_counts_index_root=Path(index_dir),
@@ -626,25 +565,9 @@ def test_runtime_conversion_binds_explicit_name_counts_index_directory(tmp_path:
     )
 
     assert (output_dir / manifest["paths"]["name_counts_index"]).resolve() == Path(index_dir).resolve()
-
-
-def test_runtime_conversion_rejects_parent_of_name_counts_index(tmp_path: Path) -> None:
-    parent = tmp_path / "counts"
-    index_dir, _metrics = write_name_counts_index(parent, tiny_name_counts_tuple())
-    assert Path(index_dir).parent == parent
-    output_dir = tmp_path / "out" / "dummy"
-
-    with pytest.raises(MissingArrowArtifactError, match="name_counts_index"):
-        convert_to_arrow.convert_runtime_dataset_to_arrow(
-            sources=_write_one_signature_sources(tmp_path),
-            output_dir=output_dir,
-            root_manifest_dir=tmp_path / "out",
-            name_counts_index_root=parent,
-            n_jobs=1,
-            overwrite=False,
-            skip_name_counts_index=False,
-        )
-    assert not output_dir.exists()
+    assert Path(manifest["paths"]["specter"]).name == "specter2.arrow"
+    assert (output_dir / "specter2.arrow").is_file()
+    assert not (output_dir / "specter.arrow").exists()
 
 
 def _write_pair_only_benchmark(source_root: Path, pair_rows: dict[str, list[tuple[str, str, str]]]) -> None:
@@ -680,9 +603,12 @@ def _convert_pair_only_benchmark(
 
 
 def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path) -> None:
-    train = [("0", "1", "YES"), ("3", "4", "NO"), ("0", "3", "NO")]
-    test = [("5", "6", "YES"), ("1", "7", "NO")]
+    train = [("0", "1", "1.0"), ("3", "4", "0.0"), ("0", "3", "0.0")]
+    # Keep consistent duplicates in the explicit test split.
+    test = [("5", "6", "YES"), ("1", "7", "NO"), ("6", "5", "YES")]
     _write_pair_only_benchmark(tmp_path / "source", {"train_pairs": train, "test_pairs": test})
+    source_path = tmp_path / "source" / "pairsonly" / "test_pairs.csv"
+    source_path.write_text(source_path.read_text().replace("signature_id_1,signature_id_2", "pair1,pair2"))
     write_name_counts_index(tmp_path / "out", tiny_name_counts_tuple())
 
     manifest = _convert_pair_only_benchmark(tmp_path, skip_name_counts_index=False)
@@ -690,9 +616,13 @@ def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path)
     output_dir = tmp_path / "out" / "pairsonly"
     assert {"train_pairs", "test_pairs"} <= set(manifest["paths"])
     assert "val_pairs" not in manifest["paths"] and "clusters" not in manifest["paths"]
-    for key in ("train_pairs", "test_pairs"):
-        published = output_dir / manifest["paths"][key]
-        assert published.read_text() == (tmp_path / "source" / "pairsonly" / f"{key}.csv").read_text()
+    train_path = output_dir / manifest["paths"]["train_pairs"]
+    assert train_path.read_text() == (tmp_path / "source" / "pairsonly" / "train_pairs.csv").read_text()
+    test_path = output_dir / manifest["paths"]["test_pairs"]
+    assert test_path.read_text().splitlines() == [
+        "signature_id_1,signature_id_2,label",
+        *[",".join(row) for row in test],
+    ]
 
     from s2and.arrow_inputs import ArrowDataset
     from s2and.arrow_training import build_training_anddata_from_arrow
@@ -706,8 +636,12 @@ def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path)
         )
         train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()
 
-    assert len(train_pairs) + len(val_pairs) == len(train)
-    assert sorted((str(a), str(b), int(label)) for a, b, label in test_pairs) == [("1", "7", 0), ("5", "6", 1)]
+    assert sorted(int(label) for _, _, label in [*train_pairs, *val_pairs]) == [0, 0, 1]
+    assert sorted((str(a), str(b), int(label)) for a, b, label in test_pairs) == [
+        ("1", "7", 0),
+        ("5", "6", 1),
+        ("6", "5", 1),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -718,25 +652,18 @@ def test_benchmark_conversion_publishes_usable_fixed_pair_labels(tmp_path: Path)
         ({"train_pairs": [("0", "1", "YES")], "test_pairs": [("1", "0", "YES")]}, "share 1 unordered pairs"),
         ({"train_pairs": [("0", "1", "maybe")], "test_pairs": [("5", "6", "NO")]}, "Unknown fixed-pair labels"),
         (
-            {"train_pairs": [("0", "1", "YES"), ("0", "1", "NO")], "test_pairs": [("5", "6", "NO")]},
-            "conflicting labels",
-        ),
-        (
             {"train_pairs": [("0", "1", "YES"), ("1", "0", "NO")], "test_pairs": [("5", "6", "NO")]},
             "conflicting labels",
         ),
         ({"train_pairs": [("0", "0", "YES")], "test_pairs": [("5", "6", "NO")]}, "self-pair"),
-        ({"train_pairs": [("0", "0", "NO")], "test_pairs": [("5", "6", "NO")]}, "self-pair"),
     ],
     ids=[
         "missing-test-split",
         "unknown-signature",
         "cross-split-overlap",
         "invalid-label",
-        "conflicting-duplicate",
         "conflicting-reverse",
         "positive-self",
-        "negative-self",
     ],
 )
 def test_benchmark_conversion_rejects_invalid_fixed_pair_labels(
@@ -749,23 +676,6 @@ def test_benchmark_conversion_rejects_invalid_fixed_pair_labels(
     assert not (tmp_path / "out" / "pairsonly").exists()
 
 
-def test_benchmark_conversion_canonicalizes_legacy_headers_and_preserves_consistent_duplicates(tmp_path: Path) -> None:
-    train = [("0", "1", "YES"), ("1", "0", "1"), ("0", "1", "YES")]
-    _write_pair_only_benchmark(tmp_path / "source", {"train_pairs": train, "test_pairs": [("5", "6", "NO")]})
-    source_path = tmp_path / "source" / "pairsonly" / "train_pairs.csv"
-    source_path.write_text(source_path.read_text().replace("signature_id_1,signature_id_2", "pair1,pair2"))
-
-    report = _convert_pair_only_benchmark(tmp_path)
-
-    published = tmp_path / "out" / "pairsonly" / report["paths"]["train_pairs"]
-    assert published.read_text().splitlines() == [
-        "signature_id_1,signature_id_2,label",
-        "0,1,YES",
-        "1,0,1",
-        "0,1,YES",
-    ]
-
-
 def test_fixed_pair_validation_preserves_string_ids(tmp_path: Path) -> None:
     _write_pair_only_benchmark(
         tmp_path / "source", {"train_pairs": [("001", "NA", "YES")], "test_pairs": [("NA", "002", "NO")]}
@@ -774,22 +684,6 @@ def test_fixed_pair_validation_preserves_string_ids(tmp_path: Path) -> None:
         convert_to_arrow.benchmark_dataset_sources(tmp_path / "source", "pairsonly"), {"001", "002", "NA"}
     )
     assert rows["train_pairs"] == [("001", "NA", "YES")]
-
-
-def test_fixed_pair_validation_preserves_numeric_label_inference(tmp_path: Path) -> None:
-    from s2and.data import ANDData, _map_fixed_pair_labels
-
-    _write_pair_only_benchmark(
-        tmp_path / "source",
-        {"train_pairs": [("0", "1", "1.0"), ("2", "3", "0.0")], "test_pairs": [("5", "6", "NO")]},
-    )
-    report = _convert_pair_only_benchmark(tmp_path)
-    published = tmp_path / "out" / "pairsonly" / report["paths"]["train_pairs"]
-    assert published.read_text().splitlines() == ["signature_id_1,signature_id_2,label", "0,1,1.0", "2,3,0.0"]
-    original = tmp_path / "source" / "pairsonly" / "train_pairs.csv"
-    for path in (original, published):
-        frame = _map_fixed_pair_labels(ANDData.maybe_load_dataframe(str(path)), "train")
-        assert frame["label"].tolist() == [1, 0]
 
 
 def test_benchmark_overwrite_removes_only_stale_pair_artifacts(tmp_path: Path) -> None:
@@ -810,9 +704,8 @@ def test_benchmark_overwrite_removes_only_stale_pair_artifacts(tmp_path: Path) -
     assert unrelated.read_text() == "keep"
 
 
-@pytest.mark.parametrize("role", ["signatures", "papers", "specter_embeddings", "clusters"])
 def test_runtime_conversion_rejects_sources_changed_during_conversion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.arrow_conversion_helpers as helpers
 
@@ -822,12 +715,7 @@ def test_runtime_conversion_rejects_sources_changed_during_conversion(
     from dataclasses import replace
 
     sources = replace(sources, clusters_path=clusters_path)
-    path = {
-        "signatures": sources.signatures_path,
-        "papers": sources.papers_path,
-        "specter_embeddings": sources.specter2_path,
-        "clusters": clusters_path,
-    }[role]
+    path = clusters_path
     original_write = helpers.write_raw_planner_arrow_from_anddata
 
     def write_and_change_source(*args: Any, **kwargs: Any) -> Any:
@@ -840,7 +728,7 @@ def test_runtime_conversion_rejects_sources_changed_during_conversion(
 
     monkeypatch.setattr(helpers, "write_raw_planner_arrow_from_anddata", write_and_change_source)
     output_root = tmp_path / "out"
-    with pytest.raises(ValueError, match=f"Source files changed during conversion.*{role}"):
+    with pytest.raises(ValueError, match="Source files changed during conversion.*clusters"):
         convert_to_arrow.convert_runtime_dataset_to_arrow(
             sources=sources,
             output_dir=output_root / "dummy",

@@ -49,23 +49,26 @@ def _labels(condensed: np.ndarray) -> list[int]:
     return [int(label) for label in labels]
 
 
-def test_disallow_veto_isolates_the_profile() -> None:
-    # The production failure: one hard negative from x to the anchor keeps
-    # the placed pair away from the whole body of work.
-    square = _square()
-    square[0, 6] = square[6, 0] = LARGE_DISTANCE
-    labels = _labels(squareform(square))
-    assert labels[0] == labels[1]
-    assert labels[0] != labels[2]
-
-
 def test_eviction_keeps_profile_and_removes_excluded_mention() -> None:
-    condensed = squareform(_square())
+    square = _square()
+    condensed = squareform(square)
+    square[0, 6] = square[6, 0] = LARGE_DISTANCE
+    vetoed = _labels(squareform(square))
+    assert vetoed[0] == vetoed[1] != vetoed[2]
+
+    scratch = np.zeros_like(condensed)
+
+    def reuse_scratch(matrix: np.ndarray) -> list[int]:
+        assert matrix is scratch
+        return _labels(matrix)
+
     exclusions = normalize_profile_exclusions([("p0", "x")])
     first = _labels(condensed.copy())
     assert first[0] == first[6]
 
-    labels = enforce_profile_exclusions_in_block(SIGNATURES, first, condensed, exclusions, _labels)
+    labels = enforce_profile_exclusions_in_block(
+        SIGNATURES, first, condensed, exclusions, reuse_scratch, scratch=scratch
+    )
 
     profile = {s for s, label in zip(SIGNATURES, labels, strict=True) if label == labels[0]}
     assert profile == {"p0", "p1", "w0", "w1", "w2", "w3"}
@@ -107,17 +110,12 @@ def test_unsettled_block_returns_labels_for_the_final_pass() -> None:
     labels = enforce_profile_exclusions_in_block(SIGNATURES, stuck, condensed, exclusions, lambda _matrix: stuck)
 
     assert labels == stuck
-    repaired, moved = evict_profile_exclusion_violations({"a": list(SIGNATURES)}, exclusions)
-    assert moved == 1
-    assert "x" not in repaired["a"]
-
-
-def test_final_pass_moves_violations_to_singletons() -> None:
-    clusters = {"a": ["p0", "w0", "x"], "b": ["y"]}
-    repaired, moved = evict_profile_exclusion_violations(clusters, normalize_profile_exclusions([("p0", "x")]))
-    assert moved == 1
-    assert repaired["a"] == ["p0", "w0"]
-    assert ["x"] in repaired.values()
+    exclusions = normalize_profile_exclusions([("p0", "x"), ("p", "q"), ("q", "p")])
+    repaired, moved = evict_profile_exclusion_violations({"a": list(SIGNATURES), "b": ["p", "q"]}, exclusions)
+    assert moved == 3
+    assert repaired["a"] == SIGNATURES[:-1]
+    assert "b" not in repaired
+    assert sorted(members for key, members in repaired.items() if key != "a") == [["p"], ["q"], ["x"]]
 
 
 def test_validation_rejects_exclusion_of_a_placed_mention() -> None:
@@ -218,29 +216,3 @@ def test_mutual_exclusions_separate_the_two_mentions() -> None:
     assert labels[0] != labels[6]
     assert len(calls) == 1
     assert all(label in (labels[0], labels[6]) for label in labels)
-
-
-def test_final_pass_drops_emptied_clusters() -> None:
-    repaired, moved = evict_profile_exclusion_violations(
-        {"a": ["p", "x"]}, normalize_profile_exclusions([("p", "x"), ("x", "p")])
-    )
-    assert moved == 2
-    assert sorted(repaired.values()) == [["p"], ["x"]]
-
-
-def test_relink_reuses_the_scratch_buffer() -> None:
-    condensed = squareform(_square())
-    scratch = np.zeros_like(condensed)
-    seen: list[bool] = []
-
-    def recording(matrix: np.ndarray) -> list[int]:
-        seen.append(matrix is scratch)
-        return _labels(matrix)
-
-    first = _labels(condensed.copy())
-    labels = enforce_profile_exclusions_in_block(
-        SIGNATURES, first, condensed, normalize_profile_exclusions([("p0", "x")]), recording, scratch=scratch
-    )
-
-    assert seen == [True]
-    assert labels[6] != labels[0]

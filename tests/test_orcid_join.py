@@ -36,41 +36,64 @@ def _partition(clusters: dict[str, list[str]]) -> set[frozenset[str]]:
     return {frozenset(members) for members in clusters.values()}
 
 
-@pytest.mark.parametrize("guard", ["enabled", "off", "suppressed", "disallow", "exclusion", "seeds", "name", "noise"])
-def test_native_cross_subblock_join_stays_in_original_block(tmp_path: Path, guard: str) -> None:
-    names = (
-        [("Ada", "Jane", "Smith")] * 3 + [("Alma", "Jane", "Smith")] * 3
-        if guard == "name"
-        else [("Ada", "Jane", "Smith")] * 6
-    )
-    dataset = _dataset(names * 2, {})
-    observed = dict.fromkeys(dataset.signatures, ORCID)
-    if guard == "noise":
-        observed = {s: ORCID for s in ("0", "1", "2", "3", "6", "7", "8", "9")}
-    _set_orcids(dataset, observed)
+def test_native_cross_subblock_join_stays_in_original_block(tmp_path: Path) -> None:
+    block_keys = ("exclusion", "plain", "other", "disallow", "seeds", "name", "noise")
+    blocks = {key: [str(i * 6 + j) for j in range(6)] for i, key in enumerate(block_keys)}
+    names = [("Ada", "Jane", "Smith")] * (6 * len(blocks))
+    for signature_id in blocks["name"][3:]:
+        names[int(signature_id)] = ("Alma", "Jane", "Smith")
+    dataset = _dataset(names, {})
+    _set_orcids(dataset, dict.fromkeys(set(dataset.signatures) - set(blocks["noise"][4:]), ORCID))
     prepare_seed_arrow_bundle(dataset, tmp_path)
     model = _model(0.15)
-    model.orcid_join = guard != "off"
-    model.suppress_orcid = guard == "suppressed"
-    blocks = {"one": list("012345"), "two": [str(i) for i in range(6, 12)]}
+    model.orcid_join = True
+    anchor, neighbor, *_, last = blocks["exclusion"]
+    exclusions = [(anchor, neighbor), (anchor, last)]
+    disallow = (blocks["disallow"][0], blocks["disallow"][-1])
+    seeds = (blocks["seeds"][0], blocks["seeds"][-1])
     with ArrowDataset.open(tmp_path) as arrow:
         clusters, _ = model.predict_from_arrow(
-            blocks,
+            {key: ids for key, ids in blocks.items() if key != "exclusion"},
             arrow,
             batching_threshold=3,
             name_tuples=frozenset(),
-            cluster_seeds_disallow=[("0", "5"), ("6", "11")] if guard == "disallow" else None,
-            profile_exclusions=[("0", "5"), ("6", "11")] if guard == "exclusion" else None,
-            cluster_seeds_require={"0": "A", "5": "B", "6": "C", "11": "D"} if guard == "seeds" else None,
+            cluster_seeds_disallow=[disallow],
+            cluster_seeds_require={seeds[0]: "A", seeds[1]: "B"},
         )
-    partition = _partition(clusters)
-    assert set().union(*partition) == set(dataset.signatures)
-    assert sum(map(len, partition)) == len(dataset.signatures)
-    if guard == "enabled":
-        assert partition == {frozenset(members) for members in blocks.values()}
-    else:
-        assert len(partition) >= 4
-        assert all(any(cluster <= set(group) for group in blocks.values()) for cluster in partition)
+        # Exercise profile eviction with an otherwise unconstrained call.
+        excluded, _ = model.predict_from_arrow(
+            {"exclusion": blocks["exclusion"]},
+            arrow,
+            batching_threshold=3,
+            name_tuples=frozenset(),
+            profile_exclusions=exclusions,
+        )
+        plain = {key: blocks[key] for key in ("plain", "other")}
+        for enabled, suppressed in ((False, False), (True, True)):
+            model.orcid_join, model.suppress_orcid = enabled, suppressed
+            separated, _ = model.predict_from_arrow(plain, arrow, batching_threshold=3, name_tuples=frozenset())
+            assert sorted(sid for members in separated.values() for sid in members) == sorted(
+                plain["plain"] + plain["other"]
+            )
+            for ids in plain.values():
+                group = frozenset(ids)
+                overlaps = {cluster for cluster in _partition(separated) if cluster & group}
+                assert len(overlaps) >= 2 and all(cluster < group for cluster in overlaps)
+
+    partition = _partition(clusters) | _partition(excluded)
+    assert sorted(sid for members in (*clusters.values(), *excluded.values()) for sid in members) == sorted(
+        dataset.signatures
+    )
+    for pair in (*exclusions, disallow, seeds):
+        pair_ids = frozenset(pair)
+        assert all(not pair_ids <= cluster for cluster in partition), pair
+    for key, ids in blocks.items():
+        group = frozenset(ids)
+        overlaps = {cluster for cluster in partition if cluster & group}
+        if key in ("plain", "other"):
+            assert overlaps == {group}
+        else:
+            assert len(overlaps) >= 2 and all(cluster < group for cluster in overlaps), key
 
 
 @pytest.mark.parametrize(("size", "joined"), [(40, True), (41, False)])
@@ -93,15 +116,14 @@ def test_cross_subblock_join_requires_orcid_coverage(size: int, joined: bool) ->
 
 
 @pytest.mark.parametrize(
-    ("left_name", "right_name", "joined"),
+    ("left_name", "right_name"),
     [
-        (("ana", ""), ("ana", "c"), True),
-        (("ana", "c"), ("ana", "m"), False),
-        (("jean pierre", ""), ("jean luc", ""), False),
+        (("ana", "c"), ("ana", "m")),
+        (("jean pierre", ""), ("jean luc", "")),
     ],
 )
 def test_cross_subblock_join_refuses_clusters_the_name_rule_keeps_apart(
-    left_name: tuple[str, str], right_name: tuple[str, str], joined: bool
+    left_name: tuple[str, str], right_name: tuple[str, str]
 ) -> None:
     from s2and.orcid_join import join_orcids_across_subblocks
 
@@ -120,7 +142,7 @@ def test_cross_subblock_join_refuses_clusters_the_name_rule_keeps_apart(
         seed_groups=None,
     )
 
-    assert (len(actual) == 1) == joined
+    assert _partition(actual) == _partition(clusters)
 
 
 @pytest.mark.parametrize(("bonus", "scans"), [(0.0, 0), (8.0, 1)])

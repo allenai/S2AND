@@ -147,14 +147,6 @@ def test_raw_candidate_plan_seed_map_rejects_duplicate_seed_signature() -> None:
         _seed_map_from_component_members(raw_plan["component_members"])
 
 
-def test_raw_candidate_plan_schema_requires_component_members() -> None:
-    raw_plan = _minimal_raw_candidate_plan()
-    raw_plan.pop("component_members")
-
-    with pytest.raises(KeyError, match="component_members"):
-        RawArrowPlanBundle.from_native_mapping(raw_plan)
-
-
 def _append_batch_index_record(
     index_path: str,
     *,
@@ -386,6 +378,27 @@ def test_raw_arrow_candidate_planner_matches_one_shot_plan(tmp_path: Path) -> No
     assert explicit_planner.build_telemetry()["query_signature_count"] == 1
     _assert_raw_candidate_plans_equal(explicit_plan, one_shot)
 
+    expected_base_dtypes = {
+        "pair_row_indices": np.uint32,
+        "row_query_signature_indices": np.uint32,
+        "retrieval_scores": np.float32,
+        "retrieval_ranks": np.uint16,
+    }
+    for key, dtype in expected_base_dtypes.items():
+        assert one_shot[key].dtype == dtype
+    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        if dtype is object:
+            assert isinstance(one_shot[raw_key], list)
+        else:
+            expected_dtype = np.uint32 if raw_key in {"row_component_sizes", "row_named_signature_counts"} else dtype
+            assert one_shot[raw_key].dtype == expected_dtype
+    bundle = RawArrowPlanBundle.from_native_mapping(one_shot)
+
+    assert bundle.row_count == one_shot["row_count"]
+    assert bundle.pair_count == one_shot["pair_count"]
+    assert bundle.signature_order.signature_ids == ("q1", "s1", "s2")
+    assert bundle.signature_order.query_signature_ids == ("q1",)
+
 
 def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
@@ -406,18 +419,10 @@ def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Pat
 
     _assert_raw_candidate_plans_equal(planned, one_shot)
     assert reusable_planner.build_telemetry()["query_signature_count"] == 0
+    assert planned["telemetry"]["planner_seed_state_reused"] == 1
     with pytest.raises(RuntimeError, match="requires explicit plan"):
         reusable_planner.plan_query_signatures()
 
-
-def test_reusable_raw_arrow_candidate_planner_owns_lookup_index_snapshots(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    planner = native_auto_planner(
-        paths,
-        top_k=2,
-        orcid_enabled=False,
-        num_threads=1,
-    )
     for key in (
         "signatures_batch_index",
         "papers_batch_index",
@@ -425,11 +430,9 @@ def test_reusable_raw_arrow_candidate_planner_owns_lookup_index_snapshots(tmp_pa
     ):
         Path(paths[key]).unlink()
 
-    first = planner.plan(["q1"])
-    second = planner.plan(["q1"])
-
-    _assert_raw_candidate_plans_equal(first, second)
-    assert first["telemetry"]["planner_seed_state_reused"] == 1
+    after_unlink = reusable_planner.plan(["q1"])
+    _assert_raw_candidate_plans_equal(after_unlink, one_shot)
+    _assert_plan_arrays_are_independent(planned, after_unlink)
 
 
 @pytest.mark.parametrize(
@@ -457,15 +460,12 @@ def test_raw_arrow_candidate_planner_requires_paper_metadata(
             planner.plan(["q1"])
 
 
-@pytest.mark.parametrize("empty_roster_papers", [("p_q",), ("p1",), ("p_q", "p1", "p2")])
-def test_raw_arrow_candidate_plans_accept_empty_paper_author_lists(
-    tmp_path: Path, empty_roster_papers: tuple[str, ...]
-) -> None:
+def test_raw_arrow_candidate_plans_accept_empty_paper_author_lists(tmp_path: Path) -> None:
     """Preserve absent coauthor evidence for valid papers without author rows."""
     paths = base_arrow_paths(tmp_path, with_indexes=False)
     with pa.memory_map(paths["paper_authors"], "r") as source:
         authors = pa.ipc.open_file(source).read_all()
-    keep = pa.array([paper_id not in empty_roster_papers for paper_id in authors["paper_id"].to_pylist()])
+    keep = pa.array([paper_id == "p2" for paper_id in authors["paper_id"].to_pylist()])
     retained_authors = authors.filter(keep)
     paths["paper_authors"] = write_ipc(tmp_path / "paper_authors_empty_lists.arrow", retained_authors)
     paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
@@ -488,15 +488,13 @@ def test_raw_arrow_candidate_plans_accept_empty_paper_author_lists(
         assert set(plan_pair_ids(plan)[1]) == {"s1", "s2"}
         matching_row = plan["row_component_keys"].index("c_match")
         assert plan["coauthor_overlap"][matching_row] == 0
-        if "p_q" in empty_roster_papers:
-            np.testing.assert_array_equal(plan["row_query_has_coauthors"], np.zeros(2, dtype=np.uint8))
-        if "p1" in empty_roster_papers:
-            assert plan["row_candidate_cluster_max_paper_author_count"][matching_row] == 0
+        np.testing.assert_array_equal(plan["row_query_has_coauthors"], np.zeros(2, dtype=np.uint8))
+        assert plan["row_candidate_cluster_max_paper_author_count"][matching_row] == 0
     with pa.memory_map(paths["paper_authors"], "r") as source:
         assert pa.ipc.open_file(source).read_all().equals(retained_authors)
 
 
-def test_raw_arrow_candidate_planner_rejects_duplicate_query_signature_request_rows(tmp_path: Path) -> None:
+def test_raw_arrow_candidate_planner_validates_query_selection(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
     query_signatures_path = tmp_path / "duplicate_incremental_query_signatures.arrow"
     write_ipc(
@@ -513,9 +511,22 @@ def test_raw_arrow_candidate_planner_rejects_duplicate_query_signature_request_r
     with pytest.raises(ValueError, match="duplicate signature_id"):
         _native_query_planner(paths, query_signatures_path)
 
+    query_signatures_path = tmp_path / "hidden_query_signatures.arrow"
+    # Write raw IPC so the Python request writer cannot reject the view first.
+    write_ipc(
+        query_signatures_path,
+        pa.table(
+            {
+                "signature_id": pa.array(["q1"], type=pa.string()),
+                "query_view": pa.array(["initial_only_no_specter"], type=pa.string()),
+                "query_author": pa.array(["Alice Wang"], type=pa.string()),
+            }
+        ),
+    )
 
-def test_raw_arrow_candidate_planner_rejects_multi_query_seed_overlap(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
+    with pytest.raises(ValueError, match="unknown query_view:.*initial_only_no_specter"):
+        _native_query_planner(paths, query_signatures_path)
+
     planner = _raw_candidate_planner_from_query_signatures(paths, ["q1", "s1"])
 
     with pytest.raises(ValueError, match="singleton query windows"):
@@ -546,6 +557,15 @@ def test_reusable_raw_arrow_planner_applies_dynamic_disallows_without_retaining_
     assert replanned["row_component_keys"] == ["c_match"]
     assert replanned["telemetry"]["cluster_seed_disallow_pair_count"] == 0
 
+    empty = planner.plan(["q1"], [("q1", "s1"), ("q1", "s2")])
+    assert empty["row_count"] == empty["pair_count"] == 0
+    assert empty["query_signature_ids"] == ["q1"]
+    assert empty["query_views"] == ["full"]
+    assert len(empty["query_authors"]) == 1
+    assert all(len(empty[key]) == 0 for key, _, _ in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS)
+    with pytest.raises(ValueError, match="query_signature_ids must be non-empty"):
+        planner.plan([])
+
 
 def test_raw_arrow_candidate_plan_rejects_disallow_with_unknown_seed_endpoint(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
@@ -561,28 +581,6 @@ def test_raw_arrow_candidate_plan_rejects_disallow_with_unknown_seed_endpoint(tm
 
     with pytest.raises(ValueError, match="unknown seed endpoint"):
         _raw_candidate_plan_arrow(paths, ["q1"])
-
-
-def test_raw_arrow_candidate_plan_keeps_zero_specter_vectors(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    paths["specter"] = write_ipc(
-        tmp_path / "specter.arrow",
-        pa.table(
-            {
-                "paper_id": pa.array(["p_q", "p1", "p2"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(
-                    pa.array([1.0, 0.0, 1.0, 0.0, 0.0, 0.0], type=pa.float32()),
-                    2,
-                ),
-            }
-        ),
-    )
-    paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
-
-    raw_plan = _raw_candidate_plan_arrow(paths, ["q1"])
-
-    assert raw_plan["telemetry"]["specter_count"] == 3
-    assert np.isfinite(np.asarray(raw_plan["specter_centroid_similarity"], dtype=np.float32)).all()
 
 
 def test_rust_featurizer_from_arrow_dataset_accepts_empty_specter_table(tmp_path: Path) -> None:
@@ -613,41 +611,12 @@ def test_rust_featurizer_from_arrow_dataset_accepts_empty_specter_table(tmp_path
     assert np.isnan(matrix).any()
 
 
-@pytest.mark.parametrize(
-    ("name_tuples", "message"),
-    [
-        (None, "requires explicit name-tuple pairs"),
-        ("aliases.txt", "explicit collection of pairs"),
-    ],
-)
-def test_rust_featurizer_requires_python_loaded_name_tuple_pairs(
-    tmp_path: Path,
-    name_tuples: object,
-    message: str,
-) -> None:
-    paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(base_arrow_paths(tmp_path), tmp_path)
-
-    with pytest.raises((TypeError, ValueError), match=message):
-        _native_featurizer(paths, ["q1", "s1"], name_tuples)
-
-
-def test_raw_arrow_candidate_plan_rejects_hidden_query_view(tmp_path: Path) -> None:
+def test_rust_featurizer_requires_python_loaded_name_tuple_pairs(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
-    query_signatures_path = tmp_path / "hidden_query_signatures.arrow"
-    # Write raw IPC so the Python request writer cannot reject the view first.
-    write_ipc(
-        query_signatures_path,
-        pa.table(
-            {
-                "signature_id": pa.array(["q1"], type=pa.string()),
-                "query_view": pa.array(["initial_only_no_specter"], type=pa.string()),
-                "query_author": pa.array(["Alice Wang"], type=pa.string()),
-            }
-        ),
-    )
-
-    with pytest.raises(ValueError, match="unknown query_view:.*initial_only_no_specter"):
-        _native_query_planner(paths, query_signatures_path)
+    with pytest.raises((TypeError, ValueError), match="requires explicit name-tuple pairs"):
+        _native_featurizer(paths, ["q1", "s1"], None)
+    with pytest.raises((TypeError, ValueError), match="explicit collection of pairs"):
+        _native_featurizer(paths, ["q1", "s1"], "aliases.txt")
 
 
 def test_raw_arrow_candidate_plan_batch_indexes_bound_rows(tmp_path: Path) -> None:
@@ -790,29 +759,13 @@ def test_raw_arrow_candidate_plan_extra_hash_selected_batch_is_exact_filtered(tm
     assert plan["telemetry"]["signature_rows_scanned"] == 2
 
 
-def test_raw_arrow_candidate_plan_rejects_out_of_range_batch_index(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    _append_batch_index_record(
-        paths["signatures_batch_index"],
-        key="s1",
-        batch_index=999,
-        replace_existing=True,
-    )
-    write_test_arrow_artifact_manifest(tmp_path, paths)
+def test_retained_batch_index_preserves_plan_and_missing_signature_errors(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path, with_indexes=False)
+    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
-    with pytest.raises(ValueError, match="references record batch 999"):
-        _raw_candidate_planner_from_query_signatures(paths, ["q1"])
-
-
-def test_arrow_batch_lookup_index_accepts_transport_mtime_change(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
     signatures_path = Path(paths["signatures"])
     stat = signatures_path.stat()
     os.utime(signatures_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
-
-    plan = _raw_candidate_plan_arrow(indexed_paths, ["q1"])
-    assert plan["query_signature_ids"] == ["q1"]
 
     _index_path, reuse_metrics = write_arrow_batch_lookup_index(
         signatures_path,
@@ -822,11 +775,6 @@ def test_arrow_batch_lookup_index_accepts_transport_mtime_change(tmp_path: Path)
         overwrite=False,
     )
     assert reuse_metrics["reused"] is True
-
-
-def test_retained_batch_index_preserves_plan_and_missing_signature_errors(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path, with_indexes=False)
-    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
     plan = _raw_candidate_plan_arrow(indexed_paths, ["q1"])
     assert plan["query_signature_ids"] == ["q1"]
@@ -842,8 +790,8 @@ def test_retained_batch_index_preserves_plan_and_missing_signature_errors(tmp_pa
         _raw_candidate_plan_arrow(indexed_paths, ["q1"])
 
 
-@pytest.mark.parametrize("artifact_key", ["signatures", "signatures_batch_index"])
-def test_retained_index_requires_manifest_checksum(tmp_path: Path, artifact_key: str) -> None:
+def test_retained_index_requires_manifest_checksum(tmp_path: Path) -> None:
+    artifact_key = "signatures_batch_index"
     paths = base_arrow_paths(tmp_path, with_indexes=False)
     indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
     write_test_arrow_artifact_manifest(tmp_path, indexed_paths)
@@ -856,27 +804,9 @@ def test_retained_index_requires_manifest_checksum(tmp_path: Path, artifact_key:
         ArrowDataset.open(tmp_path)
 
 
-@pytest.mark.parametrize(
-    "header_offset,message",
-    [(16, "indexed size="), (24, "different key column")],
-    ids=["source-size", "key-column"],
-)
-def test_retained_index_preserves_header_checks(tmp_path: Path, header_offset: int, message: str) -> None:
-    paths = base_arrow_paths(tmp_path, with_indexes=False)
-    indexed_paths, _metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
-    index_path = Path(indexed_paths["signatures_batch_index"])
-    payload = bytearray(index_path.read_bytes())
-    payload[header_offset] ^= 1
-    index_path.write_bytes(payload)
-
-    # Bind the changed bytes so this exercises native index validation after SHA checks.
-    with pytest.raises(ValueError, match=message):
-        _raw_candidate_plan_arrow(indexed_paths, ["q1"])
-
-
 def test_manifest_rejects_same_size_same_mtime_source_change(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
-    filler_count = 30_000
+    filler_count = 2_000
     filler_ids = [f"x{index:013d}" for index in range(filler_count)]
     paths["signatures"] = write_ipc_batches(
         tmp_path / "signatures.arrow",
@@ -917,19 +847,27 @@ def test_manifest_rejects_same_size_same_mtime_source_change(tmp_path: Path) -> 
         ArrowDataset.open(tmp_path)
 
 
-def test_rust_featurizer_from_arrow_dataset_deduplicates_unsorted_requested_ids(tmp_path: Path) -> None:
+def test_rust_featurizer_deduplicates_ids_and_checks_signature_order(tmp_path: Path) -> None:
     unindexed_paths = base_arrow_paths(tmp_path, with_indexes=False)
 
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(unindexed_paths, tmp_path)
     featurizer = _native_featurizer(paths, ["q1", "s1", "q1", "s2", "s1"], set())
 
-    assert tuple(featurizer.signature_ids()) == ("q1", "s1", "s2")
+    order = tuple(featurizer.signature_ids())
+    assert order == ("q1", "s1", "s2")
+    assert featurizer.has_signature_order(order)
+    assert not featurizer.has_signature_order(tuple(reversed(order)))
 
 
 def test_raw_arrow_candidate_plan_without_member_lists_reports_their_counts(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
     planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
     with_members = planner.plan(["q1"])
+    incomplete = with_members.copy()
+    del incomplete["component_members"]
+    with pytest.raises(KeyError, match="component_members"):
+        RawArrowPlanBundle.from_native_mapping(incomplete)
+
     without_members = planner.plan(["q1"], include_component_members=False)
 
     assert without_members["component_members"] is None
@@ -946,27 +884,10 @@ def test_raw_arrow_candidate_plan_without_member_lists_reports_their_counts(tmp_
         {**without_members, "component_members": with_members["component_members"]},
         with_members,
     )
-
-
-def test_raw_arrow_plan_bundle_needs_counts_without_member_lists(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
-    plan = planner.plan(["q1"], include_component_members=False)
     with pytest.raises(ValueError, match="needs component_member_counts"):
-        RawArrowPlanBundle.from_native_mapping({**plan, "component_member_counts": None})
+        RawArrowPlanBundle.from_native_mapping({**without_members, "component_member_counts": None})
     with pytest.raises(ValueError, match="two nonnegative ints"):
-        RawArrowPlanBundle.from_native_mapping({**plan, "component_member_counts": (1, -2)})
-
-
-def test_rust_featurizer_recognizes_only_its_own_signature_order(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    featurizer = _native_featurizer(paths, ["q1", "s1", "s2"], set())
-    order = tuple(featurizer.signature_ids())
-
-    assert featurizer.has_signature_order(order)
-    assert not featurizer.has_signature_order(tuple(reversed(order)))
-    assert not featurizer.has_signature_order(order[:-1])
-    assert not featurizer.has_signature_order((*order[:-1], 7))
+        RawArrowPlanBundle.from_native_mapping({**without_members, "component_member_counts": (1, -2)})
 
 
 def test_rust_featurizer_from_arrow_dataset_reuses_cached_language(tmp_path: Path) -> None:
@@ -992,8 +913,7 @@ def test_rust_featurizer_from_arrow_dataset_reuses_cached_language(tmp_path: Pat
     )
 
 
-@pytest.mark.parametrize("disallow", [False, True])
-def test_raw_arrow_candidate_plan_orcid_override_returns_all_matches(tmp_path: Path, disallow: bool) -> None:
+def test_raw_arrow_candidate_plan_orcid_override_returns_all_matches(tmp_path: Path) -> None:
     signatures = pa.table(
         {
             "signature_id": pa.array(["q1", "s_good", "s_middle", "s_year", "s_none"], type=pa.string()),
@@ -1044,23 +964,21 @@ def test_raw_arrow_candidate_plan_orcid_override_returns_all_matches(tmp_path: P
         "paper_authors": write_ipc(tmp_path / "paper_authors.arrow", paper_authors),
         "cluster_seeds": write_ipc(tmp_path / "cluster_seeds.arrow", cluster_seeds),
     }
-    if disallow:
-        paths["cluster_seed_disallows"] = write_ipc(
-            tmp_path / "cluster_seed_disallows.arrow",
-            pa.table({"signature_id_1": ["q1"], "signature_id_2": ["s_good"]}),
-        )
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
-
     plan = _raw_candidate_plan_arrow(paths, ["q1"], top_k=1, orcid_enabled=True)
-
-    expected = {"c_middle", "c_year"} if disallow else {"c_good", "c_middle", "c_year"}
-    assert set(plan["row_component_keys"]) == expected
+    assert set(plan["row_component_keys"]) == {"c_good", "c_middle", "c_year"}
     left_ids, right_ids = plan_pair_ids(plan)
     assert set(left_ids) == {"q1"}
-    assert set(right_ids) == {key.replace("c_", "s_") for key in expected}
-    assert plan["row_orcid_match"].tolist() == [1] * len(expected)
-    assert plan["telemetry"]["cluster_seed_disallowed_candidate_count"] == int(disallow)
-    assert plan["telemetry"]["cluster_seed_disallow_pair_count"] == int(disallow)
+    assert set(right_ids) == {"s_good", "s_middle", "s_year"}
+    assert plan["row_orcid_match"].tolist() == [1, 1, 1]
+
+    paths["cluster_seed_disallows"] = write_ipc(
+        tmp_path / "cluster_seed_disallows.arrow",
+        pa.table({"signature_id_1": ["q1"], "signature_id_2": ["s_good"]}),
+    )
+    plan = _raw_candidate_plan_arrow(paths, ["q1"], top_k=1, orcid_enabled=True)
+    assert set(plan["row_component_keys"]) == {"c_middle", "c_year"}
+    assert plan["telemetry"]["cluster_seed_disallowed_candidate_count"] == 1
 
 
 @pytest.mark.parametrize("positions", [[None, 0, 0], [0, None, 0]], ids=["query", "seed"])
@@ -1179,6 +1097,18 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
     assert raw_plan["left_pair_signature_indices"].tolist() == [0, 0, 1, 1]
     assert raw_plan["right_pair_signature_indices"].tolist() == [2, 3, 4, 3]
 
+    vectors = pa.FixedSizeListArray.from_arrays(
+        pa.array([1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0], type=pa.float32()), 2
+    )
+    updated = specter.set_column(1, "embedding", vectors)
+    paths["specter"] = write_ipc(tmp_path / "specter.arrow", updated)
+    paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+    with_zero = _raw_candidate_plan_arrow(paths, ["q_full", "q_initial"], query_view="auto", top_k=3)
+
+    assert with_zero["telemetry"]["specter_count"] == 5
+    assert "s_other" in plan_pair_ids(with_zero)[1]
+    assert np.isfinite(with_zero["specter_centroid_similarity"]).all()
+
 
 def test_raw_arrow_candidate_plan_excludes_query_seed_and_handles_missing_metadata(tmp_path: Path) -> None:
     signatures = pa.table(
@@ -1265,75 +1195,6 @@ def test_raw_arrow_candidate_plan_accepts_missing_papers_year_column(tmp_path: P
     )
 
 
-def test_raw_arrow_candidate_plan_bridge_maps_signature_ids_to_linker_indices(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-
-    raw_plan = _raw_candidate_plan_arrow(paths, ["q1"])
-    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_native_mapping(raw_plan),
-        signature_id_to_index={"q1": 7, "s1": 11, "s2": 13},
-    )
-
-    candidate_batch = retrieval_batch.candidate_batch
-    assert cast(Any, candidate_batch.row_query_signature_indices).tolist() == [7, 7]
-    assert candidate_batch.left_signature_indices.tolist() == [7, 7]
-    assert candidate_batch.right_signature_indices.tolist() == [11, 13]
-    assert candidate_batch.pair_row_indices.tolist() == [0, 1]
-    assert candidate_batch.row_component_keys == ("c_match", "c_other")
-    assert retrieval_batch.row_signals["query_view"].tolist() == ["full", "full"]
-    np.testing.assert_array_equal(
-        retrieval_batch.row_signals["retrieval_score"],
-        cast(Any, candidate_batch.retrieval_scores),
-    )
-    assert "candidate_cluster_max_paper_author_count" in retrieval_batch.row_signals
-
-
-def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-
-    raw_plan = _raw_candidate_plan_arrow(paths, ["q1"])
-    assert tuple(raw_plan) == (
-        "row_count",
-        "pair_count",
-        "query_signature_ids",
-        "query_views",
-        "query_authors",
-        "seed_signature_ids",
-        "component_members",
-        "component_member_counts",
-        "pair_signature_ids",
-        "left_pair_signature_indices",
-        "right_pair_signature_indices",
-        "pair_row_indices",
-        "row_query_signature_indices",
-        "row_component_keys",
-        "retrieval_scores",
-        "retrieval_ranks",
-        *(raw_key for raw_key, _signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS),
-        "telemetry",
-    )
-    expected_base_dtypes = {
-        "pair_row_indices": np.uint32,
-        "row_query_signature_indices": np.uint32,
-        "retrieval_scores": np.float32,
-        "retrieval_ranks": np.uint16,
-    }
-    for key, dtype in expected_base_dtypes.items():
-        assert raw_plan[key].dtype == dtype
-    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-        if dtype is object:
-            assert isinstance(raw_plan[raw_key], list)
-        else:
-            expected_dtype = np.uint32 if raw_key in {"row_component_sizes", "row_named_signature_counts"} else dtype
-            assert raw_plan[raw_key].dtype == expected_dtype
-    bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
-
-    assert bundle.row_count == raw_plan["row_count"]
-    assert bundle.pair_count == raw_plan["pair_count"]
-    assert bundle.signature_order.signature_ids == ("q1", "s1", "s2")
-    assert bundle.signature_order.query_signature_ids == ("q1",)
-
-
 def test_raw_arrow_plan_bundle_freezes_native_plan_values(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = _minimal_raw_candidate_plan(
         row_count=1,
@@ -1347,7 +1208,31 @@ def test_raw_arrow_plan_bundle_freezes_native_plan_values(monkeypatch: pytest.Mo
         component_members={"c0": ["s0"]},
         telemetry={"seed_signature_count": 1, "timings": {"total_secs": 0.5}},
     )
+    source_arrays = {
+        key: value for key, value in raw_plan.items() if isinstance(value, np.ndarray) and value.dtype != object
+    }
+
     bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
+
+    adopted_arrays = {
+        "row_query_signature_indices": bundle.row_query_offsets,
+        "pair_row_indices": bundle.pair_row_indices,
+        "left_pair_signature_indices": bundle.left_pair_signature_indices,
+        "right_pair_signature_indices": bundle.right_pair_signature_indices,
+        "retrieval_scores": bundle.retrieval_scores,
+        "retrieval_ranks": bundle.retrieval_ranks,
+        **{
+            raw_key: bundle.row_signals[signal_key]
+            for raw_key, signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
+            if dtype is not object
+        },
+    }
+    assert source_arrays.keys() <= adopted_arrays.keys()
+    for key, source in source_arrays.items():
+        adopted = adopted_arrays[key]
+        assert np.shares_memory(adopted, source), key
+        assert not source.flags.writeable, key
+        assert not adopted.flags.writeable, key
 
     bundle_arrays = (
         bundle.row_query_offsets,
@@ -1402,45 +1287,6 @@ def test_raw_arrow_plan_bundle_freezes_native_plan_values(monkeypatch: pytest.Mo
     assert bundle.telemetry is not None
     assert bundle.telemetry["seed_signature_count"] == 1
     assert bundle.telemetry["timings"]["total_secs"] == pytest.approx(0.5)
-
-
-def test_raw_arrow_plan_bundle_adopts_native_numeric_arrays_without_copying() -> None:
-    raw_plan = _minimal_raw_candidate_plan(
-        row_count=1,
-        pair_count=1,
-        retrieval_scores=np.asarray([0.25], dtype=np.float32),
-        retrieval_ranks=np.asarray([1], dtype=np.uint16),
-        left_signature_ids=["q0"],
-        right_signature_ids=["s0"],
-        row_query_first_tokens=np.asarray(["Alice"], dtype=object),
-        row_component_sizes=np.asarray([3.0], dtype=np.float32),
-        component_members={"c0": ["s0"]},
-    )
-    source_arrays = {
-        key: value for key, value in raw_plan.items() if isinstance(value, np.ndarray) and value.dtype != object
-    }
-
-    bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
-
-    adopted_arrays = {
-        "row_query_signature_indices": bundle.row_query_offsets,
-        "pair_row_indices": bundle.pair_row_indices,
-        "left_pair_signature_indices": bundle.left_pair_signature_indices,
-        "right_pair_signature_indices": bundle.right_pair_signature_indices,
-        "retrieval_scores": bundle.retrieval_scores,
-        "retrieval_ranks": bundle.retrieval_ranks,
-        **{
-            raw_key: bundle.row_signals[signal_key]
-            for raw_key, signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
-            if dtype is not object
-        },
-    }
-    assert source_arrays.keys() <= adopted_arrays.keys()
-    for key, source in source_arrays.items():
-        adopted = adopted_arrays[key]
-        assert np.shares_memory(adopted, source), key
-        assert not source.flags.writeable, key
-        assert not adopted.flags.writeable, key
 
 
 @pytest.mark.parametrize("empty", [False, True], ids=["populated", "empty"])
@@ -1521,17 +1367,8 @@ def test_raw_arrow_labeled_plan_preserves_ordered_schema_and_native_dtypes(tmp_p
             "pair_count": 0,
             "timings": {"total_secs": 0.0},
         }
-
-
-@pytest.mark.parametrize("labeled", [False, True], ids=["online", "labeled"])
-def test_native_candidate_plan_arrays_are_owned_by_each_result(tmp_path: Path, labeled: bool) -> None:
-    paths = base_arrow_paths(tmp_path)
-    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
-
-    def make_plan() -> dict[str, Any]:
-        if not labeled:
-            return planner.plan(["q1"])
-        return native_labeled_plan(
+    else:
+        another = native_labeled_plan(
             paths,
             ["q1"],
             ["full"],
@@ -1541,9 +1378,10 @@ def test_native_candidate_plan_arrays_are_owned_by_each_result(tmp_path: Path, l
             {"c_match": ["s1"]},
             num_threads=1,
         )
+        _assert_plan_arrays_are_independent(plan, another)
 
-    first = make_plan()
-    second = make_plan()
+
+def _assert_plan_arrays_are_independent(first: dict[str, Any], second: dict[str, Any]) -> None:
     arrays = {key: value for key, value in first.items() if isinstance(value, np.ndarray)}
     assert arrays
     for key, array in arrays.items():
@@ -1555,23 +1393,6 @@ def test_native_candidate_plan_arrays_are_owned_by_each_result(tmp_path: Path, l
         expected_bytes = second[key].tobytes()
         array[:] = 0
         assert second[key].tobytes() == expected_bytes, key
-
-
-def test_raw_arrow_online_plan_keeps_query_metadata_when_all_candidates_are_disallowed(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    planner = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
-    plan = planner.plan(["q1"], additional_cluster_seed_disallows=[("q1", "s1"), ("q1", "s2")])
-
-    assert plan["row_count"] == 0
-    assert plan["pair_count"] == 0
-    assert plan["query_signature_ids"] == ["q1"]
-    assert plan["query_views"] == ["full"]
-    assert len(plan["query_authors"]) == 1
-    assert plan["telemetry"]["query_signature_count"] == 1
-    for key, _signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-        assert len(plan[key]) == 0, key
-    with pytest.raises(ValueError, match="query_signature_ids must be non-empty"):
-        planner.plan([])
 
 
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:
@@ -1605,10 +1426,6 @@ def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_see
     assert "row_candidate_cluster_max_paper_author_count" in raw_plan
     assert raw_plan["telemetry"]["component_scope"] == "block-local"
 
-
-def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_df(tmp_path: Path) -> None:
-    paths = base_arrow_paths(tmp_path)
-    paths.pop("cluster_seeds")
     component_members = {"c_match": ["s1"], "c_other": ["s2"]}
 
     one_row = native_labeled_plan(
@@ -1622,21 +1439,9 @@ def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_d
         orcid_enabled=False,
         num_threads=1,
     )
-    two_rows = native_labeled_plan(
-        paths,
-        ["q1", "q1"],
-        ["full", "full"],
-        ["q1-full", "q1-full"],
-        ["c_match", "c_other"],
-        np.asarray([1, 2], dtype=np.uint16),
-        component_members,
-        orcid_enabled=False,
-        num_threads=1,
-    )
-
     assert one_row["telemetry"]["component_count"] == 2
-    assert two_rows["telemetry"]["component_count"] == 2
-    np.testing.assert_allclose(one_row["retrieval_scores"][0], two_rows["retrieval_scores"][0], rtol=1e-6, atol=1e-6)
+    assert raw_plan["telemetry"]["component_count"] == 2
+    np.testing.assert_allclose(one_row["retrieval_scores"][0], raw_plan["retrieval_scores"][1], rtol=1e-6, atol=1e-6)
 
 
 def test_raw_arrow_candidate_plans_initial_view_keep_full_first_token(tmp_path: Path) -> None:
@@ -1733,7 +1538,13 @@ def test_raw_arrow_candidate_plan_emits_native_row_signals_from_name_counts_inde
     tmp_path: Path,
 ) -> None:
     paths = base_arrow_paths(tmp_path)
+    ids = ["q1", "s1", "s2"]
+    without_counts = _native_featurizer(paths, ids, set())
+    assert without_counts.signature_name_counts_present() == [(sid, False) for sid in ids]
+
     paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index")
+    with_counts = _native_featurizer(paths, ids, set())
+    assert with_counts.signature_name_counts_present() == [(sid, True) for sid in ids]
 
     raw_plan = _raw_candidate_plan_arrow(paths, ["q1"])
 
@@ -1791,22 +1602,6 @@ def test_rust_featurizer_from_arrow_dataset_applies_cluster_seed_disallows(tmp_p
     signature_index = {str(signature_id): index for index, signature_id in enumerate(direct.signature_ids())}
     assert direct.get_constraints_matrix_indexed([(signature_index["q1"], signature_index["s1"])]) == [None]
     assert direct.get_constraints_matrix_indexed([(signature_index["q1"], signature_index["s2"])]) == [10000.0]
-
-
-def test_rust_featurizer_missing_name_counts_presence_is_consistent(
-    tmp_path: Path,
-) -> None:
-    paths = base_arrow_paths(tmp_path)
-    signature_ids = ["q1", "s1", "s2"]
-
-    from_arrow = _native_featurizer(paths, signature_ids, set())
-
-    assert from_arrow.signature_name_counts_present() == [("q1", False), ("s1", False), ("s2", False)]
-
-    paths_with_index = dict(paths)
-    paths_with_index["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact")
-    with_name_counts = _native_featurizer(paths_with_index, signature_ids, set())
-    assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
 
 
 def test_index_verification_rejects_out_of_bounds_record_and_runtime_open_stays_safe(

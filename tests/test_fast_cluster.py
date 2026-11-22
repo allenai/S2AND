@@ -22,33 +22,22 @@ def test_get_and_set_params_follow_the_scikit_learn_contract() -> None:
     assert model.get_params(deep=False) == model.get_params()
     assert model.set_params(eps=0.7, preserve_input=False) is model
     assert (model.eps, model.preserve_input) == (0.7, False)
-    with pytest.raises(ValueError, match="Invalid parameter 'n_jobs' for estimator FastCluster"):
+    with pytest.raises(ValueError, match="Invalid parameter 'n_jobs'"):
         model.set_params(n_jobs=4)
 
 
-def test_repr_lists_only_changed_parameters() -> None:
-    assert repr(FastCluster()) == "FastCluster()"
-    assert repr(FastCluster(eps=0.53)) == "FastCluster(eps=0.53)"
-
-
-@pytest.mark.parametrize("copy", [clone, clone_cluster_model])
-def test_clones_are_unfitted_with_the_same_parameters(copy) -> None:
+def test_clones_are_unfitted_with_the_same_parameters() -> None:
     model = FastCluster(linkage="complete", eps=0.4).fit(np.asarray([0.1, 0.9, 0.9]))
     assert model.labels_ is not None
 
-    copied = copy(model)
+    for copied in (clone_cluster_model(model), clone(model)):
+        assert type(copied) is FastCluster
+        assert copied is not model
+        assert copied.get_params() == model.get_params()
+        assert copied.labels_ is None
 
-    assert type(copied) is FastCluster
-    assert copied is not model
-    assert copied.get_params() == model.get_params()
-    assert copied.labels_ is None
-
-
-def test_clone_cluster_model_uses_scikit_learn_for_other_estimators() -> None:
-    model = DBSCAN(eps=0.2, metric="precomputed")
-
-    copied = clone_cluster_model(model)
-
-    assert type(copied) is DBSCAN
-    assert copied is not model
-    assert copied.get_params() == model.get_params()
+    fallback = DBSCAN(eps=0.2, metric="precomputed")
+    copied_fallback = clone_cluster_model(fallback)
+    assert type(copied_fallback) is DBSCAN
+    assert copied_fallback is not fallback
+    assert copied_fallback.get_params() == fallback.get_params()

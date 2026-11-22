@@ -411,23 +411,14 @@ def test_assembly_rejects_name_count_identity_mismatch_before_copy(tmp_path: Pat
 
 
 def test_assembly_rejects_reserved_support_root_collisions(tmp_path: Path) -> None:
-    for case_id, reserved_name, is_directory in (
-        ("datasets-directory", "datasets", True),
-        ("manifest-file", "manifest.json", False),
-        ("index-directory", "name_counts_index", True),
-    ):
-        inputs = _inputs(tmp_path / case_id)
-        collision = inputs["source_root"] / reserved_name
-        if is_directory:
-            collision.mkdir()
-        else:
-            collision.write_text("{}\n", encoding="utf-8")
+    inputs = _inputs(tmp_path)
+    (inputs["source_root"] / "datasets").mkdir()
 
-        with pytest.raises(ValueError, match="reserved assembled paths"):
-            assemble_source_bundle(**inputs)
+    with pytest.raises(ValueError, match="reserved assembled paths"):
+        assemble_source_bundle(**inputs)
 
-        assert not inputs["output_source_bundle"].exists(), case_id
-        assert not inputs["output_data_root"].exists(), case_id
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
 
 
 def test_assembly_rejects_output_path_overlaps_before_copy(tmp_path: Path) -> None:
@@ -454,45 +445,46 @@ def test_assembly_rejects_output_path_overlaps_before_copy(tmp_path: Path) -> No
         assert not inputs["output_data_root"].exists(), case_id
 
 
-@pytest.mark.parametrize("replay", [False, True])
-def test_assembly_rejects_changed_payload_without_recertifying_it(tmp_path: Path, replay: bool) -> None:
+def test_assembly_rejects_changed_payload_without_recertifying_it(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
-    root = inputs["replay_arrow_root"] if replay else inputs["benchmark_arrow_root"]
-    dataset = root / "datasets" / "replay_demo" if replay else root / "benchmark_demo"
-    papers = dataset / "papers.arrow"
-    papers.write_bytes(papers.read_bytes().replace(b"Notes", b"WRONG"))
-    write_arrow_batch_lookup_index(
-        papers,
-        dataset / "papers.papers_batch_index.bin",
-        key_column="paper_id",
-        table_name="papers",
-    )
-    original_manifest = (dataset / "manifest.json").read_bytes()
+    for dataset in (
+        inputs["benchmark_arrow_root"] / "benchmark_demo",
+        inputs["replay_arrow_root"] / "datasets" / "replay_demo",
+    ):
+        papers = dataset / "papers.arrow"
+        lookup = dataset / "papers.papers_batch_index.bin"
+        original_papers, original_lookup = papers.read_bytes(), lookup.read_bytes()
+        papers.write_bytes(original_papers.replace(b"Notes", b"WRONG"))
+        write_arrow_batch_lookup_index(papers, lookup, key_column="paper_id", table_name="papers")
+        manifest = dataset / "manifest.json"
+        original_manifest = manifest.read_bytes()
 
-    with pytest.raises(ValueError, match="(inventory|checksum|byte_count).*mismatch"):
-        assemble_source_bundle(**inputs)
-    assert (dataset / "manifest.json").read_bytes() == original_manifest
+        with pytest.raises(ValueError, match="(inventory|checksum|byte_count).*mismatch"):
+            assemble_source_bundle(
+                **{
+                    **inputs,
+                    "output_source_bundle": tmp_path / f"{dataset.name}-source",
+                    "output_data_root": tmp_path / f"{dataset.name}-data",
+                },
+            )
+        assert manifest.read_bytes() == original_manifest
+        papers.write_bytes(original_papers)
+        lookup.write_bytes(original_lookup)
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("kind", "unrecognized", "kind"),
-    ],
-)
-def test_assembly_rejects_original_manifest_metadata(tmp_path: Path, field: str, value: object, message: str) -> None:
+def test_assembly_rejects_unrecognized_original_manifest_kind(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     root = inputs["benchmark_arrow_root"]
     manifest_path = root / "benchmark_demo" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest[field] = value
+    manifest["kind"] = "unrecognized"
     _write_json(manifest_path, manifest)
     collection_path = root / "manifest.json"
     collection = json.loads(collection_path.read_text(encoding="utf-8"))
     collection["dataset_manifests"]["benchmark_demo"]["sha256"] = _sha256(manifest_path)
     _write_json(collection_path, collection)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="kind"):
         assemble_source_bundle(**inputs)
 
 

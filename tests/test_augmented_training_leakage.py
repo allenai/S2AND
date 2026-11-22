@@ -13,54 +13,22 @@ from scripts.production.model.augmented_leakage import (
     source_members,
     split_members_from_sources,
 )
-from tests.incremental_test_helpers import _dataset
 from tests.pairwise_release_helpers import write_pairwise_dataset
-
-
-@pytest.mark.parametrize("population", ["validation", "test", "omitted"])
-def test_augmented_training_rejects_nontraining_source_identity(population: str) -> None:
-    # Use the actual split implementation, with enough size strata for 80/10/10.
-    dataset = _dataset([("Ada", "", "Smith")] * 300, {})
-    dataset.num_clusters_for_block_size = 5
-    blocks = {}
-    offset = 0
-    for index in range(100):
-        size = index % 5 + 1
-        blocks[f"b{index}"] = [str(sid) for sid in range(offset, offset + size)]
-        offset += size
-    train, val, test = dataset.split_blocks_helper(blocks)
-    training = {sid for members in train.values() for sid in members}
-    protected = (
-        "outside-plan"
-        if population == "omitted"
-        else next(iter((val if population == "validation" else test).values()))[0]
-    )
-    safe = next(iter(training))
-    require_training_members(source_members([(f"qian___{safe}", "medline___1")]), "qian", training)
-    with pytest.raises(ValueError, match="outside its training split"):
-        require_training_members(source_members([(f"qian___{safe}", f"qian___{protected}")]), "qian", training)
 
 
 def test_augmented_source_ids_preserve_separators_and_dataset_scope() -> None:
     members = source_members([("qian___id___suffix", "kisti___id___suffix")])
     require_training_members(members, "qian", {"id___suffix"})
+    require_declared_sources(members, ("qian", "kisti", "augmented"), context="Test")
     with pytest.raises(ValueError, match="'kisti'"):
         require_training_members(members, "kisti", set())
-
-
-@pytest.mark.parametrize("signature_id", ["unprefixed", "___id", "qian___"])
-def test_augmented_source_ids_require_the_canonical_prefix(signature_id: str) -> None:
-    with pytest.raises(ValueError, match="Invalid augmented source signature ID"):
-        source_members([(signature_id, "qian___valid")])
-
-
-def test_augmented_sources_follow_the_declared_dataset_population() -> None:
-    members = source_members([("patents___p1", "medline___m1")])
-    require_declared_sources(members, ("patents", "augmented"), context="Test")
-    with pytest.raises(ValueError, match="undeclared source datasets.*patents"):
+    with pytest.raises(ValueError, match="undeclared source datasets.*kisti"):
         require_declared_sources(members, ("qian", "augmented"), context="Test")
-    with pytest.raises(ValueError, match="undeclared source datasets.*aminer"):
-        require_declared_sources({"aminer": {"a1"}}, ("patents", "augmented"), context="Test")
+
+
+def test_augmented_source_ids_require_the_canonical_prefix() -> None:
+    with pytest.raises(ValueError, match="Invalid augmented source signature ID"):
+        source_members([("unprefixed", "qian___valid")])
 
 
 def test_augmented_copies_of_a_declared_fixed_pair_source_use_only_fit_members(tmp_path: Path) -> None:
@@ -112,11 +80,20 @@ def test_random_block_fit_members_use_the_real_split_without_packaged_artifacts(
         name_tuples=frozenset(),
         n_jobs=1,
     )
-    train, _, _ = reference.split_cluster_signatures()
+    train, validation, test = reference.split_cluster_signatures()
 
     def forbid_artifact(*_args: Any, **_kwargs: Any) -> None:
         pytest.fail("split-only helper must not load the packaged name-tuple artifact")
 
     monkeypatch.setattr("s2and.data.load_packaged_name_tuple_artifact", forbid_artifact)
     expected = {sid for members in train.values() for sid in members}
-    assert split_members_from_sources("qian", model_files, random_seed=1111)[0] == expected
+
+    actual = split_members_from_sources("qian", model_files, random_seed=1111)[0]
+    assert actual == expected
+    safe = next(iter(actual))
+    require_training_members(source_members([(f"qian___{safe}", "medline___1")]), "qian", actual)
+    protected = {sid for split in (validation, test) for members in split.values() for sid in members}
+    protected.add("outside-plan")
+    members = source_members([(f"qian___{safe}", f"qian___{sid}") for sid in sorted(protected)])
+    with pytest.raises(ValueError, match="outside its training split"):
+        require_training_members(members, "qian", actual)

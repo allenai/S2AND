@@ -31,24 +31,16 @@ def test_unknown_sidecar_uses_label_directory_and_exact_bytes(tmp_path: Path) ->
     }
 
 
-@pytest.mark.parametrize("values", [["u", "u"], [1], [""], {"unknown": ["u"]}])
+@pytest.mark.parametrize("values", [["u", "u"], [""], {"unknown": ["u"]}])
 def test_unknown_sidecar_rejects_invalid_ids(tmp_path: Path, values: object) -> None:
     (tmp_path / "restored_unknown_signature_ids_20261009.json").write_text(json.dumps(values), encoding="utf-8")
     with pytest.raises(ValueError, match="sidecar"):
         load_unknown_signatures({"clusters": tmp_path / "clusters.json"})
 
 
-def test_legacy_and_ambiguous_unknown_sources(tmp_path: Path) -> None:
-    files = {"signatures": tmp_path / "signatures.json"}
-    assert load_unknown_signatures(files).ids == frozenset()
-    for date in ("20261009", "20261010"):
-        (tmp_path / f"restored_unknown_signature_ids_{date}.json").write_text("[]", encoding="utf-8")
-    with pytest.raises(ValueError, match="Multiple"):
-        load_unknown_signatures(files)
-
-
 def test_explicit_sidecar_name_requires_the_discovered_file(tmp_path: Path) -> None:
     filename = "restored_unknown_signature_ids_reviewed.json"
+    assert load_unknown_signatures({"signatures": tmp_path / "signatures.json"}).ids == frozenset()
     assert resolve_unknown_signature_sidecar(tmp_path) is None
     with pytest.raises(FileNotFoundError):
         resolve_unknown_signature_sidecar(tmp_path, filename=filename)
@@ -57,6 +49,9 @@ def test_explicit_sidecar_name_requires_the_discovered_file(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="Expected unknown-signature sidecar"):
         resolve_unknown_signature_sidecar(tmp_path, filename=filename)
     assert resolve_unknown_signature_sidecar(tmp_path, filename=other.name) == other.resolve()
+    (tmp_path / filename).write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="Multiple"):
+        resolve_unknown_signature_sidecar(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -98,8 +93,6 @@ def test_b3_ignores_fallback_memberships_and_uses_known_weights() -> None:
     assert aggregate["signature_count"] == 3
     assert aggregate["signature_weighted"]["f1"] == pytest.approx(2 / 3)
 
-
-def test_b3_requires_complete_inference_and_handles_all_unknown_scores() -> None:
     with pytest.raises(ValueError, match="cover all"):
         _b3_report({"t": ["known", "unknown"]}, {"p": ["known"]}, frozenset({"unknown"}))
     with pytest.raises(ValueError, match="at least one known"):

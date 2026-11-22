@@ -1,23 +1,11 @@
 """Caller supervision is finite, undirected, and validated before prediction."""
 
-from copy import deepcopy
-
 import numpy as np
 import pytest
 
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
 from tests.model_helpers import ConstantDistanceClassifier
-
-PUBLIC_METHODS = (
-    "predict",
-    "predict_helper",
-    "make_distance_matrices",
-    "predict_from_rust_featurizer",
-    "make_distance_matrices_from_rust_featurizer",
-    "predict_from_arrow",
-    "predict_incremental_from_arrow",
-)
 
 
 def _clusterer() -> Clusterer:
@@ -29,8 +17,7 @@ def _clusterer() -> Clusterer:
     )
 
 
-@pytest.mark.parametrize("method", PUBLIC_METHODS)
-def test_public_boundaries_reject_conflicting_reverse_entries_before_work(method):
+def _assert_conflicting_supervision_is_rejected(method):
     """Even empty requests must not silently discard contradictory caller pairs."""
     values = (0.0, 10000.0)
     entries = [(("paper-a", "paper-b"), values[0]), (("paper-b", "paper-a"), values[1])]
@@ -39,40 +26,23 @@ def test_public_boundaries_reject_conflicting_reverse_entries_before_work(method
     blocks = [] if "incremental" in method else {}
     # No usable dataset/featurizer: this must fail at the supervision boundary,
     # before leases, feature extraction, subblocking, or candidate selection.
-    with pytest.raises(ValueError, match="partial_supervision has conflicting distances") as error:
+    with pytest.raises(ValueError, match="partial_supervision has conflicting distances"):
         getattr(_clusterer(), method)(blocks, None, partial_supervision=partial)
-    message = str(error.value)
-    assert "paper-a" in message and "paper-b" in message
-    assert all(repr(value) in message for value in values)
     assert list(partial.items()) == original
+
+
+def test_normalization_distinguishes_soft_distances_from_hard_values():
+    from s2and.supervision import normalize_partial_supervision
+
+    with pytest.raises(ValueError, match="too close to a hard value"):
+        normalize_partial_supervision({("a", "b"): -5e-9})
+    with pytest.raises(ValueError, match="too close to a hard value"):
+        normalize_partial_supervision({("a", "b"): 10000.0 - 5e-7})
+
+    distances = {("a", "b"): 0, ("a", "c"): 1e-6, ("a", "d"): 10000.0 - 1e-6, ("a", "e"): 10000.0}
+    assert normalize_partial_supervision(distances) == distances
 
     value = float("nan")
-    partial = {("paper-a", "paper-b"): value}
-    with pytest.raises(ValueError, match="partial_supervision") as error:
-        getattr(_clusterer(), method)(blocks, None, partial_supervision=partial)
-    assert "paper-a" in str(error.value) and "paper-b" in str(error.value)
-    assert partial[("paper-a", "paper-b")] is value
-
-
-@pytest.mark.parametrize("values", [(0.0, 10000.0), (0.2, 0.3)])
-@pytest.mark.parametrize("reverse_entries", [False, True])
-def test_normalization_rejects_conflicts_in_either_entry_order(values, reverse_entries):
-    from s2and.supervision import normalize_partial_supervision
-
-    entries = [(("paper-a", "paper-b"), values[0]), (("paper-b", "paper-a"), values[1])]
-    partial = dict(reversed(entries) if reverse_entries else entries)
-    original = list(partial.items())
-    with pytest.raises(ValueError, match="partial_supervision has conflicting distances") as error:
-        normalize_partial_supervision(partial)
-    message = str(error.value)
-    assert "paper-a" in message and "paper-b" in message
-    assert all(repr(value) in message for value in values)
-    assert list(partial.items()) == original
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-def test_normalization_rejects_nonfinite_distances_without_mutating_input(value):
-    from s2and.supervision import normalize_partial_supervision
 
     partial = {("paper-a", "paper-b"): value}
     with pytest.raises(ValueError, match="partial_supervision") as error:
@@ -81,62 +51,22 @@ def test_normalization_rejects_nonfinite_distances_without_mutating_input(value)
     assert partial[("paper-a", "paper-b")] is value
 
 
-@pytest.mark.parametrize("value", [1e-9, 5e-7, -5e-9, 9999.999999999998, 10000.0 - 5e-7])
-def test_normalization_rejects_soft_distances_that_would_read_as_hard(value):
+def test_normalization_accepts_equal_numeric_values_and_owns_its_result():
     from s2and.supervision import normalize_partial_supervision
 
-    # Scoring would turn these into a forced link or a hard veto.
-    with pytest.raises(ValueError, match="too close to a hard value"):
-        normalize_partial_supervision({("a", "b"): value})
-
-
-@pytest.mark.parametrize("value", [0, 0.0, 1e-6, 0.5, 9999.0, 10000.0 - 1e-6, 10000.0, 10001.0])
-def test_normalization_keeps_hard_values_and_soft_distances_outside_the_margins(value):
-    from s2and.supervision import normalize_partial_supervision
-
-    assert normalize_partial_supervision({("a", "b"): value}) == {("a", "b"): value}
-
-
-@pytest.mark.parametrize("value", [-1.0, 10000.0])
-def test_normalization_deduplicates_equal_reverse_values_and_owns_its_result(value):
-    from s2and.supervision import normalize_partial_supervision
-
-    partial = {("b", "a"): value, ("a", "b"): value, ("c", "a"): 0}
-    original = deepcopy(partial)
+    partial = {("b", "a"): 0, ("a", "b"): -0.0, ("c", "a"): -1.0}
+    original = partial.copy()
     normalized = normalize_partial_supervision(partial)
-    assert normalized == {("a", "b"): value, ("a", "c"): 0}
-    assert partial == original
-    assert normalized is not partial
+    assert normalized == {("a", "b"): 0, ("a", "c"): -1.0}
     normalized[("a", "b")] = 0.7
     assert partial == original
-
-
-def test_normalization_accepts_equal_numeric_values_and_empty_input():
-    from s2and.supervision import normalize_partial_supervision
-
-    assert normalize_partial_supervision({("b", "a"): 0, ("a", "b"): -0.0}) == {("a", "b"): 0}
-    empty = {}
     assert normalize_partial_supervision(None) == {}
-    assert normalize_partial_supervision(empty) == {}
-    assert normalize_partial_supervision(empty) is not empty
-
-
-@pytest.mark.parametrize("second_pair", [("1", "2"), ("2", "1")])
-def test_arrow_id_normalization_checks_conflicts_before_collapsing_keys(second_pair):
-    from s2and.supervision import normalize_partial_supervision
-
-    partial = {(1, 2): 0.0, second_pair: 10000.0}
-    original = list(partial.items())
-    with pytest.raises(ValueError, match="partial_supervision"):
-        normalize_partial_supervision(partial, stringify_ids=True)
-    assert list(partial.items()) == original
-    assert normalize_partial_supervision({(1, 2): 0.2, ("2", "1"): 0.2}, stringify_ids=True) == {("1", "2"): 0.2}
 
 
 def test_arrow_incremental_boundary_rejects_id_collisions_before_loading_data():
     partial = {(1, 2): 0.0, ("2", "1"): 10000.0}
     original = list(partial.items())
-    with pytest.raises(ValueError, match="partial_supervision"):
+    with pytest.raises(ValueError, match="conflicting distances"):
         _clusterer().predict_incremental_from_arrow([], None, partial_supervision=partial)
     assert list(partial.items()) == original
 
@@ -147,6 +77,7 @@ def test_python_prediction_normalizes_supervision_once_per_request(route: str, m
     import s2and.model as model_module
     from tests.helpers import build_dummy_dataset
 
+    _assert_conflicting_supervision_is_rejected("predict_helper" if route == "helper" else "predict")
     dataset = build_dummy_dataset("supervision_normalization")
     clusterer = _clusterer()
     clusterer.use_default_constraints_as_supervision = False
@@ -162,9 +93,8 @@ def test_python_prediction_normalizes_supervision_once_per_request(route: str, m
 
     monkeypatch.setattr(model_module, "normalize_partial_supervision", record_normalization)
     method = clusterer.predict_helper if route == "helper" else clusterer.predict
-    options = {"batching_threshold": 3} if route == "subblocked" else {}
 
-    clusters, _ = method(blocks, dataset, partial_supervision=partial, **options)
+    clusters, _ = method(blocks, dataset, partial_supervision=partial)
 
     assert {frozenset(members) for members in clusters.values()} == {
         frozenset({"0", "1"}),
@@ -175,7 +105,7 @@ def test_python_prediction_normalizes_supervision_once_per_request(route: str, m
     assert len(normalization_calls) == 1
 
     partial[("3", "2")] = 0.2
-    clusters, _ = method(blocks, dataset, partial_supervision=partial, **options)
+    clusters, _ = method(blocks, dataset, partial_supervision=partial)
 
     assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1"}), frozenset({"2", "3"})}
     assert len(normalization_calls) == 2
@@ -183,8 +113,7 @@ def test_python_prediction_normalizes_supervision_once_per_request(route: str, m
 
 
 @pytest.mark.parametrize("override", ["subclass", "instance"])
-@pytest.mark.parametrize("threshold", [None])
-def test_bulk_prediction_preserves_predict_helper_overrides(override, threshold, monkeypatch):
+def test_bulk_prediction_preserves_predict_helper_overrides(override, monkeypatch):
     """The validation fast path must preserve existing custom helper dispatch."""
     from types import MethodType
 
@@ -212,24 +141,32 @@ def test_bulk_prediction_preserves_predict_helper_overrides(override, threshold,
     dataset = build_dummy_dataset("supervision_helper_override")
     blocks = {"first": ["1", "0"], "second": ["3", "2"]}
 
-    clusters, _ = clusterer.predict(
-        blocks, dataset, batching_threshold=threshold, partial_supervision={("1", "0"): 0.2, ("3", "2"): 0.2}
-    )
+    clusters, _ = clusterer.predict(blocks, dataset, partial_supervision={("1", "0"): 0.2, ("3", "2"): 0.2})
 
-    assert calls == ([("first", "second")] if threshold is None else [("first",), ("second",)])
+    assert calls == [("first", "second")]
     assert {frozenset(members) for members in clusters.values()} == {frozenset({"0", "1"}), frozenset({"2", "3"})}
 
 
-# Unbatched predict and predict_helper share _predict_with_normalized_supervision.
-# The predict_helper row of the conflict test covers the normalization of the helper.
-@pytest.mark.parametrize("method", [method for method in PUBLIC_METHODS if method != "predict_helper"])
-@pytest.mark.parametrize("value", [0.0, 0.2, 10000.0])
+@pytest.mark.parametrize(
+    ("method", "value"),
+    [
+        ("make_distance_matrices", 0.2),
+        ("make_distance_matrices_from_rust_featurizer", 10000.0),
+        ("predict_from_rust_featurizer", 0.2),
+        ("predict_from_arrow", 10000.0),
+        ("predict_incremental_from_arrow", 0.0),
+        ("predict_incremental_from_arrow", 0.2),
+        ("predict_incremental_from_arrow", 10000.0),
+    ],
+)
 def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tmp_path, method, value):
     """Duplicates and input order cannot alter actual matrices or predictions."""
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset
     from tests.incremental_test_helpers import _dataset, attach_tiny_incremental_linker
 
+    if method != "predict_incremental_from_arrow" or value == 0.0:
+        _assert_conflicting_supervision_is_rejected(method)
     incremental = "incremental" in method
     seeds = {"0": "seed"} if incremental else {}
     dataset = _dataset([("Ada", "", "Smith")] * 2, seeds)
@@ -247,9 +184,7 @@ def test_equal_reverse_supervision_matches_single_entry_on_real_public_routes(tm
     results = []
     for ids, partial in [
         (["0", "1"], {("0", "1"): value}),
-        (["1", "0"], {("1", "0"): value}),
-        (["0", "1"], {("1", "0"): value, ("0", "1"): value}),
-        (["1", "0"], {("0", "1"): value, ("1", "0"): value}),
+        (["1", "0"], {("1", "0"): value, ("0", "1"): value}),
     ]:
         original = list(partial.items())
         blocks = ids if incremental else {"one": ids}

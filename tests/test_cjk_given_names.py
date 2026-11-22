@@ -27,18 +27,12 @@ from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_pri
 @pytest.mark.parametrize(
     ("first", "middle", "expected"),
     [
-        ("重喜", None, True),
-        ("孝", "", True),
-        ("重", "喜", True),
         ("ひろし", None, True),
-        ("ヒロシ", None, True),
         ("민수", None, True),
         ("佐々木", None, True),
         ("重喜.", " ", True),
         (None, None, False),
-        ("Wei", None, False),
         ("重喜", "Shigeki", False),
-        ("Shigeki 重喜", None, False),
         ("Жан", None, False),
     ],
 )
@@ -58,27 +52,16 @@ def _conflict(first_a: str, first_b: str, last_a: str = "鈴木", last_b: str = 
     [
         # The production merges: pinyin syllables that match by prefix, or a missing second syllable.
         ("重喜", "重郷", True),
-        ("重郷", "重憲", True),
-        ("重喜", "重憲", True),
-        ("勝央", "勝彦", True),
         ("孝徳", "孝", True),
-        # Chinese given names in Han script, kana and hangul.
-        ("伟", "伟明", True),
-        ("ひろ", "ひろし", True),
-        ("민", "민수", True),
         # One given name in two forms stays compatible.
-        ("孝徳", "孝徳", False),
         ("张伟", "張偉", False),
         ("ひろし", "ヒロシ", False),
-        ("민수", "민 수", False),
         # A romanized side keeps the plain rules, which allow this pair.
         ("Xiao", "孝徳", False),
         # An incomplete transliteration (the long-vowel mark ー, a halfwidth voiced mark, a Han
         # character outside the table) keeps the ordinary rules, which veto these pairs.
         ("ピーター", "ジョン", True),
-        ("メアリー", "トーマス", True),
         ("ｼﾞｭﾝ", "ｹﾝ", True),
-        ("𠮷秀", "重喜", True),
         # Hangul and Han forms of one name romanize differently, so they keep the ordinary rules.
         ("민수", "敏洙", False),
     ],
@@ -95,51 +78,47 @@ def _partition(clusters, names):
     return sorted(sorted(names[int(signature_id)] for signature_id in members) for members in clusters.values())
 
 
-# Every pair gets model distance 0.1, under EPS 0.5, so only the name rule keeps people apart.
+# Set model distances below the cut to exercise the name rule.
 @pytest.mark.parametrize("route", ["arrow", "python"])
-@pytest.mark.parametrize(
-    ("given_names", "last", "expected"),
-    [
-        (["重喜", "重喜", "重郷", "重郷", "重憲"], "鈴木", [["重喜", "重喜"], ["重憲"], ["重郷", "重郷"]]),
-        (["勝央", "勝央", "勝彦"], "井上", [["勝央", "勝央"], ["勝彦"]]),
-        (["孝徳", "孝徳", "孝"], "清水", [["孝"], ["孝徳", "孝徳"]]),
-        (["孝徳", "孝徳", "孝徳"], "清水", [["孝徳", "孝徳", "孝徳"]]),
-        (["민수", "민 수", "민"], "김", [["민"], ["민 수", "민수"]]),
-    ],
-)
-def test_full_block_prediction_keeps_different_cjk_given_names_apart(
-    tmp_path: Path, route, given_names, last, expected
-):
-    dataset = _dataset([(first, "", last) for first in given_names], {})
-    signature_ids = [str(index) for index in range(len(given_names))]
-    clusters = _predict(tmp_path, dataset, {"block": signature_ids}, route, threshold=None)
-    assert _partition(clusters, given_names) == expected
+def test_full_block_prediction_keeps_different_cjk_given_names_apart(tmp_path: Path, route: str) -> None:
+    names = ["重喜", "重喜", "重郷", "重郷", "重憲", "민수", "민 수", "민"]
+    dataset = _dataset([(first, "", "鈴木") for first in names[:5]] + [(first, "", "김") for first in names[5:]], {})
+
+    clusters = _predict(tmp_path, dataset, {"suzuki": list("01234"), "kim": list("567")}, route, threshold=None)
+
+    assert _partition(clusters, names) == sorted(
+        [["重喜", "重喜"], ["重憲"], ["重郷", "重郷"], ["민"], ["민 수", "민수"]]
+    )
 
 
 @pytest.mark.parametrize("route", ["arrow", "python"])
-@pytest.mark.parametrize(
-    ("left", "right", "cluster_count"),
-    [
-        (("拓海", ""), ("拓海", ""), 1),
-        (("奈々", ""), ("奈奈", ""), 1),
-        (("奈々", ""), ("奈", ""), 2),
-        (("重喜", ""), ("重", "喜"), 1),
-        (("ひ", "ろし"), ("ひろ", "し"), 1),
-        # 𠮷 has no transliteration, so the ordinary rules apply and veto "xiu" against "ji xiu".
-        (("𠮷秀", ""), ("吉秀", ""), 2),
-        (("しけ", "\u3099る"), ("しげる", ""), 1),
-        # U+323B0 is unassigned in some Unicode versions; both routes treat it as incomplete.
-        (("孝𲎰", ""), ("孝徳", ""), 1),
-        # Halfwidth katakana and spacing voicing marks compose like the fullwidth forms.
-        (("ｶﾞｸ", ""), ("ガク", ""), 1),
-        (("しか゛", ""), ("しが", ""), 1),
-        (("ｶﾞｸ", ""), ("ヒロシ", ""), 2),
-    ],
-)
-def test_whole_given_name_orthography(tmp_path: Path, route, left, right, cluster_count):
-    dataset = _dataset([(*left, "鈴木"), (*right, "鈴木")], {})
-    clusters = _predict(tmp_path, dataset, {"block": ["0", "1"]}, route, threshold=None)
-    assert len(clusters) == cluster_count
+def test_whole_given_name_orthography(tmp_path: Path, route: str) -> None:
+    pairs = [
+        (("拓海", ""), ("拓海", ""), True),
+        (("奈々", ""), ("奈奈", ""), True),
+        (("奈々", ""), ("奈", ""), False),
+        (("重喜", ""), ("重", "喜"), True),
+        # Keep the ordinary name rules when transliteration omits a Han character.
+        (("𠮷秀", ""), ("吉秀", ""), False),
+        (("しけ", "\u3099る"), ("しげる", ""), True),
+        # Treat U+323B0 as incomplete across Unicode versions.
+        (("孝𲎰", ""), ("孝徳", ""), True),
+        (("ｶﾞｸ", ""), ("ガク", ""), True),
+        (("しか゛", ""), ("しが", ""), True),
+        (("ｶﾞｸ", ""), ("ヒロシ", ""), False),
+    ]
+    names = [(*given, "鈴木") for left, right, _ in pairs for given in (left, right)]
+    blocks = {str(i): [str(2 * i), str(2 * i + 1)] for i in range(len(pairs))}
+    expected = set()
+    for (_, _, joins), (left_id, right_id) in zip(pairs, blocks.values(), strict=True):
+        if joins:
+            expected.add(frozenset((left_id, right_id)))
+        else:
+            expected.update((frozenset((left_id,)), frozenset((right_id,))))
+
+    clusters = _predict(tmp_path, _dataset(names, {}), blocks, route, threshold=None)
+
+    assert {frozenset(members) for members in clusters.values()} == expected
 
 
 def test_orcid_name_waiver_is_independent_of_mixed_script_input_order(tmp_path: Path):

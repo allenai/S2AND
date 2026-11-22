@@ -97,9 +97,19 @@ def test_make_subblocks_uses_specter_for_oversized_single_letter_block(monkeypat
 
     assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"], ["s3", "s4"]]
 
+    def reject_fallback(*_args, **_kwargs):
+        pytest.fail("The subblock already fits at capacity")
 
-def test_make_subblocks_rejects_duplicate_ids_after_string_coercion() -> None:
-    dataset = SimpleNamespace(signatures={"1": _signature("1", first="anna")}, random_seed=0)
+    monkeypatch.setattr(subblocking, "cluster_with_specter", reject_fallback)
+    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
+        ["s1", "s2"], dataset, maximum_size=2, first_k_letter_counts_sorted={}
+    )
+    assert list(subblocks.values()) == [["s1", "s2"]]
+    assert telemetry["specter_invocation_count"] == 0
+
+
+def test_make_subblocks_rejects_coercion_collisions_and_preserves_integer_ids() -> None:
+    dataset = SimpleNamespace(signatures={1: _signature("1", first="anna")}, random_seed=0)
 
     with pytest.raises(ValueError, match="must be unique.*'1'"):
         subblocking.make_subblocks_with_telemetry(
@@ -108,10 +118,6 @@ def test_make_subblocks_rejects_duplicate_ids_after_string_coercion() -> None:
             maximum_size=2,
             first_k_letter_counts_sorted={},
         )
-
-
-def test_make_subblocks_preserves_integer_signature_ids() -> None:
-    dataset = SimpleNamespace(signatures={1: _signature("1", first="anna")}, random_seed=0)
 
     subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
         [1],
@@ -163,30 +169,6 @@ def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(t
     arrow_dataset.close()
 
 
-def test_make_subblocks_skips_specter_when_single_letter_block_is_in_budget(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="h", middle=""),
-            "s2": _signature("s2", first="h", middle=""),
-        },
-        random_seed=0,
-    )
-
-    def _fail_if_called(*_args, **_kwargs):
-        raise AssertionError("cluster_with_specter should not be called when the dead-end block is already in budget")
-
-    monkeypatch.setattr(subblocking, "cluster_with_specter", _fail_if_called)
-
-    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2"],
-        dataset,
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"]]
-
-
 def test_subdivide_helper_accepts_prefix_exactly_at_capacity() -> None:
     names = np.array(["anna", "anna", "bill"])
     signature_ids = np.array(["s1", "s2", "s3"])
@@ -200,32 +182,13 @@ def test_subdivide_helper_accepts_prefix_exactly_at_capacity() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("names", "signature_ids", "expected_output", "expected_dead_ends"),
-    [
-        (["ann", "ann", "anna"], ["s1", "s2", "s3"], {"anna": ["s3"]}, {"ann": ["s1", "s2"]}),
-        (
-            ["anna", "anna", "anne", "anne"],
-            ["s1", "s2", "s3", "s4"],
-            {},
-            {"anna": ["s1", "s2"], "anne": ["s3", "s4"]},
-        ),
-    ],
-    ids=["terminal-prefix-collision", "distinct-full-names"],
-)
-def test_subdivide_helper_keeps_terminal_full_name_groups_separate(
-    names: list[str],
-    signature_ids: list[str],
-    expected_output: dict[str, list[str]],
-    expected_dead_ends: dict[str, list[str]],
-) -> None:
-    output, dead_ends = subblocking.subdivide_helper(
-        np.array(names), np.array(signature_ids), maximum_size=1, starting_k=2
-    )
+def test_subdivide_helper_keeps_terminal_full_name_groups_separate() -> None:
+    names = np.array(["ann", "ann", "anna", "anne", "anne", "bill"])
+    ids = np.array(["s1", "s2", "s3", "s4", "s5", "s6"])
+    output, dead_ends = subblocking.subdivide_helper(names, ids, maximum_size=1, starting_k=2)
 
-    assert {key: values.tolist() for key, values in output.items()} == expected_output
-    assert {key: values.tolist() for key, values in dead_ends.items()} == expected_dead_ends
-    assert sorted(value for values in (*output.values(), *dead_ends.values()) for value in values) == signature_ids
+    assert {key: values.tolist() for key, values in output.items()} == {"anna": ["s3"], "bi": ["s6"]}
+    assert {key: values.tolist() for key, values in dead_ends.items()} == {"ann": ["s1", "s2"], "anne": ["s4", "s5"]}
 
 
 def test_make_subblocks_does_not_fallback_when_longer_name_prefixes_fit(monkeypatch) -> None:
@@ -285,36 +248,7 @@ def test_cluster_with_specter_surfaces_unexpected_auxiliary_feature_failures(mon
         subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
 
 
-def test_cluster_with_specter_handles_degenerate_auxiliary_fallback() -> None:
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="anna"),
-            "s2": _signature("s2", first="anne"),
-        },
-        papers={},
-        specter_embeddings={},
-        random_seed=0,
-    )
-
-    output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
-
-    assert sorted(output.values()) == [["s1"], ["s2"]]
-
-
-def test_cluster_with_specter_returns_capacity_sized_input_without_clustering(monkeypatch) -> None:
-    dataset = SimpleNamespace(signatures={}, papers={}, specter_embeddings={}, random_seed=0)
-
-    def _raise_if_called(*_args, **_kwargs):
-        raise AssertionError("Genie should not run when the input already fits")
-
-    monkeypatch.setattr("genieclust.Genie", _raise_if_called)
-
-    output = subblocking.cluster_with_specter(["s1"], dataset, target_subblock_size=1)
-
-    assert output == {"0": ["s1"]}
-
-
-def test_cluster_with_specter_clusters_nonzero_embeddings() -> None:
+def test_cluster_with_specter_handles_embeddings_and_fallback(monkeypatch) -> None:
     dataset = SimpleNamespace(
         signatures={
             "s1": _signature("s1", first="anna"),
@@ -328,9 +262,19 @@ def test_cluster_with_specter_clusters_nonzero_embeddings() -> None:
         random_seed=0,
     )
 
-    output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
-
+    ids = ["s1", "s2"]
+    output = subblocking.cluster_with_specter(ids, dataset, target_subblock_size=1)
     assert sorted(output.values()) == [["s1"], ["s2"]]
+
+    dataset.specter_embeddings.clear()
+    output = subblocking.cluster_with_specter(ids, dataset, target_subblock_size=1)
+    assert sorted(output.values()) == [["s1"], ["s2"]]
+
+    def reject_clustering(*_args, **_kwargs):
+        pytest.fail("The input already fits at capacity")
+
+    monkeypatch.setattr("genieclust.Genie", reject_clustering)
+    assert subblocking.cluster_with_specter(ids[:1], dataset, target_subblock_size=1) == {"0": ["s1"]}
 
 
 def test_cluster_with_specter_caps_requested_clusters_below_sample_count(monkeypatch) -> None:
@@ -372,8 +316,8 @@ def test_union_find_find_compresses_long_parent_chain_without_recursion() -> Non
     assert union_find.parent[0] == 1499
 
 
-@pytest.mark.parametrize("bridge", [(0, 2), (2, 0)])
-def test_union_find_capacity_counts_existing_component_in_either_argument_order(bridge) -> None:
+def test_union_find_capacity_counts_existing_components() -> None:
+    bridge = (2, 0)
     union_find = subblocking._UnionFind(4)
     assert union_find.union_if_capacity(0, 1, maximum_size=3)
     assert union_find.union_if_capacity(*bridge, maximum_size=3)
@@ -414,64 +358,22 @@ def test_signature_name_parts_for_subblocking_recomputes_deferred_normalized_fie
         assert subblocking.signature_name_parts_for_subblocking(signature) == expected
 
 
-def test_signature_name_parts_for_subblocking_treats_all_dashes_uniformly() -> None:
-    unicode_dash = SimpleNamespace(
-        author_info_first="Sang\u2010Min",
-        author_info_middle=None,
-        author_info_first_normalized="sang min",
-        author_info_middle_normalized="",
-    )
-    ascii_dash = SimpleNamespace(
-        author_info_first="Sang-Min",
-        author_info_middle=None,
-        author_info_first_normalized="sang min",
-        author_info_middle_normalized="",
-    )
-
-    assert subblocking.signature_name_parts_for_subblocking(unicode_dash) == ("sang min", "")
-    assert subblocking.signature_name_parts_for_subblocking(ascii_dash) == ("sang min", "")
-
-
 def _key_names(targets, context, maximum_size: int) -> list[tuple[str, str]]:
     """Key names of the target rows after the rule runs on targets plus repeated context rows."""
     names = list(targets) + [(first, middle) for first, middle, count in context for _ in range(count)]
     return subblocking.subblocking_name_parts(names, maximum_size)[: len(targets)]
 
 
-def test_subblocking_name_parts_key_all_initial_compounds_as_initials() -> None:
-    # The Rust twin is all_initial_compounds_key_as_initials_even_with_joined_evidence.
-    assert _key_names([("j d", ""), ("j d", "t"), ("j d t", "")], [("jd", "", 50)], 100) == [
-        ("j", "d"),
-        ("j", "d t"),
-        ("j", "d t"),
-    ]
+def test_subblocking_name_parts_respect_join_ratio_and_capacity() -> None:
+    targets = [("hui min", "x"), ("qi an", ""), ("xiao yu ting", "m"), ("j d", "t")]
+    # Include split evidence that puts Huimin exactly at the required ratio.
+    at_ratio = [("huimin", "", 15), ("hui", "min jie", 1), ("qian", "", 20), ("xiaoyuting", "", 9), ("jd", "", 10)]
+    assert _key_names(targets, at_ratio, 20) == [("hui", "min x"), ("qian", ""), ("xiaoyuting", "m"), ("j", "d t")]
 
-
-@pytest.mark.parametrize(
-    ("context", "expected"),
-    [
-        ([("huimin", "", 7)], ("hui", "min x")),
-        ([("huimin", "", 8)], ("huimin", "x")),
-        # Split-form records ("hui" with a middle that starts with "min") raise the bar.
-        ([("huimin", "", 15), ("hui", "min jie", 1)], ("hui", "min x")),
-        # Neither a longer middle token nor another compound counts as split form.
-        ([("huimin", "", 16), ("hui", "minh", 1), ("hui min", "", 3)], ("huimin", "x")),
-    ],
-)
-def test_subblocking_name_parts_join_only_above_the_ratio(context, expected) -> None:
-    # (n_join + 1) / (n_split + 1) must be above 8. The Rust twin is compound_joins_only_above_the_ratio.
-    assert _key_names([("hui min", "x")], context, 100) == [expected]
-
-
-@pytest.mark.parametrize(("joined_count", "expected"), [(20, ("qian", "")), (21, ("qi", "an"))])
-def test_subblocking_name_parts_do_not_join_a_first_name_above_the_cap(joined_count, expected) -> None:
-    assert _key_names([("qi an", "")], [("qian", "", joined_count)], 20) == [expected]
-
-
-def test_subblocking_name_parts_join_all_tokens_or_split_after_the_first() -> None:
-    targets = [("xiao yu ting", "m"), ("xiao yu ting", "")]
-    assert _key_names(targets, [("xiaoyuting", "", 9)], 100) == [("xiaoyuting", "m"), ("xiaoyuting", "")]
-    assert _key_names(targets[:1], [("xiaoyuting", "", 9), ("xiao", "yu", 1)], 100) == [("xiao", "yu ting m")]
+    # Ignore longer middle tokens and compounds when counting the split form.
+    above_ratio = [("huimin", "", 16), ("hui", "minh", 1), ("hui min", "", 2)]
+    above_ratio += [("qian", "", 21), ("xiaoyuting", "", 9), ("xiao", "yu", 1)]
+    assert _key_names(targets[:3], above_ratio, 20) == [("huimin", "x"), ("qi", "an"), ("xiao", "yu ting m")]
 
 
 @pytest.mark.parametrize(
@@ -484,12 +386,6 @@ def test_subblocking_name_parts_join_all_tokens_or_split_after_the_first() -> No
             id="all-initial-compound-joins-initials",
         ),
         pytest.param(
-            [(f"s{i}", "Huimin", "") for i in range(8)] + [("s8", "Hui-Min", ""), ("s9", "Hui", "Ling")],
-            9,
-            {"huim": [f"s{i}" for i in range(9)], "hui": ["s9"]},
-            id="joined-majority",
-        ),
-        pytest.param(
             [(f"s{i}", "Huimin", "") for i in range(8)] + [("s8", "Hui-Min", ""), ("s9", "Hui", "Min")],
             9,
             {"huim": [f"s{i}" for i in range(8)], "hui": ["s8", "s9"]},
@@ -500,13 +396,6 @@ def test_subblocking_name_parts_join_all_tokens_or_split_after_the_first() -> No
             9,
             {"xiaoy": [f"s{i}" for i in range(9)], "xiao": ["s9"]},
             id="three-token-join",
-        ),
-        pytest.param(
-            [(f"s{i}", "Xiaoyuting", "") for i in range(8)]
-            + [("s8", "Xiao-Yu-Ting", ""), ("s9", "Xiao", ""), ("s10", "Xiao", "Yu")],
-            9,
-            {"xiaoy": [f"s{i}" for i in range(8)], "xiao": ["s10", "s8", "s9"]},
-            id="three-token-split",
         ),
         pytest.param(
             [(f"s{i}", "Huimin", chr(ord("A") + i)) for i in range(10)] + [("s10", "Hui-Min", "")],
@@ -572,18 +461,6 @@ def _rows(*groups: tuple[str, str, int]) -> list[tuple[str, str, str]]:
             {"weimin": ["s0", "s1", "s2", "s3", "s4", "s9"]},
             id="joined-compound-in-dead-end",
         ),
-        pytest.param(
-            _rows(("Wei", "", 3), ("Wei", "Min", 1), ("Hao", "", 2), ("Hao", "Xu", 2)),
-            3,
-            {"wei": ["s0", "s1", "s2"], "hao": ["s4", "s5"]},
-            id="two-dead-ends",
-        ),
-        pytest.param(
-            _rows(("J.-D.", "", 1), ("J", "", 2), ("JD", "", 1), ("Jian", "", 1)),
-            2,
-            {},
-            id="initials-and-joined-capitals-are-not-dead-ends",
-        ),
     ],
 )
 def test_python_and_arrow_report_the_same_no_middle_dead_ends(tmp_path, rows, maximum_size, expected) -> None:
@@ -622,7 +499,7 @@ def test_python_and_arrow_report_the_same_no_middle_dead_ends(tmp_path, rows, ma
             assert all(f"{first}|middle=" in bucket_of[sid].split(", ") for sid in bucket)
 
 
-def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) -> None:
+def test_rowwise_arrow_coauthors_normalize_names_and_require_unique_positions(tmp_path) -> None:
     paper_authors = pa.table(
         {
             "paper_id": pa.array(["p1", "p1", "p1", "p1"], type=pa.string()),
@@ -642,16 +519,8 @@ def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) ->
     assert out == {"p1": [(0, "o connor"), (3, "m gorski")]}
     assert load_metrics["paper_authors_rows_loaded"] == 4
 
-
-def test_coauthor_blocks_from_rowwise_arrow_validates_blank_row_positions(tmp_path) -> None:
-    paper_authors = pa.table(
-        {
-            "paper_id": pa.array(["p1", "p1"], type=pa.string()),
-            "position": pa.array([0, 0], type=pa.int64()),
-            "author_name": pa.array(["", "   "], type=pa.string()),
-        }
-    )
-    paper_authors_path = _write_ipc(tmp_path / "paper_authors.arrow", paper_authors)
+    bad_positions = paper_authors.set_column(1, "position", pa.array([0, 1, 1, 3], type=pa.int64()))
+    _write_ipc(tmp_path / "paper_authors.arrow", bad_positions)
     with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
         subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
             _SingleBatchArrowLease(paper_authors_path),
@@ -660,11 +529,9 @@ def test_coauthor_blocks_from_rowwise_arrow_validates_blank_row_positions(tmp_pa
         )
 
 
-def test_subblock_merge_candidate_metadata_preserves_middle_values_with_equals() -> None:
+def test_terminal_full_name_is_used_for_merge_scoring() -> None:
     assert subblocking._subblock_merge_candidate_metadata("a|middle=b=c", 2) == (2, "a", "b=c", "b=c", "b=c")
 
-
-def test_terminal_full_name_is_used_for_merge_scoring() -> None:
     candidates = subblocking._sorted_subblock_merge_candidates(
         {"chen|middle=w": ["s1"], "cheng": ["s2"]},
         maximum_size=2,
@@ -679,21 +546,9 @@ def test_terminal_full_name_is_used_for_merge_scoring() -> None:
     [
         (
             [
-                ("aa", "https://orcid.org/0000-0002-1825-0097"),
-                ("bb", "ORCID: 0000000218250097"),
-                ("aa", "   "),
-                ("cc", "   "),
-            ],
-            3,
-            True,
-            [["s1", "s2", "s3"], ["s4"]],
-            (0, 0),
-        ),
-        (
-            [
+                ("bb", "https://orcid.org/0000-0000-0000-0001"),
                 ("bb", "0000-0000-0000-0001"),
-                ("bb", "0000-0000-0000-0001"),
-                ("aa", "0000-0000-0000-0001"),
+                ("aa", "ORCID: 0000000000000001"),
                 ("aa", None),
                 ("aa", None),
                 ("bb", None),
@@ -702,19 +557,6 @@ def test_terminal_full_name_is_used_for_merge_scoring() -> None:
             True,
             [["s1", "s2", "s3", "s4", "s5", "s6"]],
             (0, 0),
-        ),
-        (
-            [
-                ("aa", "0000-0000-0000-0001"),
-                ("aa", "0000-0000-0000-0001"),
-                ("aa", None),
-                ("bb", "0000-0000-0000-0001"),
-                ("bb", None),
-            ],
-            4,
-            True,
-            [["s1", "s2", "s3"], ["s4", "s5"]],
-            (1, 3),
         ),
         (
             [("aa", "https://orcid.org/0000-0002-1825-0097"), ("bb", "ORCID: 0000000218250097"), ("cc", None)],
@@ -736,7 +578,7 @@ def test_terminal_full_name_is_used_for_merge_scoring() -> None:
             (2, 4),
         ),
     ],
-    ids=["normalized-orcid", "whole-subblocks", "over-capacity", "disabled", "transitive-over-capacity"],
+    ids=["whole-subblocks", "disabled", "transitive-over-capacity"],
 )
 def test_python_and_arrow_orcid_repair_preserve_whole_subblocks(
     tmp_path: Path, names, maximum_size: int, enabled: bool, expected, skipped

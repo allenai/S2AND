@@ -316,54 +316,29 @@ def test_make_distance_matrices_guards_allocation_before_pair_featurization(monk
         )
 
 
-def test_residual_first_initial_groups_union_normalized_orcids():
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _subblocking_signature("alice", orcid="0000-0000-0000-0001"),
-            "s2": _subblocking_signature("bob", orcid="0000000000000001"),
-            "s3": _subblocking_signature("carol", orcid=None),
-        }
-    )
-    groups = residual_first_initial_groups(
-        ["s1", "s2", "s3"],
-        first_names=SignatureFirstNames(dataset.signatures),
-        orcids=SignatureOrcids(dataset.signatures),
-        partial_supervision={},
-        use_default_constraints_as_supervision=True,
-        suppress_orcid=False,
-    )
+def test_residual_first_initial_groups_union_orcids_and_handle_blanks():
+    signatures = {
+        "s1": _subblocking_signature("alice", orcid="0000-0000-0000-0001"),
+        "s2": _subblocking_signature("bob", orcid="0000000000000001"),
+        "s3": _subblocking_signature("carol", orcid=None),
+        "empty": _subblocking_signature(""),
+        "blank": _subblocking_signature(" \t "),
+    }
 
-    assert {frozenset(group) for group in groups} == {frozenset({"s1", "s2"}), frozenset({"s3"})}
+    def groups(ids):
+        return residual_first_initial_groups(
+            ids,
+            first_names=SignatureFirstNames(signatures),
+            orcids=SignatureOrcids(signatures),
+            partial_supervision={},
+            use_default_constraints_as_supervision=True,
+            suppress_orcid=False,
+        )
 
-
-def test_residual_first_initial_groups_rejects_whitespace_only_first_initials():
+    assert groups(["s1", "s2", "s3"]) == [["s1", "s2"], ["s3"]]
     assert first_initials("  ") == frozenset()
-
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": SimpleNamespace(
-                author_info_first_normalized="",
-                author_info_first="  ",
-                author_info_orcid=None,
-            ),
-            "s2": SimpleNamespace(
-                author_info_first_normalized="",
-                author_info_first="\t ",
-                author_info_orcid=None,
-            ),
-            "s3": _subblocking_signature("alice", orcid=None),
-        }
-    )
-    groups = residual_first_initial_groups(
-        ["s1", "s2", "s3"],
-        first_names=SignatureFirstNames(dataset.signatures),
-        orcids=SignatureOrcids(dataset.signatures),
-        partial_supervision={},
-        use_default_constraints_as_supervision=True,
-        suppress_orcid=True,
-    )
-
-    assert groups == [["s1", "s2", "s3"]]
+    assert groups(["s1", "s2", "s3", "blank"]) == [["s1", "s2", "s3", "blank"]]
+    assert groups(["s1", "s2", "s3", "empty"]) == [["s1", "s2", "s3", "empty"]]
 
 
 def test_sampling_balanced_homonym_synonym_respects_sample_size():

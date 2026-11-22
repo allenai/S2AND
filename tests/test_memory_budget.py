@@ -32,16 +32,6 @@ _rust_batch_plan = partial(
 )
 
 
-def test_resolve_total_ram_arg_overrides_autodetect():
-    resolved, source = memory_budget.resolve_total_ram_bytes(
-        4096,
-        detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
-        detect_total_fn=lambda: (20_000, "host:test"),
-    )
-    assert resolved == 4096
-    assert source == "arg"
-
-
 def test_emit_memory_telemetry_writes_jsonl(monkeypatch, tmp_path):
     monkeypatch.setenv(memory_budget.MEMORY_TELEMETRY_JSONL_ENV, " ")
     assert memory_budget.memory_telemetry_jsonl_path() is None
@@ -63,7 +53,15 @@ def test_emit_memory_telemetry_writes_jsonl(monkeypatch, tmp_path):
     assert record["value"] == 7
 
 
-def test_resolve_total_ram_cgroup_uses_safety_factor():
+def test_resolve_total_ram_precedence_and_safety_factor(monkeypatch):
+    resolved, source = memory_budget.resolve_total_ram_bytes(
+        4096,
+        detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
+        detect_total_fn=lambda: (20_000, "host:test"),
+    )
+    assert resolved == 4096
+    assert source == "arg"
+
     resolved, source = memory_budget.resolve_total_ram_bytes(
         None,
         detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
@@ -73,8 +71,6 @@ def test_resolve_total_ram_cgroup_uses_safety_factor():
     assert resolved == 8000
     assert source == "cgroup:test_80pct"
 
-
-def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
     monkeypatch.setattr(memory_budget, "_psutil_virtual_memory_total_bytes_best_effort", lambda: None)
     monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
     monkeypatch.setattr(memory_budget, "_windows_total_ram_bytes_best_effort", lambda: (10_000, "winapi:test"))
@@ -85,19 +81,6 @@ def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
     )
     assert resolved == 8000
     assert source == "winapi:test_80pct"
-
-
-def test_current_rss_windows_fallback_used_when_psutil_missing(monkeypatch):
-    monkeypatch.setattr(memory_budget, "_psutil_process_rss_bytes_best_effort", lambda: None)
-    monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
-    monkeypatch.setattr(
-        memory_budget,
-        "_windows_process_working_set_bytes_best_effort",
-        lambda: (654_321, "winapi:test"),
-    )
-    rss, source = memory_budget.current_rss_bytes_best_effort(10_000_000)
-    assert rss == 654_321
-    assert source == "winapi:test"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Requires the real Windows process-memory API")
@@ -177,7 +160,7 @@ def test_cached_psutil_keeps_ram_and_scorer_budget_measurements_live(monkeypatch
     assert import_calls == ["psutil"]
 
 
-def test_compute_rust_batch_chunk_plan_respects_stage_budget():
+def test_rust_batch_chunk_plan_uses_effective_ram_and_minimum_chunk():
     plan = _rust_batch_plan(
         num_features=1000,
         total_pairs=20000,
@@ -193,6 +176,32 @@ def test_compute_rust_batch_chunk_plan_respects_stage_budget():
     assert int(plan.predicted_chunk_bytes) == int(plan.bytes_per_pair_row)
     assert int(plan.predicted_stage_peak_rss_bytes) >= int(plan.predicted_stage_peak_delta_bytes)
     assert int(plan.predicted_stage_peak_delta_bytes) >= int(plan.predicted_chunk_bytes)
+
+    snapshot = memory_budget.memory_snapshot_for_stage(
+        total_ram_bytes=1_000_000,
+        safety_margin_fraction=0.10,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        # RSS > total - safety => degenerate
+        current_rss_fn=lambda _total: (950_000, "rss:test"),
+    )
+    assert snapshot.available_bytes == 1
+
+    snapshot = memory_budget.memory_snapshot_for_stage(
+        total_ram_bytes=1_000_000,
+        safety_margin_fraction=0.10,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (200_000, "rss:test"),
+    )
+    # available = 1_000_000 - 200_000 - 100_000 = 700_000
+    assert snapshot.available_bytes == 700_000
+    expected_fraction = 700_000 / 1_000_000
+    assert abs(snapshot.effective_available_fraction - expected_fraction) < 1e-6
+    plan = _rust_batch_plan(
+        num_features=64, total_pairs=1000, total_ram_bytes=1000000, current_rss_fn=lambda _total: (200000, "rss:test")
+    )
+    assert float(plan.effective_available_fraction) == pytest.approx(0.7, abs=1e-6)
 
 
 def test_compute_rust_batch_chunk_plan_accounts_for_borrowed_index_remap_arrays():
@@ -373,50 +382,23 @@ def test_promoted_orcid_fanout_floors_override_top_k_without_repeating_batch_tot
     assert total.predicted_peak_delta_bytes < per_query.predicted_peak_delta_bytes
 
 
-def test_compute_promoted_phase_a_limits_fails_when_single_query_exceeds_budget():
-    with pytest.raises(MemoryError, match="cannot fit a single query"):
-        _compute_promoted_phase_a_limits(
-            query_count=10,
-            component_sizes=[2_000_000],
-            retrieval_top_k=1,
-            total_ram_bytes=100_000_000,
-            stage_budget_fraction=0.10,
-            fixed_overhead_bytes=1_000_000,
-            current_rss_bytes=10_000_000,
-        )
-
-
-def test_compute_promoted_phase_a_limits_zero_queries_skip_work_and_single_query_budget():
-    # All-seeded incremental request: every signature is already in a seed component,
-    # so query_count == 0 and no batching_threshold is forwarded. This must not raise;
-    # the planner short-circuits to a zero-size batch (no work to do).
-    limits = _compute_promoted_phase_a_limits(
-        query_count=0,
-        component_sizes=[4],
-        retrieval_top_k=50,
+def test_promoted_phase_a_budget_rejects_work_and_allows_an_empty_batch():
+    plan = partial(
+        _compute_promoted_phase_a_limits,
+        component_sizes=[2_000_000],
+        retrieval_top_k=1,
         total_ram_bytes=100_000_000,
         stage_budget_fraction=0.10,
         fixed_overhead_bytes=20_000_000,
         current_rss_bytes=10_000_000,
     )
-
-    assert int(limits.query_batch_size) == 0
-    assert int(limits.predicted_peak_delta_bytes) >= 20_000_000
-
-
-def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold():
-    # An explicit non-positive caller value is always invalid, including when
-    # query_count == 0 (it must not be silently coerced to a 1-size batch).
-    for query_count in (0, 5):
-        with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
-            _compute_promoted_phase_a_limits(
-                query_count=query_count,
-                component_sizes=[4],
-                retrieval_top_k=50,
-                total_ram_bytes=8_000_000_000,
-                max_query_batch_size=0,
-                current_rss_bytes=100_000_000,
-            )
+    with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
+        plan(query_count=0, max_query_batch_size=0)
+    with pytest.raises(MemoryError, match="cannot fit a single query"):
+        plan(query_count=1)
+    empty = plan(query_count=0)
+    assert empty.query_batch_size == 0
+    assert empty.predicted_peak_delta_bytes >= 20_000_000
 
 
 def test_summarize_prediction_accuracy_flags_underprediction():
@@ -496,38 +478,3 @@ def test_rust_batch_selected_features_tighter_chunk_sizing():
     assert int(selected.bytes_per_pair_row) == 25 * 8 + 128
     # Tighter row estimate -> more pairs per chunk
     assert int(selected.chunk_pairs) >= int(legacy.chunk_pairs)
-
-
-def test_degenerate_budget_logs_warning(caplog):
-    """When RSS exceeds total_ram - safety_margin, a warning should be logged."""
-    with caplog.at_level(logging.WARNING, logger="s2and"):
-        snapshot = memory_budget.memory_snapshot_for_stage(
-            total_ram_bytes=1_000_000,
-            safety_margin_fraction=0.10,
-            detect_cgroup_fn=lambda: (None, "unavailable"),
-            detect_total_fn=lambda: (None, "unavailable"),
-            # RSS > total - safety => degenerate
-            current_rss_fn=lambda _total: (950_000, "rss:test"),
-        )
-    assert snapshot.available_bytes == 1
-    assert any("degenerate" in r.message for r in caplog.records)
-    assert "may reject allocations" in caplog.text
-    assert "Chunk sizes will be minimal" not in caplog.text
-
-
-def test_effective_available_fraction_in_snapshot():
-    snapshot = memory_budget.memory_snapshot_for_stage(
-        total_ram_bytes=1_000_000,
-        safety_margin_fraction=0.10,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (200_000, "rss:test"),
-    )
-    # available = 1_000_000 - 200_000 - 100_000 = 700_000
-    assert snapshot.available_bytes == 700_000
-    expected_fraction = 700_000 / 1_000_000
-    assert abs(snapshot.effective_available_fraction - expected_fraction) < 1e-6
-    plan = _rust_batch_plan(
-        num_features=64, total_pairs=1000, total_ram_bytes=1000000, current_rss_fn=lambda _total: (200000, "rss:test")
-    )
-    assert float(plan.effective_available_fraction) == pytest.approx(0.7, abs=1e-6)

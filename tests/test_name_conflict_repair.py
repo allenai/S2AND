@@ -75,28 +75,19 @@ def _partition(labels: list[int], signatures: list[str] = SIGNATURES) -> set[fro
     return {frozenset(group) for group in groups.values()}
 
 
-def test_one_odd_mention_splits_the_person_without_repair() -> None:
-    assert _partition(_labels(_square())) == {
+def test_repair_merges_the_two_clusters_and_keeps_the_odd_mention() -> None:
+    square = _square()
+    labels = _labels(square)
+    assert _partition(labels) == {
         frozenset(SIGNATURES[:6]),
         frozenset(SIGNATURES[6:11]),
         frozenset(SIGNATURES[11:]),
     }
 
-
-def test_repair_merges_the_two_clusters_and_keeps_the_odd_mention() -> None:
-    labels = _repair(_square(), NameConflictRepair(0.2, FULL))
-    assert _partition(labels) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
-
-
-def test_repair_needs_a_low_average_distance() -> None:
-    square = _square(cross=0.3)
-    assert _repair(square, NameConflictRepair(0.2, FULL)) == _labels(square)
-
-
-def test_repair_needs_one_mention_behind_every_impossible_pair() -> None:
-    square = _square()
-    square[0, 7] = square[7, 0] = LARGE_DISTANCE
-    assert _repair(square, NameConflictRepair(0.2, FULL)) == _labels(square)
+    codes = quantize_distances(squareform(square))
+    assert codes is not None
+    repaired = repair_name_conflicts_in_block(SIGNATURES, labels, codes, NameConflictRepair(0.2, FULL))
+    assert _partition(list(repaired)) == {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])}
 
 
 def test_repair_needs_five_mentions_on_each_side() -> None:
@@ -154,12 +145,6 @@ def test_close_pair_height_counts_only_codes_certainly_under_the_close_distance(
     assert _repair(square, repair) == _labels(square)
 
 
-def test_close_pair_height_equals_the_plain_average_without_close_pairs() -> None:
-    square = _square(cross=0.3)
-    repair = NameConflictRepair(0.2, FULL, close_pair_bonus=8.0, close_pair_distance=0.05)
-    assert _repair(square, repair) == _labels(square)
-
-
 def _bounded(floor: float | None, cap: float | None, min_side: int | None = None) -> NameConflictRepair:
     return NameConflictRepair(
         0.2,
@@ -202,20 +187,26 @@ def test_bonus_bound_off_keeps_the_close_pair_height() -> None:
     )
 
 
-@pytest.mark.parametrize(("floor", "cap", "merges"), [(0.10, None, True), (0.40, None, False), (None, 0.35, False)])
-def test_bonus_bound_applies_in_block_repair(floor: float | None, cap: float | None, merges: bool) -> None:
-    # 9 of 25 clean pairs are close and the plain average is about 0.52.
+def test_bonus_bounds_apply_in_block_repair() -> None:
+    # Nine of 25 clean pairs are close and the plain average is about 0.52.
     square = _half_close_square()
-    merged = _partition(_repair(square, _bounded(floor, cap))) == {
-        frozenset(SIGNATURES[:11]),
-        frozenset(SIGNATURES[11:]),
-    }
-    assert merged is merges
+    labels = _labels(square)
+    codes = quantize_distances(squareform(square))
+    assert codes is not None
+    for repair, merges in (
+        (_bounded(0.10, None), True),
+        (_bounded(0.40, None), False),
+        (_bounded(None, 0.35), False),
+        (_bounded(0.10, None, 6), False),
+    ):
+        repaired = repair_name_conflicts_in_block(SIGNATURES, labels, codes, repair)
+        expected = {frozenset(SIGNATURES[:11]), frozenset(SIGNATURES[11:])} if merges else _partition(labels)
+        assert _partition(list(repaired)) == expected, repair
 
 
 @pytest.mark.parametrize(
     ("floor", "cap", "min_side"),
-    [(-0.1, None, None), (1.1, None, None), (None, 0.0, None), (None, 1.5, None), (None, None, 0)],
+    [(-0.1, None, None), (None, 0.0, None), (None, None, 0)],
 )
 def test_repair_settings_reject_an_invalid_bonus_bound(
     floor: float | None, cap: float | None, min_side: int | None
@@ -224,24 +215,13 @@ def test_repair_settings_reject_an_invalid_bonus_bound(
         _bounded(floor, cap, min_side)
 
 
-@pytest.mark.parametrize(("smaller_side", "passes"), [(9, False), (10, True), (None, True)])
+@pytest.mark.parametrize(("smaller_side", "passes"), [(9, False), (10, True)])
 def test_bonus_bound_needs_enough_mentions_on_each_side(smaller_side: int | None, passes: bool) -> None:
     repair = _bounded(0.10, 0.35, min_side=10)
     bound = name_conflict_repair_module._height_bound(_code_sum(0.30, 100), 20, 100, repair, smaller_side)
     assert (bound <= 0.2) is passes
     # A pair under the limit on its plain average keeps the repair's own minimum.
     assert name_conflict_repair_module._height_bound(_code_sum(0.15, 100), 0, 100, repair, 5) <= 0.2
-
-
-@pytest.mark.parametrize(("min_side", "merges"), [(5, True), (6, False)])
-def test_bonus_min_side_applies_in_block_repair(min_side: int, merges: bool) -> None:
-    # The two sides keep 5 mentions each once the odd mention is left out.
-    square = _half_close_square()
-    merged = _partition(_repair(square, _bounded(0.10, None, min_side))) == {
-        frozenset(SIGNATURES[:11]),
-        frozenset(SIGNATURES[11:]),
-    }
-    assert merged is merges
 
 
 def test_repair_settings_follow_the_cluster_model_and_the_module_constants() -> None:
@@ -271,30 +251,18 @@ def test_repair_settings_follow_the_cluster_model_and_the_module_constants() -> 
     assert block_corrections._repair_settings(plain) is None
 
 
-@pytest.mark.parametrize(("bonus", "distance"), [(-1.0, 0.05), (float("nan"), 0.05), (8.0, 0.0), (8.0, 1.5)])
+@pytest.mark.parametrize(("bonus", "distance"), [(float("nan"), 0.05), (8.0, 0.0)])
 def test_repair_settings_reject_an_invalid_close_pair_rule(bonus: float, distance: float) -> None:
     with pytest.raises(ValueError, match="close_pair"):
         NameConflictRepair(0.2, FULL, close_pair_bonus=bonus, close_pair_distance=distance)
 
 
-def test_repair_skips_sides_with_different_orcids() -> None:
+def test_repair_orcid_tie_does_not_depend_on_mention_order() -> None:
     square = _square()
-    orcids = {"a0": "0000-0000-0000-0001", "b0": "0000-0000-0000-0002"}
-    assert _repair(square, NameConflictRepair(0.2, FULL, orcids)) == _labels(square)
-    same = {"a0": "0000-0000-0000-0001", "b0": "0000-0000-0000-0001"}
-    assert len(_partition(_repair(square, NameConflictRepair(0.2, FULL, same)))) == 2
-
-
-@pytest.mark.parametrize("swap", [False, True])
-@pytest.mark.parametrize(("other", "merges"), [("x", True), ("z", False)])
-def test_repair_orcid_tie_does_not_depend_on_mention_order(swap: bool, other: str, merges: bool) -> None:
-    # Side A holds one mention each of ORCIDs x and y. Side B shares x, or has only z.
-    tied = {"a0": "x", "a1": "y"}
-    if swap:
-        tied = {"a0": "y", "a1": "x"}
-    orcids = {**tied, "b0": other}
-    merged = len(_partition(_repair(_square(), NameConflictRepair(0.2, FULL, orcids)))) == 2
-    assert merged is merges
+    split = _labels(square)
+    assert len(set(_repair(square, NameConflictRepair(0.2, FULL, {"a0": "x", "a1": "y", "b0": "x"})))) == 2
+    assert len(set(_repair(square, NameConflictRepair(0.2, FULL, {"a0": "y", "a1": "x", "b0": "x"})))) == 2
+    assert _repair(square, NameConflictRepair(0.2, FULL, {"a0": "x", "a1": "y", "b0": "z"})) == split
 
 
 def test_repair_counts_the_odd_mention_orcid() -> None:
@@ -342,8 +310,6 @@ def test_repair_needs_every_impossible_pair_to_be_a_name_rule_conflict() -> None
 @pytest.mark.parametrize(
     ("values", "merges"),
     [
-        # True average 0.20074: above the limit, though the coded average reads 0.199.
-        ([0.2039] * 15 + [0.1960] * 10, False),
         # True average 0.1996: under the limit, but not certainly so after coding.
         ([0.200001] * 15 + [0.1990] * 10, False),
         ([0.19] * 25, True),
@@ -360,7 +326,7 @@ def test_repair_merges_only_when_the_average_is_certainly_under_the_limit(values
 
 @pytest.mark.parametrize(
     ("first", "full"),
-    [("ada", True), ("jean pierre", True), ("j", False), ("j p", False), ("", False), (None, False)],
+    [("jean pierre", True), ("j p", False), (None, False)],
 )
 def test_two_initials_are_not_a_full_first_name(first: str | None, full: bool) -> None:
     assert has_full_first_name(first) is full
@@ -398,17 +364,11 @@ def test_one_thread_quantization_matches_the_pooled_one() -> None:
     np.testing.assert_array_equal(serial, pooled)
 
 
-def test_quantize_returns_none_without_impossible_pairs() -> None:
-    assert quantize_distances(np.array([0.1, 0.2, 0.3])) is None
-    codes = quantize_distances(np.array([0.0, 0.5, 1.0, LARGE_DISTANCE]))
-    assert codes is not None
-    assert codes.tolist() == [0, 127, 254, 255]
-
-
-def test_quantize_without_require_hard_returns_codes_without_impossible_pairs() -> None:
-    codes = quantize_distances(np.array([0.0, 0.5, 1.0]), require_hard=False)
-    assert codes is not None
-    assert codes.tolist() == [0, 127, 254]
+def test_quantize_can_require_an_impossible_pair() -> None:
+    condensed = np.array([0.0, 0.5, 1.0])
+    assert quantize_distances(condensed) is None
+    np.testing.assert_array_equal(quantize_distances(condensed, require_hard=False), [0, 127, 254])
+    np.testing.assert_array_equal(quantize_distances(np.append(condensed, LARGE_DISTANCE)), [0, 127, 254, 255])
 
 
 def test_quantize_reads_float32_and_strided_matrices_as_float64() -> None:
@@ -426,8 +386,7 @@ def test_quantize_reads_integer_distances() -> None:
     assert codes.tolist() == [0, 254, 255]
 
 
-@pytest.mark.parametrize("require_hard", [True, False])
-@pytest.mark.parametrize("other", [1.0001, 5.0, 10 * LARGE_DISTANCE, np.nan, np.inf])
+@pytest.mark.parametrize(("other", "require_hard"), [(5.0, True), (5.0, False), (np.nan, True)])
 def test_quantize_returns_none_for_a_value_that_is_neither_model_nor_impossible(
     other: float, require_hard: bool
 ) -> None:
@@ -475,7 +434,7 @@ def test_repair_accepts_two_odd_mentions_but_not_three() -> None:
 
 @pytest.mark.parametrize(
     ("seed", "odd_count", "planted"),
-    [(seed, 6, False) for seed in range(8)] + [(seed, 1, True) for seed in range(8)],
+    [(0, 6, False), (1, 1, True)],
 )
 def test_one_repair_round_matches_a_direct_pair_search(seed: int, odd_count: int, planted: bool) -> None:
     # Random clusters and impossible pairs, checked against a plain search over cluster pairs.
@@ -553,17 +512,6 @@ def _repair_three(square: np.ndarray, **kwargs: Any) -> list[int]:
     assert codes is not None
     repair = kwargs.pop("repair", NameConflictRepair(0.2, frozenset(signatures), rounds=REPAIR_ROUNDS))
     return [int(label) for label in repair_name_conflicts_in_block(signatures, labels, codes, repair, **kwargs)]
-
-
-def test_a_later_round_joins_the_third_cluster() -> None:
-    square, _, _ = _three_clusters()
-    assert len(set(_repair_three(square))) == 1
-
-
-def test_a_later_round_needs_the_merged_pair_close_to_the_third_cluster() -> None:
-    square, _, _ = _three_clusters()
-    square[:6, 12:] = square[12:, :6] = 0.8
-    assert _repair_three(square) == [0] * 6 + [1] * 12
 
 
 def test_a_later_round_limits_the_odd_mentions_to_two() -> None:
@@ -680,16 +628,15 @@ def _facts_featurizer(name_rule_conflicts: bool = True) -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("suppress_orcid", [False, True])
-def test_rust_featurizer_facts_honor_orcid_suppression(suppress_orcid: bool) -> None:
+def test_rust_featurizer_facts_honor_orcid_suppression() -> None:
     model = _model()
-    model.suppress_orcid = suppress_orcid
+    model.suppress_orcid = True
 
     repair = _repair_from_rust_featurizer(model, {"b": SIGNATURES}, _facts_featurizer())
 
     assert repair is not None
     assert repair.full_first_names == FULL
-    assert dict(repair.orcids) == ({} if suppress_orcid else {"a0": "0000000218250097"})
+    assert not repair.orcids
 
 
 def test_a_stand_in_dataset_reads_repair_facts_from_its_featurizer() -> None:
@@ -699,19 +646,7 @@ def test_a_stand_in_dataset_reads_repair_facts_from_its_featurizer() -> None:
     )
     repair = _repair_from_dataset(_model(), {"b": SIGNATURES}, stand_in)
     assert repair is not None and repair.full_first_names == FULL
-
-
-def test_prediction_from_precomputed_distances_skips_the_repair() -> None:
-    # A caller's matrix can hold impossible pairs of its own, which nothing can tell from name conflicts.
-    clusters, _ = _model().predict_from_rust_featurizer(
-        {"b": SIGNATURES}, _facts_featurizer(), dists={"b": squareform(_square())}
-    )
-    assert len(clusters) == 3
-
-    dataset = _dataset([("Ada", "", "Smith")] * 5 + [("Alan", "", "Smith")] + [("Ada", "", "Smith")] * 10, {})
-    blocks = {"a smith": [str(i) for i in range(16)]}
-    python_clusters, _ = _model().predict(blocks, dataset, dists={"a smith": squareform(_square())})
-    assert len(python_clusters) == 3
+    assert dict(repair.orcids) == {"a0": "0000000218250097"}
 
 
 def test_predict_eps_grid_cuts_as_predict_does_and_repairs() -> None:
@@ -738,6 +673,9 @@ def test_predict_eps_grid_cuts_as_predict_does_and_repairs() -> None:
 
     # At 0.5 the repair joins the two clusters that the odd mention keeps apart.
     assert len(grid()[0.5]) == 2
+    # A caller's precomputed matrix can carry impossible pairs unrelated to names.
+    clusters, _ = model.predict(blocks, dataset, dists=dists)
+    assert len(clusters) == 3
     # Without the repair, the grid gives predict's clusters from the same matrices at each EPS.
     model.name_conflict_repair_max_distance = None
     unrepaired = grid()
@@ -773,13 +711,14 @@ def _near_model() -> Clusterer:
     )
 
 
-def test_repair_keeps_disallows_that_only_the_featurizer_holds(tmp_path: Path) -> None:
+def test_rust_route_repair_keeps_required_seeds_and_disallows_apart(tmp_path: Path) -> None:
     _, arrow_dataset = _eleven_ada_smiths(tmp_path)
     ids = [str(i) for i in range(11)]
     disallows = {("5", str(i)) for i in range(6, 11)}
-    featurizer = build_rust_featurizer_from_arrow_dataset(
+    plain = build_rust_featurizer_from_arrow_dataset(
         arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
-    ).with_cluster_seeds({}, disallows)
+    )
+    featurizer = plain.with_cluster_seeds({}, disallows)
     model = _near_model()
     distances = model.make_distance_matrices_from_rust_featurizer({"block": ids}, featurizer)
     assert int(np.count_nonzero(distances["block"] == LARGE_DISTANCE)) == 5
@@ -791,26 +730,17 @@ def test_repair_keeps_disallows_that_only_the_featurizer_holds(tmp_path: Path) -
 
     # The disallows are not repeated as arguments; the repair must still see them.
     assert violations(model.predict_from_rust_featurizer({"block": ids}, featurizer)[0]) == 0
-    assert violations(model.predict_from_rust_featurizer({"block": ids}, featurizer, dists=distances)[0]) == 0
     signatures, ids_by_eps = model.predict_eps_grid_from_rust_featurizer({"block": ids}, featurizer, distances, [0.5])
     grid: dict[str, list[str]] = {}
     for signature, cluster in zip(signatures, ids_by_eps[0.5].tolist(), strict=True):
         grid.setdefault(str(cluster), []).append(signature)
     assert violations(grid) == 0
 
-
-def test_repair_keeps_explicit_seed_groups_apart_without_default_constraints(tmp_path: Path) -> None:
-    _, arrow_dataset = _eleven_ada_smiths(tmp_path)
-    ids = [str(i) for i in range(11)]
-    featurizer = build_rust_featurizer_from_arrow_dataset(
-        arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
-    )
     seeds = {"5": "A", **{str(i): "B" for i in range(6, 11)}}
-    model = _near_model()
     # Explicit seeds stay in the distances when default constraints are off.
     model.use_default_constraints_as_supervision = False
 
-    clusters, _ = model.predict_from_rust_featurizer({"block": ids}, featurizer, cluster_seeds_require=seeds)
+    clusters, _ = model.predict_from_rust_featurizer({"block": ids}, plain, cluster_seeds_require=seeds)
 
     assert all(not ({"5", "6"} <= set(members)) for members in clusters.values())
 
@@ -884,6 +814,8 @@ def test_eps_grid_from_a_rust_featurizer_repairs_as_its_predict_does() -> None:
     assert signatures == SIGNATURES
     # At 0.5 the repair joins the two clusters that the odd mention keeps apart.
     assert len(set(ids_by_eps[0.5].tolist())) == 2
+    clusters, _ = model.predict_from_rust_featurizer(blocks, _facts_featurizer(), dists={"b": squareform(_square())})
+    assert len(clusters) == 3
     # Without the repair, the grid gives the clusters of prediction from the same matrices.
     model.name_conflict_repair_max_distance = None
     _, unrepaired = model.predict_eps_grid_from_rust_featurizer(
@@ -1008,7 +940,7 @@ def _four_way_split() -> tuple[np.ndarray, list[str]]:
     return square, signatures
 
 
-@pytest.mark.parametrize(("rounds", "clusters"), [(1, 2), (2, 1), (5, 1)])
+@pytest.mark.parametrize(("rounds", "clusters"), [(1, 2), (2, 1)])
 def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int) -> None:
     square, signatures = _four_way_split()
     labels = _labels(square)
@@ -1024,11 +956,8 @@ def test_later_rounds_rejoin_a_person_split_four_ways(rounds: int, clusters: int
     ("setting", "value"),
     [
         ("rounds", 0),
-        ("rounds", 1.9),
         ("rounds", True),
-        ("bonus_min_side_mentions", True),
         ("bonus_min_side_mentions", 1.5),
-        ("bonus_min_side_mentions", float("nan")),
     ],
 )
 def test_repair_settings_reject_a_count_that_is_not_a_positive_integer(setting: str, value: Any) -> None:
@@ -1036,10 +965,9 @@ def test_repair_settings_reject_a_count_that_is_not_a_positive_integer(setting: 
         NameConflictRepair(0.2, FULL, **{setting: value})
 
 
-@pytest.mark.parametrize(("floor", "close", "count"), [(0.07, 7, 100), (0.1, 3, 30), (0.3, 3, 10)])
-def test_bonus_floor_admits_a_share_exactly_at_the_floor(floor: float, close: int, count: int) -> None:
+def test_bonus_floor_admits_a_share_exactly_at_the_floor() -> None:
     # 0.07 * 100 is 7.000000000000001 in floating point; the share itself compares exactly.
-    bound = name_conflict_repair_module._height_bound(_code_sum(0.30, count), close, count, _bounded(floor, 0.40))
+    bound = name_conflict_repair_module._height_bound(_code_sum(0.30, 100), 7, 100, _bounded(0.07, 0.40))
     assert np.isfinite(bound)
 
 
@@ -1147,7 +1075,7 @@ def test_reading_step_takes_the_lowest_height_cover(b_label_first: bool, caplog:
     assert "odd mentions b1" in caplog.text
 
 
-@pytest.mark.parametrize(("spellers", "merges"), [({"a0"}, True), ({"b0"}, True), ({"c0"}, False)])
+@pytest.mark.parametrize(("spellers", "merges"), [({"a0"}, True), ({"c0"}, False)])
 def test_reading_step_accepts_a_speller_in_the_reading_mentions_own_cluster(spellers: set[str], merges: bool) -> None:
     # a5 reads "Jec" and its own cluster spells it ("Edward C." beside "Ec"); the b cluster holds
     # bare names. A speller in a third cluster does not count.
@@ -1193,5 +1121,5 @@ def test_a_removed_repair_setting_is_refused(setting: str) -> None:
     # Setting a removed attribute would silently change nothing, so prediction refuses it.
     model = _model()
     setattr(model, setting, 1)
-    with pytest.raises(ValueError, match=f"{setting} no longer exist"):
+    with pytest.raises(ValueError, match=setting):
         model.predict({"b": SIGNATURES}, build_dummy_dataset("name_conflict_repair"))

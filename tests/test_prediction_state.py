@@ -55,31 +55,32 @@ def _assert_dataset_unchanged(dataset: ANDData) -> Callable[[], None]:
     return check
 
 
-@pytest.mark.parametrize("request_disallow", [False, True])
-def test_predict_helper_scores_with_request_disallows(
-    shared_prediction_objects: tuple[Clusterer, ANDData], request_disallow: bool
-) -> None:
-    """Both an explicit empty override and a request disallow supersede dataset seeds."""
+def test_predict_helper_replaces_source_groups_and_disallows_in_scoring(shared_prediction_objects) -> None:
     clusterer, dataset = shared_prediction_objects
     clusterer.use_default_constraints_as_supervision = True
-    dataset.cluster_seeds_disallow = set() if request_disallow else {("3", "4")}
+    dataset.cluster_seeds_require = {"3": "source_a", "4": "source_b"}
+    dataset.cluster_seeds_disallow = {("3", "4")}
     check = _assert_dataset_unchanged(dataset)
-    state = PredictionState(cluster_seeds_disallow={("3", "4")} if request_disallow else set())
+
     clusters, _ = clusterer.predict_helper(
-        {"block": ["3", "4"]},
+        {"allowed": ["3", "4"], "blocked": ["5", "6"]},
         dataset,
-        prediction_state=state,
+        prediction_state=PredictionState(
+            cluster_seeds_require={"3": "request", "4": "request"},
+            cluster_seeds_disallow={("5", "6")},
+        ),
         runtime_context=build_runtime_context("request_disallow_test", backend="python"),
     )
-    assert {frozenset(group) for group in clusters.values()} == (
-        {frozenset({"3"}), frozenset({"4"})} if request_disallow else {frozenset({"3", "4"})}
-    )
+    assert {frozenset(group) for group in clusters.values()} == {
+        frozenset({"3", "4"}),
+        frozenset({"5"}),
+        frozenset({"6"}),
+    }
     check()
 
 
-@pytest.mark.parametrize("precomputed", [False, True])
-def test_predict_helper_uses_request_require_groups(
-    shared_prediction_objects: tuple[Clusterer, ANDData], precomputed: bool
+def test_predict_helper_uses_request_require_groups_with_precomputed_distances(
+    shared_prediction_objects: tuple[Clusterer, ANDData],
 ) -> None:
     """Request groups override source constraints in scoring and posthoc merging."""
     clusterer, dataset = shared_prediction_objects
@@ -90,7 +91,7 @@ def test_predict_helper_uses_request_require_groups(
     clusters, _ = clusterer.predict_helper(
         {"block": ["3", "4"]},
         dataset,
-        dists={"block": np.array([1.0])} if precomputed else None,
+        dists={"block": np.array([1.0])},
         prediction_state=PredictionState(cluster_seeds_require={"3": "request", "4": "request"}),
         runtime_context=build_runtime_context("request_require_test", backend="python"),
     )

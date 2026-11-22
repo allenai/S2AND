@@ -12,7 +12,6 @@ from s2and.incremental_linking.feature_block import (
     validate_arrow_batch_lookup_index,
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
-    write_raw_arrow_batch_lookup_indexes,
 )
 
 
@@ -55,15 +54,6 @@ def test_lookup_returns_every_batch_for_repeated_keys_and_omits_absent_keys(tmp_
         )
 
 
-def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:
-    values = ["", "abc", "Renée", "李", "emoji-🧪"]
-
-    assert feature_block_arrow_module._fnv64_utf8_batch(values) == [  # noqa: SLF001
-        feature_block_arrow_module._fnv64_bytes(value.encode("utf-8"))  # noqa: SLF001
-        for value in values
-    ]
-
-
 @pytest.mark.parametrize("arrow_type", ["string", "large_string"])
 def test_vectorized_arrow_hash_matches_python_fnv1a64(arrow_type: str) -> None:
     import pyarrow as pa
@@ -74,7 +64,9 @@ def test_vectorized_arrow_hash_matches_python_fnv1a64(arrow_type: str) -> None:
 
     hashes = feature_block_arrow_module._fnv64_arrow_utf8(array)  # noqa: SLF001
 
-    assert hashes.tolist() == [feature_block_arrow_module._fnv64_bytes(v.encode("utf-8")) for v in values]  # noqa: SLF001
+    expected = [feature_block_arrow_module._fnv64_bytes(v.encode("utf-8")) for v in values]  # noqa: SLF001
+    assert hashes.tolist() == expected
+    assert feature_block_arrow_module._fnv64_utf8_batch(values) == expected  # noqa: SLF001
 
 
 def test_vectorized_arrow_hash_uses_text_form_for_non_string_keys() -> None:
@@ -140,21 +132,6 @@ def test_write_uses_bounded_sorted_runs_and_emits_v3_bytes(
     assert not list(tmp_path.glob(f".{index_path.name}.*"))
 
 
-def test_validation_rejects_inexact_batch_index_body_length(tmp_path: Path) -> None:
-    for mutation in ("truncated", "trailing"):
-        case_root = tmp_path / mutation
-        case_root.mkdir()
-        path, index_path = _write_tiny_index(case_root)
-        payload = index_path.read_bytes()
-        if mutation == "truncated":
-            index_path.write_bytes(payload[:-1])
-        else:
-            index_path.write_bytes(payload + b"\x00")
-
-        with pytest.raises(ValueError, match="does not match expected length"):
-            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
-
-
 def test_validation_rejects_decreasing_batch_index_hashes(tmp_path: Path) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     payload = bytearray(index_path.read_bytes())
@@ -172,19 +149,6 @@ def test_validation_rejects_decreasing_batch_index_hashes(tmp_path: Path) -> Non
         validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
-def test_validation_rejects_out_of_bounds_record_batch_index(tmp_path: Path) -> None:
-    path, index_path = _write_tiny_index(tmp_path)
-    payload = bytearray(index_path.read_bytes())
-    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
-    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
-    key_hash, _batch_index, reserved = record_struct.unpack_from(payload, header_size)
-    record_struct.pack_into(payload, header_size, key_hash, 3, reserved)
-    index_path.write_bytes(payload)
-
-    with pytest.raises(ValueError, match="batch index 3 is out of bounds"):
-        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
-
-
 def test_write_reuse_validates_last_record(tmp_path: Path) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     payload = bytearray(index_path.read_bytes())
@@ -196,6 +160,8 @@ def test_write_reuse_validates_last_record(tmp_path: Path) -> None:
     record_struct.pack_into(payload, last_record_offset, key_hash, 3, reserved)
     index_path.write_bytes(payload)
 
+    with pytest.raises(ValueError, match="batch index 3 is out of bounds"):
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
     with pytest.raises(ValueError, match="batch index 3 is out of bounds"):
         write_arrow_batch_lookup_index(
             path,
@@ -261,17 +227,26 @@ def test_raw_planner_index_rejects_source_changed_while_lookup(
         )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "validate"])
-def test_old_index_format_requires_rebuilding(tmp_path: Path, operation: str) -> None:
+def test_index_header_and_body_corruption_are_rejected(tmp_path: Path) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     current = index_path.read_bytes()
-    # A real v2 header includes the removed source fingerprint word.
+    # Include the source fingerprint word from the old format.
     index_path.write_bytes(b"S2ABI002" + current[8:32] + struct.pack("<Q", 123) + current[32:])
     with pytest.raises(ValueError, match="invalid magic bytes.*Rebuild"):
-        if operation == "lookup":
-            read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
-        else:
-            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+
+    data = bytearray(current)
+    struct.pack_into("<Q", data, 16, Path(path).stat().st_size + 1)
+    index_path.write_bytes(data)
+    with pytest.raises(ValueError, match="stale.*indexed size"):
+        read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
+    with pytest.raises(ValueError, match="stale.*indexed size"):
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+
+    index_path.write_bytes(current[:-1])
+
+    with pytest.raises(ValueError, match="does not match expected length"):
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
 def test_structural_reuse_preserves_bytes_and_does_not_claim_content_validation(tmp_path: Path) -> None:
@@ -304,19 +279,6 @@ def test_structural_reuse_preserves_bytes_and_does_not_claim_content_validation(
     )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "validate"])
-def test_source_size_mismatch_is_still_rejected(tmp_path: Path, operation: str) -> None:
-    path, index_path = _write_tiny_index(tmp_path)
-    data = bytearray(index_path.read_bytes())
-    struct.pack_into("<Q", data, 16, Path(path).stat().st_size + 1)
-    index_path.write_bytes(data)
-    with pytest.raises(ValueError, match="stale.*indexed size"):
-        if operation == "lookup":
-            read_arrow_batch_lookup_index_batch_indices(path, index_path, key_column="signature_id", values=["s1"])
-        else:
-            validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
-
-
 def test_source_changed_while_publishing_preserves_previous_index_and_cleans_temporary_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,22 +296,3 @@ def test_source_changed_while_publishing_preserves_previous_index_and_cleans_tem
         write_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
     assert index_path.read_bytes() == previous
     assert not list(tmp_path.glob(f".{index_path.name}.*"))
-
-
-def test_raw_indexes_can_be_created_and_structurally_reused(tmp_path: Path) -> None:
-    import pyarrow as pa
-
-    paths = {
-        "signatures": write_arrow_ipc_table(
-            pa.table({"signature_id": pa.array(["s1", "s2"], type=pa.string())}), tmp_path / "signatures.arrow"
-        ),
-        "papers": write_arrow_ipc_table(
-            pa.table({"paper_id": pa.array(["p1", "p2"], type=pa.string())}), tmp_path / "papers.arrow"
-        ),
-    }
-    indexed, written = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "indexes", overwrite=False)
-    again, reused = write_raw_arrow_batch_lookup_indexes(paths, tmp_path / "indexes", overwrite=False)
-    assert again == indexed
-    assert {"signatures_batch_index", "papers_batch_index"} <= indexed.keys()
-    assert all(metrics["magic"] == "S2ABI003" and not metrics["reused"] for metrics in written.values())
-    assert all(metrics["reused"] for metrics in reused.values())

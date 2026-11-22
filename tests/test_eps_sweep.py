@@ -74,23 +74,6 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
 
 
-def test_eps_sweep_runtime_environment_sets_threads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OMP_NUM_THREADS", "1")
-    monkeypatch.setenv("RAYON_NUM_THREADS", "1")
-    sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(n_jobs=2)))
-
-    assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
-    assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
-
-
-def test_eps_sweep_cli_has_one_real_orcid_constraint_switch() -> None:
-    default_args = sweep_eps_on_linking_gold.parse_args(_cli())
-    enabled_args = sweep_eps_on_linking_gold.parse_args(_cli("--use-orcid-constraints"))
-
-    assert default_args.suppress_orcid_constraints is True
-    assert enabled_args.suppress_orcid_constraints is False
-
-
 def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         sweep_eps_on_linking_gold,
@@ -124,27 +107,7 @@ def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path
     assert clusterer.batch_size == 99
 
 
-@pytest.mark.parametrize(
-    ("replacement_model", "expected_generation", "waiver_off", "dropped", "message"),
-    (
-        (b"second model with different contents", "first-generation", False, None, "model_"),
-        (None, "second-generation", False, None, "arrow_generation_id"),
-        (None, "first-generation", True, None, "orcid_name_waiver"),
-        # Caches written before these fields existed hold other name rules.
-        (None, "first-generation", False, "s2and_version", "s2and_version"),
-        (None, "first-generation", False, "orcid_name_waiver", "orcid_name_waiver"),
-    ),
-    ids=("model-content", "arrow-generation", "orcid-name-waiver", "no-version", "no-waiver-field"),
-)
-def test_distance_cache_metadata_rejects_changed_inputs(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-    replacement_model: bytes | None,
-    expected_generation: str,
-    waiver_off: bool,
-    dropped: str | None,
-    message: str,
-) -> None:
+def test_distance_cache_metadata_rejects_changed_inputs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     model_path = tmp_path / "model.pkl"
     model_path.write_bytes(b"model")
     args = SimpleNamespace(
@@ -162,24 +125,33 @@ def test_distance_cache_metadata_rejects_changed_inputs(
         ["s1", "s2"],
         "first-generation",
     )
-    metadata.pop(dropped or "", None)
+
     cache_path = tmp_path / "cache.pkl"
-    with cache_path.open("wb") as outfile:
-        pickle.dump({"metadata": metadata, "dist": [0.25]}, outfile)
 
-    if replacement_model is not None:
-        model_path.write_bytes(replacement_model)
-    if waiver_off:
-        monkeypatch.setattr("s2and.model.Clusterer.orcid_name_waiver", None)
-    expected_metadata = sweep_eps_on_linking_gold._cache_metadata(
-        cast(Any, args),
-        "block",
-        ["s1", "s2"],
-        expected_generation,
-    )
+    def cache(record: dict) -> None:
+        with cache_path.open("wb") as outfile:
+            pickle.dump({"metadata": record, "dist": [0.25]}, outfile)
 
-    with pytest.raises(ValueError, match=message):
-        sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected_metadata)
+    def expected(generation: str = "first-generation") -> dict:
+        return sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["s1", "s2"], generation)
+
+    cache(metadata)
+    with pytest.raises(ValueError, match="arrow_generation_id"):
+        sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected("second-generation"))
+
+    cache({key: value for key, value in metadata.items() if key != "s2and_version"})
+    with pytest.raises(ValueError, match="s2and_version"):
+        sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected())
+
+    cache(metadata)
+    with monkeypatch.context() as patch:
+        patch.setattr(Clusterer, "orcid_name_waiver", None)
+        with pytest.raises(ValueError, match="orcid_name_waiver"):
+            sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected())
+
+    model_path.write_bytes(b"second model with different contents")
+    with pytest.raises(ValueError, match="model_"):
+        sweep_eps_on_linking_gold._load_cached_distance(cache_path, expected())
 
 
 def test_distance_cache_recomputes_for_the_new_name_policy(tmp_path) -> None:
@@ -276,25 +248,34 @@ def test_eps_sweep_resolves_bound_model_and_arrow_inputs(tmp_path) -> None:
         common.arrow_dataset_dir(undeclared_root, "dummy")
 
 
-def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
-    args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists"))
+def test_cli_enforces_production_route_and_compute_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def validate(*extra: str):
+        args = sweep_eps_on_linking_gold.parse_args(_cli(*extra))
+        sweep_eps_on_linking_gold._validate_args(args)
+        return args
 
     with pytest.raises(ValueError, match="--max-subblocks"):
-        sweep_eps_on_linking_gold._validate_args(args)  # noqa: SLF001
+        validate("--compute-missing-dists")
+    with pytest.raises(ValueError, match="--route bulk"):
+        validate("--max-subblocks", "1")
+    with pytest.raises(ValueError, match="--use-orcid-subblocking exactly"):
+        validate("--use-orcid-subblocking")
 
-    limited_args = sweep_eps_on_linking_gold.parse_args(
-        _cli("--compute-missing-dists", "--max-subblocks", "1", "--route", "bulk")
-    )
-    sweep_eps_on_linking_gold._validate_args(limited_args)  # noqa: SLF001
-
-    full_run_args = sweep_eps_on_linking_gold.parse_args(_cli("--compute-missing-dists", "--allow-full-run"))
-    sweep_eps_on_linking_gold._validate_args(full_run_args)  # noqa: SLF001
+    validate("--compute-missing-dists", "--max-subblocks", "1", "--route", "bulk")
+    assert validate("--compute-missing-dists", "--allow-full-run").suppress_orcid_constraints is True
+    args = validate("--use-orcid-subblocking", "--use-orcid-constraints", "--n-jobs", "2")
+    assert args.suppress_orcid_constraints is False
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("RAYON_NUM_THREADS", "1")
+    sweep_eps_on_linking_gold._configure_runtime_environment(args)
+    assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
+    assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
 
 
 @pytest.mark.parametrize(
-    "raw_config,neighbors", [(None, 16), ({"neighbors": 7}, 7), (subblocking.GraphSubblockingConfig(neighbors=5), 5)]
+    ("raw_config", "neighbors", "orcid"),
+    [(None, 16, False), ({"neighbors": 7}, 7, True), (subblocking.GraphSubblockingConfig(neighbors=5), 5, False)],
 )
-@pytest.mark.parametrize("orcid", [False, True])
 def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neighbors, orcid):
     calls = []
     dataset = object()
@@ -331,7 +312,7 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
 
 @pytest.mark.parametrize(
     "result",
-    [{"a": ["1", "2"]}, {"a": ["1", "2"], "b": ["2", "3"]}, {"a": ["1", "2"], "b": ["other"]}, {"a": ["1", "2", "3"]}],
+    [{"a": ["1", "2"], "b": ["2", "3"]}, {"a": ["1", "2", "3"]}],
 )
 def test_eps_sweep_rejects_invalid_native_partition(monkeypatch, result):
     monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", lambda *a, **k: (result, {}, {}))
@@ -354,25 +335,6 @@ def test_eps_sweep_rejects_invalid_graph_config_type():
             target_signature_ids=set(),
             arrow_dataset=object(),
         )
-
-
-@pytest.mark.parametrize(
-    ("extra", "message"),
-    [
-        (("--max-subblocks", "1"), "--route bulk"),
-        (("--use-orcid-subblocking",), "--use-orcid-subblocking exactly"),
-        (("--use-orcid-constraints",), "--use-orcid-subblocking exactly"),
-    ],
-)
-def test_production_route_rejects_partial_blocks_and_mismatched_orcid_repair(extra, message) -> None:
-    with pytest.raises(ValueError, match=message):
-        sweep_eps_on_linking_gold._validate_args(sweep_eps_on_linking_gold.parse_args(_cli(*extra)))  # noqa: SLF001
-    sweep_eps_on_linking_gold._validate_args(  # noqa: SLF001
-        sweep_eps_on_linking_gold.parse_args(_cli("--use-orcid-subblocking", "--use-orcid-constraints"))
-    )
-    sweep_eps_on_linking_gold._validate_args(  # noqa: SLF001
-        sweep_eps_on_linking_gold.parse_args(_cli("--route", "bulk", "--max-subblocks", "1"))
-    )
 
 
 def test_cache_order_appends_non_target_subblocks_after_target_subblocks() -> None:

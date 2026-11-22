@@ -187,18 +187,13 @@ def test_arrow_incremental_presplit_uses_configured_params_and_reuses_cache(
         arrow.close()
 
 
-@pytest.mark.parametrize("preserve_input", [None, True, False])
-def test_nested_precomputed_prediction_retains_explicit_input_policy(
-    preserve_input: bool | None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_nested_precomputed_prediction_retains_explicit_input_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stored matrices stay intact by default; explicit ownership survives nesting."""
     dataset = build_dummy_dataset("prediction_params_matrix")
     params: dict[str, Any] = {"eps": 0.8}
-    if preserve_input is not None:
-        params["preserve_input"] = preserve_input
-    model = _clusterer_with_prediction_params(clusterer(), params)
+
     distances = np.array([0.2, 0.7, 0.8, 0.5, 0.9, 0.6], dtype=np.float64)
-    before = distances.copy()
+    original = distances.copy()
     observed: list[bool] = []
     constrained_linkage = pairwise_module.constrained_linkage
 
@@ -207,10 +202,18 @@ def test_nested_precomputed_prediction_retains_explicit_input_policy(
         return constrained_linkage(*args, **kwargs)
 
     monkeypatch.setattr(pairwise_module, "constrained_linkage", checked_linkage)
-    model.predict_helper({"block": ["0", "1", "2", "3"]}, dataset, dists={"block": distances})
-    assert observed == [True if preserve_input is None else preserve_input]
-    if preserve_input is not False:
-        np.testing.assert_array_equal(distances, before)
+    prototype = clusterer()
+    proto = _clusterer_with_prediction_params(prototype, params)
+    blocks = {"a": ["0", "1", "2", "3"], "b": ["4", "5"]}
+    matrices = {"a": distances, "b": np.array([0.6])}
+    proto.predict_helper(blocks, dataset, dists=matrices)
+    assert observed == [True, True]
+    np.testing.assert_array_equal(distances, original)
+
+    observed.clear()
+    model = _clusterer_with_prediction_params(prototype, {**params, "preserve_input": False})
+    model.predict_helper(blocks, dataset, dists=matrices)
+    assert observed == [False, False]
 
 
 def test_failure_and_recorded_cluster_bypass_preserve_original() -> None:

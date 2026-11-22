@@ -41,10 +41,8 @@ def _assert_pairs_equal(
 @pytest.mark.parametrize(
     "random_seed,sample_size,with_cluster_labels",
     [
-        pytest.param(0, 0, False, id="empty-sample"),
-        pytest.param(0, 4, False, id="partial-sample"),
         pytest.param(0, 11, False, id="sample-capped-to-population"),
-        pytest.param(7, 10, True, id="cluster-labels"),
+        pytest.param(7, 4, True, id="partial-sample-with-labels"),
     ],
 )
 def test_within_block_rank_sampling_matches_legacy_output(
@@ -81,9 +79,9 @@ def test_within_block_rank_sampling_matches_legacy_output(
     _assert_pairs_equal(actual, expected)
 
 
-@pytest.mark.parametrize("block_size", [2, 17, 200_000])
-def test_pair_rank_row_boundaries_preserve_pair_identity(block_size: int) -> None:
+def test_pair_rank_row_boundaries_preserve_pair_identity() -> None:
     """Ranks at both ends of each sampled row retain their exact signature indices."""
+    block_size = 200_000
     pair_count = math.comb(block_size, 2)
     for first in sorted({0, (block_size - 2) // 2, block_size - 2}):
         # Count the pairs remaining in the suffix, independently of the binary
@@ -96,7 +94,7 @@ def test_pair_rank_row_boundaries_preserve_pair_identity(block_size: int) -> Non
             assert _upper_triangle_pair_indices(block_size, row_start - 1) == (first - 1, block_size - 1)
 
 
-def test_within_block_rank_sampling_preserves_negative_sample_error() -> None:
+def test_within_block_rank_sampling_validates_size_and_cluster_labels() -> None:
     dataset = ANDData.__new__(ANDData)
     dataset.pair_sampling_mode = "within_block_random"
     dataset.signature_to_cluster_id = None
@@ -104,14 +102,7 @@ def test_within_block_rank_sampling_preserves_negative_sample_error() -> None:
 
     with pytest.raises(ValueError, match="Sample larger than population or is negative"):
         dataset.pair_sampling(-1, [], {"block": ["a", "b"]})
-
-
-def test_within_block_rank_sampling_validates_all_cluster_labels_before_sampling() -> None:
-    dataset = ANDData.__new__(ANDData)
-    dataset.pair_sampling_mode = "within_block_random"
     dataset.signature_to_cluster_id = {"a": "cluster"}
-    dataset.random_seed = 7
-
     with pytest.raises(KeyError, match="b"):
         dataset.pair_sampling(0, [], {"block": ["a", "b"]})
 

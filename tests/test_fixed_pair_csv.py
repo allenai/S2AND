@@ -49,10 +49,10 @@ def test_reordered_fixed_pair_csv_preserves_splits_features_and_labels(tmp_path:
     assert observed_features[0, info.get_feature_names().index("year_diff")] == 2.0
 
 
-@pytest.mark.parametrize("left_column", ["pair1", "pairs1"])
-def test_legacy_fixed_pair_headers_preserve_automatic_validation_split(left_column: str) -> None:
+def test_legacy_fixed_pair_headers_preserve_automatic_validation_split() -> None:
+    left_column = "pairs1"
     rows = [(f"left-{index}", f"right-{index}", index % 2) for index in range(20)]
-    frame = pd.DataFrame(rows, columns=[left_column, "pair2", "label"])
+    frame = pd.DataFrame(rows, columns=pd.Index([left_column, "pair2", "label"]))
     frame["dataset_name"] = "fixture"
     dataset = ANDData(
         signatures={},
@@ -60,7 +60,7 @@ def test_legacy_fixed_pair_headers_preserve_automatic_validation_split(left_colu
         name="legacy_fixed_pair_headers",
         mode="train",
         train_pairs=frame[["label", "dataset_name", "pair2", left_column]],
-        test_pairs=pd.DataFrame([("YES", "test-left", "test-right")], columns=["label", left_column, "pair2"]),
+        test_pairs=pd.DataFrame([("YES", "test-left", "test-right")], columns=pd.Index(["label", "pair1", "pair2"])),
         name_counts_index=None,
         name_tuples=set(),
         preprocess=False,
@@ -91,7 +91,7 @@ def test_fixed_pairs_reject_ambiguous_or_missing_named_columns(columns: list[str
         papers={},
         name="invalid_fixed_pair_columns",
         mode="train",
-        train_pairs=pd.DataFrame([["YES"] * len(columns)], columns=columns),
+        train_pairs=pd.DataFrame([["YES"] * len(columns)], columns=pd.Index(columns)),
         name_counts_index=None,
         name_tuples=set(),
         preprocess=False,

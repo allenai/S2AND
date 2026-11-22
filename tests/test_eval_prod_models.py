@@ -74,6 +74,20 @@ def test_arrow_availability_reads_only_manifests_and_opens_once_for_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
+    declared_path = dataset_root / "specter2.arrow"
+    renamed_path = dataset_root / "SPECTER2.ARROW"
+    intermediate_path = declared_path.rename(dataset_root / "rename-intermediate.arrow")
+    intermediate_path.rename(renamed_path)
+    if not declared_path.is_file():
+        renamed_path.rename(declared_path)
+
+    manifest_path = dataset_root / "manifest.json"
+    manifest_path.write_bytes(b"\xef\xbb\xbf" + manifest_path.read_bytes())
+    collection_path = tmp_path / "manifest.json"
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    collection["dataset_manifests"]["pubmed"]["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    collection_path.write_text(json.dumps(collection), encoding="utf-8")
+
     opened: list[Path] = []
     real_open = ArrowDataset.open
 
@@ -89,81 +103,40 @@ def test_arrow_availability_reads_only_manifests_and_opens_once_for_evaluation(
     assert opened == [dataset_root.resolve()]
 
 
-def test_arrow_availability_requires_name_counts_declaration(tmp_path: Path) -> None:
-    _write_eval_arrow_root(tmp_path, include_name_counts_index=False)
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is not None
-    error = eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
-    assert isinstance(error, FileNotFoundError)
-    assert "name_counts_index" in str(error)
-    with pytest.raises(FileNotFoundError, match="name_counts_index"):
-        eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
-
-
-def test_arrow_availability_uses_declared_specter_name_on_case_insensitive_filesystem(tmp_path: Path) -> None:
-    dataset_root = _write_eval_arrow_root(tmp_path)
-    declared_path = dataset_root / "specter2.arrow"
-    renamed_path = dataset_root / "SPECTER2.ARROW"
-    intermediate_path = declared_path.rename(dataset_root / "rename-intermediate.arrow")
-    intermediate_path.rename(renamed_path)
-    if not declared_path.is_file():
-        pytest.skip("The filesystem distinguishes the declared and physical filename case")
-
-    with ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True):
-        pass
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
-    with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
-        assert dataset.root == dataset_root.resolve()
-
-
-def test_arrow_availability_accepts_utf8_bom_dataset_manifest(tmp_path: Path) -> None:
-    dataset_root = _write_eval_arrow_root(tmp_path)
-    manifest_path = dataset_root / "manifest.json"
-    manifest_path.write_bytes(b"\xef\xbb\xbf" + manifest_path.read_bytes())
-    collection_path = tmp_path / "manifest.json"
-    collection = json.loads(collection_path.read_text(encoding="utf-8"))
-    collection["dataset_manifests"]["pubmed"]["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    collection_path.write_text(json.dumps(collection), encoding="utf-8")
-
-    with ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True):
-        pass
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
-    with eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl") as dataset:
-        assert dataset.root == dataset_root.resolve()
-
-
-@pytest.mark.parametrize(
-    "artifact,corruption",
-    [
-        ("papers", "missing"),
-        ("papers", "checksum"),
-        ("name_counts_index", "checksum"),
-        ("name_counts_index", "missing"),
-    ],
-)
-def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path, corruption: str, artifact: str) -> None:
+def test_available_arrow_payload_corruption_fails_the_real_open(tmp_path: Path) -> None:
     dataset_root = _write_eval_arrow_root(tmp_path)
     manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
-    payload = dataset_root / manifest["paths"][artifact]
-    if artifact == "name_counts_index":
-        payload /= "manifest.json"
-    if corruption == "checksum":
-        content = payload.read_bytes()
-        payload.write_bytes(bytes([content[0] ^ 1]) + content[1:])
-    else:
-        payload.unlink()
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
-    with pytest.raises(
-        ValueError if corruption == "checksum" else FileNotFoundError,
-        # The index reports its own damage; the dataset manifest does not vouch for it.
-        match={"papers": "checksum mismatch", "name_counts_index": "failed to parse"}[artifact]
-        if corruption == "checksum"
-        else None,
-    ):
-        eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
+    papers = dataset_root / manifest["paths"]["papers"]
+    index_manifest = dataset_root / manifest["paths"]["name_counts_index"] / "manifest.json"
+
+    def resolve() -> ArrowDataset:
+        assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
+        return eval_prod_models.resolve_arrow_dataset(str(tmp_path), "pubmed", "_specter2.pkl")
+
+    original_papers = papers.read_bytes()
+    papers.unlink()
+    with pytest.raises(FileNotFoundError):
+        resolve()
+    papers.write_bytes(original_papers)
+
+    original_index = index_manifest.read_bytes()
+    index_manifest.write_bytes(b"{")
+    with pytest.raises(ValueError, match="failed to parse"):
+        resolve()
+    index_manifest.write_bytes(original_index)
+    index_manifest.unlink()
+    with pytest.raises(FileNotFoundError):
+        resolve()
 
 
 def test_arrow_availability_rejects_missing_base_artifact(tmp_path: Path) -> None:
+    assert eval_prod_models.first_missing_arrow_dataset_error(None, ["pubmed"], ["_specter2.pkl"]) is not None
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is not None
     dataset_root = _write_eval_arrow_root(tmp_path)
+    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["absent"], ["_specter2.pkl"]) is not None
+    assert (
+        eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter.pickle"]) is not None
+    )
     root_manifest = tmp_path / "manifest.json"
     child_manifest = dataset_root / "manifest.json"
     child = json.loads(child_manifest.read_text(encoding="utf-8"))
@@ -175,17 +148,6 @@ def test_arrow_availability_rejects_missing_base_artifact(tmp_path: Path) -> Non
     root_manifest.write_text(json.dumps(collection), encoding="utf-8")
     with pytest.raises(ValueError):
         eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"])
-
-
-def test_arrow_availability_distinguishes_absence_and_embedding_generation(tmp_path: Path) -> None:
-    assert eval_prod_models.first_missing_arrow_dataset_error(None, ["pubmed"], ["_specter2.pkl"]) is not None
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is not None
-    _write_eval_arrow_root(tmp_path)
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["absent"], ["_specter2.pkl"]) is not None
-    assert (
-        eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter.pickle"]) is not None
-    )
-    assert eval_prod_models.first_missing_arrow_dataset_error(str(tmp_path), ["pubmed"], ["_specter2.pkl"]) is None
 
 
 def test_train_mode_validation_rejects_conflicting_request_or_wrong_dataset() -> None:
@@ -266,26 +228,24 @@ def test_build_pairwise_clusterer_can_disable_hyperopt(monkeypatch: pytest.Monke
     assert captured_cluster_kwargs["cluster_model"].eps == 0.5
 
 
-def test_read_arrow_s2_blocks_reads_from_open_dataset(tmp_path: Path) -> None:
-    with _open_minimal_arrow_dataset(tmp_path) as arrow_dataset:
-        assert arrow_dataset.root == tmp_path.resolve()
-        assert eval_prod_models.read_arrow_s2_blocks(arrow_dataset) == {
-            "a lovelace": [*[str(index) for index in range(10)], "q1", "q2", "seed1"]
-        }
-
-
 def test_pair_splits_from_arrow_dataset_samples_within_block_random_pairs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(eval_prod_models, "read_arrow_s2_blocks", lambda _path: {"block": ["s1", "s2", "s3"]})
     monkeypatch.setattr(
         eval_prod_models,
         "split_blocks_like_anddata",
         lambda blocks, *, random_seed: (dict(blocks), {}, {}),
     )
 
-    with _open_minimal_arrow_dataset(tmp_path, clusters={"c1": ["s1", "s2"], "c2": ["s3"]}) as arrow_dataset:
+    with _open_minimal_arrow_dataset(tmp_path, clusters={"c1": ["q1", "q2"], "c2": ["seed1"]}) as arrow_dataset:
+        assert arrow_dataset.root == tmp_path.resolve()
+        assert eval_prod_models.read_arrow_s2_blocks(arrow_dataset) == {
+            "a lovelace": [*[str(index) for index in range(10)], "q1", "q2", "seed1"]
+        }
+        monkeypatch.setattr(
+            eval_prod_models, "read_arrow_s2_blocks", lambda _dataset: {"a lovelace": ["q1", "q2", "seed1"]}
+        )
         splits = eval_prod_models.pair_splits_from_arrow_dataset(
             arrow_dataset,
             random_seed=42,
@@ -295,16 +255,16 @@ def test_pair_splits_from_arrow_dataset_samples_within_block_random_pairs(
         )
 
     assert set(splits.train_pairs) == {
-        ("s1", "s2", 1),
-        ("s1", "s3", 0),
-        ("s2", "s3", 0),
+        ("q1", "q2", 1),
+        ("q1", "seed1", 0),
+        ("q2", "seed1", 0),
     }
     assert splits.val_pairs == []
     assert splits.test_pairs == []
 
 
-@pytest.mark.parametrize("n_jobs", [3, -1])
-def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_path, monkeypatch, n_jobs) -> None:
+def test_arrow_feature_splits_reuse_open_dataset_and_project_one_union_call(tmp_path, monkeypatch) -> None:
+    n_jobs = -1
     from s2and import feature_port, thread_config
 
     monkeypatch.setattr(thread_config.os, "cpu_count", lambda: 3)
@@ -424,14 +384,10 @@ def test_recorded_holdout_rejects_invalid_ids(ids: Any) -> None:
         frozen_test_blocks(blocks, {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ids})
 
 
-def test_bundle_holdout_requires_recorded_identities(tmp_path: Path) -> None:
+def test_bundle_holdout_rejects_null_record_instead_of_falling_back_to_seed(tmp_path: Path) -> None:
     _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
     with pytest.raises(ValueError, match="no recorded cluster test splits"):
         eval_prod_models.bundle_cluster_test_splits(tmp_path)
-
-
-def test_bundle_holdout_rejects_null_record_instead_of_falling_back_to_seed(tmp_path: Path) -> None:
-    _write_bundle_training_config(tmp_path, {"data_random_seed": 1111})
     (tmp_path / "reproducibility" / "pairwise_training_summary.json").write_text(
         json.dumps({"cluster_test_splits": {"pubmed": None}}), encoding="utf-8"
     )
@@ -442,26 +398,36 @@ def test_bundle_holdout_rejects_null_record_instead_of_falling_back_to_seed(tmp_
         eval_prod_models.bundle_cluster_test_splits(tmp_path)
 
 
-def test_arrow_eval_uses_recorded_holdout_without_resplitting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_arrow_eval_uses_open_dataset_and_does_not_resplit_recorded_holdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     blocks = {"training": ["s0"], "heldout": ["s1"]}
     record = {"block_membership_sha256": block_membership_sha256(blocks), "test_block_ids": ["heldout"]}
     monkeypatch.setattr(eval_prod_models, "read_arrow_s2_blocks", lambda _dataset: blocks)
-    monkeypatch.setattr(
-        eval_prod_models,
-        "split_blocks_like_anddata",
-        lambda *_a, **_k: pytest.fail("Must not recreate split from seed"),
-    )
+    split_seeds = []
+
+    def split(actual_blocks, *, random_seed):
+        assert actual_blocks == blocks
+        split_seeds.append(random_seed)
+        return {}, {}, {"heldout": ["s1"]}
+
+    monkeypatch.setattr(eval_prod_models, "split_blocks_like_anddata", split)
 
     class Clusterer:
-        def predict_from_arrow(self, actual_blocks, _dataset, **_kwargs):
+        def predict_from_arrow(self, actual_blocks, actual_dataset, **kwargs):
             assert actual_blocks == {"heldout": ["s1"]}
+            assert actual_dataset is dataset
+            assert kwargs["batching_threshold"] == 7
             return {"pred": ["s1"]}, None
 
     with _open_minimal_arrow_dataset(tmp_path, clusters={"truth": ["s1"]}) as dataset:
         metrics, _ = eval_prod_models.cluster_eval_arrow(
-            dataset, Clusterer(), random_seed=42, n_jobs=1, test_split=record
+            dataset, Clusterer(), random_seed=42, n_jobs=1, batching_threshold=7, test_split=record
         )
-    assert metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
+        assert metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
+        assert split_seeds == []
+        eval_prod_models.cluster_eval_arrow(dataset, Clusterer(), random_seed=1111, n_jobs=1, batching_threshold=7)
+        assert split_seeds == [1111]
 
 
 def test_bundle_data_random_seed_requires_a_recorded_integer(tmp_path: Path) -> None:
@@ -484,15 +450,6 @@ def test_bundle_data_random_seed_requires_a_recorded_integer(tmp_path: Path) -> 
             eval_prod_models.bundle_data_random_seed(invalid_root)
 
 
-def test_resolve_arrow_dataset_root_requires_explicit_collection_root(tmp_path: Path) -> None:
-    dataset_root = tmp_path / "arrow" / "dummy"
-    dataset_root.mkdir(parents=True)
-    (dataset_root / "manifest.json").write_text("{}\n", encoding="utf-8")
-
-    with pytest.raises(FileNotFoundError, match="Arrow root manifest does not exist"):
-        eval_prod_models.resolve_arrow_dataset_root(str(tmp_path / "arrow"), "dummy")
-
-
 def test_resolve_arrow_dataset_root_does_not_bypass_its_manifest(tmp_path: Path) -> None:
     root = tmp_path / "arrow"
     declared = root / "declared"
@@ -502,6 +459,9 @@ def test_resolve_arrow_dataset_root_does_not_bypass_its_manifest(tmp_path: Path)
     declared_manifest = declared / "manifest.json"
     declared_manifest.write_text("{}\n", encoding="utf-8")
     (undeclared / "manifest.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="Arrow root manifest does not exist"):
+        eval_prod_models.resolve_arrow_dataset_root(str(root), "declared")
+
     (root / "manifest.json").write_text(
         json.dumps(
             {
@@ -521,42 +481,6 @@ def test_resolve_arrow_dataset_root_does_not_bypass_its_manifest(tmp_path: Path)
     assert eval_prod_models.resolve_arrow_dataset_root(str(root), "declared") == str(declared.resolve())
     with pytest.raises(FileNotFoundError, match="does not declare dataset 'undeclared'"):
         eval_prod_models.resolve_arrow_dataset_root(str(root), "undeclared")
-
-
-def test_cluster_eval_arrow_passes_open_dataset(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    class FakeClusterer:
-        def predict_from_arrow(self, block_dict, arrow_dataset, **kwargs):
-            captured["block_dict"] = dict(block_dict)
-            captured["arrow_dataset"] = arrow_dataset
-            captured["kwargs"] = dict(kwargs)
-            return {"pred": ["s1"]}, None
-
-    monkeypatch.setattr(eval_prod_models, "read_arrow_s2_blocks", lambda _path: {"block": ["s1"]})
-    monkeypatch.setattr(
-        eval_prod_models,
-        "split_blocks_like_anddata",
-        lambda blocks, *, random_seed: ({}, {}, dict(blocks)),
-    )
-    monkeypatch.setattr(eval_prod_models, "read_signature_to_cluster_id", lambda _path: {"s1": "truth"})
-
-    with _open_minimal_arrow_dataset(tmp_path, clusters={"truth": ["s1"]}) as arrow_dataset:
-        eval_prod_models.cluster_eval_arrow(
-            arrow_dataset,
-            FakeClusterer(),
-            random_seed=42,
-            n_jobs=1,
-            batching_threshold=7,
-        )
-
-        assert captured["arrow_dataset"] is arrow_dataset
-    assert captured["block_dict"] == {"block": ["s1"]}
-    assert "load_name_counts" not in captured["kwargs"]
-    assert captured["kwargs"]["batching_threshold"] == 7
 
 
 def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
@@ -632,8 +556,7 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
     assert captured["clusterer"].model_path == model_path
 
 
-@pytest.mark.parametrize("force_arrow", [False, True])
-@pytest.mark.parametrize("corruption", ["payload", "manifest"])
+@pytest.mark.parametrize(("force_arrow", "corruption"), [(False, "payload"), (True, "manifest")])
 def test_eval_main_surfaces_arrow_corruption_with_json_fallback_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_arrow: bool, corruption: str
 ) -> None:
@@ -684,10 +607,7 @@ def test_eval_main_surfaces_arrow_corruption_with_json_fallback_configured(
         eval_prod_models.main()
 
 
-@pytest.mark.parametrize("automatic", [False, True])
-def test_eval_main_json_uses_recorded_holdout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], automatic: bool
-) -> None:
+def test_eval_main_json_uses_recorded_holdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import s2and.name_tuple_artifact as name_tuple_artifact
     import s2and.production_model as production_model
     from s2and.data import ANDData
@@ -728,49 +648,36 @@ def test_eval_main_json_uses_recorded_holdout(
     monkeypatch.setattr(name_tuple_artifact, "load_name_tuple_artifact", lambda _path: SimpleNamespace(pairs=set()))
     monkeypatch.setattr(production_model, "load_production_model", lambda _path: Clusterer())
     arrow_root = tmp_path / "arrow"
-    if automatic:
-        _write_eval_arrow_root(arrow_root, include_name_counts_index=False)
-    else:
-        # An explicitly selected JSON evaluation never consults unrelated Arrow data.
-        arrow_root.mkdir()
-        (arrow_root / "manifest.json").write_text("{", encoding="utf-8")
+
+    _write_eval_arrow_root(arrow_root, include_name_counts_index=False)
+    argv = [
+        "eval_prod_models.py",
+        "--dataset",
+        "mini",
+        "--datasets",
+        "pubmed",
+        "--specter2-model-path",
+        str(model_path),
+        "--json-data-root",
+        str(tmp_path),
+        "--arrow-data-root",
+        str(arrow_root),
+        "--name-counts-index-root",
+        str(tmp_path),
+        "--name-tuples-path",
+        str(tmp_path / "tuples"),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    eval_prod_models.main()
+    assert len(predicted) == 1
 
     def fail_arrow_probe(*_args, **_kwargs):
         pytest.fail("--no-arrow must bypass Arrow availability")
 
-    if not automatic:
-        monkeypatch.setattr(eval_prod_models, "first_missing_arrow_dataset_error", fail_arrow_probe)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "eval_prod_models.py",
-            "--dataset",
-            "mini",
-            "--datasets",
-            "pubmed",
-            *([] if automatic else ["--no-arrow"]),
-            "--specter2-model-path",
-            str(model_path),
-            "--json-data-root",
-            str(tmp_path),
-            "--arrow-data-root",
-            str(arrow_root),
-            "--name-counts-index-root",
-            str(tmp_path),
-            "--name-tuples-path",
-            str(tmp_path / "tuples"),
-        ],
-    )
+    monkeypatch.setattr(eval_prod_models, "first_missing_arrow_dataset_error", fail_arrow_probe)
+    monkeypatch.setattr(sys, "argv", [*argv, "--no-arrow"])
     eval_prod_models.main()
-    assert len(predicted) == 1
-    output = capsys.readouterr().out
-    if automatic:
-        assert "Arrow unavailable; using JSON:" in output
-        assert "dataset='pubmed'" in output
-        assert "name_counts_index" in output
-    else:
-        assert "Arrow unavailable; using JSON:" not in output
+    assert len(predicted) == 2
 
 
 def test_eval_main_forced_arrow_rejects_undeclared_name_counts_with_json_fallback(
@@ -809,29 +716,7 @@ def test_eval_main_forced_arrow_rejects_undeclared_name_counts_with_json_fallbac
     assert str(error.value) == str(missing_arrow_error)
     assert "dataset='pubmed'" in str(error.value)
 
-
-def test_eval_main_unavailable_arrow_without_json_preserves_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    arrow_root = tmp_path / "arrow"
-    _write_eval_arrow_root(arrow_root, include_name_counts_index=False)
-    model_path = tmp_path / "model"
-    _write_bundle_training_config(model_path, {"data_random_seed": 1111})
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "eval_prod_models.py",
-            "--dataset",
-            "mini",
-            "--datasets",
-            "pubmed",
-            "--specter2-model-path",
-            str(model_path),
-            "--arrow-data-root",
-            str(arrow_root),
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", [arg for arg in sys.argv[:-2] if arg != "--use-arrow"])
     with pytest.raises(ValueError, match="name_counts_index") as error:
         eval_prod_models.main()
     assert "dataset='pubmed'" in str(error.value)

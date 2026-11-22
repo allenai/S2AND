@@ -1,9 +1,7 @@
 """Gate configuration validation at the real source-bundle preflight boundary."""
 
 import json
-import re
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pytest
@@ -12,7 +10,7 @@ from s2and.incremental_linking_training.classic import OfficialBundle, load_bund
 from s2and.incremental_linking_training.source_bundle_preflight import validate_source_bundle_support_files
 
 
-def _source_bundle(root: Path, gate_changes: dict[str, Any]) -> OfficialBundle:
+def _source_bundle(root: Path) -> OfficialBundle:
     """Write otherwise-valid support files, including every configured split."""
     splits_dir = root / "splits"
     splits_dir.mkdir()
@@ -32,7 +30,6 @@ def _source_bundle(root: Path, gate_changes: dict[str, Any]) -> OfficialBundle:
             "mode": "promoted_logistic_topk_multiclass_l2",
             "calibration_splits": ["calibration_fit", "calibration_check"],
             "test_split": "test",
-            **gate_changes,
         },
     }
     (root / "bundle.json").write_text(
@@ -44,8 +41,8 @@ def _source_bundle(root: Path, gate_changes: dict[str, Any]) -> OfficialBundle:
     return load_bundle(root)
 
 
-def test_source_support_preflight_accepts_valid_gate_and_complete_assignments(tmp_path: Path) -> None:
-    bundle = _source_bundle(tmp_path, {})
+def test_source_support_preflight_requires_complete_gate_and_assignments(tmp_path: Path) -> None:
+    bundle = _source_bundle(tmp_path)
 
     files = validate_source_bundle_support_files(bundle)
 
@@ -55,23 +52,28 @@ def test_source_support_preflight_accepts_valid_gate_and_complete_assignments(tm
         str(tmp_path / "splits" / "assignments.csv"),
     }
 
+    splits = tmp_path / "splits"
+    assignments = splits / "assignments.csv"
+    complete = assignments.read_bytes()
+    rows = pd.read_csv(assignments)
+    rows.loc[rows["split"] != "calibration_check"].to_csv(assignments, index=False)
+    with pytest.raises(ValueError, match="omit configured calibration/test splits"):
+        validate_source_bundle_support_files(bundle)
+    assignments.write_bytes(complete)
 
-@pytest.mark.parametrize(
-    ("gate_changes", "message"),
-    [
-        (
-            {"mode": "legacy_threshold_gate"},
-            "classic.promoted_stratified_gate.mode must be 'promoted_logistic_topk_multiclass_l2'",
-        ),
-    ],
-    ids=["unsupported-mode"],
-)
-def test_source_support_preflight_rejects_present_invalid_gate(
-    tmp_path: Path, gate_changes: dict[str, Any], message: str
-) -> None:
-    bundle = _source_bundle(tmp_path, gate_changes)
+    classic = bundle.models["classic"]
+    gate = classic.pop("promoted_stratified_gate")
+    with pytest.raises(ValueError, match="promoted_stratified_gate is required"):
+        validate_source_bundle_support_files(bundle)
+    classic["promoted_stratified_gate"] = {**gate, "mode": "legacy_threshold_gate"}
+    with pytest.raises(ValueError, match="promoted_stratified_gate.mode"):
+        validate_source_bundle_support_files(bundle)
 
-    # All support files and referenced split names exist, and base/query IDs
-    # are disjoint. Only validation of the present gate config can reject it.
-    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+    classic.pop("classic_gate_internal_eval_base_groups_path")
+    with pytest.raises(ValueError, match="classic_gate_internal_eval_base_groups_path"):
+        validate_source_bundle_support_files(bundle)
+
+    assignments.unlink()
+    (splits / "internal_eval.csv").unlink()
+    with pytest.raises(ValueError, match="contains no files"):
         validate_source_bundle_support_files(bundle)

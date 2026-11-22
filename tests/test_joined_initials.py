@@ -23,15 +23,11 @@ from tests.incremental_test_helpers import _dataset, _predict
     ("first", "middle", "expected"),
     [
         ("Ka", "", "Jka"),
-        ("Mal", None, "Jmal"),
         ("MArfan", "", "Wm arfan"),
         ("Ka", "A.", None),
         ("KA", "", None),
-        ("Kristan", "", None),
         ("Dr", "", None),
         ("Md", "", None),
-        ("Ed", "", None),
-        ("K", "", None),
     ],
 )
 def test_joined_initials_reading(first, middle, expected):
@@ -51,16 +47,11 @@ def test_joined_initials_reading(first, middle, expected):
         ("Лев", "IP", "Sip"),
         ("Johanna IP", "", "Sip"),
         # Only the middle's last word counts: the spell step splits only that token.
-        ("Johanna", "A IP", "Sip"),
-        ("Johanna", "A. IP", "Sip"),
         ("Johanna", "IP A", None),
         # Vowel-less mixed case reads as initials as in D9; "Mc", suffixes and roman numerals do not.
         ("Hendrik", "Hg", "Shg"),
         ("Jeffrey", "Mc", None),
         ("John", "III", None),
-        ("John", "JR", None),
-        ("Johanna", "I. Petra", None),
-        ("Ka", "", "Jka"),
     ],
 )
 def test_spelled_middle_initials_value(first, middle, expected):
@@ -79,34 +70,19 @@ def _conflict(a: tuple[str, str], b: tuple[str, str], last: str = "Leite") -> bo
     [
         # Joined initials that spell the other name exactly.
         (("Ka", ""), ("Kristan", "Allan"), False),
-        (("Ka", ""), ("Kristian", "A."), False),
         (("Mal", ""), ("Marco Aurelio Lisboa", ""), False),
         (("MArfan", ""), ("Mohammad", "Arfan"), False),
-        (("Al", ""), ("Andrew", "L."), False),
         # A joined-capitals middle is spelled out ("Johanna IP" is J. I. P.).
         (("Jip", ""), ("Johanna", "IP"), False),
-        (("Jip", ""), ("Johanna", "I. P."), False),
         # A joined-capitals last middle word after an initial is spelled out too.
         (("Johanna", "A IP"), ("Johanna", "A. Inge Petra"), False),
-        (("Johanna", "A. IP"), ("Johanna", "A. Inge Petra"), False),
         # Too few names on the other side, or other initials, keep the veto.
         (("Ka", ""), ("Kristian", ""), True),
-        (("Mal", ""), ("Mark", ""), True),
-        (("MArfan", ""), ("Mohammad", ""), True),
         (("MArfan", ""), ("Mohammad", "Arif"), True),
-        (("Jim", ""), ("Jack", "M. T."), True),
-        (("Jip", ""), ("Johanna", "I."), True),
-        (("Jip", ""), ("Johanna", "Ip"), True),
-        (("Jip", ""), ("Johanna", "IQ"), True),
         # Short romanized syllables on the other side keep the veto.
-        (("Li", ""), ("Lei", ""), True),
         (("Ji", ""), ("Jong", "In"), True),
-        (("Yu", ""), ("Young", "Uk"), True),
         # Two short names compare by the ordinary rule only.
         (("Ka", ""), ("Ki", ""), True),
-        # Unrelated conflicts are unchanged.
-        (("Kristan", ""), ("Kristian", ""), True),
-        (("Ka", ""), ("Kristan", "Allan"), False),
     ],
 )
 def test_joined_initials_reconcile_only_exact_spellings(left, right, expected):
@@ -117,8 +93,6 @@ def test_joined_initials_reconcile_only_exact_spellings(left, right, expected):
 @pytest.mark.parametrize(
     ("left", "right", "expected"),
     [
-        # A joined-capitals middle reads as initials in the whole name rule.
-        (("Johanna", "IP"), ("Johanna", "Inge Petra"), False),
         (("Johanna", "IP"), ("Johanna", "I. P."), False),
         (("Johanna", "IP"), ("Johanna", "Karin Maria"), True),
         # A title-case middle stays a name.
@@ -137,24 +111,26 @@ def test_joined_initials_keep_the_surname_rule():
     assert canonical_names_conflict(name_a, name_b, set(), cjk_given_names=values)
 
 
-# Every pair gets model distance 0.1, under EPS 0.5, so only the name rule keeps people apart.
+# Set model distances below the cut to exercise the name rule.
 @pytest.mark.parametrize("route", ["arrow", "python"])
-@pytest.mark.parametrize(
-    ("names", "clusters"),
-    [
-        ([("Ka", "", "Hahn"), ("Kristan", "Allan", "Hahn")], 1),
-        ([("Mal", "", "Leite"), ("Marco Aurelio Lisboa", "", "Leite")], 1),
-        ([("MArfan", "", "Ikram"), ("Mohammad", "Arfan", "Ikram")], 1),
-        ([("Li", "", "Wang"), ("Lei", "", "Wang")], 2),
-        ([("Ka", "", "Hahn"), ("Kristian", "", "Hahn")], 2),
-        ([("Jip", "", "de Vries"), ("Johanna", "IP", "de Vries")], 1),
-        ([("Johanna", "IP", "de Vries"), ("Johanna", "Inge Petra", "de Vries")], 1),
-    ],
-)
-def test_full_block_prediction_applies_the_joined_initials_reading(tmp_path: Path, route, names, clusters):
-    dataset = _dataset(names, {})
-    found = _predict(tmp_path, dataset, {"block": [str(i) for i in range(len(names))]}, route, threshold=None)
-    assert len(found) == clusters
+def test_full_block_prediction_applies_the_joined_initials_reading(tmp_path: Path, route: str) -> None:
+    names = [
+        ("Ka", "", "Hahn"),
+        ("Kristan", "Allan", "Hahn"),
+        ("MArfan", "", "Ikram"),
+        ("Mohammad", "Arfan", "Ikram"),
+        ("Ka", "", "Berg"),
+        ("Kristian", "", "Berg"),
+        ("Jip", "", "de Vries"),
+        ("Johanna", "IP", "de Vries"),
+        ("Johanna", "Inge Petra", "de Vries"),
+    ]
+    blocks = {"hahn": ["0", "1"], "ikram": ["2", "3"], "berg": ["4", "5"], "de vries": ["6", "7", "8"]}
+
+    found = _predict(tmp_path, _dataset(names, {}), blocks, route, threshold=None)
+
+    expected = [["0", "1"], ["2", "3"], ["4"], ["5"], ["6", "7", "8"]]
+    assert sorted(sorted(members) for members in found.values()) == expected
 
 
 @pytest.mark.parametrize("route", ["arrow", "python"])

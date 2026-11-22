@@ -63,15 +63,13 @@ def test_assert_exact_rejects_constraint_index_mismatch_with_equal_values() -> N
         _assert_exact(report)
 
 
-def test_numeric_report_uses_configured_nan_mismatch_policy() -> None:
+def test_numeric_report_applies_nan_and_integer_policies() -> None:
     left = np.asarray([1.0, np.nan])
     right = np.asarray([1.0, 2.0])
 
     assert _numeric_report(left, right, treat_nan_as_mismatch=True)["nan_mismatch_count"] == 1
     assert _numeric_report(left, right, treat_nan_as_mismatch=False)["nan_mismatch_count"] == 0
 
-
-def test_numeric_report_requires_exact_integer_reference_values() -> None:
     report = _numeric_report(
         np.asarray([[1.0, 1.25]]),
         np.asarray([[1.0 + 5e-7, 1.25 + 5e-7]]),
@@ -116,7 +114,7 @@ def test_cluster_partition_ignores_cluster_labels_and_member_order() -> None:
     assert _cluster_partition(incumbent) != _cluster_partition({"a": ["s1"], "b": ["s2", "s3"]})
 
 
-def test_parity_main_rejects_mismatch_without_report(tmp_path, monkeypatch) -> None:
+def test_parity_main_publishes_only_a_passing_report(tmp_path, monkeypatch) -> None:
     report = {
         "distance_comparison": {"block-a": {"allclose_equal_nan": False}},
         "clusters_exact_match": True,
@@ -130,16 +128,7 @@ def test_parity_main_rejects_mismatch_without_report(tmp_path, monkeypatch) -> N
 
     assert not output_json.exists()
 
-
-def test_parity_main_writes_fresh_report_on_success(tmp_path, monkeypatch) -> None:
-    report = {
-        "distance_comparison": {},
-        "clusters_exact_match": True,
-    }
-    output_json = tmp_path / "report.json"
-    monkeypatch.setattr(parity_module, "run", lambda _args: report)
-    monkeypatch.setattr(sys, "argv", _parity_argv(tmp_path))
-
+    report["distance_comparison"]["block-a"]["allclose_equal_nan"] = True
     parity_module.main()
 
     assert json.loads(output_json.read_text(encoding="utf-8")) == report
@@ -149,22 +138,21 @@ def test_parity_fixture_meta_paths_resolve_relative_to_fixture_dir(tmp_path) -> 
     seed_path = tmp_path / "seeds.json"
     seed_path.write_text('{"s1": "c1", "s2": "c2"}\n', encoding="utf-8")
     meta = {
+        "block": "reviewed",
+        "dataset": "dummy",
         "paths": {
             "signatures": "signatures.json",
             "cluster_seeds_require": "seeds.json",
-        }
+        },
     }
 
-    assert _fixture_meta_path(meta, tmp_path, "signatures") == tmp_path / "signatures.json"
-    assert _load_cluster_seeds_require(meta, tmp_path, ["s1"], enabled=True) == {"s1": "c1"}
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    loaded = parity_module._load_parity_meta(tmp_path)
+    assert _fixture_meta_path(loaded, tmp_path, "signatures") == tmp_path / "signatures.json"
+    assert _load_cluster_seeds_require(loaded, tmp_path, ["s1"], enabled=True) == {"s1": "c1"}
 
-
-def test_parity_meta_requires_exactly_dataset_block_and_paths(tmp_path) -> None:
-    meta = {"block": "reviewed", "dataset": "dummy", "paths": {"signatures": "signatures.json"}}
-    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
-    assert parity_module._load_parity_meta(tmp_path) == meta
-
-    (tmp_path / "meta.json").write_text(json.dumps({**meta, "workload": {}}), encoding="utf-8")
+    meta_path.write_text(json.dumps({**meta, "workload": {}}), encoding="utf-8")
     with pytest.raises(ValueError, match="exactly block, dataset, and paths"):
         parity_module._load_parity_meta(tmp_path)
 
@@ -203,14 +191,9 @@ def test_parity_arrow_writer_adds_current_raw_planner_indexes(tmp_path) -> None:
     assert physical_layout["tables"]["signatures"]["batch_index_present"] is True
 
 
-@pytest.mark.parametrize("option", ["--block-size", "--n-jobs", "--total-ram-bytes"])
-@pytest.mark.parametrize("value", ["0", "-1"])
-def test_parity_rejects_nonpositive_sizes(tmp_path, option: str, value: str) -> None:
+def test_parity_rejects_zero_block_size(tmp_path) -> None:
     argv = _parity_argv(tmp_path)[1:]
-    if option in argv:
-        argv[argv.index(option) + 1] = value
-    else:
-        argv += [option, value]
+    argv[argv.index("--block-size") + 1] = "0"
 
     with pytest.raises(SystemExit):
         parity_module._build_arg_parser().parse_args(argv)

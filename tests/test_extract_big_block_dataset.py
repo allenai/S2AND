@@ -88,9 +88,9 @@ def _write_fixture(path: Path, content: str) -> None:
 
 def test_iter_monolith_records_yields_expected_sequence(tmp_path):
     input_path = tmp_path / "big_block_fixture.json"
-    _write_fixture(input_path, MONOLITH_FIXTURE)
+    _write_fixture(input_path, _minify_fixture(MONOLITH_FIXTURE))
 
-    records = list(iter_monolith_records(input_path))
+    records = list(iter_monolith_records(input_path, chunk_size=64))
 
     assert [record_type for record_type, _ in records] == [
         "signatures",
@@ -104,22 +104,6 @@ def test_iter_monolith_records_yields_expected_sequence(tmp_path):
     assert records[2][1]["paper_id"] == 101
     assert records[4][1][0] == "101"
     np.testing.assert_allclose(records[4][1][1], np.array([0.1, 0.2, 0.3], dtype=np.float32))
-
-
-def test_iter_monolith_records_handles_minified_chunk_boundaries(tmp_path):
-    input_path = tmp_path / "big_block_fixture.json"
-    _write_fixture(input_path, _minify_fixture(MONOLITH_FIXTURE))
-
-    records = list(iter_monolith_records(input_path, chunk_size=64))
-
-    assert [record_type for record_type, _ in records] == [
-        "signatures",
-        "signatures",
-        "papers",
-        "papers",
-        "paper_embedding",
-        "paper_embedding",
-    ]
 
 
 def test_extract_monolith_dataset_writes_anddata_friendly_outputs(tmp_path):

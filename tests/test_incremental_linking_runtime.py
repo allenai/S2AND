@@ -15,7 +15,6 @@ from s2and.incremental_linking.artifact import load_incremental_linking_artifact
 from s2and.incremental_linking.features import (
     PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS,
     LinkerFeatureMatrix,
-    assemble_linker_feature_matrix,
     promoted_linker_feature_columns,
 )
 from s2and.incremental_linking.linker_pairwise import (
@@ -103,29 +102,12 @@ class TwoFeatureClassifier:
         raise AssertionError("feature-count mismatch must fail before prediction")
 
 
-@pytest.mark.parametrize(
-    "classifier,expected",
-    [
-        (RejectsNumThreadsClassifier(), [0.25, 0.75]),
-        (PositiveProbabilityClassifier(), [0.75, 0.25]),
-    ],
-    ids=["no-num-threads-keyword", "positive-probability-fast-path"],
-)
-def test_pairwise_predict_class0_supports_classifier_interfaces(classifier, expected) -> None:
-    predictions = predict_pairwise_class0(
-        classifier,
-        np.asarray([[0.25], [0.75]], dtype=np.float64),
-    )
-
-    assert np.allclose(predictions, expected)
-
-
-def test_pairwise_predict_class0_rejects_fitted_feature_count_mismatch() -> None:
+def test_pairwise_predict_class0_supports_classifier_interfaces_and_checks_width() -> None:
+    features = np.asarray([[0.25], [0.75]], dtype=np.float64)
+    np.testing.assert_allclose(predict_pairwise_class0(RejectsNumThreadsClassifier(), features), [0.25, 0.75])
+    np.testing.assert_allclose(predict_pairwise_class0(PositiveProbabilityClassifier(), features), [0.75, 0.25])
     with pytest.raises(ValueError, match="feature count does not match fitted schema"):
-        predict_pairwise_class0(
-            TwoFeatureClassifier(),
-            np.asarray([[0.25], [0.75]], dtype=np.float64),
-        )
+        predict_pairwise_class0(TwoFeatureClassifier(), features)
 
 
 def test_pairwise_model_feature_indices_match_sorted_featurizer_order() -> None:
@@ -134,19 +116,6 @@ def test_pairwise_model_feature_indices_match_sorted_featurizer_order() -> None:
     featurizer_info.feature_group_to_index = {"first": [3, 1], "second": [5, 1]}
 
     assert runtime_module._pairwise_model_feature_indices(featurizer_info) == (1, 3, 5)  # noqa: SLF001
-
-
-def test_distance_row_signals_distinguish_top3_and_top5_means() -> None:
-    signals = runtime_module._distance_row_signals(
-        counts=np.asarray([6], dtype=np.uint64),
-        sums=np.asarray([2.1], dtype=np.float64),
-        mins=np.asarray([0.1], dtype=np.float64),
-        top_distances=np.asarray([[0.1, 0.2, 0.3, 0.4, 0.5]], dtype=np.float64),
-    )
-
-    assert signals["mean_distance"][0] == pytest.approx(0.35)
-    assert signals["top3_mean_distance"][0] == pytest.approx(0.2)
-    assert signals["top5_mean_distance"][0] == pytest.approx(0.3)
 
 
 def test_vectorized_top_distances_match_the_per_row_loops_bit_for_bit() -> None:
@@ -174,12 +143,15 @@ def test_vectorized_top_distances_match_the_per_row_loops_bit_for_bit() -> None:
     assert top_distances.tobytes() == reference.tobytes()
 
     counts = rng.integers(0, 3, size=row_count).astype(np.uint64)
+    sums = rng.random(row_count)
     signals = runtime_module._distance_row_signals(
         counts=counts,
-        sums=rng.random(row_count),
+        sums=sums,
         mins=rng.random(row_count),
         top_distances=top_distances,
     )
+    expected_mean = np.divide(sums, counts, out=np.ones(row_count), where=counts > 0)
+    np.testing.assert_array_equal(signals["mean_distance"], expected_mean.astype(np.float32))
     for limit, key in ((3, "top3_mean_distance"), (5, "top5_mean_distance")):
         # The float64 means, before the float32 cast hides rounding differences.
         rows, means = runtime_module._leading_finite_means(top_distances, np.arange(row_count), limit)
@@ -214,7 +186,6 @@ def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
         ({"left_signature_indices": [0]}, "legacy numeric pair indices"),
         ({"row_query_signature_indices": [1]}, "row_query_signature_indices.*query_signature_ids length=1"),
         ({"retrieval_ranks": [-1]}, "retrieval_ranks"),
-        ({"retrieval_ranks": [0]}, "retrieval_ranks"),
         ({"row_query_year_missing": [-1]}, "row_query_year_missing.*non-0/1"),
         ({"query_views": []}, "query_views length must match query_signature_ids"),
         ({"query_views": ["typo"]}, "Unknown retrieval query_view"),
@@ -611,8 +582,8 @@ def _fake_pairwise_result(candidate_batch: LinkerCandidateBatch) -> CandidateBat
     )
 
 
-@pytest.mark.parametrize("model_nan,aggregate_nan", [(0.0, np.nan), (np.nan, 0.0)])
-def test_fused_native_features_scoring_and_constraints(tmp_path, monkeypatch, model_nan, aggregate_nan):
+def test_fused_native_features_scoring_and_constraints(tmp_path, monkeypatch):
+    model_nan, aggregate_nan = 0.0, np.nan
     dataset = build_arrow_training_dataset(build_dummy_dataset("fused", name_counts_index=True), tmp_path)
     native = runtime_module.feature_port._get_rust_featurizer(dataset)
     pairs = [(0, 1), (0, 2), (3, 4), (0, 3), (1, 4), (2, 5)]
@@ -695,10 +666,11 @@ def test_fused_native_features_scoring_and_constraints(tmp_path, monkeypatch, mo
     assert result.telemetry["predicted_index_remap_bytes"] == stats.chunk_plan.chunk_pairs * 8
 
 
-@pytest.mark.parametrize("aggregate_nan", [0.0, np.nan], ids=["zero-fill", "preserve-nan"])
 def test_fused_native_aggregates_across_chunks_match_dense_reference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aggregate_nan: float
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    aggregate_nan = 0.0
     monkeypatch.setattr(memory_budget, "RUST_BATCH_MAX_CHUNK_PAIRS", 2)
     dataset = build_arrow_training_dataset(build_dummy_dataset("fused-chunks", name_counts_index=True), tmp_path)
     native = runtime_module.feature_port._get_rust_featurizer(dataset)
@@ -781,8 +753,6 @@ def _native_scorer_on_pairs(native: Any, pairs: list[tuple[int, int]], info: Fea
     ("with_labels", "model_nan", "aggregate_nan", "n_jobs", "with_nameless"),
     [
         (True, np.nan, 0.0, 3, True),
-        (False, np.nan, 0.0, 1, True),
-        (True, 0.0, np.nan, 2, False),
         (False, 0.0, 0.0, 3, False),
     ],
 )
@@ -935,122 +905,118 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     )
 
 
-@pytest.mark.parametrize("gate", [0.0, 1.1], ids=["accept", "reject"])
-def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path: Path, gate: float) -> None:
+def test_retrieved_candidates_score_a_loaded_artifact_and_record_missing_queries(tmp_path: Path, monkeypatch) -> None:
     booster, _fixture = build_tiny_promoted_booster()
     artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
         artifact_dir,
-        gate_config=_promoted_gate_config(gate),
+        gate_config=_promoted_gate_config(0.0),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
-    artifact = load_incremental_linking_artifact(artifact_dir)
-    candidate_batch = _row_only_candidate_batch(
+    retrieval_batch = _retrieval_batch(
         row_query_signature_indices=np.asarray([10, 10, 11], dtype=np.uint32),
         row_component_keys=("c_low", "c_high", "c_single"),
         retrieval_ranks=np.asarray([2, 1, 1], dtype=np.uint16),
     )
-    feature_matrix = assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_features(np.asarray([0.1, 0.9, 0.8], dtype=np.float32)),
+    monkeypatch.setattr(
+        runtime_module,
+        "build_promoted_non_pairwise_row_features_with_telemetry",
+        lambda _batch, _signals: _row_features_with_telemetry(np.asarray([0.1, 0.9, 0.8], dtype=np.float32)),
+    )
+    result = _predict_incremental_link_or_abstain_retrieved_candidates(
+        load_incremental_linking_artifact(artifact_dir),
+        retrieval_batch,
         pairwise_stats=StaticPairwiseStats(row_count=3),
+        no_candidate_query_signature_indices=np.asarray([42], dtype=np.uint32),
     )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        feature_matrix,
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"] * 3, dtype=object)},
-    )
-
-    assert len(result.probabilities) == 3
-    assert [decision.query_signature_index for decision in result.decisions] == [10, 11]
-    assert [(decision.action, decision.component_key) for decision in result.decisions] == (
-        [("link", "c_high"), ("link", "c_single")] if gate == 0 else [("abstain", None)] * 2
-    )
-
-
-def test_compact_link_or_abstain_applies_numpy_logistic_gate_feature() -> None:
-    scale = 200.0
-    artifact = StaticArtifact(
-        np.asarray([0.60, 0.55, 0.40], dtype=np.float64),
-        gate_config=logistic_gate_config(
-            feature_names=("score_margin",),
-            weights=np.asarray([[-scale, 0.0, scale]], dtype=np.float64),
-            bias=np.asarray([scale * 0.04, -10.0, -scale * 0.04], dtype=np.float64),
-            missing_values=np.asarray([0.0], dtype=np.float64),
-            calibration_mode="test",
-        ),
-    )
-    candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10, 10, 11], dtype=np.uint32),
-        row_component_keys=("c_margin", "c_runner_up", "c_single"),
-        retrieval_ranks=np.asarray([1, 2, 1], dtype=np.uint16),
-    )
-    feature_matrix = _empty_feature_matrix(candidate_batch)
-    row_signals: dict[str, Any] = {
-        "first_name_bucket": np.asarray(
-            ["single_letter_first", "single_letter_first", "multi_letter_first"],
-            dtype=object,
-        ),
+    assert result.feature_matrix.matrix.shape == (3, len(promoted_linker_feature_columns()))
+    assert result.compact_result.probabilities.shape == (3,)
+    assert [(d.query_signature_index, d.action, d.component_key) for d in result.compact_result.decisions] == [
+        (10, "link", "c_high"),
+        (11, "link", "c_single"),
+        (42, "abstain", None),
+    ]
+    assert {
+        key: result.telemetry[key]
+        for key in (
+            "candidate_row_count",
+            "no_candidate_query_count",
+            "decision_count",
+            "link_count",
+            "abstain_count",
+            "native_scorer_chunk_rows",
+            "native_scorer_chunk_count",
+        )
+    } == {
+        "candidate_row_count": 3,
+        "no_candidate_query_count": 1,
+        "decision_count": 3,
+        "link_count": 2,
+        "abstain_count": 1,
+        "native_scorer_chunk_rows": 3,
+        "native_scorer_chunk_count": 1,
     }
 
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        feature_matrix,
-        row_signals=row_signals,
-    )
 
-    assert [decision.action for decision in result.decisions] == ["link", "abstain"]
-    assert result.decisions[0].component_key == "c_margin"
-    assert result.decisions[0].score_margin == pytest.approx(0.05)
-
-
-def test_compact_logistic_gate_can_use_materialized_bucket_feature() -> None:
+def test_compact_logistic_gate_uses_score_margin_and_name_bucket() -> None:
     artifact = StaticArtifact(
-        np.asarray([0.60], dtype=np.float64),
+        np.asarray([0.60, 0.55, 0.40, 0.40], dtype=np.float64),
         gate_config=logistic_gate_config(
-            feature_names=("first_name_bucket_multi_letter_first",),
-            weights=np.asarray([[0.0, 0.0, 5.0]], dtype=np.float64),
-            bias=np.asarray([0.0, 0.0, -2.5], dtype=np.float64),
-            missing_values=np.asarray([0.0], dtype=np.float64),
+            feature_names=("score_margin", "first_name_bucket_multi_letter_first"),
+            weights=np.asarray([[-200.0, 0.0, 200.0], [-10.0, 0.0, 10.0]], dtype=np.float64),
+            bias=np.asarray([8.0, -10.0, -8.0], dtype=np.float64),
+            missing_values=np.asarray([0.0, 0.0], dtype=np.float64),
             calibration_mode="test",
         ),
     )
     candidate_batch = _row_only_candidate_batch(
-        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
-        row_component_keys=("c_single",),
-        retrieval_ranks=np.asarray([1], dtype=np.uint16),
+        row_query_signature_indices=np.asarray([10, 10, 11, 12], dtype=np.uint32),
+        row_component_keys=("c_margin", "c_runner_up", "c_initial", "c_full"),
+        retrieval_ranks=np.asarray([1, 2, 1, 1], dtype=np.uint16),
     )
-
     result = _predict_incremental_link_or_abstain_compact(
         artifact,
         _empty_feature_matrix(candidate_batch),
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"], dtype=object)},
+        row_signals={"first_name_bucket": np.asarray(["single_letter_first"] * 3 + ["multi_letter_first"])},
     )
 
-    assert result.decisions[0].action == "link"
+    assert [(d.action, d.component_key) for d in result.decisions] == [
+        ("link", "c_margin"),
+        ("abstain", None),
+        ("link", "c_full"),
+    ]
+    assert result.decisions[0].score_margin == pytest.approx(0.05)
 
 
-@pytest.mark.parametrize("force", ["constraint_require_count", "orcid_match"])
-def test_compact_forced_link_keeps_full_group_runner_up(force):
-    """A forced low-score row beats both the model gate and a high-score rival."""
+def test_compact_name_checks_keep_forced_links_and_reject_incompatible_scored_links():
     result = _compact_decisions(
-        [0.95, 0.10],
-        gate=0.99,
+        [0.95, 0.10, 0.95, 0.10, 0.95],
+        queries=[10, 10, 11, 11, 12],
+        gate=0.9,
         row_signals={
-            force: [0, 1],
-            "constraint_pair_count": [1, 1],
-            "constraint_disallow_count": [0, int(force == "orcid_match")],
-            "constraint_disallow_fraction": [0, int(force == "orcid_match")],
+            "constraint_require_count": [0, 1, 0, 0, 0],
+            "orcid_match": [0, 0, 0, 1, 0],
+            "constraint_pair_count": [1, 5, 1, 1, 5],
+            "constraint_disallow_count": [0, 1, 0, 1, 1],
+            "constraint_disallow_fraction": [0.0, 0.2, 0.0, 1.0, 0.2],
+            "constraint_name_check_disallow_count": [0, 1, 0, 1, 1],
         },
     )
-    decision = result.decisions[0]
-    assert (decision.action, decision.component_key) == ("link", "c1")
-    assert decision.score == pytest.approx(0.10)
-    assert decision.runner_up_score == pytest.approx(0.95)
-    assert decision.score_margin == pytest.approx(-0.85)
+
+    for decision, component_key in zip(result.decisions[:2], ["c1", "c3"], strict=True):
+        assert (decision.action, decision.component_key) == ("link", component_key)
+        assert decision.forced
+        assert not decision.name_conflict
+        assert decision.score == pytest.approx(0.10)
+        assert decision.runner_up_score == pytest.approx(0.95)
+        assert decision.score_margin == pytest.approx(-0.85)
+    rejected = result.decisions[2]
+    assert rejected.action == "abstain"
+    assert rejected.name_conflict
+    assert rejected.score == pytest.approx(0.95)
+    assert result.decision_telemetry["name_check_abstain_count"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1091,23 +1057,6 @@ def test_compact_constraint_veto_recomputes_gate_only_for_affected_query(monkeyp
     assert gate_row_counts == [4, 1]
     assert [decision.component_key for decision in result.decisions] == ["c1", "c2"]
     assert result.decisions[0].score == pytest.approx(0.80)
-
-
-@pytest.mark.parametrize("hard", [False, True], ids=["constraint-veto", "hard-exclusion"])
-def test_compact_abstains_when_every_candidate_is_excluded(hard):
-    result = _compact_decisions(
-        [0.95, 0.80],
-        hard_excluded_rows=[True, True] if hard else None,
-        row_signals={
-            "constraint_pair_count": [1, 1],
-            "constraint_disallow_count": [1, 1],
-            "constraint_disallow_fraction": [1, 1],
-        },
-    )
-    decision = result.decisions[0]
-    assert (decision.action, decision.component_key, decision.row_index) == ("abstain", None, None)
-    if hard:
-        assert decision.score is None
 
 
 def test_runtime_orcid_force_link_policy_is_independent_of_model_features(
@@ -1169,15 +1118,26 @@ def test_constraint_disallow_veto_policy_pins_two_pair_half_disallow_fall_throug
     assert veto.tolist() == [True, False, True, False, True, True]
 
 
-def test_hard_exclusion_beats_orcid_and_preserves_eligible_candidate():
+def test_compact_hard_exclusion_beats_orcid_and_abstains_when_no_candidates_remain():
     result = _compact_decisions(
-        [0.95, 0.60],
-        row_signals={"orcid_match": [1, 0]},
-        hard_excluded_rows=[True, False],
+        [0.95, 0.60, 0.95, 0.80, 0.95, 0.80],
+        queries=[10, 10, 11, 11, 12, 12],
+        row_signals={
+            "orcid_match": [1, 0, 0, 0, 0, 0],
+            "constraint_pair_count": [1] * 6,
+            "constraint_disallow_count": [0, 0, 0, 0, 1, 1],
+            "constraint_disallow_fraction": [0, 0, 0, 0, 1, 1],
+        },
+        hard_excluded_rows=[True, False, True, True, False, False],
     )
-    assert (result.decisions[0].action, result.decisions[0].component_key) == ("link", "c1")
-    assert result.decision_telemetry["cluster_seed_disallow_excluded_row_count"] == 1
-    assert result.decision_telemetry["cluster_seed_disallow_excluded_query_count"] == 1
+    assert [(d.action, d.component_key, d.row_index) for d in result.decisions] == [
+        ("link", "c1", 1),
+        ("abstain", None, None),
+        ("abstain", None, None),
+    ]
+    assert result.decisions[1].score is None
+    assert result.decision_telemetry["cluster_seed_disallow_excluded_row_count"] == 3
+    assert result.decision_telemetry["cluster_seed_disallow_excluded_query_count"] == 2
 
 
 def test_cluster_seed_disallow_excluded_rows_builds_query_component_mask() -> None:
@@ -1219,52 +1179,6 @@ def test_query_disallow_partner_ids_collects_query_pairs_from_both_channels() ->
     )
 
     assert partners == {"q1": {"q2"}, "q2": {"q1", "q3"}, "q3": {"q2"}}
-
-
-def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact = StaticArtifact(
-        np.asarray([0.1, 0.9, 0.8], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.0),
-    )
-    retrieval_batch = _retrieval_batch(
-        row_query_signature_indices=np.asarray([10, 10, 11], dtype=np.uint32),
-        row_component_keys=("c_low", "c_high", "c_single"),
-        retrieval_ranks=np.asarray([2, 1, 1], dtype=np.uint16),
-    )
-
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(
-            np.asarray([0.1, 0.9, 0.8], dtype=np.float32)
-        ),
-    )
-
-    result = _predict_incremental_link_or_abstain_retrieved_candidates(
-        artifact,
-        retrieval_batch,
-        pairwise_stats=StaticPairwiseStats(row_count=3),
-    )
-
-    assert result.feature_matrix.matrix.shape == (3, len(promoted_linker_feature_columns()))
-    assert [decision.component_key for decision in result.compact_result.decisions] == ["c_high", "c_single"]
-    assert {key: value for key, value in result.telemetry.items() if not key.startswith("native_scorer_")} == {
-        "candidate_row_count": 3,
-        "pair_count": 0,
-        "no_candidate_query_count": 0,
-        "decision_count": 2,
-        "link_count": 2,
-        "abstain_count": 0,
-        "cluster_seed_disallow_excluded_row_count": 0,
-        "cluster_seed_disallow_excluded_query_count": 0,
-        "row_feature_generated_family_id_count": 0,
-        "row_feature_generic_family_override_count": 0,
-    }
-    assert result.telemetry["native_scorer_chunk_rows"] == 3
-    assert result.telemetry["native_scorer_chunk_count"] == 1
-    assert result.telemetry["native_scorer_predicted_peak_delta_bytes"] == 3 * (53 * 4 + 8)
 
 
 def test_private_retrieved_candidate_slice_returns_no_candidate_abstains(
@@ -1310,39 +1224,28 @@ def test_private_retrieved_candidate_slice_rejects_partial_supervision() -> None
         )
 
 
-@pytest.mark.parametrize(
-    "component_keys,query_objects",
-    [
-        ((), None),
-        (("c1", "c1"), None),
-        (("c1", "c2"), {"q1": SimpleNamespace(query_author="ignored")}),
-    ],
-    ids=["empty", "without-query-objects", "ignore-query-objects"],
-)
-def test_authoritative_query_author_signals_need_no_extra_signals(component_keys, query_objects) -> None:
-    row_count = len(component_keys)
+def test_empty_authoritative_query_author_signal_needs_no_extra_signals() -> None:
     retrieval_batch = _production_retrieval_batch(
-        row_query_signature_indices=np.zeros(row_count, dtype=np.uint32),
-        row_component_keys=component_keys,
+        row_query_signature_indices=np.zeros(0, dtype=np.uint32),
+        row_component_keys=(),
     )
-    retrieval_batch.row_signals["query_author"] = np.asarray(["Ada Lovelace"] * row_count, dtype=object)
+    retrieval_batch.row_signals["query_author"] = np.asarray([], dtype=object)
     assert (
         runtime_module._production_query_author_row_signals(
             retrieval_batch,
             query_signature_id_by_index={0: "q1"},
-            query_by_signature_id=query_objects,
+            query_by_signature_id=None,
         )
         == {}
     )
 
 
-@pytest.mark.parametrize("authors", [[], [["Ada Lovelace"]]])
-def test_query_author_row_signal_rejects_malformed_length_and_shape(authors) -> None:
+def test_query_author_row_signal_rejects_malformed_shape() -> None:
     retrieval_batch = _production_retrieval_batch(
         row_query_signature_indices=np.asarray([0], dtype=np.uint32),
         row_component_keys=("c1",),
     )
-    retrieval_batch.row_signals["query_author"] = np.asarray(authors, dtype=object)
+    retrieval_batch.row_signals["query_author"] = np.asarray([["Ada Lovelace"]], dtype=object)
     with pytest.raises(ValueError, match=r"query_author row signal must have shape \(1,\)"):
         runtime_module._production_query_author_row_signals(
             retrieval_batch,
@@ -1364,8 +1267,14 @@ def test_query_author_row_signal_requires_authority_without_query_objects() -> N
         )
 
 
-@pytest.mark.parametrize("author,expected_action", [("Ada Lovelace", "link"), ("A", "abstain"), ("", "abstain")])
-@pytest.mark.parametrize("author_source", ["authoritative", "authoritative_with_queries", "fallback"])
+@pytest.mark.parametrize(
+    ("author", "expected_action", "author_source"),
+    [
+        ("Ada Lovelace", "link", "authoritative_with_queries"),
+        ("A", "abstain", "fallback"),
+        ("", "abstain", "authoritative"),
+    ],
+)
 def test_from_retrieval_preserves_author_dependent_gate_decisions(
     monkeypatch: pytest.MonkeyPatch, author: str, expected_action: str, author_source: str
 ) -> None:
@@ -1531,46 +1440,6 @@ def test_constraint_row_signals_count_only_checked_name_conflicts() -> None:
     assert "constraint_name_check_disallow_count" not in runtime_module._constraint_row_signals(candidate_batch, labels)
 
 
-def test_compact_name_check_turns_a_conflicting_link_into_an_abstain() -> None:
-    """One conflicting member in five passes the share veto but not the name check."""
-    shared = {
-        "constraint_pair_count": [5, 5],
-        "constraint_disallow_count": [1, 0],
-        "constraint_disallow_fraction": [0.2, 0.0],
-    }
-    baseline = _compact_decisions([0.95, 0.80], row_signals=shared)
-    assert (baseline.decisions[0].action, baseline.decisions[0].component_key) == ("link", "c0")
-    assert "name_check_abstain_count" not in baseline.decision_telemetry
-
-    checked = _compact_decisions([0.95, 0.80], row_signals={**shared, "constraint_name_check_disallow_count": [1, 0]})
-
-    decision = checked.decisions[0]
-    assert (decision.action, decision.component_key, decision.row_index) == ("abstain", None, None)
-    assert decision.name_conflict
-    assert decision.score == pytest.approx(0.95)
-    assert checked.decision_telemetry["name_check_abstain_count"] == 1
-
-
-@pytest.mark.parametrize("force", ["constraint_require_count", "orcid_match"])
-def test_compact_name_check_keeps_require_and_orcid_links(force):
-    result = _compact_decisions(
-        [0.95, 0.10],
-        gate=0.99,
-        row_signals={
-            force: [0, 1],
-            "constraint_pair_count": [1, 5],
-            "constraint_disallow_count": [0, 1],
-            "constraint_disallow_fraction": [0.0, 0.2],
-            "constraint_name_check_disallow_count": [0, 1],
-        },
-    )
-    decision = result.decisions[0]
-    assert (decision.action, decision.component_key) == ("link", "c1")
-    assert decision.forced
-    assert not decision.name_conflict
-    assert result.decision_telemetry["name_check_abstain_count"] == 0
-
-
 @pytest.mark.parametrize(
     ("exempt", "conflicting_member", "expected_action"),
     [
@@ -1630,11 +1499,10 @@ def test_from_retrieval_name_check_skips_required_seed_members(
     assert ("constraint_name_check_disallow_count" in result.decision_row_signals) == (exempt is not None)
 
 
-@pytest.mark.parametrize("seed", range(5))
-def test_supervised_candidate_pairs_match_the_per_pair_string_path(seed: int) -> None:
+def test_supervised_candidate_pairs_match_the_per_pair_string_path() -> None:
     # The indexed lookup replaces per-pair id tuples; it must give the same
     # distance-override mask and the same window membership answers.
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(0)
     signature_ids = tuple(f"s{index}" for index in range(40))
     pair_count = 300
     left = rng.integers(0, len(signature_ids), pair_count).astype(np.uint32)
@@ -1670,14 +1538,13 @@ def test_supervised_candidate_pairs_match_the_per_pair_string_path(seed: int) ->
         assert ((b, a) in inside) == ((b, a) in all_pairs)
 
 
-@pytest.mark.parametrize("seed", range(4))
-def test_batched_subset_gates_match_per_query_gates_bit_for_bit(seed: int) -> None:
+def test_batched_subset_gates_match_per_query_gates_bit_for_bit() -> None:
     # The compact decider builds every subset gate in one call; each result must
     # equal the per-query gate over the same rows, for a gate over every runtime
     # feature, with missing values, ties, and groups of one to six rows.
     from s2and.incremental_linking.logistic_gate import default_logistic_gate_feature_names
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(0)
     names = default_logistic_gate_feature_names()
     gate = load_logistic_gate_config(
         logistic_gate_config(

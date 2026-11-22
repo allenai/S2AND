@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import logging
 import multiprocessing
 import os
 import time
@@ -16,13 +15,18 @@ import s2and._atomic_io as atomic_io_module
 from s2and._atomic_io import exclusive_file_lock
 
 
-def _hold_lock_until_released(path: Path, ready: Any, release: Any) -> None:
+def _hold_lock_until_released(path: Path, ready: Any, release: Any, retry: Any, reacquired: Any) -> None:
     """Hold a lock until the parent has observed a bounded timeout."""
 
     with exclusive_file_lock(path):
         ready.set()
         if not release.wait(timeout=10):
             raise RuntimeError("contending test process did not release holder")
+
+    if not retry.wait(timeout=10):
+        raise RuntimeError("contending test process did not signal retry")
+    with exclusive_file_lock(path, timeout_seconds=0.0):
+        reacquired.set()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows CRT locking regression")
@@ -65,41 +69,33 @@ def test_exclusive_file_lock_retries_past_windows_crt_window(
     assert acquisition_attempts > 100
 
 
-def test_exclusive_file_lock_times_out_on_permanent_contention(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_exclusive_file_lock_times_out_and_releases_after_errors(tmp_path: Path) -> None:
     context = multiprocessing.get_context("spawn")
-    ready = context.Event()
-    release = context.Event()
+    ready, release, retry, reacquired = (context.Event() for _ in range(4))
     lock_path = tmp_path / "publication.lock"
-    holder = context.Process(target=_hold_lock_until_released, args=(lock_path, ready, release))
+    holder = context.Process(target=_hold_lock_until_released, args=(lock_path, ready, release, retry, reacquired))
     holder.start()
     try:
         assert ready.wait(timeout=5)
         started_at = time.monotonic()
-        with (
-            caplog.at_level(logging.ERROR, logger="s2and._atomic_io"),
-            pytest.raises(TimeoutError, match="timed out acquiring exclusive file lock") as exc_info,
-        ):
-            with exclusive_file_lock(
-                lock_path,
-                timeout_seconds=0.2,
-                poll_interval_seconds=0.02,
-            ):
-                pass
-        elapsed_seconds = time.monotonic() - started_at
+        with pytest.raises(TimeoutError, match="timed out acquiring exclusive file lock"):
+            with exclusive_file_lock(lock_path, timeout_seconds=0.2, poll_interval_seconds=0.02):
+                pytest.fail("acquired a held lock")
+        assert 0.18 <= time.monotonic() - started_at < 2.0
+
+        release.set()
+        with pytest.raises(RuntimeError, match="publication failure"):
+            with exclusive_file_lock(lock_path, timeout_seconds=2.0):
+                raise RuntimeError("publication failure")
+        retry.set()
+        assert reacquired.wait(timeout=5)
     finally:
         release.set()
+        retry.set()
         holder.join(timeout=5)
         if holder.is_alive():
             holder.terminate()
             holder.join(timeout=5)
-
-    assert 0.18 <= elapsed_seconds < 2.0
-    assert str(lock_path) in str(exc_info.value)
-    assert "attempts" in str(exc_info.value)
-    assert str(exc_info.value) in caplog.text
     assert holder.exitcode == 0
 
 
@@ -150,36 +146,6 @@ def test_exclusive_file_lock_does_not_retry_after_deadline(
             pass
 
     assert acquisition_attempts == 1
-
-
-def test_exclusive_file_lock_zero_timeout_still_attempts_available_lock(tmp_path: Path) -> None:
-    lock_path = tmp_path / "publication.lock"
-
-    with exclusive_file_lock(lock_path, timeout_seconds=0.0):
-        assert lock_path.exists()
-
-
-def test_exception_releases_lock_for_another_process(tmp_path: Path) -> None:
-    """A failed publisher must not strand later writers behind its process lock."""
-    lock_path = tmp_path / "publication.lock"
-    with pytest.raises(RuntimeError, match="injected publication failure"):
-        with exclusive_file_lock(lock_path):
-            raise RuntimeError("injected publication failure")
-
-    context = multiprocessing.get_context("spawn")
-    ready = context.Event()
-    release = context.Event()
-    successor = context.Process(target=_hold_lock_until_released, args=(lock_path, ready, release))
-    successor.start()
-    try:
-        assert ready.wait(timeout=5), "successor could not acquire lock after exceptional exit"
-    finally:
-        release.set()
-        successor.join(timeout=5)
-        if successor.is_alive():
-            successor.terminate()
-            successor.join(timeout=5)
-    assert successor.exitcode == 0
 
 
 def test_exclusive_file_lock_rejects_unbounded_timing_values(tmp_path: Path) -> None:

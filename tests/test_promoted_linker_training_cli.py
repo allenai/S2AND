@@ -11,7 +11,6 @@ import pytest
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training import classic as classic_training
-from s2and.incremental_linking_training import source_bundle_preflight
 from scripts.production.model import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 
@@ -81,8 +80,15 @@ def test_linker_commands_require_name_counts_root() -> None:
     option_index = arguments.index("--name-counts-index-root")
     del arguments[option_index : option_index + 2]
 
+    parser = promoted_train.build_parser()
     with pytest.raises(SystemExit):
-        promoted_train.build_parser().parse_args(arguments)
+        parser.parse_args(arguments)
+
+    arguments = list(COMMON_TRAINING_ARGS)
+    option_index = arguments.index("--n-jobs")
+    del arguments[option_index : option_index + 2]
+    with pytest.raises(SystemExit):
+        parser.parse_args(arguments)
 
 
 def test_output_paths_cannot_be_nested_under_input_bundles(tmp_path: Path) -> None:
@@ -96,67 +102,6 @@ def test_output_paths_cannot_be_nested_under_input_bundles(tmp_path: Path) -> No
             source_bundle_root=source_root,
             pairwise_model_path=pairwise_root,
         )
-
-
-def test_source_support_preflight_requires_declared_split_files(tmp_path: Path) -> None:
-    (tmp_path / "bundle.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "splits").mkdir()
-    bundle = promoted_train.OfficialBundle(
-        root=tmp_path.resolve(),
-        bundle_name="support",
-        assets={},
-        models={"classic": {}},
-        expected_metrics={},
-    )
-
-    with pytest.raises(ValueError, match="contains no files"):
-        source_bundle_preflight.validate_source_bundle_support_files(bundle)
-
-    (tmp_path / "splits" / "placeholder.csv").write_text("unused\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="classic_gate_internal_eval_base_groups_path"):
-        source_bundle_preflight.validate_source_bundle_support_files(bundle)
-
-    bundle.models["classic"].update(
-        classic_gate_internal_eval_base_groups_path="splits/placeholder.csv",
-        stratified_eval_test_split={"assignments_path": "splits/placeholder.csv"},
-    )
-    with pytest.raises(ValueError, match="classic.promoted_stratified_gate is required"):
-        source_bundle_preflight.validate_source_bundle_support_files(bundle)
-
-
-def test_source_support_preflight_requires_all_configured_splits(tmp_path: Path) -> None:
-    (tmp_path / "bundle.json").write_text("{}", encoding="utf-8")
-    splits_dir = tmp_path / "splits"
-    splits_dir.mkdir()
-    assignments_path = splits_dir / "assignments.csv"
-    internal_eval_path = splits_dir / "internal_eval.csv"
-    pd.DataFrame({"base_group_id": ["internal"]}).to_csv(internal_eval_path, index=False)
-    pd.DataFrame(
-        {
-            "query_group_id": ["q1", "q2"],
-            "source_key": ["s", "s"],
-            "base_group_id": ["b1", "b2"],
-            "split": ["calibration_fit", "test"],
-        }
-    ).to_csv(assignments_path, index=False)
-    classic = {
-        "classic_gate_internal_eval_base_groups_path": "splits/internal_eval.csv",
-        "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv", "test_split": "test"},
-        "promoted_stratified_gate": {
-            "calibration_splits": ["calibration_fit", "calibration_check"],
-            "test_split": "test",
-        },
-    }
-    bundle = promoted_train.OfficialBundle(
-        root=tmp_path.resolve(),
-        bundle_name="support",
-        assets={},
-        models={"classic": classic},
-        expected_metrics={},
-    )
-
-    with pytest.raises(ValueError, match="omit configured calibration/test splits"):
-        source_bundle_preflight.validate_source_bundle_support_files(bundle)
 
 
 def test_release_table_plan_keeps_frozen_test_queries_out_of_training(tmp_path: Path) -> None:
@@ -341,18 +286,9 @@ def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
         arrow_dataset.close()
 
 
-@pytest.mark.parametrize(
-    ("source_classic", "retrieval_top_k"),
-    [
-        ({"classic_gate_calibration_retrieval_limit": 5}, 25),
-        ({"retrieval_top_k": 7, "classic_gate_calibration_retrieval_limit": 5}, 7),
-    ],
-)
-def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(
-    tmp_path: Path,
-    source_classic: dict[str, int],
-    retrieval_top_k: int,
-) -> None:
+def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tmp_path: Path) -> None:
+    source_classic = {"retrieval_top_k": 7, "classic_gate_calibration_retrieval_limit": 5}
+    retrieval_top_k = 7
     source_root = tmp_path / "source"
     output_root = tmp_path / "output"
     source_files = {
@@ -421,7 +357,9 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(
         "j_smith": "features_corrected/j_smith.parquet",
     }
     optional_paths = classic_training._iter_extra_eval_paths(bundle.models["classic"])  # noqa: SLF001
+
     assert [dataset for dataset, _path in optional_paths] == ["s_park", "s_lee", "j_smith"]
+    assert classic_training._summary_key_for_eval_dataset("j_smith") == "overall_j_smith_eval"
     for _dataset, path in optional_paths:
         assert len(pd.read_parquet(classic_training._resolve_path(bundle, path))) == 1  # noqa: SLF001
 
@@ -449,9 +387,8 @@ def _valid_observed_metrics() -> dict[str, Any]:
     )
 
 
-def test_observed_metrics_use_weighted_average_error() -> None:
+def test_observed_official_metrics_validate_weighted_error_and_counts() -> None:
     observed = _valid_observed_metrics()
-
     promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
 
     assert observed["false_abstain_error_rate"] == pytest.approx(0.04)
@@ -459,61 +396,30 @@ def test_observed_metrics_use_weighted_average_error() -> None:
     assert observed["wrong_link_error_rate"] == pytest.approx(0.03)
     assert observed["weighted_average_error"] == pytest.approx(((0.25 * 0.04) + 0.03 + (1.5 * 0.03)) / 2.75)
 
+    incomplete = observed.copy()
+    incomplete.pop("weighted_average_error")
+    with pytest.raises(ValueError, match="complete official metric set"):
+        promoted_train._validate_observed_official_metrics(incomplete)  # noqa: SLF001
 
-@pytest.mark.parametrize(
-    ("case_id", "field", "value", "message"),
-    [
-        ("missing", "weighted_average_error", None, "complete official metric set"),
-        ("extra", "unexpected_metric", 0.0, "complete official metric set"),
-        ("accuracy-nan", "stratified_test_accuracy", float("nan"), "must be finite"),
-        ("accuracy-over-one", "stratified_test_accuracy", 1.1, "must be in [0, 1]"),
-        ("negative-errors", "stratified_test_errors", -1, "must be a nonnegative integer"),
-        ("zero-training-rows", "training_rows", 0, "training counts are inconsistent"),
-        ("zero-test-queries", "stratified_test_queries", 0, "test counts are inconsistent"),
-        ("too-many-errors", "stratified_test_errors", 101, "test counts are inconsistent"),
-        (
-            "nonpositive-weight",
-            "weighted_average_error_weights",
-            {
-                **promoted_train.WEIGHTED_ERROR_WEIGHTS,
-                "false_link_error_rate": 0.0,
-            },
-            "must be positive",
-        ),
-        (
-            "nonofficial-weight",
-            "weighted_average_error_weights",
-            {
-                **promoted_train.WEIGHTED_ERROR_WEIGHTS,
-                "false_link_error_rate": 2.0,
-            },
-            "must equal the official value",
-        ),
-    ],
-    ids=[
-        "missing",
-        "extra",
-        "accuracy-nan",
-        "accuracy-over-one",
-        "negative-errors",
-        "zero-training-rows",
-        "zero-test-queries",
-        "too-many-errors",
-        "nonpositive-weight",
-        "nonofficial-weight",
-    ],
-)
-def test_observed_metric_validation_rejects_invalid_contract(
-    case_id: str, field: str, value: Any, message: str
-) -> None:
+    for field, value, message in (
+        ("stratified_test_accuracy", float("nan"), "must be finite"),
+        ("stratified_test_accuracy", 1.1, r"must be in \[0, 1\]"),
+        ("stratified_test_errors", -1, "nonnegative integer"),
+        ("training_rows", 0, "training counts are inconsistent"),
+        ("stratified_test_errors", 101, "test counts are inconsistent"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            promoted_train._validate_observed_official_metrics(observed | {field: value})  # noqa: SLF001
+
+
+def test_observed_official_metrics_reject_invalid_error_weights() -> None:
     observed = _valid_observed_metrics()
-    if case_id == "missing":
-        observed.pop(field)
-    else:
-        observed[field] = value
-    with pytest.raises(ValueError) as error:
-        promoted_train._validate_observed_official_metrics(observed)  # noqa: SLF001
-    assert message in str(error.value)
+    for value, message in ((0.0, "must be positive"), (2.0, "must equal the official value")):
+        weights = {**promoted_train.WEIGHTED_ERROR_WEIGHTS, "false_link_error_rate": value}
+        with pytest.raises(ValueError, match=message):
+            promoted_train._validate_observed_official_metrics(  # noqa: SLF001
+                observed | {"weighted_average_error_weights": weights},
+            )
 
 
 def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:

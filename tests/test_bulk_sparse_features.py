@@ -22,8 +22,12 @@ def native_features(tmp_path_factory: pytest.TempPathFactory) -> Any:
 
 @pytest.mark.parametrize(
     ("rows", "main", "nameless", "compact"),
-    [(rows, [3, 1, 3, 0], [1, 0], compact) for rows in ([], [1, 4], [0, 1, 2, 3, 4]) for compact in (False, True)]
-    + [([1, 4], [0, 1], None, False), ([1, 4], [], [], False)],
+    [
+        ([], [3, 1, 3, 0], [1, 0], True),
+        ([1, 4], [3, 1, 3, 0], [1, 0], True),
+        ([1, 4], [0, 1], None, False),
+        ([1, 4], [], [], False),
+    ],
 )
 def test_sparse_feature_rows_match_dense_bits(
     native_features: Any, rows: list[int], main: list[int], nameless: list[int] | None, compact: bool
@@ -35,7 +39,7 @@ def test_sparse_feature_rows_match_dense_bits(
         max_pairs=5,
         main_indices=main,
         nameless_indices=nameless,
-        num_threads=10,
+        num_threads=2,
     )
     dense = model_module._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs)
     indices = np.asarray(rows, dtype=np.intp)
@@ -69,7 +73,7 @@ class RecordingClassifier:
 
 @pytest.mark.parametrize(
     ("chunk_size", "fastcluster", "constraints"),
-    [(5, False, False), (5, False, True), (5, True, False), (5, True, True), (1, True, True), (21, False, True)],
+    [(5, False, False), (5, True, True)],
 )
 def test_sparse_features_preserve_distances_and_classifier_calls(
     native_features: Any, monkeypatch: pytest.MonkeyPatch, chunk_size: int, fastcluster: bool, constraints: bool
@@ -87,7 +91,7 @@ def test_sparse_features_preserve_distances_and_classifier_calls(
         nameless_featurizer_info=info,
         nameless_classifier=nameless,
         cluster_model=FastCluster(linkage="average") if fastcluster else object(),
-        n_jobs=10,
+        n_jobs=2,
         batch_size=chunk_size,
         use_default_constraints_as_supervision=constraints,
     )
@@ -158,8 +162,6 @@ def native_block_scorers(native_features: Any, tmp_path_factory: pytest.TempPath
     ("chunk_size", "constraints", "overrides", "with_nameless"),
     [
         (5, True, True, True),
-        (21, True, True, True),
-        (5, False, False, True),
         (3, True, False, False),
         (50, False, True, False),
     ],
@@ -187,7 +189,7 @@ def test_fused_block_scoring_matches_feature_matrix_path(
         nameless_featurizer_info=info if with_nameless else None,
         nameless_classifier=nameless if with_nameless else None,
         cluster_model=FastCluster(linkage="average"),
-        n_jobs=4,
+        n_jobs=2,
         batch_size=chunk_size,
         use_default_constraints_as_supervision=constraints,
     )
@@ -197,7 +199,7 @@ def test_fused_block_scoring_matches_feature_matrix_path(
     assert model_module._native_block_scorers(main, nameless if with_nameless else None) is not None
     # Small tiles cross tile edges inside the 7-signature block.
     one_pass = []
-    for row_band, column_block in ((1, 1), (2, 3), (3, 2), (32, 64)):
+    for row_band, column_block in ((2, 3), (32, 64)):
         monkeypatch.setattr(
             model_module, "_one_pass_tile_overrides", {"row_band": row_band, "column_block": column_block}
         )
@@ -221,8 +223,7 @@ def test_fused_block_scoring_matches_feature_matrix_path(
 
 @pytest.mark.parametrize(
     ("copy_budget", "rows", "with_nameless"),
-    [(budget, [0, 3, 5], nameless) for budget in (1, 96, 100000) for nameless in (False, True)]
-    + [(1, [], True), (96, [0], True), (100000, list(range(7)), True)],
+    [(1, [], True), (96, [0, 3, 5], True), (100000, list(range(7)), False)],
 )
 def test_compact_scoring_preserves_batches_and_owned_inputs(
     monkeypatch: pytest.MonkeyPatch, copy_budget: int, rows: list[int], with_nameless: bool

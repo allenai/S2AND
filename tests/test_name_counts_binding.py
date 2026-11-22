@@ -42,30 +42,20 @@ def _runtime_state(tmp_path: Path):
     return clusterer, dataset, arrow_root, index
 
 
-def test_exact_manifest_identity_is_accepted_at_every_runtime_boundary(tmp_path: Path) -> None:
+def test_manifest_identity_is_enforced_at_every_runtime_boundary(tmp_path: Path) -> None:
     clusterer, dataset, arrow_root, index = _runtime_state(tmp_path)
 
     require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset")
+    require_rust_featurizer_name_counts_binding_for_clusterer(clusterer, index._native, context="Rust")
     with ArrowDataset.open(arrow_root, require_name_counts_index=True) as arrow_dataset:
         require_arrow_name_counts_index_for_clusterer(clusterer, arrow_dataset, context="Arrow")
-    require_rust_featurizer_name_counts_binding_for_clusterer(clusterer, index._native, context="Rust")
-
-
-def test_manifest_mismatch_is_rejected_at_every_runtime_boundary(tmp_path: Path) -> None:
-    clusterer, dataset, arrow_root, index = _runtime_state(tmp_path)
-    clusterer.feature_contract = {"name_counts_manifest_sha256": "f" * 64}
-
-    with pytest.raises(ValueError, match="name-count binding mismatch"):
-        require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset")
-    with ArrowDataset.open(arrow_root, require_name_counts_index=True) as arrow_dataset:
+        clusterer.feature_contract = {"name_counts_manifest_sha256": "f" * 64}
         with pytest.raises(ValueError, match="name-count binding mismatch"):
             require_arrow_name_counts_index_for_clusterer(clusterer, arrow_dataset, context="Arrow")
     with pytest.raises(ValueError, match="name-count binding mismatch"):
+        require_dataset_name_counts_binding_for_clusterer(clusterer, dataset, context="dataset")
+    with pytest.raises(ValueError, match="name-count binding mismatch"):
         require_rust_featurizer_name_counts_binding_for_clusterer(clusterer, index._native, context="Rust")
-
-
-def test_missing_manifest_identity_is_rejected(tmp_path: Path) -> None:
-    clusterer, dataset, _arrow_root, _index = _runtime_state(tmp_path)
     clusterer.feature_contract = {}
 
     with pytest.raises(ValueError, match="name_counts_manifest_sha256"):

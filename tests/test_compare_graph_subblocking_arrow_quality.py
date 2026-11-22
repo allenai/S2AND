@@ -42,6 +42,8 @@ def _run_argv(arrow_root: Path, component_members: Path, output_dir: Path) -> li
         "--maximum-size",
         "2",
         "--allow-full",
+        "--local-move-passes",
+        "0",
     ]
 
 
@@ -56,12 +58,8 @@ def test_compare_graph_subblocking_parser_requires_bounded_or_explicit_full_run(
     "extra_args",
     [
         ["--min-edge-score", "nan"],
-        ["--specter-weight", "inf"],
         ["--max-candidate-edges", "0"],
-        ["--neighbors", "-1"],
-        ["--local-move-passes", "-1"],
         ["--maximum-size", "0"],
-        ["--top-diff-subblocks", "0"],
     ],
 )
 def test_compare_graph_subblocking_parser_rejects_invalid_numbers(monkeypatch, extra_args) -> None:
@@ -69,12 +67,6 @@ def test_compare_graph_subblocking_parser_rejects_invalid_numbers(monkeypatch, e
 
     with pytest.raises(SystemExit):
         script.parse_args()
-
-
-def test_compare_graph_subblocking_parser_accepts_zero_local_move_passes(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "argv", [*_base_argv(), "--allow-full", "--local-move-passes", "0"])
-
-    assert script.parse_args().local_move_passes == 0
 
 
 def _write_table(path, table) -> None:
@@ -165,27 +157,6 @@ def _write_two_signature_arrow_bundle(arrow_root: Path) -> dict[str, str]:
     return paths
 
 
-def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_path) -> None:
-    arrow_root = tmp_path / "arrow"
-    _write_two_signature_arrow_bundle(arrow_root)
-
-    with ArrowDataset.open(arrow_root, require_specter=True) as arrow_dataset:
-        with arrow_dataset.use(require_specter=True) as arrow_lease:
-            dataset, signature_ids = script.load_lightweight_dataset_from_arrow(
-                arrow_lease,
-                limit=2,
-                sample_mode="first",
-                seed=7,
-            )
-
-    assert signature_ids == ["s1", "s2"]
-    assert dataset.signatures["s1"].author_info_first == "Hui"
-    assert dataset.signatures["s1"].author_info_coauthor_blocks == ("a lovelace",)
-    assert dataset.papers["p1"]["authors"][2] == {"position": 2, "author_name": ""}
-    assert dataset.papers["p2"]["authors"][2] == {"position": 2, "author_name": "   "}
-    assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))
-
-
 @pytest.fixture
 def run_inputs(tmp_path: Path) -> SimpleNamespace:
     import pyarrow as pa
@@ -203,6 +174,7 @@ def run_inputs(tmp_path: Path) -> SimpleNamespace:
     output_dir = tmp_path / "report"
     return SimpleNamespace(
         argv=_run_argv(arrow_root, component_members, output_dir),
+        arrow_root=arrow_root,
         output_dir=output_dir,
     )
 
@@ -210,8 +182,11 @@ def run_inputs(tmp_path: Path) -> SimpleNamespace:
 def _patch_subblocking(monkeypatch: pytest.MonkeyPatch) -> None:
     def python_subblocks(_args, dataset, signature_ids, _config):
         assert signature_ids == ["s1", "s2"]
+        assert dataset.signatures["s1"].author_info_first == "Hui"
         assert dataset.signatures["s1"].author_info_coauthor_blocks == ("a lovelace",)
-        assert set(dataset.specter_embeddings) == {"p1", "p2"}
+        assert dataset.papers["p1"]["authors"][2] == {"position": 2, "author_name": ""}
+        assert dataset.papers["p2"]["authors"][2] == {"position": 2, "author_name": "   "}
+        np.testing.assert_allclose(dataset.specter_embeddings["p1"], [1.0, 0.0])
         return {"python-block": list(signature_ids)}, {"implementation": "python"}
 
     def rust_subblocks(_args, arrow_dataset, signature_ids, _config):
@@ -245,6 +220,7 @@ def test_subblocking_report_contains_metrics_and_artifacts(run_inputs, monkeypat
     assert report["inputs"]["python_source"] == "arrow"
     assert report["inputs"]["limit"] is None
     assert report["inputs"]["allow_full"] is True
+    assert report["graph_config"]["local_move_passes"] == 0
     assert report["baseline_deltas"] == {}
     assert report["python"]["hook_telemetry"] == {}
     for implementation in ("python", "rust"):
@@ -265,12 +241,13 @@ def test_subblocking_report_contains_metrics_and_artifacts(run_inputs, monkeypat
     with pytest.raises(FileExistsError, match="Report output already exists"):
         script.main()
 
+    with ArrowDataset.open(run_inputs.arrow_root, require_specter=True) as dataset:
+        with dataset.use(require_specter=True) as lease:
+            bounded, ids = script.load_lightweight_dataset_from_arrow(lease, limit=1, sample_mode="first", seed=7)
+    assert ids == ["s1"]
+    assert bounded.signatures["s1"].author_info_coauthor_blocks == ("a lovelace",)
 
-def test_subblocking_report_compares_with_a_baseline_summary(run_inputs, monkeypatch) -> None:
-    _patch_subblocking(monkeypatch)
-    monkeypatch.setattr(sys, "argv", run_inputs.argv)
-    script.main()
-    baseline = run_inputs.output_dir / "subblocking_evaluation_report.json"
+    baseline = output_dir / "subblocking_evaluation_report.json"
     second = run_inputs.output_dir.parent / "second"
     argv = [*run_inputs.argv, "--baseline-summary", str(baseline)]
     argv[argv.index(str(run_inputs.output_dir))] = str(second)

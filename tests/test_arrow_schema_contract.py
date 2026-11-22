@@ -30,16 +30,7 @@ def test_full_schema_validation_allows_missing_optional_columns_and_checks_prese
     with pytest.raises(ValueError, match="papers column 'year' expected int64"):
         validate_arrow_schema(malformed_optional, table_name="papers")
 
-    duplicate = {"name": "paper_id", "datatype": "string", "required": True}
-    monkeypatch.setattr(arrow_schema, "_contract_tables", lambda: {"papers": [duplicate, duplicate]})
-    with pytest.raises(ValueError, match="repeats column 'paper_id'"):
-        validate_arrow_schema(required_only, table_name="papers")
-
-
-def test_subset_schema_validation_uses_exact_contract_physical_types() -> None:
-    import pyarrow as pa
-
-    canonical_subset = pa.schema([pa.field("paper_id", pa.string())])
+    canonical_subset = required_only.remove(required_only.get_field_index("title"))
     validate_arrow_schema(canonical_subset, table_name="papers", columns={"paper_id"})
 
     with pytest.raises(ValueError, match="papers table is missing required column 'year'"):
@@ -48,3 +39,8 @@ def test_subset_schema_validation_uses_exact_contract_physical_types() -> None:
     noncanonical_subset = pa.schema([pa.field("paper_id", pa.large_string())])
     with pytest.raises(ValueError, match="papers column 'paper_id' expected string, got large_string"):
         validate_arrow_schema(noncanonical_subset, table_name="papers", columns={"paper_id"})
+
+    duplicate = {"name": "paper_id", "datatype": "string", "required": True}
+    monkeypatch.setattr(arrow_schema, "_contract_tables", lambda: {"papers": [duplicate, duplicate]})
+    with pytest.raises(ValueError, match="repeats column 'paper_id'"):
+        validate_arrow_schema(required_only, table_name="papers")

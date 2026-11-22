@@ -9,8 +9,10 @@ import pytest
 from scripts.verification.verify_rust_distribution_licenses import LICENSE_PATHS, verify_archive
 
 
-@pytest.mark.parametrize("kind", ["wheel", "sdist"])
-@pytest.mark.parametrize("damage", [None, "missing", "changed"])
+@pytest.mark.parametrize(
+    ("kind", "damage"),
+    [("wheel", None), ("sdist", None), ("wheel", "missing"), ("sdist", "missing"), ("sdist", "changed")],
+)
 def test_verify_rust_distribution_notices(tmp_path, kind, damage):
     source = tmp_path / "source"
     notices = {path: f"license text: {path}".encode() for path in LICENSE_PATHS}

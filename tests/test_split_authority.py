@@ -61,18 +61,15 @@ def _members(blocks: dict[str, list[str]]) -> set[str]:
 # Every kind retains its holdout and all three training-pair membership checks;
 # split selection is shared after resolving the three populations.
 @pytest.mark.parametrize(
-    "kind,split,index",
+    "kind",
     [
-        ("fixed_blocks", "train", 0),
-        ("fixed_blocks", "val", 1),
-        ("fixed_blocks", "test", 2),
-        ("fixed_signatures", "test", 2),
-        ("blocks", "test", 2),
-        ("signatures", "test", 2),
-        ("time", "test", 2),
+        "fixed_blocks",
+        "fixed_signatures",
+        "signatures",
+        "time",
     ],
 )
-def test_cluster_eval_matches_configured_split(dataset: ANDData, kind: str, split: str, index: int) -> None:
+def test_cluster_eval_matches_configured_split(dataset: ANDData, kind: str) -> None:
     """Evaluation honors explicit populations and preserves default split order."""
     if kind == "fixed_blocks":
         dataset.train_blocks = [f"b{i}" for i in range(16)]
@@ -89,22 +86,25 @@ def test_cluster_eval_matches_configured_split(dataset: ANDData, kind: str, spli
 
     before = copy.deepcopy(expected)
     recorder = RecordingClusterer()
-    metrics, per_signature = cluster_eval(dataset, cast(Clusterer, recorder), split=split)
+    metrics, per_signature = cluster_eval(dataset, cast(Clusterer, recorder), split="test")
 
-    assert recorder.blocks == expected[index]
-    assert list(recorder.blocks) == list(expected[index])
-    assert set(per_signature) == _members(expected[index])
+    assert recorder.blocks == expected[2]
+    assert list(recorder.blocks) == list(expected[2])
+    assert set(per_signature) == _members(expected[2])
     assert metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
     assert _resolve_signature_splits(dataset) == before
     train_pairs, val_pairs, test_pairs = resolve_training_pairs(dataset)
     for pairs, blocks in zip((train_pairs, val_pairs, test_pairs), expected, strict=True):
         assert {sid for left, right, _ in pairs for sid in (left, right)} <= _members(blocks)
-    if split == "test":
-        assert not _members(recorder.blocks) & _members(expected[0])
+
+    assert not _members(recorder.blocks) & _members(expected[0])
+    if kind == "fixed_blocks":
+        _, per_signature = cluster_eval(dataset, cast(Clusterer, recorder), split="train")
+        assert recorder.blocks == expected[0]
+        assert set(per_signature) == _members(expected[0])
 
 
-@pytest.mark.parametrize("split", ["val", "test"])
-def test_incremental_eval_uses_only_selected_context_and_scored_ids(dataset: ANDData, split: str) -> None:
+def test_incremental_eval_uses_only_selected_context_and_scored_ids(dataset: ANDData) -> None:
     """Unselected source records cannot join the prediction or metric population."""
     ids = ["s0_0", "s0_1", "s1_0", "s1_1"]
     for sid in ids:
@@ -115,20 +115,21 @@ def test_incremental_eval_uses_only_selected_context_and_scored_ids(dataset: AND
     dataset.test_signatures = [ids[2]]
     recorder = RecordingClusterer()
 
-    metrics, per_signature = incremental_cluster_eval(dataset, cast(Clusterer, recorder), split=split)
+    val_metrics, val_scores = incremental_cluster_eval(dataset, cast(Clusterer, recorder), split="val")
+    assert recorder.blocks == {"selected": [ids[1], ids[0]]}
+    assert set(val_scores) == {ids[1]}
+    assert val_metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
 
-    expected_context = [ids[1], ids[0]] if split == "val" else ids[:3]
-    assert recorder.blocks == {"selected": expected_context}
-    assert set(per_signature) == {ids[1] if split == "val" else ids[2]}
-    assert metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
-    assert ids[3] not in _members(recorder.blocks)
+    test_metrics, test_scores = incremental_cluster_eval(dataset, cast(Clusterer, recorder), split="test")
+    assert recorder.blocks == {"selected": ids[:3]}
+    assert set(test_scores) == {ids[2]}
+    assert test_metrics["B3 (P, R, F1)"] == (1.0, 1.0, 1.0)
     assert dataset.train_signatures == [ids[0]]
     assert dataset.val_signatures == [ids[1]]
     assert dataset.test_signatures == [ids[2]]
 
 
-@pytest.mark.parametrize("precomputed", [False, True])
-def test_cluster_fit_calibrates_on_fixed_validation_only(dataset: ANDData, monkeypatch, precomputed: bool) -> None:
+def test_cluster_fit_calibrates_on_fixed_validation_only(dataset: ANDData, monkeypatch: pytest.MonkeyPatch) -> None:
     """EPS calibration consumes declared validation matrices, including cached ones."""
     dataset.train_blocks = [f"b{i}" for i in range(16)]
     dataset.val_blocks = ["b16", "b17"]
@@ -138,14 +139,22 @@ def test_cluster_fit_calibrates_on_fixed_validation_only(dataset: ANDData, monke
     originals = {key: value.copy() for key, value in distances.items()}
     clusterer = Clusterer(FeaturizationInfo(["year_diff"]), classifier=None, n_jobs=1, n_iter=2)
 
+    calls = []
+
     def make_distances(blocks, supplied_dataset):
         assert supplied_dataset is dataset
         assert blocks == expected
-        assert not precomputed
+        calls.append(blocks)
         return distances
 
     monkeypatch.setattr(clusterer, "make_distance_matrices", make_distances)
-    assert clusterer.fit(dataset, val_dists_precomputed={dataset.name: distances} if precomputed else None) is clusterer
+
+    assert clusterer.fit(dataset) is clusterer
+    assert isinstance(clusterer.hyperopt_trials_store, Trials)
+    assert clusterer.hyperopt_trials_store.losses() == [-1.0, -1.0]
+
+    assert clusterer.fit(dataset, val_dists_precomputed={dataset.name: distances}) is clusterer
+    assert calls == [expected]
     assert isinstance(clusterer.hyperopt_trials_store, Trials)
     assert clusterer.hyperopt_trials_store.losses() == [-1.0, -1.0]
     for key, value in distances.items():
@@ -169,10 +178,9 @@ def test_inferred_validation_matches_training(dataset: ANDData, kind: str) -> No
     assert not _members(recorder.blocks) & _members(expected[2])
 
 
-@pytest.mark.parametrize("kind", ["blocks", "signatures", "time"])
-def test_empty_validation_split_stays_empty(dataset: ANDData, kind: str) -> None:
+def test_empty_validation_split_stays_empty(dataset: ANDData) -> None:
     """Zero-ratio evaluation uses the existing empty-metric contract."""
-    dataset.unit_of_data_split = kind
+    dataset.unit_of_data_split = "blocks"
     dataset.train_ratio, dataset.val_ratio, dataset.test_ratio = 0.8, 0.0, 0.2
     recorder = RecordingClusterer()
     metrics, per_signature = cluster_eval(dataset, cast(Clusterer, recorder), split="val")

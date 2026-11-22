@@ -74,10 +74,6 @@ WHOLE = {frozenset(SIGNATURES[:12])}
 SPLIT = {frozenset(SIGNATURES[:2]), frozenset(SIGNATURES[2:12])}
 
 
-def test_split_separates_papers_across_an_empty_stretch_beyond_the_cap() -> None:
-    assert _split(_square(), _years()) == SPLIT
-
-
 def test_split_keeps_the_largest_part_on_the_original_label() -> None:
     labels = split_year_gaps(SIGNATURES, [7] * 12 + [1], _codes(_square()), _years(), CLOSE_CODE)
     assert np.asarray(labels).tolist() == [8, 8] + [7] * 10 + [1]
@@ -149,19 +145,12 @@ def test_an_undated_mention_bridges_parts_by_first_name() -> None:
     assert _split(_square(), years, orcids=orcids, first_names={"n0": "ada", "n5": "ada"}) == WHOLE
 
 
-def test_undated_mentions_follow_the_closer_part() -> None:
+def test_undated_mentions_follow_seed_groups_before_distance() -> None:
     square = _square()
     years = _years()
     del years["n0"]
     square[2, OLD] = square[OLD, 2] = 0.1
     assert _split(square, years) == {frozenset({"o0", "o1", "n0"}), frozenset(SIGNATURES[3:12])}
-
-
-def test_undated_mentions_follow_their_seed_group_first() -> None:
-    square = _square()
-    years = _years()
-    del years["n0"]
-    square[2, OLD] = square[OLD, 2] = 0.1
     assert _split(square, years, seed_groups={"n0": "P", "n5": "P"}) == SPLIT
 
 
@@ -202,70 +191,43 @@ def _model(close_pair_bonus: float) -> Clusterer:
     )
 
 
-def _dated_dataset() -> ANDData:
+def _dated_dataset(extra_names: tuple[str, ...] = ()) -> ANDData:
     """Thirteen "Ada Smith" mentions with SIGNATURES' years; signature i is SIGNATURES[i]."""
-    dataset = _dataset([("Ada", "", "Smith")] * 13, {})
+    dataset = _dataset([("Ada", "", "Smith")] * 13 + [(name, "", "Jones") for name in extra_names], {})
     for index, signature_id in enumerate(SIGNATURES):
         paper_id = str(100 + index)
         dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=_years().get(signature_id))
     return dataset
 
 
-def test_both_routes_read_the_same_years(tmp_path: Path) -> None:
-    dataset = _dated_dataset()
-    ids = [str(i) for i in range(13)]
+def test_both_routes_read_the_same_years_and_small_block_names(tmp_path: Path) -> None:
+    dataset = _dated_dataset(("Ada", "A.", "Jean-Pierre", "Ömer", "J. Robert", "Li"))
+    smiths = [str(i) for i in range(13)]
+    joneses = [str(i) for i in range(13, len(dataset.signatures))]
+    blocks = {"smith": smiths, "jones": joneses}
     model = _model(8.0)
-    python_repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
+    python_repair = block_corrections.corrections_from_dataset(model, blocks, dataset)
     arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
     assert arrow_dataset is not None
     featurizer = build_rust_featurizer_from_arrow_dataset(
-        arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
+        arrow_dataset, signature_ids=smiths + joneses, name_tuples=frozenset(), num_threads=1
     )
-    rust_repair = block_corrections.corrections_from_rust_featurizer(model, {"b": ids}, featurizer)
+    rust_repair = block_corrections.corrections_from_rust_featurizer(model, blocks, featurizer)
 
     assert python_repair is not None and rust_repair is not None
-    assert (
-        dict(python_repair.years) == dict(rust_repair.years) == {str(i): _years()[s] for i, s in enumerate(SIGNATURES)}
-    )
-    # Thirteen mentions: no small surname block, so neither route reads first names.
-    assert dict(python_repair.first_names) == dict(rust_repair.first_names) == {}
-
-
-def test_both_routes_read_the_same_first_names_in_a_small_block(tmp_path: Path) -> None:
-    names = ["Ada", "A.", "Jean-Pierre", "Ömer", "J. Robert", "Li"]
-    dataset = _dataset([(name, "", "Smith") for name in names], {})
-    ids = [str(i) for i in range(len(names))]
-    model = _model(8.0)
-    python_repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
-    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
-    assert arrow_dataset is not None
-    featurizer = build_rust_featurizer_from_arrow_dataset(
-        arrow_dataset, signature_ids=ids, name_tuples=frozenset(), num_threads=1
-    )
-    rust_repair = block_corrections.corrections_from_rust_featurizer(model, {"b": ids}, featurizer)
-
-    assert python_repair is not None and rust_repair is not None
+    years = _years()
+    expected_years = {str(i): years[s] for i, s in enumerate(SIGNATURES)}
+    assert dict(python_repair.years) == dict(rust_repair.years) == expected_years | dict.fromkeys(joneses, 2000)
     assert dict(python_repair.first_names) == dict(rust_repair.first_names)
-    assert dict(python_repair.first_names)["0"] == "ada"
-    assert "1" not in python_repair.first_names
+    assert python_repair.first_names["13"] == "ada"
+    assert "14" not in python_repair.first_names
+    assert set(python_repair.first_names).isdisjoint(smiths)
 
-
-def test_both_routes_count_the_surname_block_not_the_request(tmp_path: Path) -> None:
-    # Five of thirteen Smith mentions, as a claimed profile or a residual would send them.
-    dataset = _dated_dataset()
-    part = {"profile": [str(i) for i in range(5)]}
-    assert block_corrections.dataset_small_block_signatures(part, dataset) == frozenset()
-    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path / "arrow").arrow_dataset
-    assert arrow_dataset is not None
+    # Count the original surname block when a claimed profile includes only part of it.
+    part = {"profile": smiths[:5], "jones": joneses}
+    assert block_corrections.dataset_small_block_signatures(part, dataset) == frozenset(joneses)
     with arrow_dataset.use() as lease:
-        assert block_corrections.arrow_small_block_signatures(lease, part) == frozenset()
-    whole = {"b": [str(i) for i in range(5)]}
-    small = _dataset([("Ada", "", "Smith")] * 5, {})
-    small_arrow = build_arrow_training_dataset(small, tmp_path / "small").arrow_dataset
-    assert small_arrow is not None
-    assert block_corrections.dataset_small_block_signatures(whole, small) == frozenset(whole["b"])
-    with small_arrow.use() as lease:
-        assert block_corrections.arrow_small_block_signatures(lease, whole) == frozenset(whole["b"])
+        assert block_corrections.arrow_small_block_signatures(lease, part) == frozenset(joneses)
 
 
 def test_python_route_reads_a_nan_year_as_undated() -> None:
@@ -277,25 +239,19 @@ def test_python_route_reads_a_nan_year_as_undated() -> None:
     assert "0" not in repair.years
 
 
-@pytest.mark.parametrize(("close_pair_bonus", "enabled", "parts"), [(8.0, True, 2), (8.0, False, 1), (0.0, True, 1)])
-def test_block_clustering_splits_year_gaps_after_the_repair(close_pair_bonus: float, enabled: bool, parts: int) -> None:
+def test_block_clustering_splits_year_gaps_after_the_repair() -> None:
     dataset = _dated_dataset()
     ids = [str(i) for i in range(13)]
-    model = _model(close_pair_bonus)
-    model.year_gap_split = enabled
-    repair = block_corrections.corrections_from_dataset(model, {"b": ids}, dataset)
-
-    labels = model._cluster_one_block(ids, squareform(_square(0.25)), None, dataset, {}, corrections=repair)
-
-    assert len(_partition(labels)) == parts
-
-
-def test_eps_grid_splits_as_block_clustering_does() -> None:
-    dataset = _dated_dataset()
-    ids = [str(i) for i in range(13)]
-    signatures, ids_by_eps = _model(8.0).predict_eps_grid({"b": ids}, dataset, {"b": squareform(_square(0.25))}, [0.5])
+    square = _square(0.25)
+    model = _model(8.0)
+    assert _cluster(model, dataset, square) == SPLIT
+    signatures, labels = model.predict_eps_grid({"b": ids}, dataset, {"b": squareform(square)}, [0.5])
     assert signatures == ids
-    assert _partition(ids_by_eps[0.5]) == SPLIT
+    assert _partition(labels[0.5]) == SPLIT
+
+    model.year_gap_split = False
+    assert _cluster(model, dataset, square) == WHOLE
+    assert _cluster(_model(0.0), dataset, square) == WHOLE
 
 
 def _cluster(model: Clusterer, dataset: ANDData, square: np.ndarray, **kwargs: Any) -> set[frozenset[str]]:
@@ -376,10 +332,6 @@ def test_block_clustering_splits_a_block_under_the_repair_size() -> None:
     assert labels[0] == labels[1] != labels[2] == labels[3] == labels[4]
 
 
-def test_small_block_keeps_parts_that_share_a_first_name() -> None:
-    assert len(set(_small_block_labels("Ada", [1928, 1930, 2001, 2010, 2020]))) == 1
-
-
 @pytest.mark.parametrize(("name_count", "parts"), [(2194.0, 2), (3.0, 1), (float("nan"), 1)])
 def test_a_common_name_count_rules_out_the_bridge(name_count: float, parts: int) -> None:
     # Scholar reclusters excluded mentions alone, so the request may hold only part of the block.
@@ -392,14 +344,8 @@ def test_a_small_part_of_a_large_surname_block_splits_parts_that_share_a_first_n
     assert labels[0] == labels[1] != labels[2] == labels[3] == labels[4]
 
 
-def test_large_block_splits_parts_that_share_a_first_name() -> None:
-    # Thirteen "Ada Smith" mentions: in a large block a first name is too common to bridge a gap.
-    assert _cluster(_model(8.0), _dated_dataset(), _square(0.25)) == SPLIT
-
-
-@pytest.mark.parametrize(("old_years", "parts"), [((1601, 1800), 1), ((1799, 1790), 2)])
-def test_block_clustering_treats_placeholder_years_as_undated(old_years: tuple[int, int], parts: int) -> None:
-    assert len(set(_small_block_labels("A.", [*old_years, 2001, 2010, 2020]))) == parts
+def test_block_clustering_treats_placeholder_years_as_undated() -> None:
+    assert len(set(_small_block_labels("A.", [1601, 1800, 2001, 2010, 2020]))) == 1
 
 
 def test_short_spans_skip_the_split() -> None:

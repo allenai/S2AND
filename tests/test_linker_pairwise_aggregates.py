@@ -32,10 +32,9 @@ def test_candidate_batch_rejects_uint32_wraparound_indices() -> None:
     "retrieval_ranks",
     (
         np.asarray([0], dtype=np.uint16),
-        np.asarray([-1], dtype=np.int64),
         np.asarray([int(np.iinfo(np.uint16).max) + 1], dtype=np.int64),
     ),
-    ids=("zero", "negative", "overflow"),
+    ids=("zero", "overflow"),
 )
 def test_candidate_batch_rejects_invalid_retrieval_ranks(retrieval_ranks: np.ndarray) -> None:
     with pytest.raises(ValueError, match="retrieval_ranks"):

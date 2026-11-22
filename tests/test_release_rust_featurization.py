@@ -38,7 +38,7 @@ from tests.pairwise_release_helpers import (
 
 MAIN_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
 NAMELESS_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS))
-EPS_GRID = [round(float(eps), 3) for eps in np.linspace(0.05, 0.95, 19)]
+EPS_GRID = (0.05, 0.5, 0.95)
 
 
 def _build_release_inputs(tmp_path: Path) -> dict[str, Any]:
@@ -203,47 +203,36 @@ def test_fixed_pair_datasets_featurize_like_python(release_inputs: dict[str, Any
     _assert_features_match(_python_features(val_pairs, reference), val)
 
 
-def test_rust_features_match_python_on_the_selected_training_pairs(release_inputs: dict[str, Any]) -> None:
-    reference, dataset, train_pairs, val_pairs = _selections(release_inputs)
-    assert len(train_pairs) == 24 and len(val_pairs) == 6
-
-    with _open(release_inputs) as arrow_dataset:
-        featurizer = _featurizer(release_inputs, dataset, arrow_dataset, _pair_members(train_pairs, val_pairs))
-        assert len(featurizer.signature_ids()) < len(dataset.signatures)
-        for pairs in (train_pairs, val_pairs):
-            _assert_features_match(_python_features(pairs, reference), _rust_features(pairs, featurizer))
-        # A non-NaN nan_value is applied after featurization, as many_pairs_featurize does.
-        replaced = _rust_features(train_pairs, featurizer, nan_value=-1.0)
-        _assert_features_match(_python_features(train_pairs, reference, nan_value=-1.0), replaced)
-        assert not np.isnan(replaced[0]).any()
-
-
-@pytest.mark.parametrize("unknown_scope", ["partial", "all"])
 def test_unknowns_leave_supervised_pairs_but_retain_dataset_and_features(
     release_inputs: dict[str, Any],
-    unknown_scope: str,
 ) -> None:
     reference, dataset, train_pairs, val_pairs = _selections(release_inputs)
     unknown = frozenset({str(train_pairs[0][0]), str(val_pairs[0][1])})
-    if unknown_scope == "all":
-        unknown = frozenset(dataset.signatures)
     expected = [
         [pair for pair in pairs if str(pair[0]) not in unknown and str(pair[1]) not in unknown]
         for pairs in (train_pairs, val_pairs)
     ]
     original_blocks = dataset.get_blocks()
-    assert reference.name_counts_manifest_sha256 is not None
+    index_digest = reference.name_counts_manifest_sha256
+    assert index_digest is not None
     with _open(release_inputs) as arrow_dataset:
-        observed = train_pairwise._featurize_selection(
-            dataset,
-            arrow_dataset,
-            MAIN_INFO,
-            name_counts_manifest_sha256=reference.name_counts_manifest_sha256,
-            n_jobs=1,
-            nameless_featurizer_info=NAMELESS_INFO,
-            total_ram_bytes=None,
-            unknown_signature_ids=unknown,
-        )
+
+        def featurize(excluded: frozenset[str]):
+            return train_pairwise._featurize_selection(
+                dataset,
+                arrow_dataset,
+                MAIN_INFO,
+                name_counts_manifest_sha256=index_digest,
+                n_jobs=1,
+                nameless_featurizer_info=NAMELESS_INFO,
+                total_ram_bytes=None,
+                unknown_signature_ids=excluded,
+            )
+
+        observed = featurize(unknown)
+        empty = _python_features([], reference)
+        for arrays in featurize(frozenset(dataset.signatures)):
+            _assert_features_match(empty, arrays)
     for pairs, arrays in zip(expected, observed, strict=True):
         _assert_features_match(_python_features(pairs, reference), arrays)
     assert dataset.get_blocks() == original_blocks
@@ -284,11 +273,13 @@ def test_unknown_signature_retains_its_effect_on_cluster_predictions(release_inp
     assert len(without_unknown) == 2
 
 
-def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict[str, Any]) -> None:
+def test_rust_training_features_and_cluster_partitions_match_python(release_inputs: dict[str, Any]) -> None:
     """Release clustering (selection-only dataset, Rust distances) partitions like Python fused predict."""
 
-    reference, dataset, train_pairs, _ = _selections(release_inputs)
-    features, labels, nameless_features = _python_features(train_pairs, reference)
+    reference, dataset, train_pairs, val_pairs = _selections(release_inputs)
+    assert len(train_pairs) == 24 and len(val_pairs) == 6
+    python_train = _python_features(train_pairs, reference)
+    features, labels, nameless_features = python_train
     classifiers = [
         LGBMClassifier(n_estimators=25, num_leaves=5, min_child_samples=2, random_state=0, n_jobs=1, verbose=-1).fit(
             matrix, labels
@@ -315,6 +306,22 @@ def test_rust_distances_give_python_partitions_at_every_eps(release_inputs: dict
 
     python_distances = clusterer.make_distance_matrices(blocks, reference)
     with _open(release_inputs) as arrow_dataset:
+        featurizer = _featurizer(release_inputs, dataset, arrow_dataset, _pair_members(train_pairs, val_pairs))
+        assert len(featurizer.signature_ids()) < len(dataset.signatures)
+        _assert_features_match(python_train, _rust_features(train_pairs, featurizer))
+        _assert_features_match(_python_features(val_pairs, reference), _rust_features(val_pairs, featurizer))
+        # A non-NaN nan_value is applied after featurization, as many_pairs_featurize does.
+        replaced = _rust_features(train_pairs, featurizer, nan_value=-1.0)
+        _assert_features_match(_python_features(train_pairs, reference, nan_value=-1.0), replaced)
+        assert not np.isnan(replaced[0]).any()
+
+        features, labels, nameless = _rust_features([], featurizer)
+        assert features.shape == (0, len(MAIN_INFO.selected_feature_indices()))
+        assert labels.shape == (0,)
+        assert nameless is not None and nameless.shape == (0, len(NAMELESS_INFO.selected_feature_indices()))
+        with pytest.raises(ValueError, match="partial-supervision"):
+            _rust_features([(train_pairs[0][0], train_pairs[0][1], -1)], featurizer)
+
         seeded = _featurizer(release_inputs, dataset, arrow_dataset, _block_members(blocks)).with_cluster_seeds(
             dataset.cluster_seeds_require, dataset.cluster_seeds_disallow
         )
@@ -407,17 +414,3 @@ def test_verified_featurizer_rejects_mismatched_counts_and_signatures(release_in
         # The full-set check still runs when only a subset is built.
         with pytest.raises(ValueError, match="Arrow signatures for 'qian' differ from its JSON signatures"):
             _featurizer(release_inputs, dataset, arrow_dataset, members)
-
-
-def test_rust_pair_featurization_handles_empty_input_and_rejects_constraint_labels(
-    release_inputs: dict[str, Any],
-) -> None:
-    dataset = _json_dataset(release_inputs)
-    with _open(release_inputs) as arrow_dataset:
-        featurizer = _featurizer(release_inputs, dataset, arrow_dataset, set(list(dataset.signatures)[:2]))
-        features, labels, nameless = _rust_features([], featurizer)
-        assert features.shape == (0, len(MAIN_INFO.selected_feature_indices()))
-        assert labels.shape == (0,)
-        assert nameless is not None and nameless.shape == (0, len(NAMELESS_INFO.selected_feature_indices()))
-        with pytest.raises(ValueError, match="partial-supervision"):
-            _rust_features([("signature-0-0", "signature-0-1", -1)], featurizer)

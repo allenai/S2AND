@@ -267,21 +267,20 @@ def test_uv_cache_and_digest_track_only_native_inputs(tmp_path: Path) -> None:
     assert _sync_uv_cache_project(project) == 1, "initial build"
     assert _sync_uv_cache_project(project) == 1, "unchanged fixture must stay cached"
 
-    for relative in ("src/lib.rs.orig", "src/.swp", "vendor/cld2/Cargo.lock", "vendor/cld2/target/generated.rs"):
-        ignored = source / relative
-        ignored.parent.mkdir(parents=True, exist_ok=True)
-        for operation, content in (
-            ("add", b"irrelevant file\n"),
-            ("modify", b"changed irrelevant file\n"),
-            ("delete", None),
-        ):
+    ignored = [
+        source / relative
+        for relative in ("src/lib.rs.orig", "src/.swp", "vendor/cld2/Cargo.lock", "vendor/cld2/target/generated.rs")
+    ]
+    # Sync once per operation: an ignored file that reached the cache keys would still raise the build count.
+    for operation, content in (("add", b"irrelevant file\n"), ("modify", b"changed\n"), ("delete", None)):
+        for path in ignored:
+            path.parent.mkdir(parents=True, exist_ok=True)
             if content is None:
-                ignored.unlink()
+                path.unlink()
             else:
-                ignored.write_bytes(content)
-            scenario = f"{relative}: {operation}"
-            assert rust_source_digest(source) == baseline, scenario
-            assert _sync_uv_cache_project(project) == 1, scenario
+                path.write_bytes(content)
+            assert rust_source_digest(source) == baseline, f"{path.name}: {operation}"
+        assert _sync_uv_cache_project(project) == 1, operation
 
     for expected_builds, relative in enumerate(
         ("src/lib.rs", "src/nested/mod.rs", "vendor/cld2/src/lib.rs", "vendor/cld2/Cargo.toml"), start=2

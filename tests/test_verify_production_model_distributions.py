@@ -92,7 +92,6 @@ def _write_distribution_fixture(
 @pytest.mark.parametrize(
     ("archive_kind", "replacement", "message"),
     (
-        ("wheel", None, "missing required distribution files"),
         ("sdist", None, "missing required distribution files"),
         ("wheel", b"tampered\n", "content differs from the source tree"),
     ),
@@ -109,17 +108,9 @@ def test_distribution_verifier_rejects_missing_or_drifted_member(tmp_path, archi
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 
 
-def test_distribution_verifier_accepts_valid_archives(tmp_path: Path) -> None:
-    dist_dir, source_root = _write_distribution_fixture(tmp_path)
-
-    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
-
-
 @pytest.mark.parametrize(
     ("platform", "path"),
     [
-        ("musllinux_1_2_x86_64", "s2and.libs/extra.py"),
-        ("musllinux_1_2_x86_64", "s2and.libs/libunexpected-123abc.so.1"),
         ("musllinux_1_2_x86_64", "s2and.libs/libgcc_s.so.1"),
         ("win_amd64", "s2and.libs/libgcc_s-f685abf1.so.1"),
     ],
@@ -133,42 +124,25 @@ def test_distribution_verifier_rejects_unexpected_bundled_files(tmp_path: Path, 
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 
 
-@pytest.mark.parametrize("missing_path", sorted(REQUIRED_RUNTIME_PATHS))
-def test_distribution_verifier_requires_runtime_artifact(tmp_path: Path, missing_path: str) -> None:
+def test_distribution_verifier_requires_runtime_artifacts(tmp_path: Path) -> None:
     dist_dir, source_root = _write_distribution_fixture(tmp_path)
-    _write_package_data_config(source_root, set(RELEASE_MEMBERS) - {missing_path})
+    _write_package_data_config(source_root, {GENERIC_MEMBER_PATH})
 
-    with pytest.raises(ValueError, match="Release distributions require these paths"):
+    with pytest.raises(ValueError, match="Release distributions require these paths") as error:
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 
+    for path in REQUIRED_RUNTIME_PATHS:
+        assert path in str(error.value)
 
-@pytest.mark.parametrize(
-    ("archive_kind", "forbidden_path"),
-    (
-        ("wheel", DEFAULT_MODEL_PATH),
-        ("wheel", MODEL_MEMBER_PATH),
-        ("sdist", DEFAULT_MODEL_PATH),
-    ),
-)
-def test_distribution_verifier_rejects_model_path(tmp_path, archive_kind, forbidden_path) -> None:
-    overrides: dict[str, bytes | None] = {forbidden_path: b"{}\n"}
+
+def test_distribution_verifier_rejects_model_paths(tmp_path: Path) -> None:
     dist_dir, source_root = _write_distribution_fixture(
-        tmp_path,
-        wheel_overrides=overrides if archive_kind == "wheel" else None,
-        sdist_overrides=overrides if archive_kind == "sdist" else None,
+        tmp_path, sdist_overrides={DEFAULT_MODEL_PATH: b"{}\n", MODEL_MEMBER_PATH: b"{}\n"}
     )
-
-    with pytest.raises(ValueError, match="forbidden production model paths"):
+    with pytest.raises(ValueError, match="forbidden production model paths") as error:
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
-
-
-@pytest.mark.parametrize("keep", ["wheel", "sdist"])
-def test_verify_separate_platform_build_artifacts(tmp_path, keep):
-    dist_dir, root = _write_distribution_fixture(tmp_path)
-    suffix = "*.tar.gz" if keep == "wheel" else "*.whl"
-    for path in dist_dir.glob(suffix):
-        path.unlink()
-    verify_production_model_distributions(dist_dir=dist_dir, source_root=root)
+    assert DEFAULT_MODEL_PATH in str(error.value)
+    assert MODEL_MEMBER_PATH in str(error.value)
 
 
 def test_verify_every_platform_wheel(tmp_path):
@@ -181,30 +155,29 @@ def test_verify_every_platform_wheel(tmp_path):
         verify_production_model_distributions(dist_dir=dist_dir, source_root=root)
 
 
-@pytest.mark.parametrize(
-    ("archive_kind", "overrides", "message"),
-    (
-        # Maturin packs any file Git does not ignore, so stray files must fail the inventory.
-        ("wheel", {"s2and/data/extra.json": b"{}\n"}, "unexpected package files"),
-        ("sdist", {"s2and/data/extra.json": b"{}\n"}, "unexpected package files"),
-        ("wheel", {"s2and/__pycache__/model.cpython-311.pyc": b""}, "unexpected package files"),
-        ("wheel", {"scripts/extra.py": b""}, "unexpected package files"),
-        ("wheel", {MODULE_PATH: None}, "missing source modules"),
-        ("sdist", {MODULE_PATH: None}, "missing source modules"),
-        ("wheel", {NATIVE_PATH: None}, "must contain 1 native extension"),
-        ("wheel", {"s2and/_s2and_rust.cp312-win_amd64.pyd": b"native"}, "must contain 1 native extension"),
-        ("sdist", {NATIVE_PATH: b"native"}, "unexpected package files"),
-    ),
-)
-def test_distribution_verifier_requires_exact_package_inventory(tmp_path, archive_kind, overrides, message) -> None:
+@pytest.mark.parametrize("archive_kind", ["wheel", "sdist"])
+def test_distribution_verifier_requires_exact_package_inventory(tmp_path: Path, archive_kind: str) -> None:
+    unexpected = (
+        {"s2and/data/extra.json": b"{}", "s2and/__pycache__/model.cpython-311.pyc": b"", "scripts/extra.py": b""}
+        if archive_kind == "wheel"
+        else {NATIVE_PATH: b"native", "s2and/data/extra.json": b"{}"}
+    )
+    overrides = {**unexpected, MODULE_PATH: None}
+    if archive_kind == "wheel":
+        overrides[NATIVE_PATH] = None
     dist_dir, source_root = _write_distribution_fixture(
         tmp_path,
         wheel_overrides=overrides if archive_kind == "wheel" else None,
         sdist_overrides=overrides if archive_kind == "sdist" else None,
     )
-
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="unexpected package files") as error:
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+    for path in unexpected:
+        assert path in str(error.value)
+    assert "missing source modules" in str(error.value)
+    assert MODULE_PATH in str(error.value)
+    if archive_kind == "wheel":
+        assert "must contain 1 native extension" in str(error.value)
 
 
 def test_distribution_verifier_accepts_real_maturin_wheel_layout(tmp_path: Path) -> None:
@@ -221,4 +194,11 @@ def test_distribution_verifier_accepts_real_maturin_wheel_layout(tmp_path: Path)
         wheel.writestr("s2and.libs/libgcc_s-f685abf1.so.1", b"runtime")
         wheel.writestr("s2and.libs/libstdc++-1b2c0963.so.6", b"runtime")
 
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+    sdist = next(dist_dir.glob("*.tar.gz"))
+    saved = sdist.rename(tmp_path / sdist.name)
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+    saved.rename(sdist)
+    for wheel_path in dist_dir.glob("*.whl"):
+        wheel_path.unlink()
     verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)

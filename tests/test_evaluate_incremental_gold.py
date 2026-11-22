@@ -164,6 +164,12 @@ def test_two_cases_use_serialized_complete_model_and_actual_arrow(
 ) -> None:
     root, mask = _fixture(tmp_path)
     payload = gold.prepare_cases(snapshot=root, eligible_mask=mask, max_blocks=1, max_cases=3)
+    assert sorted(payload["source_sha256"]["smoke"]) == [
+        "benchmarks/smoke/conversion_provenance.json",
+        "benchmarks/smoke/manifest.json",
+        "benchmarks/smoke/restored_unknown_signature_ids_20261009.json",
+        "benchmarks/smoke/smoke_clusters.json",
+    ]
     payload["cases"] = [case for case in payload["cases"] if case["query_author_id"] == "author_a"]
     cases = tmp_path / "cases.json"
     _write_json(cases, payload)
@@ -198,17 +204,6 @@ def test_two_cases_use_serialized_complete_model_and_actual_arrow(
             n_jobs=1,
             total_ram_bytes=2_000_000_000,
         )
-
-
-def test_frozen_cases_bind_only_published_dataset_files(tmp_path: Path) -> None:
-    root, mask = _fixture(tmp_path)
-    payload = gold.prepare_cases(snapshot=root, eligible_mask=mask, max_blocks=1, max_cases=4)
-    assert sorted(payload["source_sha256"]["smoke"]) == [
-        "benchmarks/smoke/conversion_provenance.json",
-        "benchmarks/smoke/manifest.json",
-        "benchmarks/smoke/restored_unknown_signature_ids_20261009.json",
-        "benchmarks/smoke/smoke_clusters.json",
-    ]
 
 
 @pytest.mark.parametrize(

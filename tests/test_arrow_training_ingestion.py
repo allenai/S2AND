@@ -126,22 +126,6 @@ def _replace_arrow_column(path: Path, column_name: str, values: Any) -> None:
     write_arrow_ipc_table(pa.Table.from_arrays(arrays, names=column_names), path)
 
 
-def test_arrow_training_rejects_noncanonical_signature_affiliations_type(tmp_path: Path) -> None:
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_minimal_signatures_table(signatures_path, ["s1"])
-    _replace_arrow_column(
-        signatures_path,
-        "author_affiliations",
-        pa.array(["Institute"], type=pa.string()),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=r"signatures column 'author_affiliations' expected list<string>",
-    ):
-        load_signatures_from_arrow(signatures_path)
-
-
 def test_arrow_training_rejects_noncanonical_paper_column_types(tmp_path: Path) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
@@ -167,17 +151,12 @@ def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path)
 
 def test_arrow_training_rejects_missing_author_block(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
-    for _case_id, author_block in (("null", None), ("empty", "")):
-        _write_minimal_signatures_table(signatures_path, ["s1"])
+    _write_minimal_signatures_table(signatures_path, ["s1"])
+    for author_block in (None, ""):
         _replace_arrow_column(signatures_path, "author_block", pa.array([author_block], type=pa.string()))
-
-        with pytest.raises(ValueError, match="(null|empty) author_block"):
+        with pytest.raises(ValueError, match="author_block"):
             load_signatures_from_arrow(signatures_path)
 
-
-def test_arrow_training_rejects_absent_author_block_column(tmp_path: Path) -> None:
-    signatures_path = tmp_path / "signatures.arrow"
-    _write_minimal_signatures_table(signatures_path, ["s1"])
     with pa.memory_map(str(signatures_path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
         retained_fields = [field for field in table.schema if field.name != "author_block"]
@@ -192,14 +171,20 @@ def test_arrow_training_rejects_absent_author_block_column(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="missing loader-required columns.*author_block"):
         load_signatures_from_arrow(signatures_path)
 
-
-def test_arrow_training_accepts_missing_orcid_column(tmp_path: Path) -> None:
-    signatures_path = tmp_path / "signatures.arrow"
     _write_minimal_signatures_table(signatures_path, ["s1"])
+    assert load_signatures_from_arrow(signatures_path)["s1"].author_info_orcid is None
 
-    signatures = load_signatures_from_arrow(signatures_path)
+    _replace_arrow_column(
+        signatures_path,
+        "author_affiliations",
+        pa.array(["Institute"], type=pa.string()),
+    )
 
-    assert signatures["s1"].author_info_orcid is None
+    with pytest.raises(
+        ValueError,
+        match=r"signatures column 'author_affiliations' expected list<string>",
+    ):
+        load_signatures_from_arrow(signatures_path)
 
 
 def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(
@@ -271,25 +256,29 @@ def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(
         assert replace_calls == 0
 
 
-@pytest.mark.parametrize(
-    ("table_name", "paper_ids", "message"),
-    [
-        ("papers", [None, "p1"], "null paper_id"),
-        ("papers", ["p1", "p1"], "duplicate paper_id"),
-        ("paper_authors", [None], "null paper_id"),
-        ("paper_authors", ["p1", "p1"], r"duplicate \(paper_id, position\)"),
-    ],
-)
-def test_arrow_training_rejects_invalid_paper_keys(
-    tmp_path: Path, table_name: str, paper_ids: list[str | None], message: str
-) -> None:
+def test_arrow_training_rejects_invalid_paper_keys(tmp_path: Path) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
-    _write_minimal_papers_table(papers_path, paper_ids if table_name == "papers" else ["p1"])
-    _write_minimal_paper_authors_table(authors_path, paper_ids if table_name == "paper_authors" else ["p1"])
-
-    with pytest.raises(ValueError, match=message):
+    _write_minimal_paper_authors_table(authors_path, ["p1"])
+    _write_minimal_papers_table(papers_path, [None, "p1"])
+    with pytest.raises(ValueError, match="null paper_id"):
         load_papers_from_arrow(papers_path, authors_path)
+
+    _write_minimal_papers_table(papers_path, ["p1", "p1"])
+    with pytest.raises(ValueError, match="duplicate paper_id"):
+        load_papers_from_arrow(papers_path, authors_path)
+
+    _write_minimal_papers_table(papers_path, ["p1"])
+    _write_minimal_paper_authors_table(authors_path, [None])
+    with pytest.raises(ValueError, match="null paper_id"):
+        load_papers_from_arrow(papers_path, authors_path)
+
+    _write_minimal_paper_authors_table(authors_path, ["p1", "p1"])
+    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
+        load_papers_from_arrow(papers_path, authors_path)
+
+    _write_minimal_paper_authors_table(authors_path, ["p1"])
+    assert set(load_papers_from_arrow(papers_path, authors_path)) == {"p1"}
 
 
 def test_arrow_training_preserves_blank_paper_author_names(tmp_path: Path) -> None:

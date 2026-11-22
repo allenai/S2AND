@@ -19,7 +19,7 @@ from tests.helpers import (
 )
 
 
-def _args(tmp_path, **workload_overrides):
+def _setup_profile_argv(tmp_path, **workload_overrides):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
@@ -65,7 +65,11 @@ def _args(tmp_path, **workload_overrides):
     ]
     if workload["synthetic_seeds_when_clusters_missing"]:
         argv.append("--synthetic-seeds-when-clusters-missing")
-    return profile.parse_args(argv)
+    return argv
+
+
+def _args(tmp_path, **workload_overrides):
+    return profile.parse_args(_setup_profile_argv(tmp_path, **workload_overrides))
 
 
 def _stub_prerun(monkeypatch):
@@ -183,56 +187,6 @@ def test_run_rejects_unbounded_or_negative_workload_without_full_run(tmp_path) -
             raise AssertionError(f"{case_id}: unsafe workload was accepted")
 
 
-def test_main_writes_fresh_report_and_rejects_reuse(tmp_path, monkeypatch, capsys) -> None:
-    report_path = tmp_path / "report.json"
-    payload = {"summary": {"run_count": 1}}
-    monkeypatch.setattr(profile, "run", lambda _args: payload)
-
-    exit_code = profile.main(
-        [
-            "--model-path",
-            "model",
-            "--arrow-root",
-            "arrow",
-            "--dataset",
-            "dummy",
-            "--query-limit",
-            "1",
-            "--max-seed-clusters",
-            "1",
-            "--n-jobs",
-            "1",
-            "--write-json",
-            str(report_path),
-        ]
-    )
-
-    assert exit_code == 0
-    assert json.loads(report_path.read_text(encoding="utf-8")) == payload
-    assert json.loads(capsys.readouterr().out) == payload
-
-    monkeypatch.setattr(profile, "run", lambda _args: pytest.fail("profile must not run"))
-    with pytest.raises(FileExistsError, match="already exists"):
-        profile.main(
-            [
-                "--model-path",
-                "model",
-                "--arrow-root",
-                "arrow",
-                "--dataset",
-                "dummy",
-                "--query-limit",
-                "1",
-                "--max-seed-clusters",
-                "1",
-                "--n-jobs",
-                "1",
-                "--write-json",
-                str(report_path),
-            ]
-        )
-
-
 def test_invalid_data_or_model_manifest_fails_from_content(tmp_path, monkeypatch) -> None:
     from s2and import production_model
 
@@ -252,7 +206,7 @@ def test_invalid_data_or_model_manifest_fails_from_content(tmp_path, monkeypatch
         profile.run(_args(model_root))
 
 
-def test_report_contains_workload_and_metrics(tmp_path, monkeypatch) -> None:
+def test_main_writes_report_with_workload_and_metrics_once(tmp_path, monkeypatch, capsys) -> None:
     from s2and import production_model
 
     _stub_prerun(monkeypatch)
@@ -271,7 +225,13 @@ def test_report_contains_workload_and_metrics(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(profile, "_run_metadata", lambda: {})
 
-    payload = profile.run(_args(tmp_path))
+    argv = _setup_profile_argv(tmp_path)
+    assert profile.main(argv) == 0
+    payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert json.loads(capsys.readouterr().out) == payload
+    monkeypatch.setattr(profile, "run", lambda _args: pytest.fail("profile must not rerun"))
+    with pytest.raises(FileExistsError, match="already exists"):
+        profile.main(argv)
 
     assert payload["runner"] == "promoted_incremental_arrow_profile"
     assert payload["summary"]["predict_seconds"]["p50"] >= 0

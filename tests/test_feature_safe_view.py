@@ -90,7 +90,7 @@ def _feature_safe_dataset() -> ANDData:
     )
 
 
-def test_python_and_cached_rust_constraints_respect_suppress_orcid_per_call(tmp_path) -> None:
+def test_suppress_orcid_is_scoped_to_constraint_and_supervision_calls(tmp_path) -> None:
     source_dataset = _feature_safe_dataset()
     dataset = build_arrow_training_dataset(source_dataset, tmp_path, name_counts="empty")
     rust_featurizer = _get_rust_featurizer(dataset)
@@ -107,19 +107,16 @@ def test_python_and_cached_rust_constraints_respect_suppress_orcid_per_call(tmp_
             == expected
         )
 
-
-def test_suppress_orcid_removes_orcid_supervision() -> None:
-    dataset = _feature_safe_dataset()
     runtime_context = build_runtime_context("feature_safe_view_test", backend="python")
     for suppress in (False, True):
         backend = model_module._build_incremental_constraint_backend(
-            dataset,
+            source_dataset,
             use_default_constraints_as_supervision=True,
             runtime_context=runtime_context,
             suppress_orcid=suppress,
         )
         labels, _telemetry = model_module._resolve_constraint_labels_batch(
-            dataset,
+            source_dataset,
             [("same_a", "same_b")],
             constraint_backend=backend,
             partial_supervision={},

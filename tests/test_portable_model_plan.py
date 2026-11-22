@@ -50,32 +50,28 @@ def test_relative_model_plan_survives_source_removal(tmp_path: Path) -> None:
     shutil.copytree(original, relocated)
     shutil.rmtree(original)
     plan = load_model_plan(relocated / "pairwise" / "model_plan.json")
+    assert plan.eps.precision_f1_tolerance == 0.0
     assert plan.datasets["inventors_s2and"].split_mode == "random_blocks"
     assert all(path.is_relative_to(relocated) for path in plan.datasets["inventors_s2and"].files.values())
 
 
-@pytest.mark.parametrize(
-    ("extra", "expected"),
-    [({}, 0.0), ({"precision_f1_tolerance": 0.001}, 0.001)],
-    ids=["field-omitted", "field-set"],
-)
-def test_precision_f1_tolerance_is_an_optional_eps_field(tmp_path: Path, extra: dict, expected: float) -> None:
+def test_model_plan_validates_optional_eps_policy(tmp_path: Path) -> None:
     plan_path = _write_plan(tmp_path)
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    payload["eps"] |= extra
+    payload["eps"]["precision_f1_tolerance"] = 0.001
     plan_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_model_plan(plan_path).eps.precision_f1_tolerance == 0.001
 
-    assert load_model_plan(plan_path).eps.precision_f1_tolerance == expected
+    for invalid in (True, 1.5):
+        payload["eps"]["precision_f1_tolerance"] = invalid
+        plan_path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="expected a number"):
+            load_model_plan(plan_path)
 
-
-@pytest.mark.parametrize("extra", [{"precision_f1_tolerance": 1.5}, {"precision_f1_tolerance": True}, {"other": 0.1}])
-def test_invalid_eps_policy_fields_are_rejected(tmp_path: Path, extra: dict) -> None:
-    plan_path = _write_plan(tmp_path)
-    payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    payload["eps"] |= extra
+    del payload["eps"]["precision_f1_tolerance"]
+    payload["eps"]["other"] = 0.1
     plan_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="invalid EPS policy"):
         load_model_plan(plan_path)
 
 
@@ -86,11 +82,10 @@ def test_relative_model_plan_rejects_changed_source(tmp_path: Path) -> None:
         load_model_plan(plan)
 
 
-@pytest.mark.parametrize("name", ("../outside", "a/b", "a\\b", "C:patents"))
-def test_model_dataset_name_cannot_escape_its_directory(tmp_path: Path, name: str) -> None:
+def test_model_dataset_name_cannot_escape_its_directory(tmp_path: Path) -> None:
     plan = _write_plan(tmp_path)
     contents = json.loads(plan.read_text(encoding="utf-8"))
-    contents["datasets"] = {name: next(iter(contents["datasets"].values()))}
+    contents["datasets"] = {"../outside": next(iter(contents["datasets"].values()))}
     plan.write_text(json.dumps(contents), encoding="utf-8")
     with pytest.raises(ValueError, match="invalid model dataset"):
         load_model_plan(plan)

@@ -44,32 +44,28 @@ def test_checked_in_manual_adjudication_matches_promoted_aliases() -> None:
     assert artifact.pairs.isdisjoint(excluded)
 
 
-@pytest.mark.parametrize(
-    ("evidence_file", "expected_count", "required_pair"),
-    [
-        ("gold_additions_20261012.csv", 27, ("jeremiah", "jerry")),
-        ("model_additions_20261012.csv", 226, ("bernd", "bernhard")),
-    ],
-)
-def test_gold_alias_additions_remove_real_first_name_vetoes(
-    tmp_path: Path, evidence_file: str, expected_count: int, required_pair: tuple[str, str]
-) -> None:
+def test_gold_alias_additions_remove_real_first_name_vetoes(tmp_path: Path) -> None:
     """Preserve verified name variants without changes to the constraint policy."""
     from s2and.consts import LARGE_DISTANCE
     from s2and.feature_port import _get_rust_featurizer
     from tests.helpers import build_arrow_training_dataset
     from tests.incremental_test_helpers import _dataset
 
-    evidence_path = Path(__file__).resolve().parent / "fixtures" / "name_tuples" / evidence_file
-    with evidence_path.open(encoding="utf-8", newline="") as stream:
-        rows = list(csv.DictReader(stream))
-    pairs = [(row["name_a"], row["name_b"]) for row in rows]
-    assert len(pairs) == len(set(pairs)) == expected_count
-    assert required_pair in pairs
+    packaged = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt").pairs
+    evidence = Path(__file__).resolve().parent / "fixtures" / "name_tuples"
+    cases = (
+        ("gold_additions_20261012.csv", 27, [("jeremiah", "jerry"), ("hans juergen", "hans jurgen")]),
+        ("model_additions_20261012.csv", 226, [("bernd", "bernhard")]),
+    )
+    pairs: list[tuple[str, str]] = []
+    for filename, expected_count, examples in cases:
+        with (evidence / filename).open(encoding="utf-8", newline="") as stream:
+            rows = [(row["name_a"], row["name_b"]) for row in csv.DictReader(stream)]
+        assert len(rows) == len(set(rows)) == expected_count
+        assert set(examples) <= set(rows) <= packaged
+        pairs.extend(examples)
     names = [(first.replace(" ", "-"), "", "Smith") for pair in pairs for first in pair]
     dataset = _dataset(names, {})
-    packaged = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt").pairs
-    assert set(pairs) <= packaged
     dataset.name_tuples = set(packaged) - set(pairs)
     for index in range(len(pairs)):
         left, right = str(2 * index), str(2 * index + 1)
@@ -134,7 +130,10 @@ def test_loader_rejects_semantically_invalid_rows(tmp_path: Path) -> None:
 def test_generator_atomically_publishes_one_loadable_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source_path = tmp_path / "source.txt"
     output_path = tmp_path / "aliases.txt"
-    source_path.write_text("Alice,Ally\nRobert,Bob\n", encoding="utf-8")
+    source_path.write_text(
+        "Alice,Ally\nally,alice\nALICE,ALLY\nAlice,Alice\nAnn,Anna\n',Alice\n",
+        encoding="utf-8",
+    )
     replaced_destinations: list[Path] = []
     real_replace = os.replace
 
@@ -146,20 +145,8 @@ def test_generator_atomically_publishes_one_loadable_file(tmp_path: Path, monkey
     summary = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
 
     assert replaced_destinations == [output_path]
-    assert summary["data"]["pair_count"] == 2
-    assert load_name_tuple_artifact(output_path).pairs == frozenset({("alice", "ally"), ("bob", "robert")})
-
-
-def test_generator_reports_filtered_and_duplicate_rows(tmp_path: Path) -> None:
-    source_path = tmp_path / "source.txt"
-    output_path = tmp_path / "aliases.txt"
-    source_path.write_text(
-        "Alice,Ally\nally,alice\nALICE,ALLY\nAlice,Alice\nAnn,Anna\n',Alice\n",
-        encoding="utf-8",
-    )
-
-    summary = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
-
+    assert summary["data"]["pair_count"] == 1
+    assert load_name_tuple_artifact(output_path).pairs == frozenset({("alice", "ally")})
     assert summary["generation_counts"] == {
         "input_pair_count": 6,
         "dropped_identity": 1,
@@ -167,7 +154,6 @@ def test_generator_reports_filtered_and_duplicate_rows(tmp_path: Path) -> None:
         "dropped_empty": 1,
         "dropped_duplicate_canonical": 2,
     }
-    assert summary["data"]["pair_count"] == 1
 
 
 def test_concurrent_generators_leave_one_loadable_artifact(tmp_path: Path) -> None:

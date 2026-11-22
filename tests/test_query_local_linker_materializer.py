@@ -152,10 +152,7 @@ def test_materializer_ranks_match_the_native_labeled_plan(tmp_path: Path) -> Non
     )
 
 
-@pytest.mark.parametrize("explicit_disallow", [False, True])
-def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
-    tmp_path: Path, explicit_disallow: bool
-) -> None:
+def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(tmp_path: Path) -> None:
     """A cloned query must not use its full source identity as profile evidence."""
     source = tmp_path / "source"
     clone = derived_query_id("visibleq:", "q1", "p_q")
@@ -272,7 +269,7 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
             source_bundle=bundle, dataset_name="toy", arrow_dataset=arrow
         )  # noqa: SLF001
         context.cluster_seeds_require = {"q1": "source_seed", "s1": "source_seed", "s2": "other_seed"}
-        context.cluster_seeds_disallow = frozenset({("q1", "s2")}) if explicit_disallow else frozenset()
+        context.cluster_seeds_disallow = frozenset({("q1", "s2")})
         features, summary, selected = trainer._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
             context=context,
             rows=clean,
@@ -352,9 +349,7 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
                 name_tuples=frozenset(),
                 num_threads=1,
             )
-            featurizer = featurizer.with_cluster_seeds(
-                {"s1": "a", "s2": "b"}, {("q1", "s2")} if explicit_disallow else set()
-            )
+            featurizer = featurizer.with_cluster_seeds({"s1": "a", "s2": "b"}, {("q1", "s2")})
             signatures = tuple(featurizer.signature_ids())
             order = [list(plan["row_component_keys"]).index(key) for key in ("a", "b")]
             retrieval = build_linker_retrieval_batch_from_raw_plan_bundle(
@@ -394,4 +389,4 @@ def test_initial_clone_matches_public_overlay_and_keeps_origin_constraints(
             np.testing.assert_array_equal(
                 np.column_stack([features[column] for column in columns]), public_features.matrix[order]
             )
-    assert features["min_distance"][1] == pytest.approx(LARGE_DISTANCE if explicit_disallow else 0.2)
+    assert features["min_distance"][1] == pytest.approx(LARGE_DISTANCE)

@@ -109,18 +109,18 @@ def test_current_raw_names_ids_and_vectors_replace_stale_sources(tmp_path: Path)
     assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in sources.items())
 
 
-def test_missing_replay_signature_id_fails(tmp_path: Path) -> None:
+def test_replay_rejects_missing_signatures_and_stale_vectors(tmp_path: Path) -> None:
     roots = _inputs(tmp_path)
     path = roots["benchmark"] / "arnetminer/arnetminer_signatures.json"
-    values = json.loads(path.read_bytes())
+    original = path.read_bytes()
+    values = json.loads(original)
     del values["2"]
     _json(path, values)
     with pytest.raises(ValueError, match="fixed replay signature IDs"):
         _run(roots)
+    path.write_bytes(original)
 
-
-def test_changed_encoder_input_cannot_reuse_stale_vector(tmp_path: Path) -> None:
-    roots = _inputs(tmp_path)
     _pickle(roots["benchmark"] / "arnetminer/arnetminer_specter2.pkl", ["p2"], [8])
+
     with pytest.raises(ValueError, match="Changed arnetminer encoder input lacks"):
-        _run(roots)
+        _run({**roots, "output": tmp_path / "stale-vector-output"})

@@ -168,9 +168,8 @@ def _rewrite_dataset_manifest_paths(release_root: Path, dataset_name: str, paths
     _write_root_manifest(release_root, dataset_name)
 
 
-def test_arrow_release_layout_required_files(tmp_path: Path) -> None:
+def test_release_validation_follows_verified_artifacts(tmp_path: Path) -> None:
     release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
-
     assert validate_release_root(release_root) == {
         "release_root": str(release_root.resolve()),
         "dataset_manifest_count": 1,
@@ -179,93 +178,31 @@ def test_arrow_release_layout_required_files(tmp_path: Path) -> None:
         "network_access": False,
     }
 
+    root_manifest_path = release_root / "manifest.json"
+    root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
+    root_manifest["dataset_manifests"][dataset_name]["sha256"] = "0" * 64
+    _touch_json(root_manifest_path, root_manifest)
+    with pytest.raises(ValueError, match=r"dataset_manifests\..*\.sha256 mismatch"):
+        validate_release_root(release_root)
+    _write_root_manifest(release_root, dataset_name)
 
-@pytest.mark.parametrize(
-    ("case_id", "message"),
-    (
-        ("dataset-checksum", r"dataset_manifests\..*\.sha256 mismatch"),
-        ("signatures-file", r"signatures\.arrow"),
-        ("papers-index", r"missing required Arrow artifacts.*papers_batch_index"),
-        ("specter-index", r"must contain both specter and specter_batch_index"),
-        ("replay-manifest", r"replay_bundles\.mini-replay manifest does not exist"),
-        ("nested-replay", r"fields mismatch.*extra=\['replay_bundles'\]"),
-    ),
-)
-def test_validate_release_root_reports_corrupt_or_missing_artifacts(
-    tmp_path: Path,
-    case_id: str,
-    message: str,
-) -> None:
-    release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
-    if case_id == "dataset-checksum":
-        root_manifest_path = release_root / "manifest.json"
-        root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
-        root_manifest["dataset_manifests"][dataset_name]["sha256"] = "0" * 64
-        _touch_json(root_manifest_path, root_manifest)
-    elif case_id == "signatures-file":
-        (release_root / dataset_name / "signatures.arrow").unlink()
-    elif case_id in {"papers-index", "specter-index"}:
-        manifest_path = release_root / dataset_name / "manifest.json"
-        paths = json.loads(manifest_path.read_text(encoding="utf-8"))["paths"]
-        del paths["papers_batch_index" if case_id == "papers-index" else "specter_batch_index"]
-        _rewrite_dataset_manifest_paths(release_root, dataset_name, paths)
-    elif case_id == "replay-manifest":
-        _write_root_manifest(
-            release_root,
-            dataset_name,
-            replay_bundles={"mini-replay": {"path": "replay/manifest.json", "sha256": "0" * 64}},
-        )
-    else:
-        replay_root = release_root / "replay"
-        replay_dataset_manifest = replay_root / "dataset" / "manifest.json"
-        nested_manifest = replay_root / "nested" / "manifest.json"
-        _touch_json(replay_dataset_manifest)
-        _touch_json(nested_manifest)
-        replay_manifest = replay_root / "manifest.json"
-        _touch_json(
-            replay_manifest,
-            {
-                "kind": ARROW_COLLECTION_KIND,
-                "format_version": PUBLIC_DATA_FORMAT_VERSION,
-                "dataset_manifests": {
-                    "dataset": {
-                        "path": "dataset/manifest.json",
-                        "sha256": hashlib.sha256(replay_dataset_manifest.read_bytes()).hexdigest(),
-                    }
-                },
-                "replay_bundles": {
-                    "nested": {
-                        "path": "nested/manifest.json",
-                        "sha256": hashlib.sha256(nested_manifest.read_bytes()).hexdigest(),
-                    }
-                },
-            },
-        )
-        _write_root_manifest(
-            release_root,
-            dataset_name,
-            replay_bundles={
-                "replay": {
-                    "path": "replay/manifest.json",
-                    "sha256": hashlib.sha256(replay_manifest.read_bytes()).hexdigest(),
-                }
-            },
-        )
+    signatures = release_root / dataset_name / "signatures.arrow"
+    saved_signatures = signatures.with_suffix(".saved")
+    signatures.rename(saved_signatures)
+    with pytest.raises(ValueError, match=r"signatures\.arrow"):
+        validate_release_root(release_root)
+    saved_signatures.rename(signatures)
 
-    with pytest.raises(ValueError, match=message):
+    alternate_index, _ = write_name_counts_index(release_root / "alternate", tiny_name_counts_tuple())
+    manifest_path = release_root / dataset_name / "manifest.json"
+    paths = json.loads(manifest_path.read_text(encoding="utf-8"))["paths"]
+    _rewrite_dataset_manifest_paths(release_root, dataset_name, {**paths, "name_counts_index": alternate_index})
+    with pytest.raises(ValueError, match="must resolve to the publication root index"):
         validate_release_root(release_root)
 
-
-def test_validate_release_root_owns_name_counts_topology(tmp_path: Path) -> None:
-    release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
-    alternate_root = release_root / "alternate"
-    alternate_index, _metrics = write_name_counts_index(alternate_root, tiny_name_counts_tuple())
-    dataset_manifest = json.loads((release_root / dataset_name / "manifest.json").read_text(encoding="utf-8"))
-    paths = dataset_manifest["paths"]
-    paths["name_counts_index"] = str(Path(alternate_index).resolve())
+    del paths["specter_batch_index"]
     _rewrite_dataset_manifest_paths(release_root, dataset_name, paths)
-
-    with pytest.raises(ValueError, match="must resolve to the publication root index"):
+    with pytest.raises(ValueError, match="both specter and specter_batch_index"):
         validate_release_root(release_root)
 
 
@@ -316,3 +253,23 @@ def test_validate_release_root_threads_publication_root_into_replay_bundles(tmp_
 
     metrics = validate_release_root(release_root)
     assert metrics["replay_dataset_manifest_count"] == 1
+
+    replay_manifest = replay_root / "manifest.json"
+    original = json.loads(replay_manifest.read_text(encoding="utf-8"))
+    replay_manifest.unlink()
+    with pytest.raises(ValueError, match=r"replay_bundles\.mini-replay manifest does not exist"):
+        validate_release_root(release_root)
+
+    _touch_json(replay_manifest, {**original, "replay_bundles": {}})
+    _write_root_manifest(
+        release_root,
+        dataset_name,
+        replay_bundles={
+            "mini-replay": {
+                "path": "replay/manifest.json",
+                "sha256": hashlib.sha256(replay_manifest.read_bytes()).hexdigest(),
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="fields mismatch.*replay_bundles"):
+        validate_release_root(release_root)

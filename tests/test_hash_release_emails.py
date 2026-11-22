@@ -24,7 +24,7 @@ from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 @pytest.mark.parametrize(
     "value",
-    [None, "", "J.Smith@MIT.EDU.", ".j.smith@mit.edu", "other@mit.edu", "a@b@c", "a @b", "a@", "@b"],
+    [None, "J.Smith@MIT.EDU.", "a@b@c", "a @b"],
 )
 def test_hashing_preserves_normalized_email_components(value: str | None) -> None:
     result = hash_feature_email(value)

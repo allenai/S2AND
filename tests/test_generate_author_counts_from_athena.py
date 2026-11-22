@@ -130,7 +130,9 @@ def _export_responses(athena_stub: Any, s3_stub: Any, run_plan: dict[str, Any]) 
         )
 
 
-def test_plan_has_exact_raw_author_sql_and_does_not_execute(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_plan_has_exact_raw_author_sql_and_does_not_execute(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     output = tmp_path / "planned"
     assert exporter.main(_arguments(output)) == 0
     value = json.loads(capsys.readouterr().out)
@@ -143,8 +145,6 @@ def test_plan_has_exact_raw_author_sql_and_does_not_execute(tmp_path: Path, caps
     assert value["scan_price_estimate_upper_usd"] == 0.075
     assert not output.exists()
 
-
-def test_plan_rejects_sql_injection_and_excess_threads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     args = exporter._parser().parse_args(_arguments(tmp_path / "out", "--table", "authors WHERE true"))
     with pytest.raises(ValueError, match="plain SQL identifiers"):
         exporter.plan(args)
@@ -246,49 +246,7 @@ def test_downloaded_and_complete_local_resume_need_no_aws_sdk(tmp_path: Path, mo
     assert before == {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in index.iterdir()}
 
 
-def test_resume_reuses_query_id_after_service_failure(tmp_path: Path) -> None:
-    pytest.importorskip("duckdb", minversion="1.5")
-    session, _, _, athena_stub, s3_stub = _clients()
-    from botocore.exceptions import ClientError
-    from botocore.stub import ANY
-
-    output = tmp_path / "out"
-    args = exporter._parser().parse_args(_arguments(output, "--execute"))
-    run_plan = exporter.plan(args)
-    athena_stub.add_response(
-        "get_work_group",
-        {"WorkGroup": {"Name": "bounded", "Configuration": {"BytesScannedCutoffPerQuery": 100_000_000}}},
-        {"WorkGroup": "bounded"},
-    )
-    athena_stub.add_response(
-        "start_query_execution",
-        {"QueryExecutionId": "retained-query"},
-        {
-            "QueryString": run_plan["sql"],
-            "ClientRequestToken": ANY,
-            "QueryExecutionContext": {"Database": "content_ext"},
-            "WorkGroup": "bounded",
-            "ResultConfiguration": {"OutputLocation": "s3://example/query/"},
-        },
-    )
-    athena_stub.add_client_error("get_query_execution", service_error_code="InternalServerException")
-    with athena_stub, s3_stub:
-        with pytest.raises(ClientError):
-            exporter.execute_export(args, run_plan, session=session)
-        record = json.loads((output / "export.json").read_text(encoding="utf-8"))
-        assert record["execution_id"] == "retained-query"
-        args.resume = True
-        athena_stub.add_response(
-            "get_query_execution",
-            {"QueryExecution": {"QueryExecutionId": "retained-query", "Status": {"State": "FAILED"}}},
-            {"QueryExecutionId": "retained-query"},
-        )
-        with pytest.raises(RuntimeError, match="Author export FAILED"):
-            exporter.execute_export(args, run_plan, session=session)
-        athena_stub.assert_no_pending_responses()
-
-
-def test_resume_preserves_idempotency_token_after_lost_submission_response(tmp_path: Path) -> None:
+def test_resume_reuses_submission_token_and_query_id_after_service_failures(tmp_path: Path) -> None:
     pytest.importorskip("duckdb", minversion="1.5")
     session, _, _, athena_stub, s3_stub = _clients()
     from botocore.exceptions import ClientError
@@ -317,6 +275,12 @@ def test_resume_preserves_idempotency_token_after_lost_submission_response(tmp_p
                 "ResultConfiguration": {"OutputLocation": "s3://example/query/"},
             },
         )
+        athena_stub.add_client_error("get_query_execution", service_error_code="InternalServerException")
+        with pytest.raises(ClientError):
+            exporter.execute_export(args, run_plan, session=session)
+        active = json.loads((output / "export.json").read_text(encoding="utf-8"))
+        assert active["execution_id"] == "same-export"
+
         athena_stub.add_response(
             "get_query_execution",
             {"QueryExecution": {"Status": {"State": "FAILED"}}},
@@ -327,9 +291,8 @@ def test_resume_preserves_idempotency_token_after_lost_submission_response(tmp_p
         athena_stub.assert_no_pending_responses()
 
 
-def test_query_timeout_cancels_and_records_the_bound(tmp_path: Path) -> None:
-    session, athena, _, athena_stub, _ = _clients()
-    del session
+def test_query_bound_cancels_running_queries_and_allows_completed_queries(tmp_path: Path) -> None:
+    _, athena, _, athena_stub, _ = _clients()
     path = tmp_path / "export.json"
     record = {
         "execution_id": "slow",
@@ -344,15 +307,7 @@ def test_query_timeout_cancels_and_records_the_bound(tmp_path: Path) -> None:
         exporter._wait_query(athena, record, path)
     assert json.loads(path.read_text(encoding="utf-8"))["status"] == "bound_exceeded"
 
-
-def test_completed_query_can_resume_after_local_downtime(tmp_path: Path) -> None:
-    _, athena, _, athena_stub, _ = _clients()
-    path = tmp_path / "export.json"
-    record = {
-        "execution_id": "complete",
-        "submitted_epoch": time.time() - 10,
-        "plan": {"max_query_seconds": 1, "max_scan_bytes": 100, "poll_seconds": 1},
-    }
+    record = record | {"execution_id": "complete"}
     athena_stub.add_response(
         "get_query_execution",
         {

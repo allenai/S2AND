@@ -1489,6 +1489,76 @@ def _refresh_stratified_metadata_from_active_labels(
     return refreshed_rows, refreshed_assignments
 
 
+def _select_classic_stratified_eval_rows(
+    bundle: OfficialBundle,
+    spec: dict[str, Any],
+    assignments: pd.DataFrame,
+    *,
+    include_calibration_source: bool,
+    read_source_rows: Callable[[Path, set[str]], pd.DataFrame],
+) -> pd.DataFrame:
+    """Resolve assignments to eligible source rows for fit, evaluation, and preflight."""
+    sources = _classic_stratified_eval_source_specs(spec)
+    known_keys = {source["source_key"] for source in sources if source["source_kind"] != "calibration_source"}
+    if unknown_keys := set(assignments["source_key"].astype(str)) - known_keys:
+        raise ValueError(f"Stratified split assignments use unknown source_key values: {sorted(unknown_keys)}")
+    assigned_query_ids = set(assignments["query_group_id"].astype(str))
+    source_frames: list[pd.DataFrame] = []
+    for source_spec in sources:
+        if source_spec["source_kind"] == "calibration_source":
+            if not include_calibration_source:
+                continue
+            source_query_ids = assigned_query_ids
+        else:
+            source_query_ids = set(
+                assignments.loc[
+                    assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
+                    "query_group_id",
+                ].astype(str)
+            )
+        if not source_query_ids:
+            continue
+        source_path = _resolve_path(bundle, source_spec["path"])
+        rows = read_source_rows(source_path, source_query_ids)
+        if str(source_spec["source_key"]) == "calibration_source":
+            rows["source_key"] = (
+                rows["dataset"].astype(str).map(CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET).fillna("s2and_eval")
+            )
+        else:
+            rows["source_key"] = str(source_spec["source_key"])
+        rows["source_kind"] = str(source_spec["source_kind"])
+        rows, _filter_summary = _drop_unlabeled_singleton_orcid_rows(
+            rows,
+            context=f"stratified_eval:{source_spec['source_key']}",
+        )
+        source_frames.append(rows)
+    all_rows = _drop_shadowed_calibration_source_rows(pd.concat(source_frames, ignore_index=True))
+    join_keys = ["query_group_id", "source_key"]
+    rows = all_rows.merge(assignments, on=join_keys, how="inner", suffixes=("", "_split"))
+    matched_assignments = rows[join_keys].drop_duplicates()
+    if len(matched_assignments) != len(assignments):
+        missing = assignments[join_keys].merge(matched_assignments, on=join_keys, how="left", indicator=True)
+        examples = missing.loc[missing["_merge"].eq("left_only"), join_keys].head(5).to_dict(orient="records")
+        raise ValueError(
+            "Stratified split assignments did not all match source rows: "
+            f"matched={len(matched_assignments)}, expected={len(assignments)}, sample={examples}"
+        )
+    return rows
+
+
+def _read_classic_stratified_source_rows(source_path: Path, source_query_ids: set[str]) -> pd.DataFrame:
+    """Read classic label rows for the assigned query groups."""
+    if source_path.suffix == ".parquet":
+        rows = pd.read_parquet(
+            source_path,
+            filters=[("query_group_id", "in", sorted(source_query_ids))],
+        )
+    else:
+        rows = _read_csv(source_path, compression="gzip")
+        rows = rows[rows["query_group_id"].astype(str).isin(source_query_ids)].copy()
+    return rows
+
+
 def _load_classic_stratified_eval_rows(
     bundle: OfficialBundle,
     spec: dict[str, Any],
@@ -1505,46 +1575,6 @@ def _load_classic_stratified_eval_rows(
     assignments = assignments[assignments["split"].astype(str).isin(requested_splits)].copy()
     if assignments.empty:
         raise ValueError(f"Stratified assignments contain no rows for splits={sorted(requested_splits)}")
-    assigned_query_ids = set(assignments["query_group_id"].astype(str))
-    source_frames: list[pd.DataFrame] = []
-    for source_spec in _classic_stratified_eval_source_specs(spec):
-        if source_spec["source_kind"] == "calibration_source":
-            if not include_calibration_source:
-                continue
-            source_query_ids = assigned_query_ids
-        else:
-            source_query_ids = set(
-                assignments.loc[
-                    assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
-                    "query_group_id",
-                ].astype(str)
-            )
-        if not source_query_ids:
-            continue
-        source_path = _resolve_path(bundle, source_spec["path"])
-        if source_path.suffix == ".parquet":
-            rows = pd.read_parquet(
-                source_path,
-                filters=[("query_group_id", "in", sorted(source_query_ids))],
-            )
-        else:
-            rows = _read_csv(source_path, compression="gzip")
-            rows = rows[rows["query_group_id"].astype(str).isin(source_query_ids)].copy()
-        if str(source_spec["source_key"]) == "calibration_source":
-            rows["source_key"] = (
-                rows["dataset"].astype(str).map(CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET).fillna("s2and_eval")
-            )
-        else:
-            rows["source_key"] = str(source_spec["source_key"])
-        rows["source_kind"] = str(source_spec["source_kind"])
-        rows, _filter_summary = _drop_unlabeled_singleton_orcid_rows(
-            rows,
-            context=f"stratified_eval:{source_spec['source_key']}",
-        )
-        source_frames.append(rows)
-    all_rows = _drop_shadowed_calibration_source_rows(pd.concat(source_frames, ignore_index=True))
-    if "base_group_id" not in all_rows.columns:
-        raise ValueError("Stratified eval source rows must contain base_group_id")
     assignment_columns = [
         "query_group_id",
         "source_key",
@@ -1560,15 +1590,16 @@ def _load_classic_stratified_eval_rows(
         "correction_type",
     ]
     selected_assignment_columns = [column for column in assignment_columns if column in assignments.columns]
-    rows = all_rows.merge(
+    rows = _select_classic_stratified_eval_rows(
+        bundle,
+        spec,
         assignments[selected_assignment_columns],
-        on=["query_group_id", "source_key"],
-        how="inner",
-        suffixes=("", "_split"),
+        include_calibration_source=include_calibration_source,
+        read_source_rows=_read_classic_stratified_source_rows,
     )
+    if "base_group_id_split" not in rows.columns:
+        raise ValueError("Stratified eval source rows must contain base_group_id")
     assignment_base_column = "base_group_id_split"
-    if assignment_base_column not in rows.columns:
-        raise ValueError("Stratified eval join did not retain assignment base_group_id")
     source_base_ids = rows["base_group_id"]
     assignment_base_ids = rows[assignment_base_column]
     invalid_source_base_ids = source_base_ids.isna() | source_base_ids.astype(str).str.strip().eq("")
@@ -1595,12 +1626,6 @@ def _load_classic_stratified_eval_rows(
         if assignment_column in rows.columns:
             rows[column] = rows[assignment_column]
             rows = rows.drop(columns=[assignment_column])
-    matched_assignments = rows[["query_group_id", "source_key"]].drop_duplicates()
-    if len(matched_assignments) != len(assignments):
-        raise ValueError(
-            "Stratified split assignments did not all match source rows: "
-            f"matched={len(matched_assignments)}, expected={len(assignments)}"
-        )
     _validate_unique_stratified_candidate_rows(rows)
     source_keys_per_query = rows.groupby("query_group_id")["source_key"].nunique()
     cross_source_queries = source_keys_per_query[source_keys_per_query > 1]

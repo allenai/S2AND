@@ -88,6 +88,10 @@ uv run --no-sync python scripts/production/model/train_linker_and_finalize.py \
 
 The step computes incremental features with the calibrated pairwise model and fits the linker.
 It writes the complete model, reloads it, and evaluates the declared linker test split.
+Preflight resolves the frozen calibration and test assignments before featurization.
+Calibration groups can use the calibration source, and each assigned evaluation table must still contribute eligible calibration rows.
+Test groups must have eligible rows in their assigned evaluation tables.
+Rows marked `unlabeled_singleton_orcid` are excluded from both splits.
 For a source with reviewed all-negative singleton-ORCID views, cite the review with `--singleton-orcid-review-note`.
 
 ### 4. Outer-test evaluation

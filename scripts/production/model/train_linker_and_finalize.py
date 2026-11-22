@@ -1750,7 +1750,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             source_bundle,
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
-            calibration_query_ids=calibration_query_ids,
             singleton_orcid_review_note=getattr(args, "singleton_orcid_review_note", None),
         )
         query_sources = load_initial_query_sources(

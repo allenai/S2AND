@@ -7,6 +7,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.dataset as pa_dataset
 
 from s2and.arrow_inputs import ArrowDataset
@@ -15,6 +16,7 @@ from s2and.incremental_linking_training.classic import (
     _classic_stratified_eval_source_specs,
     _promoted_stratified_gate_spec,
     _resolve_path,
+    _select_classic_stratified_eval_rows,
     _validate_stratified_split_assignments,
 )
 from s2and.production_training_contract import REQUIRED_LINKER_TABLE_KEYS
@@ -220,12 +222,43 @@ def _validate_singleton_orcid_labels(labels_path: Path, table_key: str) -> None:
         )
 
 
+def _validate_source_split_coverage(source_bundle: OfficialBundle, label_tables: Mapping[Path, pa.Table]) -> None:
+    """Check assigned groups and the calibration tables required by materialization."""
+    classic = dict(source_bundle.models["classic"])
+    gate = _promoted_stratified_gate_spec(classic)
+    if gate is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
+    split_spec = classic["stratified_eval_test_split"]
+    assignments = pd.read_csv(_resolve_path(source_bundle, str(split_spec["assignments_path"])))
+    _validate_stratified_split_assignments(assignments)
+
+    def read_source_rows(path: Path, query_ids: set[str]) -> pd.DataFrame:
+        rows = label_tables[path.resolve()]
+        return rows.filter(pa_dataset.field("query_group_id").isin(sorted(query_ids))).to_pandas()
+
+    for splits, include_calibration_source in ((gate["calibration_splits"], True), ([gate["test_split"]], False)):
+        selected = assignments.loc[assignments["split"].astype(str).isin(splits), ["query_group_id", "source_key"]]
+        if selected.empty:
+            raise ValueError(f"Stratified assignments contain no rows for splits={sorted(splits)}")
+        matched = _select_classic_stratified_eval_rows(
+            source_bundle,
+            classic,
+            selected,
+            include_calibration_source=include_calibration_source,
+            read_source_rows=read_source_rows,
+        )
+        if include_calibration_source:
+            # Materialization still needs an eval file for each assigned calibration source.
+            public_keys = set(matched.loc[matched["source_kind"].ne("calibration_source"), "source_key"])
+            if missing := set(selected["source_key"]) - public_keys:
+                raise ValueError(f"Eval tables have no eligible assigned calibration groups: {sorted(missing)}")
+
+
 def preflight_source_rows(
     source_bundle: OfficialBundle,
     *,
     name_counts_index_root: Path | None,
     arrow_stack: ExitStack,
-    calibration_query_ids: Mapping[str, set[str]] | None = None,
     singleton_orcid_review_note: str | None = None,
 ) -> tuple[int, dict[str, ArrowDataset]]:
     """Validate source rows, calibration coverage, and referenced Arrow generations."""
@@ -236,28 +269,36 @@ def preflight_source_rows(
     if missing_required:
         raise ValueError(f"official linker source bundle is missing required tables: {missing_required}")
 
-    if calibration_query_ids is None:
-        _, calibration_query_ids, _ = _release_table_plan(source_bundle)
-
+    classic = dict(source_bundle.models["classic"])
+    split_paths = {
+        _resolve_path(source_bundle, source["path"]).resolve()
+        for source in _classic_stratified_eval_source_specs(classic)
+    }
     has_singleton_review = bool(singleton_orcid_review_note and singleton_orcid_review_note.strip())
     source_rows = 0
     observed_datasets: set[str] = set()
+    label_tables: dict[Path, pa.Table] = {}
     for table_key in available_tables:
-        labels_path = source_bundle_asset_file(source_bundle, "featureless_rows", table_key)
-        assigned_ids = calibration_query_ids.get(table_key, set())
-        columns = ["dataset", "query_group_id"] if assigned_ids else ["dataset"]
-        rows = read_source_parquet_rows(labels_path, columns=columns)
-        if rows.empty:
+        labels_path = source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve()
+        labels = pa_dataset.dataset(labels_path, format="parquet")
+        columns = ["dataset"]
+        if labels_path in split_paths:
+            columns.append("query_group_id")
+            if "supervision_type" in labels.schema.names:
+                columns.append("supervision_type")
+        rows = labels.to_table(columns=columns)
+        if not len(rows):
             raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
-        if assigned_ids and (missing_ids := assigned_ids - set(rows["query_group_id"].astype(str))):
-            raise ValueError(
-                f"source table {table_key!r} is missing {len(missing_ids)} assigned calibration groups: "
-                f"{sorted(missing_ids)[:5]} ({labels_path})"
-            )
+        if labels_path in split_paths:
+            label_tables[labels_path] = rows
         if not has_singleton_review:
             _validate_singleton_orcid_labels(labels_path, table_key)
         source_rows += len(rows)
-        observed_datasets.update(rows["dataset"].astype(str))
+        observed_datasets.update(str(value) for value in rows["dataset"].unique().to_pylist())
+
+    if missing_paths := split_paths - label_tables.keys():
+        raise ValueError(f"Stratified sources have no featureless tables: {sorted(missing_paths)}")
+    _validate_source_split_coverage(source_bundle, label_tables)
 
     arrow_datasets: dict[str, ArrowDataset] = {}
     for dataset_name in sorted(observed_datasets):

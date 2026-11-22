@@ -188,7 +188,7 @@ def _write_linker_inputs(root: Path, *, leak: bool, dataset: str = "replay_demo"
     assignments = pd.DataFrame(
         {
             "query_group_id": ["cal:q1", "s2and:q1", "hwang:q1"],
-            "source_key": ["calibration_source", "s2and_eval", "hwang_eval"],
+            "source_key": ["s2and_eval", "s2and_eval", "hwang_eval"],
             "split": ["calibration_fit", "calibration_fit", "test"],
             "base_group_id": ["cal:b1", "s2and:b1", "cal:b1" if leak else "hwang:b1"],
         }
@@ -380,16 +380,16 @@ def test_assembled_source_bundle_is_valid_bound_and_portable(
         assert set(datasets) == {"replay_demo"}
 
 
-def test_assembly_requires_calibration_groups_in_the_assigned_eval_table(tmp_path: Path) -> None:
+def test_assembly_rejects_a_missing_calibration_group(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     labels = inputs["source_root"] / "labels" / "s2and_eval.parquet"
     assignments_path = inputs["source_root"] / "splits" / "assignments.csv"
     assignments = pd.read_csv(assignments_path)
-    # The query exists elsewhere in the bundle. It must also exist in its assigned table.
-    assignments.loc[assignments["source_key"].eq("s2and_eval"), "query_group_id"] = "train:q1"
+    # Training rows cannot satisfy an eval assignment.
+    assignments.loc[assignments["query_group_id"].eq("s2and:q1"), "query_group_id"] = "train:q1"
     assignments.to_csv(assignments_path, index=False)
 
-    with pytest.raises(ValueError, match=r"s2and_eval_path.*missing 1 assigned calibration groups.*train:q1"):
+    with pytest.raises(ValueError, match=r"did not all match source rows.*train:q1"):
         assemble_source_bundle(**inputs)
 
     rows = pd.read_parquet(labels)
@@ -398,6 +398,59 @@ def test_assembly_requires_calibration_groups_in_the_assigned_eval_table(tmp_pat
     inputs["output_source_bundle"] = tmp_path / "fixed-source"
     inputs["output_data_root"] = tmp_path / "fixed-data"
     assert assemble_source_bundle(**inputs)["selected_source_rows"] == 4
+
+
+@pytest.mark.parametrize("source_key", ["s2nad_eval", "calibration_source"])
+def test_assembly_rejects_unknown_assignment_sources(tmp_path: Path, source_key: str) -> None:
+    inputs = _inputs(tmp_path)
+    assignments_path = inputs["source_root"] / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    assignments.loc[assignments["query_group_id"].eq("cal:q1"), "source_key"] = source_key
+    assignments.to_csv(assignments_path, index=False)
+
+    with pytest.raises(ValueError, match=f"unknown source_key.*{source_key}"):
+        assemble_source_bundle(**inputs)
+
+
+@pytest.mark.parametrize(
+    ("filename", "query_id"),
+    [("s2and_eval.parquet", "s2and:q1"), ("calibration.parquet", "cal:q1"), ("hwang_eval.parquet", "hwang:q1")],
+)
+def test_assembly_rejects_assignments_with_only_unlabeled_singletons(
+    tmp_path: Path, filename: str, query_id: str
+) -> None:
+    inputs = _inputs(tmp_path)
+    path = inputs["source_root"] / "labels" / filename
+    pd.read_parquet(path).assign(supervision_type="unlabeled_singleton_orcid").to_parquet(path, index=False)
+
+    with pytest.raises(ValueError, match=f"did not all match source rows.*{query_id}"):
+        assemble_source_bundle(**inputs)
+
+
+def test_assembly_rejects_a_test_group_only_in_the_calibration_source(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    labels = inputs["source_root"] / "labels"
+    test_path = labels / "hwang_eval.parquet"
+    calibration_path = labels / "calibration.parquet"
+    test_rows = pd.read_parquet(test_path)
+    pd.concat([pd.read_parquet(calibration_path), test_rows.assign(dataset="h_wang")]).to_parquet(calibration_path)
+    test_rows.assign(query_group_id="hwang:other").to_parquet(test_path, index=False)
+
+    with pytest.raises(ValueError, match="did not all match source rows.*hwang:q1"):
+        assemble_source_bundle(**inputs)
+
+
+def test_assembly_rejects_an_eval_table_with_only_fallback_assignments(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    labels = inputs["source_root"] / "labels"
+    eval_path = labels / "s2and_eval.parquet"
+    calibration_path = labels / "calibration.parquet"
+    eval_rows = pd.read_parquet(eval_path)
+    pd.concat([pd.read_parquet(calibration_path), eval_rows], ignore_index=True).to_parquet(calibration_path)
+    eval_rows.assign(query_group_id="s2and:other").to_parquet(eval_path, index=False)
+
+    with pytest.raises(ValueError, match="no eligible assigned calibration groups.*s2and_eval"):
+        assemble_source_bundle(**inputs)
 
 
 @pytest.mark.parametrize("review_note", [None, "   ", "Reviewed candidate decisions in the release ledger."])

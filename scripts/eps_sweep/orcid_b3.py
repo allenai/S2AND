@@ -14,7 +14,11 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from s2and.arrow_inputs import ArrowDataset
-from s2and.incremental_linking_training.classic import _load_classic_stratified_eval_rows, load_bundle
+from s2and.incremental_linking_training.classic import (
+    _load_classic_stratified_eval_rows,
+    _promoted_stratified_gate_spec,
+    load_bundle,
+)
 from s2and.text import normalize_orcid
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
 from scripts.production.model.initial_query_sources import (
@@ -59,28 +63,25 @@ def final_test_query_identities(
         query_sources = load_initial_query_sources(snapshot_root, dataset_names=(dataset,))
     bundle = load_bundle(snapshot_root)
     spec = dict(bundle.models["classic"])
+    gate = _promoted_stratified_gate_spec(spec)
+    if gate is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
     split_spec = dict(spec["stratified_eval_test_split"])
-    rows, assignments = _load_classic_stratified_eval_rows(
+    rows, _assignments = _load_classic_stratified_eval_rows(
         bundle,
         spec,
         split_spec,
-        splits=(str(split_spec["test_split"]),),
-        include_calibration_source=True,
-        dataset=dataset,
+        splits=(str(gate["test_split"]),),
+        include_calibration_source=False,
     )
-    if assignments.empty:
-        return frozenset()
-    return resolve_test_query_identities(rows, assignments, query_sources.origins.get(dataset, {}), dataset)
+    return resolve_test_query_identities(rows, query_sources.origins.get(dataset, {}), dataset)
 
 
-def resolve_test_query_identities(
-    rows: pd.DataFrame, assignments: pd.DataFrame, origins: Mapping[str, str], dataset: str
-) -> frozenset[str]:
+def resolve_test_query_identities(rows: pd.DataFrame, origins: Mapping[str, str], dataset: str) -> frozenset[str]:
     """Resolve assigned test query groups to source records.
 
     Args:
         rows: Label rows of the test split, with query group and query signature IDs.
-        assignments: Frozen test-split assignments.
         origins: Initial-only query copies mapped to their source records.
         dataset: Incremental dataset name.
 
@@ -88,12 +89,9 @@ def resolve_test_query_identities(
         Source signature IDs of every assigned test query.
 
     Raises:
-        ValueError: If a test group has no label rows or a copy has no source record.
+        ValueError: If a copy has no source record.
     """
     rows = rows[rows["dataset"].astype(str).eq(dataset)]
-    assigned = set(assignments.loc[assignments["dataset"].astype(str).eq(dataset), "query_group_id"].astype(str))
-    if missing := assigned - set(rows["query_group_id"].astype(str)):
-        raise ValueError(f"Final-test query groups have no label rows: {dataset} {sorted(missing)[:5]}")
     queries = set(rows["query_signature_id"].astype(str))
     if unmapped := sorted(query for query in queries if query.startswith("visibleq:") and query not in origins):
         raise ValueError(f"Final-test query copies have no source record: {dataset} {unmapped[:5]}")

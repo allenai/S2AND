@@ -266,52 +266,55 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
             orcid_b3.read_reference(dataset, tmp_path, "unit", test_identities=frozenset(), error_records=frozenset())
 
 
-def test_final_test_identities_only_open_sources_for_the_reviewed_dataset(tmp_path: Path) -> None:
+def test_final_test_identities_use_label_dataset_when_assignment_is_stale(tmp_path: Path) -> None:
     _source_snapshot(tmp_path, source="origin", with_clone=True)
-    write_json(
-        tmp_path / "bundle.json",
-        {
-            "bundle_name": "snapshot",
-            "assets": {},
-            "expected_metrics": {},
-            "models": {
-                "classic": {
-                    "classic_gate_source_path": "calibration.parquet",
-                    "s2and_eval_path": "unit.parquet",
-                    "hwang_eval_path": "unavailable.parquet",
-                    "stratified_eval_test_split": {"test_split": "test", "assignments_path": "assignments.csv"},
-                }
-            },
-        },
-    )
-    pd.DataFrame(
-        {
-            "dataset": ["unit", "h_wang"],
-            "query_group_id": ["unit-query", "other-query"],
-            "base_group_id": ["unit-base", "other-base"],
-            "source_key": ["s2and_eval", "hwang_eval"],
-            "split": ["test", "test"],
-        }
-    ).to_csv(tmp_path / "assignments.csv", index=False)
-    rows = pd.DataFrame(
-        {
-            "dataset": ["unit"],
-            "query_group_id": ["unit-query"],
-            "base_group_id": ["unit-base"],
-            "query_signature_id": [derived_query_id("visibleq:", "origin", "source-paper")],
-            "candidate_component_key": ["candidate"],
-            "retrieval_rank": [1],
-            "label": [1],
-        }
-    )
-    rows.to_parquet(tmp_path / "calibration.parquet", index=False)
-    rows.to_parquet(tmp_path / "unit.parquet", index=False)
+    _write_sweep_assignments(tmp_path, test_signature=derived_query_id("visibleq:", "origin", "source-paper"))
+    assignments_path = tmp_path / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    assignments.loc[assignments["query_group_id"].eq("unit:test"), "dataset"] = "stale_dataset"
+    assignments.to_csv(assignments_path, index=False)
 
     assert orcid_b3.final_test_query_identities(tmp_path, "unit") == frozenset({"origin"})
 
 
-def test_final_test_identities_resolve_copies_and_reject_unmapped_or_missing_rows() -> None:
-    assignments = pd.DataFrame({"dataset": ["unit", "unit", "other"], "query_group_id": ["g1", "g2", "g3"]})
+def test_final_test_identities_use_promoted_gate_test_split(tmp_path: Path) -> None:
+    _source_snapshot(tmp_path)
+    _write_sweep_assignments(tmp_path)
+    bundle_path = tmp_path / "bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["models"]["classic"]["promoted_stratified_gate"]["test_split"] = "final"
+    write_json(bundle_path, bundle)
+    assignments_path = tmp_path / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    final = assignments.loc[assignments["query_group_id"].eq("unit:test")].assign(
+        split="final", query_group_id="unit:final", base_group_id="unit:final"
+    )
+    pd.concat([assignments, final]).to_csv(assignments_path, index=False)
+    labels_path = tmp_path / "unit.parquet"
+    rows = pd.read_parquet(labels_path)
+    final_rows = rows.loc[rows["query_group_id"].eq("unit:test")].assign(
+        query_group_id="unit:final", base_group_id="unit:final", query_signature_id="held-record"
+    )
+    pd.concat([rows, final_rows]).to_parquet(labels_path, index=False)
+
+    assert orcid_b3.final_test_query_identities(tmp_path, "unit") == frozenset({"held-record"})
+
+
+def test_final_test_identities_reject_groups_only_in_calibration_source(tmp_path: Path) -> None:
+    _source_snapshot(tmp_path)
+    _write_sweep_assignments(tmp_path)
+    assignments_path = tmp_path / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    assignments.loc[assignments["query_group_id"].eq("unit:test"), "source_key"] = "s2and_eval"
+    assignments.to_csv(assignments_path, index=False)
+    rows = pd.read_parquet(tmp_path / "unit.parquet")
+    rows.loc[rows["query_group_id"].eq("unit:test")].to_parquet(tmp_path / "calibration.parquet", index=False)
+
+    with pytest.raises(ValueError, match="did not all match source rows.*unit:test"):
+        orcid_b3.final_test_query_identities(tmp_path, "unit")
+
+
+def test_final_test_identities_resolve_copies_and_reject_unmapped_copies() -> None:
     rows = pd.DataFrame(
         {
             "dataset": ["unit", "unit", "unit", "other"],
@@ -319,11 +322,9 @@ def test_final_test_identities_resolve_copies_and_reject_unmapped_or_missing_row
             "query_signature_id": ["s1", "s1", "visibleq:c", "s9"],
         }
     )
-    assert orcid_b3.resolve_test_query_identities(rows, assignments, {"visibleq:c": "s2"}, "unit") == {"s1", "s2"}
+    assert orcid_b3.resolve_test_query_identities(rows, {"visibleq:c": "s2"}, "unit") == {"s1", "s2"}
     with pytest.raises(ValueError, match="no source record"):
-        orcid_b3.resolve_test_query_identities(rows, assignments, {}, "unit")
-    with pytest.raises(ValueError, match="no label rows"):
-        orcid_b3.resolve_test_query_identities(rows[rows["query_group_id"] != "g2"], assignments, {}, "unit")
+        orcid_b3.resolve_test_query_identities(rows, {}, "unit")
 
 
 def test_native_eps_featurizer_hides_orcid_ids(tmp_path: Path) -> None:

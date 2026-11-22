@@ -1587,9 +1587,8 @@ def _load_classic_stratified_eval_rows(
     *,
     splits: Sequence[str],
     include_calibration_source: bool,
-    dataset: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load rows assigned to the requested splits and, if specified, one dataset."""
+    """Load rows assigned to the requested splits."""
 
     assignments = _read_csv(_resolve_path(bundle, str(split_spec["assignments_path"])))
     _validate_stratified_split_assignments(assignments)
@@ -1597,10 +1596,6 @@ def _load_classic_stratified_eval_rows(
     assignments = assignments[assignments["split"].astype(str).isin(requested_splits)].copy()
     if assignments.empty:
         raise ValueError(f"Stratified assignments contain no rows for splits={sorted(requested_splits)}")
-    if dataset is not None:
-        assignments = assignments[assignments["dataset"].astype(str).eq(dataset)].copy()
-        if assignments.empty:
-            return pd.DataFrame(), assignments
     assignment_columns = [
         "query_group_id",
         "source_key",

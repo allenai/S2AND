@@ -259,13 +259,16 @@ def validate_portable_source_bundle(root: Path, *, singleton_orcid_review_note: 
                     ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True)
                 )
                 opened_roots.add(dataset_root)
-    return {
+    report = {
         "dataset_count": len(entries),
         "datasets": sorted(entries),
         "name_counts_manifest_sha256": index_sha256,
         "selected_source_rows": selected_rows,
         "source_bundle": str(root),
     }
+    if singleton_orcid_review_note and singleton_orcid_review_note.strip():
+        report["singleton_orcid_review_note"] = singleton_orcid_review_note
+    return report
 
 
 def assemble_source_bundle(
@@ -346,13 +349,16 @@ def assemble_source_bundle(
         output_source_bundle, singleton_orcid_review_note=singleton_orcid_review_note
     )
     validate_release_root(output_data_root)
-    return {
+    report = {
         "data_root": str(output_data_root),
         "name_counts_manifest_sha256": authoritative_manifest_sha256,
         "release_version": release_version,
         "selected_source_rows": source_report["selected_source_rows"],
         "source_bundle": str(output_source_bundle),
     }
+    if "singleton_orcid_review_note" in source_report:
+        report["singleton_orcid_review_note"] = source_report["singleton_orcid_review_note"]
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -369,7 +375,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.add_argument(f"--{option}", type=Path, required=True)
     parser.add_argument(
         "--singleton-orcid-review-note",
-        help="Cite the review of every all-negative singleton-ORCID view in the source bundle.",
+        help="Cite the review of tables with at least ten singleton-ORCID views and no positive among them.",
     )
     print(json.dumps(assemble_source_bundle(**vars(parser.parse_args(argv))), indent=2, sort_keys=True))
     return 0

@@ -179,7 +179,7 @@ def validate_corrected_datasets(root: Path, *, singleton_orcid_review_note: str 
             ) as data:
                 if data.name_counts_index is None or Path(data.name_counts_index.path).resolve() != index:
                     raise ValueError(f"Pairwise dataset must use the shared count index: {name}")
-    return {
+    report = {
         "root": str(root),
         "release_version": inputs["release_version"],
         "corrected_datasets": sorted(path.name for path in corrected.iterdir() if path.is_dir()),
@@ -191,6 +191,9 @@ def validate_corrected_datasets(root: Path, *, singleton_orcid_review_note: str 
         "incremental_source_rows": incremental["selected_source_rows"],
         "name_counts_manifest_sha256": index_digest,
     }
+    if "singleton_orcid_review_note" in incremental:
+        report["singleton_orcid_review_note"] = incremental["singleton_orcid_review_note"]
+    return report
 
 
 def package_corrected_datasets(
@@ -363,7 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--singleton-orcid-review-note",
-        help="Cite the review of every all-negative singleton-ORCID view in the source bundle.",
+        help="Cite the review of tables with at least ten singleton-ORCID views and no positive among them.",
     )
     print(json.dumps(package_corrected_datasets(**vars(parser.parse_args(argv))), indent=2))
     return 0

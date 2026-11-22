@@ -92,7 +92,9 @@ Preflight resolves the frozen calibration and test assignments before featurizat
 Calibration groups can use the calibration source, and each assigned evaluation table must still contribute eligible calibration rows.
 Test groups must have eligible rows in their assigned evaluation tables.
 Rows marked `unlabeled_singleton_orcid` are excluded from both splits.
-For a source with reviewed all-negative singleton-ORCID views, cite the review with `--singleton-orcid-review-note`.
+Preflight flags label tables with at least ten negative singleton-ORCID views and no positive in those views.
+For a reviewed table that meets this condition, cite the review with `--singleton-orcid-review-note`.
+The linker evaluation report records the citation.
 
 ### 4. Outer-test evaluation
 

@@ -29,6 +29,9 @@ from s2and.incremental_linking_training.source_bundle_preflight import preflight
 from scripts.production.model.linker_source_bundle import (
     assemble_source_bundle,
 )
+from scripts.production.model.linker_source_bundle import (
+    main as assemble_main,
+)
 from scripts.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
@@ -453,33 +456,58 @@ def test_assembly_rejects_an_eval_table_with_only_fallback_assignments(tmp_path:
         assemble_source_bundle(**inputs)
 
 
-@pytest.mark.parametrize("review_note", [None, "   ", "Reviewed candidate decisions in the release ledger."])
-def test_assembly_requires_review_of_each_all_negative_singleton_orcid_view(
-    tmp_path: Path, review_note: str | None
-) -> None:
-    inputs = _inputs(tmp_path)
-    labels_path = inputs["source_root"] / "labels" / "s2and_eval.parquet"
-    template = pd.read_parquet(labels_path)
+def _write_singleton_orcid_views(source_root: Path, *, view_count: int, reviewed: bool) -> None:
+    path = source_root / "labels" / "s2and_eval.parquet"
+    template = pd.read_parquet(path).assign(supervision_type="negative_singleton_orcid")
     rows = pd.concat(
         [
-            template.assign(supervision_type="negative_singleton_orcid"),
-            template.assign(supervision_type="negative_singleton_orcid", label=0, retrieval_rank=2),
-            template.assign(query_group_id="unreviewed", supervision_type="negative_singleton_orcid", label=0),
-            template.assign(query_group_id="unlabeled", supervision_type="unlabeled_singleton_orcid", label=0),
+            template,
+            *(
+                template.assign(query_group_id=f"singleton:{index}", base_group_id=f"singleton:{index}")
+                for index in range(1, view_count)
+            ),
         ],
         ignore_index=True,
     )
-    rows.to_parquet(labels_path, index=False)
+    rows["label"] = [int(reviewed), *([0] * (view_count - 2)), None]
+    rows.to_parquet(path, index=False)
 
-    if not review_note or not review_note.strip():
-        with pytest.raises(ValueError, match="1 all-negative negative_singleton_orcid views.*unreviewed"):
-            if review_note is None:
-                assemble_source_bundle(**inputs)
-            else:
-                assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)
-        return
 
-    assert assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)["selected_source_rows"] == 7
+@pytest.mark.parametrize(("view_count", "reviewed"), [(9, False), (10, True)])
+def test_assembly_accepts_small_or_reviewed_singleton_orcid_tables(
+    tmp_path: Path, view_count: int, reviewed: bool
+) -> None:
+    inputs = _inputs(tmp_path)
+    _write_singleton_orcid_views(inputs["source_root"], view_count=view_count, reviewed=reviewed)
+
+    report = assemble_source_bundle(**inputs)
+
+    assert report["selected_source_rows"] == view_count + 3
+    assert "singleton_orcid_review_note" not in report
+
+
+@pytest.mark.parametrize("review_note", [None, "   "])
+def test_assembly_rejects_all_negative_singleton_orcid_tables_with_null_labels(
+    tmp_path: Path, review_note: str | None
+) -> None:
+    inputs = _inputs(tmp_path)
+    _write_singleton_orcid_views(inputs["source_root"], view_count=10, reviewed=False)
+
+    with pytest.raises(ValueError, match="10 all-negative negative_singleton_orcid views"):
+        assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)
+
+
+def test_assembly_cli_records_singleton_orcid_review(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    inputs = _inputs(tmp_path)
+    _write_singleton_orcid_views(inputs["source_root"], view_count=10, reviewed=False)
+    args = [arg for name, path in inputs.items() for arg in (f"--{name.replace('_', '-')}", str(path))]
+    note = "Reviewed the all-negative table in the release ledger."
+
+    assert assemble_main([*args, "--singleton-orcid-review-note", note]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["singleton_orcid_review_note"] == note
+    assert report["selected_source_rows"] == 13
 
 
 def test_assembly_rejects_source_leakage_and_published_arrow_inputs(tmp_path: Path) -> None:

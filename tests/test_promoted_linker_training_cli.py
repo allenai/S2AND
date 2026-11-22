@@ -13,6 +13,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training import classic as classic_training
 from scripts.production.model import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
+from tests.test_linker_source_bundle import _write_arrow_root, _write_linker_inputs, _write_singleton_orcid_views
 
 COMMON_TRAINING_ARGS = (
     "--source-bundle-root",
@@ -451,9 +452,12 @@ def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
 
 
+@pytest.mark.parametrize("review_note", [None, "Reviewed the all-negative table in the release ledger."])
 def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    review_note: str | None,
 ) -> None:
     target = {
         "features": ["f0"],
@@ -461,13 +465,12 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "params": {"n_estimators": 1},
         "metrics": {"stratified_test_errors": 0},
     }
-    bundle = promoted_train.OfficialBundle(
-        root=(tmp_path / "source").resolve(),
-        bundle_name="gate-order",
-        assets={},
-        models={"classic": {"feature_columns": ["f0"], "best_params": {"n_estimators": 1}}},
-        expected_metrics={},
-    )
+    source_root = tmp_path / "source"
+    _write_arrow_root(source_root, dataset="replay_demo", replay=True)
+    _write_linker_inputs(source_root, leak=False)
+    _write_singleton_orcid_views(source_root, view_count=10, reviewed=review_note is None)
+    bundle = promoted_train.load_bundle(source_root)
+    bundle.models["classic"]["best_params"] = {"n_estimators": 1}
     map_path = bundle.root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
     map_path.parent.mkdir(parents=True)
     map_path.write_bytes(b"")
@@ -507,8 +510,15 @@ def test_release_serializes_complete_bundle_before_evaluation(
         }
 
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
-    monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
-    _stub_preflight(monkeypatch)
+    monkeypatch.setattr(
+        promoted_train,
+        "load_packaged_artifact_authority",
+        lambda **_kwargs: SimpleNamespace(
+            hashes=dict(EXPLICIT_ARTIFACT_HASHES), name_tuples=SimpleNamespace(pairs=frozenset())
+        ),
+    )
+    monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path, **_kwargs: {"test": "binding"})
+    monkeypatch.setattr(promoted_train, "require_arrow_name_counts_index_for_clusterer", lambda *_a, **_kw: None)
 
     training_authorities: list[Any] = []
     stage_summaries: dict[str, list[dict[str, Any]]] = {}
@@ -517,6 +527,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         stage = "materialize_training" if "materialize_training" not in order else "materialize_evaluation"
         if stage == "materialize_training":
             training_authorities.append(_kwargs["holdout_identities"])
+            assert _kwargs["query_ids_by_table"] == {"s2and_eval_path": {"cal:q1", "s2and:q1"}}
         else:
             assert "holdout_identities" not in _kwargs
         order.append(stage)
@@ -589,15 +600,25 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "load_clusterer",
         lambda *_args, **_kwargs: SimpleNamespace(production_model_release_version="9.9"),
     )
-    args = promoted_train.build_parser().parse_args(
-        [
-            *COMMON_TRAINING_ARGS,
-            "--output-dir",
-            str(output_dir),
-        ]
-    )
+    args = [
+        *COMMON_TRAINING_ARGS,
+        "--source-bundle-root",
+        str(source_root),
+        "--name-counts-index-root",
+        str(source_root / "name_counts_index"),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if review_note is not None:
+        with pytest.raises(ValueError, match="10 all-negative negative_singleton_orcid views"):
+            promoted_train.main(args)
+        assert not output_dir.exists()
+        args.extend(("--singleton-orcid-review-note", review_note))
 
-    result = promoted_train.run(args)
+    promoted_train.main(args)
+
+    result = json.loads(capsys.readouterr().out)
+    assert result.get("singleton_orcid_review_note") == review_note
     assert order == [
         "materialize_training",
         "fit",

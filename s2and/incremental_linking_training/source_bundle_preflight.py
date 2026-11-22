@@ -200,25 +200,24 @@ def _release_table_plan(
     return training_keys, calibration_query_ids, evaluation_keys
 
 
-def _validate_singleton_orcid_labels(labels_path: Path, table_key: str) -> None:
-    """Reject a singleton-ORCID view whose candidates all have negative labels."""
-    labels = pa_dataset.dataset(labels_path, format="parquet")
-    if "supervision_type" not in labels.schema.names:
+def _validate_singleton_orcid_labels(rows: pa.Table, table_key: str, labels_path: Path) -> None:
+    """Require review of tables with at least ten marked views and no positive in those views."""
+    marked_rows = rows.filter(pa_dataset.field("supervision_type") == "negative_singleton_orcid")
+    if len(marked_rows) < 10:
         return
-    rows = labels.to_table(columns=["dataset", "query_group_id", "label", "supervision_type"]).to_pandas()
-    marked = rows["supervision_type"].eq("negative_singleton_orcid")
-    if not marked.any():
+    view_keys = ["dataset", "query_group_id"]
+    marked_views = marked_rows.select(view_keys).to_pandas().drop_duplicates()
+    if len(marked_views) < 10:
         return
-    view_keys = [rows["dataset"], rows["query_group_id"]]
-    all_zero = pd.to_numeric(rows["label"], errors="coerce").eq(0).groupby(view_keys).transform("all")
-    unreviewed = rows.loc[marked & all_zero, ["dataset", "query_group_id"]].drop_duplicates()
-    if not unreviewed.empty:
-        examples = unreviewed.head(5).to_dict(orient="records")
+    labels = pd.to_numeric(rows["label"].to_pandas(), errors="coerce").fillna(0)
+    positive_views = rows.select(view_keys).filter(pa.array(labels.eq(1))).to_pandas()
+    if positive_views.merge(marked_views, on=view_keys).empty:
+        examples = marked_views.head(5).to_dict(orient="records")
         raise ValueError(
-            f"source table {table_key!r} has {len(unreviewed)} all-negative negative_singleton_orcid views "
+            f"source table {table_key!r} has {len(marked_views)} all-negative negative_singleton_orcid views "
             f"without review provenance: {examples} ({labels_path}). "
-            "Mark unreviewed queries unlabeled_singleton_orcid. "
-            "For reviewed queries, cite the review with --singleton-orcid-review-note."
+            "Mark unreviewed queries unlabeled_singleton_orcid and remove their split assignments. "
+            "For reviewed tables, cite the review with --singleton-orcid-review-note."
         )
 
 
@@ -281,18 +280,22 @@ def preflight_source_rows(
     for table_key in available_tables:
         labels_path = source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve()
         labels = pa_dataset.dataset(labels_path, format="parquet")
+        has_supervision_type = "supervision_type" in labels.schema.names
+        check_singletons = has_supervision_type and not has_singleton_review
         columns = ["dataset"]
-        if labels_path in split_paths:
+        if labels_path in split_paths or check_singletons:
             columns.append("query_group_id")
-            if "supervision_type" in labels.schema.names:
+            if has_supervision_type:
                 columns.append("supervision_type")
+        if check_singletons:
+            columns.append("label")
         rows = labels.to_table(columns=columns)
         if not len(rows):
             raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
         if labels_path in split_paths:
             label_tables[labels_path] = rows
-        if not has_singleton_review:
-            _validate_singleton_orcid_labels(labels_path, table_key)
+        if check_singletons:
+            _validate_singleton_orcid_labels(rows, table_key, labels_path)
         source_rows += len(rows)
         observed_datasets.update(str(value) for value in rows["dataset"].unique().to_pylist())
 

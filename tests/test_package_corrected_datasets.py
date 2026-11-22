@@ -25,7 +25,12 @@ from scripts.production.model.linker_source_bundle import validate_portable_sour
 from scripts.production.model.unknown_signatures import load_unknown_signatures
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import write_pairwise_dataset
-from tests.test_linker_source_bundle import _link_directory, _write_arrow_root, _write_linker_inputs
+from tests.test_linker_source_bundle import (
+    _link_directory,
+    _write_arrow_root,
+    _write_linker_inputs,
+    _write_singleton_orcid_views,
+)
 from tests.test_package_pairwise_inputs import _write_prepared
 
 
@@ -107,6 +112,20 @@ def test_packaging_cli_requires_a_precision_tolerance(
     assert exc.value.code == 2
     assert "--precision-f1-tolerance" in capsys.readouterr().err
     assert not package_inputs["output_root"].exists()
+
+
+def test_packaging_cli_records_singleton_orcid_review(
+    package_inputs: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_singleton_orcid_views(package_inputs["linker_source_bundle"], view_count=10, reviewed=False)
+    args = [arg for name, path in package_inputs.items() for arg in (f"--{name.replace('_', '-')}", str(path))]
+    note = "Reviewed the all-negative table in the release ledger."
+
+    assert main([*args, "--precision-f1-tolerance", "0", "--singleton-orcid-review-note", note]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["singleton_orcid_review_note"] == note
+    assert report["incremental_source_rows"] == 13
 
 
 def test_complete_snapshot_preserves_current_sources_and_uses_one_index(

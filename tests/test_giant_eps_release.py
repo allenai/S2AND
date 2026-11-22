@@ -54,6 +54,31 @@ def _source_snapshot(root: Path, *, source: str = "q1", with_clone: bool = False
     return path
 
 
+def _write_sweep_assignments(root: Path, calibration_datasets: tuple[str, ...] = ("unit",)) -> None:
+    assignments = root / "splits" / "assignments.csv"
+    assignments.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        (dataset, "fit" if index == 0 else "check", f"{dataset}_eval")
+        for index, dataset in enumerate(calibration_datasets)
+    ]
+    rows.extend([("s2and", "fit", "s2and_eval"), ("held_out", "test", "held_out_eval")])
+    pd.DataFrame(rows, columns=pd.Index(["dataset", "split", "source_key"])).to_csv(assignments, index=False)
+    write_json(
+        root / "bundle.json",
+        {
+            "bundle_name": "snapshot",
+            "assets": {},
+            "expected_metrics": {},
+            "models": {
+                "classic": {
+                    "promoted_stratified_gate": {"calibration_splits": ["fit", "check"]},
+                    "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv"},
+                }
+            },
+        },
+    )
+
+
 def _curve(
     root: Path,
     model_hash: str = "a" * 64,
@@ -70,6 +95,7 @@ def _curve(
     )
     snapshot_root = root / "snapshot"
     map_path = _source_snapshot(snapshot_root, with_clone=with_source_map)
+    _write_sweep_assignments(snapshot_root)
     map_digest = sha256_file(map_path) if with_source_map else None
     plan = {
         "dataset": "unit",
@@ -141,7 +167,6 @@ def _apply(
         0.65,
         "Fixture review",
         tmp_path / "review.json",
-        release_datasets=("unit",),
         expected_batching_threshold=15000,
         test_identities=lambda _root, _dataset, _sources: test_ids,
     )
@@ -392,6 +417,9 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     manifest.write_text("{}", encoding="utf-8")
     dataset = _curve(tmp_path / "curves", sha256_file(manifest))
 
+    with pytest.raises(ValueError, match="must match the sweep plans"):
+        _apply(tmp_path, source, datasets=("unit", "unit"))
+
     with pytest.raises(ValueError, match="contains final-test records"):
         _apply(tmp_path, source, test_ids=frozenset({"r2"}))
 
@@ -403,25 +431,15 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("extra_cli_args", "message"),
-    [
-        ([], "positive --expected-batching-threshold"),
-        (
-            ["--expected-batching-threshold", "0", "--release-datasets", "unit"],
-            "positive --expected-batching-threshold",
-        ),
-        (
-            ["--expected-batching-threshold", "-1", "--release-datasets", "unit"],
-            "positive --expected-batching-threshold",
-        ),
-        (["--expected-batching-threshold", "15000"], "needs --release-datasets"),
-    ],
+    "threshold_args", [[], ["--expected-batching-threshold", "0"], ["--expected-batching-threshold", "-1"]]
 )
-def test_snapshot_sweep_review_requires_expectations(tmp_path: Path, extra_cli_args: list[str], message: str) -> None:
+def test_snapshot_sweep_review_requires_a_positive_batching_threshold(
+    tmp_path: Path, threshold_args: list[str]
+) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "manifest.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="positive --expected-batching-threshold"):
         apply_reviewed_eps_module.main(
             [
                 "--source-model",
@@ -438,29 +456,23 @@ def test_snapshot_sweep_review_requires_expectations(tmp_path: Path, extra_cli_a
                 "Fixture review",
                 "--output-report",
                 str(tmp_path / "review.json"),
-                *extra_cli_args,
+                *threshold_args,
             ]
         )
     assert not (tmp_path / "output").exists()
 
 
-def test_release_review_requires_every_declared_dataset(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "manifest.json").write_text("{}", encoding="utf-8")
-    _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
-    with pytest.raises(ValueError, match="exactly the frozen datasets"):
-        apply_reviewed_eps(
-            source,
-            tmp_path / "output",
-            tmp_path / "curves",
-            ["unit"],
-            0.65,
-            "Fixture review",
-            tmp_path / "review.json",
-            expected_batching_threshold=15000,
-            release_datasets=("unit", "other"),
-        )
+def test_release_review_rejects_a_sweep_missing_a_snapshot_calibration_dataset(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    root = tmp_path / "curves"
+    _curve(root, sha256_file(source / "manifest.json"))
+    _write_sweep_assignments(root / "snapshot", ("unit", "other"))
+
+    with pytest.raises(ValueError, match="calibration assignments.*other"):
+        _apply(tmp_path, source)
+
+    assert not (tmp_path / "output").exists()
+    assert not (tmp_path / "review.json").exists()
 
 
 def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_path: Path) -> None:
@@ -479,7 +491,6 @@ def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_pa
             0.65,
             "Fixture review",
             tmp_path / "review.json",
-            release_datasets=("unit",),
             expected_batching_threshold=15000,
         )
     assert not (tmp_path / "output").exists()
@@ -531,13 +542,12 @@ def _complete_model(tmp_path: Path) -> Path:
     ).bundle_dir
 
 
-@pytest.mark.parametrize("extra_cli_args", [("--expected-batching-threshold", "15000"), ("--release-datasets", "unit")])
-def test_internal_review_rejects_snapshot_only_options(tmp_path: Path, extra_cli_args: tuple[str, str]) -> None:
+def test_internal_review_rejects_a_batching_threshold(tmp_path: Path) -> None:
     source = _complete_model(tmp_path)
     output = tmp_path / "output"
     report = tmp_path / "review.json"
 
-    with pytest.raises(ValueError, match=f"{extra_cli_args[0]}.*--sweep-root"):
+    with pytest.raises(ValueError, match="--expected-batching-threshold requires --sweep-root"):
         apply_reviewed_eps_module.main(
             [
                 "--source-model",
@@ -550,7 +560,8 @@ def test_internal_review_rejects_snapshot_only_options(tmp_path: Path, extra_cli
                 "Fixture review",
                 "--output-report",
                 str(report),
-                *extra_cli_args,
+                "--expected-batching-threshold",
+                "15000",
             ]
         )
 
@@ -563,6 +574,7 @@ def test_release_review_rejects_a_completed_curve_copied_under_another_name(tmp_
     root = tmp_path / "curves"
     dataset = _curve(root, sha256_file(source / "manifest.json"))
     shutil.copytree(dataset, root / "other")
+    _write_sweep_assignments(root / "snapshot", ("unit", "other"))
     snapshot_datasets = root / "snapshot" / "datasets"
     shutil.copytree(snapshot_datasets / "unit", snapshot_datasets / "other")
     output = tmp_path / "output"
@@ -577,7 +589,6 @@ def test_release_review_rejects_a_completed_curve_copied_under_another_name(tmp_
             0.65,
             "Fixture review",
             report,
-            release_datasets=("unit", "other"),
             expected_batching_threshold=15000,
             test_identities=lambda _root, _dataset, _sources: frozenset(),
         )
@@ -586,7 +597,7 @@ def test_release_review_rejects_a_completed_curve_copied_under_another_name(tmp_
     assert not report.exists()
 
 
-def test_release_review_rejects_matching_lists_that_omit_a_sweep_plan(tmp_path: Path) -> None:
+def test_release_review_rejects_a_dataset_list_that_omits_a_sweep_plan(tmp_path: Path) -> None:
     source = _complete_model(tmp_path)
     root = tmp_path / "curves"
     dataset = _curve(root, sha256_file(source / "manifest.json"))
@@ -695,7 +706,6 @@ def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path
             eps,
             "Fixture review",
             tmp_path / "review.json",
-            release_datasets=("unit",),
             expected_batching_threshold=15000,
             test_identities=lambda _root, _dataset, _sources: frozenset(),
             precision_f1_tolerance=tolerance,

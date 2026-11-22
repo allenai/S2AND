@@ -20,6 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from s2and._sha256 import sha256_file
+from s2and.incremental_linking_training.classic import (
+    _promoted_stratified_gate_spec,
+    _read_csv,
+    _resolve_path,
+    load_bundle,
+)
 from s2and.production_bundle import _staged_production_bundle
 from s2and.production_model import load_production_model
 from scripts.eps_sweep.common import (
@@ -65,24 +71,37 @@ def _require_test_separated_reference(
     return stats
 
 
+def _release_datasets_from_snapshot(snapshot_root: Path) -> list[str]:
+    """Read the giant datasets assigned to linker calibration in the snapshot."""
+    bundle = load_bundle(snapshot_root)
+    classic = dict(bundle.models["classic"])
+    gate = _promoted_stratified_gate_spec(classic)
+    if gate is None:
+        raise ValueError("classic.promoted_stratified_gate is required")
+    split_spec = classic["stratified_eval_test_split"]
+    assignments = _read_csv(
+        _resolve_path(bundle, str(split_spec["assignments_path"])), usecols=["dataset", "split", "source_key"]
+    )
+    is_calibration = assignments["split"].astype(str).isin(gate["calibration_splits"])
+    is_giant = assignments["source_key"].ne("s2and_eval")
+    return sorted(set(assignments.loc[is_calibration & is_giant, "dataset"].astype(str)))
+
+
 def _validated_sweep_plans(
     sweep_root: Path,
     datasets: Sequence[str],
     eps: float,
     source_hash: str,
     expected_batching_threshold: int,
-    release_datasets: Sequence[str],
     test_identities: TestIdentityLoader,
 ) -> dict[str, dict[str, Any]]:
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
-    if len(set(datasets)) != len(datasets) or sorted(datasets) != sorted(release_datasets):
-        raise ValueError(f"Release EPS review requires exactly the frozen datasets: {sorted(release_datasets)}")
     planned_datasets = sorted(path.parent.name for path in sweep_root.glob("*/plan.json") if path.is_file())
-    if sorted(release_datasets) != planned_datasets:
+    if sorted(datasets) != planned_datasets:
         raise ValueError(f"Release EPS review dataset list must match the sweep plans: {planned_datasets}")
     plans: dict[str, dict[str, Any]] = {}
     source_maps: dict[Path, InitialQuerySources] = {}
-    for dataset in dict.fromkeys(datasets):
+    for dataset in datasets:
         plan_path = sweep_root / dataset / "plan.json"
         raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
         plan, curve = read_sweep_curve(sweep_root, dataset, raw_plan["score_mode"])
@@ -127,6 +146,12 @@ def _validated_sweep_plans(
             raise ValueError(f"Invalid EPS metrics: {dataset}")
         snapshot_root = Path(plan["arrow_root"]).resolve()
         if snapshot_root not in source_maps:
+            release_datasets = _release_datasets_from_snapshot(snapshot_root)
+            if planned_datasets != release_datasets:
+                raise ValueError(
+                    "Release EPS sweep plans must match the snapshot's calibration assignments outside s2and_eval: "
+                    f"expected {release_datasets}, found {planned_datasets}"
+                )
             source_maps[snapshot_root] = load_initial_query_sources(
                 snapshot_root, dataset_names=release_datasets, expected_sha256=plan.get(MAP_SHA256_FIELD)
             )
@@ -210,7 +235,6 @@ def apply_reviewed_eps(
     review_note: str,
     report_path: Path,
     *,
-    release_datasets: Sequence[str] | None = None,
     expected_batching_threshold: int | None = None,
     test_identities: TestIdentityLoader = final_test_query_identities,
     close_pair: tuple[float, float] | None = None,
@@ -223,8 +247,8 @@ def apply_reviewed_eps(
     setting. ``release_version`` names a model that differs from its source only in linkage settings.
     ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
 
-    With a sweep root, check the snapshot giant curves against the expected subblock limit
-    and the frozen release dataset list, which must cover every plan under the sweep root.
+    With a sweep root, check the expected subblock limit and require the requested datasets
+    and sweep plans to match the snapshot's calibration assignments outside ``s2and_eval``.
     Without one, the review note must cite the internal evidence, because the curves are not on disk here.
     """
     source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
@@ -234,8 +258,8 @@ def apply_reviewed_eps(
         raise ValueError("A manual review note is required")
     if (sweep_root is None) != (not datasets):
         raise ValueError("Pass the sweep root and the dataset list together, or neither")
-    if sweep_root is None and (release_datasets is not None or expected_batching_threshold is not None):
-        raise ValueError("--release-datasets and --expected-batching-threshold require --sweep-root")
+    if sweep_root is None and expected_batching_threshold is not None:
+        raise ValueError("--expected-batching-threshold requires --sweep-root")
     if close_pair is not None:
         bonus, close = close_pair
         if not math.isfinite(bonus) or bonus <= 0 or not 0 < close <= 1:
@@ -259,10 +283,8 @@ def apply_reviewed_eps(
     if sweep_root is not None:
         if expected_batching_threshold is None or expected_batching_threshold <= 0:
             raise ValueError("A sweep review needs a positive --expected-batching-threshold")
-        if not release_datasets:
-            raise ValueError("A sweep review needs --release-datasets with the frozen dataset list")
         plans = _validated_sweep_plans(
-            sweep_root, datasets, eps, source_hash, expected_batching_threshold, release_datasets, test_identities
+            sweep_root, datasets, eps, source_hash, expected_batching_threshold, test_identities
         )
     giant_f1_tolerance = (
         None
@@ -320,11 +342,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument("--datasets", nargs="+", default=[], help="Datasets in the sweep being reviewed.")
     parser.add_argument(
-        "--release-datasets",
-        nargs="+",
-        help="Frozen dataset list, covering every dataset with a plan under the sweep root.",
-    )
-    parser.add_argument(
         "--expected-batching-threshold", type=int, help="Production subblock limit required for a snapshot sweep."
     )
     parser.add_argument("--eps", type=float, required=True)
@@ -359,7 +376,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         release_version=args.release_version,
         precision_f1_tolerance=args.precision_f1_tolerance,
         expected_batching_threshold=args.expected_batching_threshold,
-        release_datasets=args.release_datasets,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

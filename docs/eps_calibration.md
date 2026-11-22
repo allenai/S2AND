@@ -94,7 +94,8 @@ uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
 
 The examples use a production subblock limit of 15,000, 12 threads, and 128 GiB of RAM.
 Set the limit to the one used in production and the threads and RAM to your allocation.
-Set `$Giants` to the frozen development dataset list for your release. The example lists the 1.4 development giants.
+Set `$Giants` to the datasets with linker calibration assignments outside `s2and_eval` in the snapshot's split file.
+The example lists the 1.4 development giants.
 Every sweep requires the limit and records it in `plan.json`.
 Inspect the smoke log and `plan.json` before a larger run.
 Run `--dry-run` for each full dataset to obtain subblock, signature, and pair counts.
@@ -178,9 +179,9 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
 For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
 It requires each plan's subblock limit to match `--expected-batching-threshold`.
-Pass the frozen dataset list as `--release-datasets`.
-Both dataset lists must include every dataset with a `plan.json` under the dedicated sweep root.
-The command checks each plan's recorded dataset name and both completed curves.
+The command derives the required datasets from the snapshot's linker calibration assignments outside `s2and_eval`.
+The `--datasets` list and the `plan.json` directories under the sweep root must both match that set.
+The command checks each plan's recorded dataset name and requires both completed curves for every dataset.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
 It writes a fresh complete model and preserves every trained artifact byte.

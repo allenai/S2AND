@@ -70,6 +70,8 @@ average linkage and once with the close-pair bonus.
 It selects the setting with the best signature-weighted B-cubed (B3) F1.
 When the plan sets `precision_f1_tolerance`, it selects the most precise setting within that tolerance of the best F1.
 The `1.3.1` plan sets it to `0.001`.
+If a close-pair bonus wins with a zero or omitted tolerance, pass `--allow-zero-precision-f1-tolerance`
+to approve that selection.
 Test blocks never select EPS.
 
 ### 3. Incremental linker training and the complete model

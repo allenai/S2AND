@@ -164,7 +164,9 @@ By default the best signature-weighted F1 wins.
 Set `precision_f1_tolerance` in the model plan's `eps` section to lean toward precision.
 Calibration then selects the most precise setting whose F1 is within that tolerance of the best.
 With the close-pair bonus, F1 is nearly flat over a wide range of EPS, so a small tolerance buys a clear gain in precision.
-`package_corrected_datasets.py --precision-f1-tolerance` writes the field; a plan without it selects the best F1.
+Packaging requires `--precision-f1-tolerance` and records the supplied value, including zero.
+Calibration treats a legacy plan without the field as zero. If a close-pair bonus wins at zero tolerance,
+calibration requires `--allow-zero-precision-f1-tolerance` to write the selected settings.
 The rule needs no earlier model, so a dataset update or a new pairwise fit does not change how it works.
 Calibration writes a fresh calibrated sibling and preserves both boosters.
 Verify that only clusterer configuration and bundle metadata change.

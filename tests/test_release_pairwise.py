@@ -259,6 +259,49 @@ def test_calibrate_eps_binds_plan_reuses_matrices_applies_floors_and_smallest_ti
     assert args.output_bundle.is_dir() and args.output_report.is_file()
 
 
+@pytest.mark.parametrize("allow_zero_tolerance", [False, True])
+def test_calibrate_eps_requires_an_opt_in_to_select_a_bonus_at_zero_tolerance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_zero_tolerance: bool,
+) -> None:
+    model_plan = _arrow_model_plan(tmp_path, eps_grid=[0.6, 0.4, 0.2])
+    bundle = _calibration_bundle(tmp_path)
+    clusterer = _StubCalibrationClusterer()
+    scores = {0.2: 0.7, 0.4: 0.8, 0.6: 0.75, (True, 0.4): 0.9}
+    finalizations, _ = _patch_calibration(monkeypatch, clusterer, scores)
+
+    args = _calibration_args(tmp_path, bundle, model_plan)
+    cli_args = ["calibrate-eps"]
+    for name in ("source_bundle", "model_plan", "output_bundle", "output_report", "name_counts_index_root"):
+        cli_args.extend((f"--{name.replace('_', '-')}", str(getattr(args, name))))
+    if allow_zero_tolerance:
+        cli_args.append("--allow-zero-precision-f1-tolerance")
+    parsed = release_pairwise.build_parser().parse_args(cli_args)
+
+    if not allow_zero_tolerance:
+        with pytest.raises(ValueError, match="close-pair bonus with zero precision_f1_tolerance"):
+            release_pairwise.calibrate_eps(parsed)
+        assert not finalizations
+        assert not args.output_bundle.exists()
+        assert not args.output_report.exists()
+        return
+
+    report = release_pairwise.calibrate_eps(parsed)
+
+    bonus, distance = release_pairwise.CLOSE_PAIR_CANDIDATES[1]
+    assert (report["selected_eps"], report["selected_close_pair_bonus"], report["selected_close_pair_distance"]) == (
+        pytest.approx(0.4),
+        bonus,
+        distance,
+    )
+    assert (finalizations[0]["close_pair_bonus"], finalizations[0]["close_pair_distance"]) == (bonus, distance)
+    assert len(report["trials"]) == 3 * len(release_pairwise.CLOSE_PAIR_CANDIDATES)
+    assert {(trial["close_pair_bonus"], trial["eps"]) for trial in report["trials"]} == {
+        (candidate[0], eps) for candidate in release_pairwise.CLOSE_PAIR_CANDIDATES for eps in (0.2, 0.4, 0.6)
+    }
+
+
 _FLOOR_SCORES = {
     # Plain linkage.
     0.2: (0.99, 0.50, 0.66),
@@ -285,7 +328,9 @@ def test_precision_f1_tolerance_selects_the_most_precise_setting_near_the_best_f
     model_plan = _arrow_model_plan(tmp_path, eps_grid=[0.6, 0.4, 0.2], precision_f1_tolerance=tolerance)
     finalizations, _ = _patch_calibration(monkeypatch, _StubCalibrationClusterer(), _FLOOR_SCORES)
 
-    report = release_pairwise.calibrate_eps(_calibration_args(tmp_path, _calibration_bundle(tmp_path), model_plan))
+    args = _calibration_args(tmp_path, _calibration_bundle(tmp_path), model_plan)
+    args.allow_zero_precision_f1_tolerance = not tolerance
+    report = release_pairwise.calibrate_eps(args)
 
     assert (report["selected_eps"], report["selected_close_pair_bonus"]) == (pytest.approx(expected_eps), 8.0)
     assert finalizations[0]["new_eps"] == pytest.approx(expected_eps)

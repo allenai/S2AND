@@ -710,6 +710,7 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
 
     With a positive ``precision_f1_tolerance`` in the plan, the most precise setting wins among
     those within that tolerance of the best signature-weighted F1. Otherwise the best F1 wins.
+    Selecting a close-pair bonus at zero tolerance requires explicit approval.
     """
 
     source_bundle, output_bundle, output_report, plan, config, manifest_sha256 = _calibration_preflight(args)
@@ -831,6 +832,15 @@ def calibrate_eps(args: argparse.Namespace) -> dict[str, Any]:
             key=lambda trial: (trial["signature_weighted"]["f1"], -trial["close_pair_bonus"], -trial["eps"]),
         )
         selection_rule = "highest signature-weighted F1"
+    if (
+        plan.eps.precision_f1_tolerance == 0
+        and selected["close_pair_bonus"] > 0
+        and not getattr(args, "allow_zero_precision_f1_tolerance", False)
+    ):
+        raise ValueError(
+            "EPS calibration selected a close-pair bonus with zero precision_f1_tolerance. "
+            "Set a positive tolerance in the model plan or pass --allow-zero-precision-f1-tolerance."
+        )
     selected_eps = float(selected["eps"])
     finalize_pairwise_eps(
         source_bundle_dir=source_bundle,
@@ -874,6 +884,11 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--name-counts-index-root", type=Path, required=True)
     calibrate.add_argument("--n-jobs", type=_positive_int, default=1)
     calibrate.add_argument("--total-ram-bytes", type=_positive_int)
+    calibrate.add_argument(
+        "--allow-zero-precision-f1-tolerance",
+        action="store_true",
+        help="Allow calibration to select a close-pair bonus with zero precision_f1_tolerance.",
+    )
     calibrate.set_defaults(handler=calibrate_eps)
 
     heldout = commands.add_parser("evaluate-heldout", help="Score the model plan's outer test without a baseline.")

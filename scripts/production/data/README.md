@@ -24,6 +24,7 @@ uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
   --corrected-replay-root <current-replay-raw-root> `
   --corrected-replay-embeddings-root <current-replay-vector-root> `
   --name-counts-index <common-name-counts-index> `
+  --precision-f1-tolerance 0.001 `
   --output-root <new-combined-snapshot>
 ```
 

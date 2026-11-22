@@ -201,13 +201,13 @@ def package_corrected_datasets(
     linker_source_bundle: Path,
     name_counts_index: Path,
     output_root: Path,
+    precision_f1_tolerance: float,
     corrected_replay_root: Path | None = None,
     corrected_replay_embeddings_root: Path | None = None,
     release_version: str | None = None,
     eps_grid: Sequence[float] = DEFAULT_EPS_GRID,
     minimum_dataset_f1: float = 0.0,
     minimum_signature_weighted_f1: float = 0.0,
-    precision_f1_tolerance: float = 0.0,
 ) -> dict[str, Any]:
     """Copy final records and prepared populations into a fresh dataset snapshot."""
 
@@ -319,8 +319,7 @@ def package_corrected_datasets(
             "grid": grid,
             "minimum_dataset_f1": minimum_dataset_f1,
             "minimum_signature_weighted_f1": minimum_signature_weighted_f1,
-            # Written only when set, so a plan without a precision lean keeps its earlier bytes.
-            **({"precision_f1_tolerance": precision_f1_tolerance} if precision_f1_tolerance > 0 else {}),
+            "precision_f1_tolerance": precision_f1_tolerance,
         },
     }
     (destination_pairwise / "model_plan.json").write_text(json.dumps(model_plan, indent=2) + "\n", encoding="utf-8")
@@ -358,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--precision-f1-tolerance",
         type=float,
-        default=0.0,
+        required=True,
         help="F1 that EPS selection may give up to gain precision; 0 selects the best F1",
     )
     print(json.dumps(package_corrected_datasets(**vars(parser.parse_args(argv))), indent=2))

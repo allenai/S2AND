@@ -16,6 +16,7 @@ from s2and.production_training_contract import load_model_plan
 from scripts.convert_to_arrow import _write_root_manifest
 from scripts.production.data.package_corrected_datasets import (
     DEFAULT_EPS_GRID,
+    main,
     package_corrected_datasets,
     validate_corrected_datasets,
 )
@@ -85,16 +86,27 @@ def _package(
     )
 
 
-def test_model_plan_carries_a_set_precision_tolerance(package_inputs: dict[str, Path]) -> None:
-    # test_complete_snapshot_preserves_current_sources_and_uses_one_index checks the unset default.
+def test_model_plan_records_the_explicit_precision_tolerance(package_inputs: dict[str, Path]) -> None:
     tolerance = 0.001
     _package(package_inputs, precision_f1_tolerance=tolerance)
 
     plan_path = package_inputs["output_root"] / "pairwise" / "model_plan.json"
     eps = json.loads(plan_path.read_text(encoding="utf-8"))["eps"]
-    # A plan without a precision lean keeps the three fields that earlier releases wrote.
     assert eps["precision_f1_tolerance"] == tolerance
     assert load_model_plan(plan_path).eps.precision_f1_tolerance == tolerance
+
+
+def test_packaging_cli_requires_a_precision_tolerance(
+    package_inputs: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [arg for name, path in package_inputs.items() for arg in (f"--{name.replace('_', '-')}", str(path))]
+
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+
+    assert exc.value.code == 2
+    assert "--precision-f1-tolerance" in capsys.readouterr().err
+    assert not package_inputs["output_root"].exists()
 
 
 def test_complete_snapshot_preserves_current_sources_and_uses_one_index(
@@ -135,8 +147,7 @@ def test_complete_snapshot_preserves_current_sources_and_uses_one_index(
     plan = load_model_plan(root / "pairwise" / "model_plan.json")
     assert list(plan.datasets) == ["qian", "augmented"]
     assert plan.eps.grid == tuple(step / 100 for step in range(101))
-    # A plan without a precision lean keeps the three fields that earlier releases wrote.
-    assert "precision_f1_tolerance" not in json.loads((root / "pairwise" / "model_plan.json").read_text())["eps"]
+    assert json.loads((root / "pairwise" / "model_plan.json").read_text())["eps"]["precision_f1_tolerance"] == 0.0
     assert plan.eps.precision_f1_tolerance == 0.0
     assert plan.datasets["qian"].files["papers"] == root / "corrected_sources" / "qian" / "qian_papers.json"
     for name, filename in (

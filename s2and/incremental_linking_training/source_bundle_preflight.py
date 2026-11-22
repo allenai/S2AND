@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +21,14 @@ from s2and.incremental_linking_training.classic import (
     _validate_stratified_split_assignments,
 )
 from s2and.production_training_contract import REQUIRED_LINKER_TABLE_KEYS
+
+
+@dataclass(frozen=True)
+class SourceLabelSummary:
+    """Row count and Arrow datasets referenced by validated source label tables."""
+
+    row_count: int
+    datasets: frozenset[str]
 
 
 def source_featureless_table_keys(bundle: OfficialBundle) -> tuple[str, ...]:
@@ -253,14 +262,12 @@ def _validate_source_split_coverage(source_bundle: OfficialBundle, label_tables:
                 raise ValueError(f"Eval tables have no eligible assigned calibration groups: {sorted(missing)}")
 
 
-def preflight_source_rows(
+def validate_source_label_tables(
     source_bundle: OfficialBundle,
     *,
-    name_counts_index_root: Path | None,
-    arrow_stack: ExitStack,
     singleton_orcid_review_note: str | None = None,
-) -> tuple[int, dict[str, ArrowDataset]]:
-    """Validate source rows, calibration coverage, and referenced Arrow generations."""
+) -> SourceLabelSummary:
+    """Validate source labels and split coverage without opening Arrow datasets."""
 
     available_tables = source_featureless_table_keys(source_bundle)
     available_table_set = set(available_tables)
@@ -303,8 +310,25 @@ def preflight_source_rows(
         raise ValueError(f"Stratified sources have no featureless tables: {sorted(missing_paths)}")
     _validate_source_split_coverage(source_bundle, label_tables)
 
+    return SourceLabelSummary(source_rows, frozenset(observed_datasets))
+
+
+def preflight_source_rows(
+    source_bundle: OfficialBundle,
+    *,
+    name_counts_index_root: Path | None,
+    arrow_stack: ExitStack,
+    singleton_orcid_review_note: str | None = None,
+    label_summary: SourceLabelSummary | None = None,
+) -> tuple[int, dict[str, ArrowDataset]]:
+    """Validate source rows and open the Arrow generations they reference."""
+    if label_summary is None:
+        label_summary = validate_source_label_tables(
+            source_bundle, singleton_orcid_review_note=singleton_orcid_review_note
+        )
+
     arrow_datasets: dict[str, ArrowDataset] = {}
-    for dataset_name in sorted(observed_datasets):
+    for dataset_name in sorted(label_summary.datasets):
         arrow_datasets[dataset_name] = arrow_stack.enter_context(
             open_source_arrow_dataset(
                 source_bundle,
@@ -322,4 +346,4 @@ def preflight_source_rows(
         raise ValueError(
             f"linker source datasets reference multiple name-count generations: {sorted(name_count_hashes)}"
         )
-    return source_rows, arrow_datasets
+    return label_summary.row_count, arrow_datasets

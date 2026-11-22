@@ -95,6 +95,7 @@ Rows marked `unlabeled_singleton_orcid` are excluded from both splits.
 Preflight flags label tables with at least ten negative singleton-ORCID views and no positive in those views.
 For a reviewed table that meets this condition, cite the review with `--singleton-orcid-review-note`.
 The linker evaluation report records the citation.
+Source bundle assembly and corrected dataset packaging validate labels before copying and record any citation in their reports.
 
 ### 4. Outer-test evaluation
 

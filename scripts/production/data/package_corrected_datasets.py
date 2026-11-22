@@ -22,6 +22,12 @@ from s2and.arrow_inputs import (  # noqa: E402
     require_name_counts_index_artifact,
 )
 from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
+from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
+from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
+    SourceLabelSummary,
+    validate_source_bundle_support_files,
+    validate_source_label_tables,
+)
 from s2and.production_training_contract import _unit_float, load_model_plan  # noqa: E402
 from scripts.convert_to_arrow import _write_root_manifest  # noqa: E402
 from scripts.production.model.linker_source_bundle import (  # noqa: E402
@@ -126,7 +132,12 @@ def _validate_corrected_source_inventory(root: Path, corrected: Path) -> int:
     return len(inventory)
 
 
-def validate_corrected_datasets(root: Path, *, singleton_orcid_review_note: str | None = None) -> dict[str, Any]:
+def validate_corrected_datasets(
+    root: Path,
+    *,
+    singleton_orcid_review_note: str | None = None,
+    _label_summary: SourceLabelSummary | None = None,
+) -> dict[str, Any]:
     """Validate the public, pairwise, and incremental inputs within one root."""
 
     root = root.resolve()
@@ -135,7 +146,9 @@ def validate_corrected_datasets(root: Path, *, singleton_orcid_review_note: str 
     if index_dirs != [index]:
         raise ValueError(f"Require one shared name_counts_index directory: {index_dirs}")
     public = validate_release_root(root)
-    incremental = validate_portable_source_bundle(root, singleton_orcid_review_note=singleton_orcid_review_note)
+    incremental = validate_portable_source_bundle(
+        root, singleton_orcid_review_note=singleton_orcid_review_note, _label_summary=_label_summary
+    )
     pairwise = root / "pairwise"
     inputs = _read_json(pairwise / "inputs.json")
     if _local_path(pairwise, inputs["name_counts_index"], boundary=root) != index:
@@ -268,6 +281,9 @@ def package_corrected_datasets(
     )
     _validate_root_name_counts_binding(linker, authoritative_manifest_sha256=index_digest)
     _validate_bundle_paths(linker)
+    bundle = load_bundle(linker)
+    validate_source_bundle_support_files(bundle)
+    label_summary = validate_source_label_tables(bundle, singleton_orcid_review_note=singleton_orcid_review_note)
 
     _copy_arrow_root_without_name_counts(linker, output)
     _copy_file(license_source, output / "LICENSE.txt")
@@ -338,7 +354,9 @@ def package_corrected_datasets(
         replay_bundles={"incremental": "replay_manifest.json"},
         release_version=version,
     )
-    return validate_corrected_datasets(output, singleton_orcid_review_note=singleton_orcid_review_note)
+    return validate_corrected_datasets(
+        output, singleton_orcid_review_note=singleton_orcid_review_note, _label_summary=label_summary
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

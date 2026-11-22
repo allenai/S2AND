@@ -394,12 +394,12 @@ def test_assembly_rejects_a_missing_calibration_group(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=r"did not all match source rows.*train:q1"):
         assemble_source_bundle(**inputs)
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
 
     rows = pd.read_parquet(labels)
     rows["query_group_id"] = "train:q1"
     rows.to_parquet(labels, index=False)
-    inputs["output_source_bundle"] = tmp_path / "fixed-source"
-    inputs["output_data_root"] = tmp_path / "fixed-data"
     assert assemble_source_bundle(**inputs)["selected_source_rows"] == 4
 
 
@@ -495,6 +495,8 @@ def test_assembly_rejects_all_negative_singleton_orcid_tables_with_null_labels(
 
     with pytest.raises(ValueError, match="10 all-negative negative_singleton_orcid views"):
         assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
 
 
 def test_assembly_cli_records_singleton_orcid_review(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

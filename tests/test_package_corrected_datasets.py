@@ -128,6 +128,23 @@ def test_packaging_cli_records_singleton_orcid_review(
     assert report["incremental_source_rows"] == 13
 
 
+@pytest.mark.parametrize("problem", ["missing-test-group", "unreviewed-singletons"])
+def test_packaging_rejects_invalid_linker_labels_before_copy(package_inputs: dict[str, Path], problem: str) -> None:
+    linker = package_inputs["linker_source_bundle"]
+    if problem == "missing-test-group":
+        labels = linker / "labels" / "hwang_eval.parquet"
+        pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
+        message = "did not all match source rows.*hwang:q1"
+    else:
+        _write_singleton_orcid_views(linker, view_count=10, reviewed=False)
+        message = "10 all-negative negative_singleton_orcid views"
+
+    with pytest.raises(ValueError, match=message):
+        _package(package_inputs)
+
+    assert not package_inputs["output_root"].exists()
+
+
 def test_complete_snapshot_preserves_current_sources_and_uses_one_index(
     package_inputs: dict[str, Path], tmp_path: Path
 ) -> None:

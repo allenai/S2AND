@@ -93,6 +93,8 @@ It writes the complete model, reloads it, and evaluates the declared linker test
 Preflight resolves the frozen calibration and test assignments before featurization.
 Calibration groups can use the calibration source, and each assigned evaluation table must still contribute eligible calibration rows.
 Test groups must have eligible rows in their assigned evaluation tables.
+The linker fit, `evaluate_classic`, and the EPS tools reject an assignment whose source key
+has no declared evaluation table.
 Rows marked `unlabeled_singleton_orcid` are excluded from both splits.
 Preflight checks each dataset in each label table. When ten or more views are marked
 `negative_singleton_orcid`, at least 10% of those views must have a positive candidate

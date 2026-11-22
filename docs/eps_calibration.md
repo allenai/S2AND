@@ -169,6 +169,7 @@ Record the reason for that choice.
 
 ```powershell
 $PrecisionF1Tolerance = (Get-Content -Raw "$Snapshot/pairwise/model_plan.json" | ConvertFrom-Json).eps.precision_f1_tolerance
+if ($null -eq $PrecisionF1Tolerance) { $PrecisionF1Tolerance = 0 }
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `
@@ -179,9 +180,11 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
 For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
 It requires each plan's subblock limit to match `--expected-batching-threshold`.
-The command derives the required datasets from the snapshot's linker calibration assignments outside `s2and_eval`.
-The `--datasets` list and the `plan.json` directories under the sweep root must both match that set.
-The command checks each plan's recorded dataset name and requires both completed curves for every dataset.
+The command resolves the snapshot's linker calibration assignments outside `s2and_eval`
+against their declared sources. It rejects an assignment whose dataset differs from its source rows.
+The `--datasets` list must match the resulting datasets. The command reports and ignores other sweep folders.
+The plans must all point to the same snapshot. Apply and the plotters check each plan's recorded
+dataset name. Apply requires both completed curves for every requested dataset.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
 It writes a fresh complete model and preserves every trained artifact byte.

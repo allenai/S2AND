@@ -177,7 +177,8 @@ def _validated_sweep_plans(
             )
         elif plan_snapshot != snapshot_root:
             raise ValueError(
-                f"Release EPS sweep plans must use one snapshot: {dataset} uses {plan_snapshot}, expected {snapshot_root}"
+                "Release EPS sweep plans must use one snapshot: "
+                f"{dataset} uses {plan_snapshot}, expected {snapshot_root}"
             )
         reference = _require_test_separated_reference(sweep_root, dataset, plan, test_identities, query_sources)
         diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)

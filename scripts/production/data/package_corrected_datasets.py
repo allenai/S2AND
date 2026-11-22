@@ -23,7 +23,9 @@ from s2and.arrow_inputs import (  # noqa: E402
 )
 from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
-from s2and.incremental_linking_training.source_bundle_preflight import validate_source_bundle_support_files  # noqa: E402
+from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
+    validate_source_bundle_support_files,
+)
 from s2and.production_training_contract import _unit_float, load_model_plan  # noqa: E402
 from scripts.convert_to_arrow import _write_root_manifest  # noqa: E402
 from scripts.production.model.linker_source_bundle import (  # noqa: E402

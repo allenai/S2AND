@@ -96,7 +96,7 @@ def _validated_sweep_plans(
                 f"The EPS sweep skipped the production attachment passes; rerun with --route production: {dataset}"
             )
         batching_threshold = plan.get("batching_threshold")
-        if type(batching_threshold) is not int or batching_threshold != expected_batching_threshold:
+        if batching_threshold != expected_batching_threshold:
             raise ValueError(
                 f"The EPS sweep used batching_threshold={batching_threshold!r}, "
                 f"expected {expected_batching_threshold}; rerun it: {dataset}"
@@ -229,6 +229,8 @@ def apply_reviewed_eps(
         raise ValueError("A manual review note is required")
     if (sweep_root is None) != (not datasets):
         raise ValueError("Pass the sweep root and the dataset list together, or neither")
+    if sweep_root is None and (release_datasets is not None or expected_batching_threshold is not None):
+        raise ValueError("--release-datasets and --expected-batching-threshold require --sweep-root")
     if close_pair is not None:
         bonus, close = close_pair
         if not math.isfinite(bonus) or bonus <= 0 or not 0 < close <= 1:

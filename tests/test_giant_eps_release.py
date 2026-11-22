@@ -361,6 +361,14 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     ("extra_cli_args", "message"),
     [
         ([], "positive --expected-batching-threshold"),
+        (
+            ["--expected-batching-threshold", "0", "--release-datasets", "unit"],
+            "positive --expected-batching-threshold",
+        ),
+        (
+            ["--expected-batching-threshold", "-1", "--release-datasets", "unit"],
+            "positive --expected-batching-threshold",
+        ),
         (["--expected-batching-threshold", "15000"], "needs --release-datasets"),
     ],
 )
@@ -476,6 +484,33 @@ def _complete_model(tmp_path: Path) -> Path:
         incremental_linker_artifact_dir=linker,
         target_json=target,
     ).bundle_dir
+
+
+@pytest.mark.parametrize("extra_cli_args", [("--expected-batching-threshold", "15000"), ("--release-datasets", "unit")])
+def test_internal_review_rejects_snapshot_only_options(tmp_path: Path, extra_cli_args: tuple[str, str]) -> None:
+    source = _complete_model(tmp_path)
+    output = tmp_path / "output"
+    report = tmp_path / "review.json"
+
+    with pytest.raises(ValueError, match=f"{extra_cli_args[0]}.*--sweep-root"):
+        apply_reviewed_eps_module.main(
+            [
+                "--source-model",
+                str(source),
+                "--output-model",
+                str(output),
+                "--eps",
+                "0.65",
+                "--review-note",
+                "Fixture review",
+                "--output-report",
+                str(report),
+                *extra_cli_args,
+            ]
+        )
+
+    assert not output.exists()
+    assert not report.exists()
 
 
 def _changed_files(source: Path, output: Path) -> set[str]:

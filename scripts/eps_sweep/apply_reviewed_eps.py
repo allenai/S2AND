@@ -83,6 +83,8 @@ def _validated_sweep_plans(
         plan_path = sweep_root / dataset / "plan.json"
         raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
         plan, curve = read_sweep_curve(sweep_root, dataset, raw_plan["score_mode"])
+        if plan.get("dataset") != dataset:
+            raise ValueError(f"The EPS sweep for {dataset!r} records dataset={plan.get('dataset')!r}")
         if plan["score_mode"] != "orcid-b3":
             raise ValueError("Release EPS requires identity B3 curves; safe-action curves are diagnostic")
         if plan["model_manifest_sha256"] != source_hash:

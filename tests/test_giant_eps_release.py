@@ -72,6 +72,7 @@ def _curve(
     map_path = _source_snapshot(snapshot_root, with_clone=with_source_map)
     map_digest = sha256_file(map_path) if with_source_map else None
     plan = {
+        "dataset": "unit",
         "model_manifest_sha256": model_hash,
         "score_mode": mode,
         "limited_run": limited,
@@ -507,6 +508,32 @@ def test_internal_review_rejects_snapshot_only_options(tmp_path: Path, extra_cli
                 str(report),
                 *extra_cli_args,
             ]
+        )
+
+    assert not output.exists()
+    assert not report.exists()
+
+
+def test_release_review_rejects_a_completed_curve_copied_under_another_name(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    root = tmp_path / "curves"
+    dataset = _curve(root, sha256_file(source / "manifest.json"))
+    shutil.copytree(dataset, root / "other")
+    output = tmp_path / "output"
+    report = tmp_path / "review.json"
+
+    with pytest.raises(ValueError, match=r"for 'other' records dataset='unit'"):
+        apply_reviewed_eps(
+            source,
+            output,
+            root,
+            ["unit", "other"],
+            0.65,
+            "Fixture review",
+            report,
+            release_datasets=("unit", "other"),
+            expected_batching_threshold=15000,
+            test_identities=lambda _root, _dataset, _sources: frozenset(),
         )
 
     assert not output.exists()

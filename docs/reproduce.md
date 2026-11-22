@@ -88,6 +88,7 @@ uv run --no-sync python scripts/production/model/train_linker_and_finalize.py \
 
 The step computes incremental features with the calibrated pairwise model and fits the linker.
 It writes the complete model, reloads it, and evaluates the declared linker test split.
+For a source with reviewed all-negative singleton-ORCID views, cite the review with `--singleton-orcid-review-note`.
 
 ### 4. Outer-test evaluation
 

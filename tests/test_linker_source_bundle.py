@@ -389,6 +389,35 @@ def test_assembly_requires_calibration_groups_in_the_assigned_eval_table(tmp_pat
     assert assemble_source_bundle(**inputs)["selected_source_rows"] == 4
 
 
+@pytest.mark.parametrize("review_note", [None, "   ", "Reviewed candidate decisions in the release ledger."])
+def test_assembly_requires_review_of_each_all_negative_singleton_orcid_view(
+    tmp_path: Path, review_note: str | None
+) -> None:
+    inputs = _inputs(tmp_path)
+    labels_path = inputs["source_root"] / "labels" / "s2and_eval.parquet"
+    template = pd.read_parquet(labels_path)
+    rows = pd.concat(
+        [
+            template.assign(supervision_type="negative_singleton_orcid"),
+            template.assign(supervision_type="negative_singleton_orcid", label=0, retrieval_rank=2),
+            template.assign(query_group_id="unreviewed", supervision_type="negative_singleton_orcid", label=0),
+            template.assign(query_group_id="unlabeled", supervision_type="unlabeled_singleton_orcid", label=0),
+        ],
+        ignore_index=True,
+    )
+    rows.to_parquet(labels_path, index=False)
+
+    if not review_note or not review_note.strip():
+        with pytest.raises(ValueError, match="1 all-negative negative_singleton_orcid views.*unreviewed"):
+            if review_note is None:
+                assemble_source_bundle(**inputs)
+            else:
+                assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)
+        return
+
+    assert assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)["selected_source_rows"] == 7
+
+
 def test_assembly_rejects_source_leakage_and_published_arrow_inputs(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path, leak=True)
 

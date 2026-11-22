@@ -1751,6 +1751,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
             calibration_query_ids=calibration_query_ids,
+            singleton_orcid_review_note=getattr(args, "singleton_orcid_review_note", None),
         )
         query_sources = load_initial_query_sources(
             source_bundle.root,
@@ -1901,6 +1902,10 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--expected-initial-query-map-sha256",
         help="Require this digest for the initial-query source map.",
+    )
+    parser.add_argument(
+        "--singleton-orcid-review-note",
+        help="Cite the review of every all-negative singleton-ORCID view in the source bundle.",
     )
     parser.add_argument("--target-json", type=Path, required=True, help="Explicit promoted-linker target JSON.")
     parser.add_argument("--output-dir", type=Path, required=True)

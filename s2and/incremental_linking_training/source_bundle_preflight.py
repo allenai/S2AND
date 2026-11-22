@@ -198,12 +198,35 @@ def _release_table_plan(
     return training_keys, calibration_query_ids, evaluation_keys
 
 
+def _validate_singleton_orcid_labels(labels_path: Path, table_key: str) -> None:
+    """Reject a singleton-ORCID view whose candidates all have negative labels."""
+    labels = pa_dataset.dataset(labels_path, format="parquet")
+    if "supervision_type" not in labels.schema.names:
+        return
+    rows = labels.to_table(columns=["dataset", "query_group_id", "label", "supervision_type"]).to_pandas()
+    marked = rows["supervision_type"].eq("negative_singleton_orcid")
+    if not marked.any():
+        return
+    view_keys = [rows["dataset"], rows["query_group_id"]]
+    all_zero = pd.to_numeric(rows["label"], errors="coerce").eq(0).groupby(view_keys).transform("all")
+    unreviewed = rows.loc[marked & all_zero, ["dataset", "query_group_id"]].drop_duplicates()
+    if not unreviewed.empty:
+        examples = unreviewed.head(5).to_dict(orient="records")
+        raise ValueError(
+            f"source table {table_key!r} has {len(unreviewed)} all-negative negative_singleton_orcid views "
+            f"without review provenance: {examples} ({labels_path}). "
+            "Mark unreviewed queries unlabeled_singleton_orcid. "
+            "For reviewed queries, cite the review with --singleton-orcid-review-note."
+        )
+
+
 def preflight_source_rows(
     source_bundle: OfficialBundle,
     *,
     name_counts_index_root: Path | None,
     arrow_stack: ExitStack,
     calibration_query_ids: Mapping[str, set[str]] | None = None,
+    singleton_orcid_review_note: str | None = None,
 ) -> tuple[int, dict[str, ArrowDataset]]:
     """Validate source rows, calibration coverage, and referenced Arrow generations."""
 
@@ -216,6 +239,7 @@ def preflight_source_rows(
     if calibration_query_ids is None:
         _, calibration_query_ids, _ = _release_table_plan(source_bundle)
 
+    has_singleton_review = bool(singleton_orcid_review_note and singleton_orcid_review_note.strip())
     source_rows = 0
     observed_datasets: set[str] = set()
     for table_key in available_tables:
@@ -230,6 +254,8 @@ def preflight_source_rows(
                 f"source table {table_key!r} is missing {len(missing_ids)} assigned calibration groups: "
                 f"{sorted(missing_ids)[:5]} ({labels_path})"
             )
+        if not has_singleton_review:
+            _validate_singleton_orcid_labels(labels_path, table_key)
         source_rows += len(rows)
         observed_datasets.update(rows["dataset"].astype(str))
 

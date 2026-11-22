@@ -221,7 +221,7 @@ def _validate_bundle_paths(root: Path) -> None:
         check(runtime_root, "runtime_contract.arrow_dataset_root")
 
 
-def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
+def validate_portable_source_bundle(root: Path, *, singleton_orcid_review_note: str | None = None) -> dict[str, Any]:
     """Verify all operational paths and payloads within one portable root."""
 
     root = root.resolve()
@@ -245,7 +245,10 @@ def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
     validate_source_bundle_support_files(bundle)
     with ExitStack() as arrow_stack:
         selected_rows, datasets = preflight_source_rows(
-            bundle, name_counts_index_root=shared_index, arrow_stack=arrow_stack
+            bundle,
+            name_counts_index_root=shared_index,
+            arrow_stack=arrow_stack,
+            singleton_orcid_review_note=singleton_orcid_review_note,
         )
         opened_roots = {dataset.root.resolve() for dataset in datasets.values()}
         # Unreferenced datasets can become active after a future label update.
@@ -274,6 +277,7 @@ def assemble_source_bundle(
     model_plan: Path,
     output_source_bundle: Path,
     output_data_root: Path,
+    singleton_orcid_review_note: str | None = None,
 ) -> dict[str, Any]:
     """Copy reviewed inputs into fresh source and public-data roots."""
 
@@ -338,7 +342,9 @@ def assemble_source_bundle(
         release_version=release_version,
     )
 
-    source_report = validate_portable_source_bundle(output_source_bundle)
+    source_report = validate_portable_source_bundle(
+        output_source_bundle, singleton_orcid_review_note=singleton_orcid_review_note
+    )
     validate_release_root(output_data_root)
     return {
         "data_root": str(output_data_root),
@@ -361,6 +367,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output-data-root",
     ):
         parser.add_argument(f"--{option}", type=Path, required=True)
+    parser.add_argument(
+        "--singleton-orcid-review-note",
+        help="Cite the review of every all-negative singleton-ORCID view in the source bundle.",
+    )
     print(json.dumps(assemble_source_bundle(**vars(parser.parse_args(argv))), indent=2, sort_keys=True))
     return 0
 

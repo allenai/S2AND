@@ -126,7 +126,7 @@ def _validate_corrected_source_inventory(root: Path, corrected: Path) -> int:
     return len(inventory)
 
 
-def validate_corrected_datasets(root: Path) -> dict[str, Any]:
+def validate_corrected_datasets(root: Path, *, singleton_orcid_review_note: str | None = None) -> dict[str, Any]:
     """Validate the public, pairwise, and incremental inputs within one root."""
 
     root = root.resolve()
@@ -135,7 +135,7 @@ def validate_corrected_datasets(root: Path) -> dict[str, Any]:
     if index_dirs != [index]:
         raise ValueError(f"Require one shared name_counts_index directory: {index_dirs}")
     public = validate_release_root(root)
-    incremental = validate_portable_source_bundle(root)
+    incremental = validate_portable_source_bundle(root, singleton_orcid_review_note=singleton_orcid_review_note)
     pairwise = root / "pairwise"
     inputs = _read_json(pairwise / "inputs.json")
     if _local_path(pairwise, inputs["name_counts_index"], boundary=root) != index:
@@ -208,6 +208,7 @@ def package_corrected_datasets(
     eps_grid: Sequence[float] = DEFAULT_EPS_GRID,
     minimum_dataset_f1: float = 0.0,
     minimum_signature_weighted_f1: float = 0.0,
+    singleton_orcid_review_note: str | None = None,
 ) -> dict[str, Any]:
     """Copy final records and prepared populations into a fresh dataset snapshot."""
 
@@ -334,7 +335,7 @@ def package_corrected_datasets(
         replay_bundles={"incremental": "replay_manifest.json"},
         release_version=version,
     )
-    return validate_corrected_datasets(output)
+    return validate_corrected_datasets(output, singleton_orcid_review_note=singleton_orcid_review_note)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -359,6 +360,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=float,
         required=True,
         help="F1 that EPS selection may give up to gain precision; 0 selects the best F1",
+    )
+    parser.add_argument(
+        "--singleton-orcid-review-note",
+        help="Cite the review of every all-negative singleton-ORCID view in the source bundle.",
     )
     print(json.dumps(package_corrected_datasets(**vars(parser.parse_args(argv))), indent=2))
     return 0

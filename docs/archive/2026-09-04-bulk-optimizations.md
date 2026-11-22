@@ -1,5 +1,7 @@
 # Bulk Arrow optimizations: exact outputs, time, and peak memory
 
+> **Historical note (2026-09-04).** This profiling record predates the unified `s2and._s2and_rust` package.
+
 Four changes passed the requested gates on the measured workloads: at least
 10% less time in the affected category, exact outputs, and no more than 10%
 additional peak memory. No public API, artifact schema, or production
@@ -127,26 +129,10 @@ implementation invariant; the exact tests and real-data traces verify it.
 
 ## Reproduction and retained artifacts
 
-Experiment scripts, source copies, measurements, and final builds remain under
-`scratch/bulk_fixes_20260904/` (git-ignored).
-The [scratch archive](</D:/local-unsynced/s2and_scratch_archive_20261013/scratch/bulk_profile_20260904>)
-contains the original release extension and copied inputs.
-`final_wheels/` contains the final wheel. `final_runtime/` contains its extracted files.
-
-Restore `scratch/bulk_profile_20260904/` from that archive before the commands below.
-The harness uses that path for copied Arrow inputs and name counts.
-
-```powershell
-uv run --no-sync maturin build --release --manifest-path s2and_rust/Cargo.toml --out scratch/bulk_fixes_20260904/final_wheels
-uv run --no-sync python scratch/bulk_fixes_20260904/profile_compare.py --dataset aminer --limit 2500 --blocks 5 --repeat 1 --baseline --output scratch/bulk_fixes_20260904/full_baseline_rerun --runtime scratch/bulk_profile_20260904/release_runtime
-uv run --no-sync python scratch/bulk_fixes_20260904/profile_compare.py --dataset aminer --limit 2500 --blocks 5 --repeat 3 --output scratch/bulk_fixes_20260904/full_candidate_rerun --runtime scratch/bulk_fixes_20260904/final_runtime
-```
-
-Output directories must be fresh. The harness prepends the chosen release
-runtime before importing S2AND, since repository imports otherwise shadow it.
-For feature isolation add `--skip-scoring`; `--dense-features` supplies the
-dense control and `--check-features` performs the separate exact comparison.
-Do not time independent variants concurrently.
+The original reproduction commands used the pre-unification `s2and_rust`
+package and local scratch artifacts. The experiment stored scripts,
+measurements, and builds in `scratch/bulk_fixes_20260904/`. It used copied
+inputs and the baseline extension from `scratch/bulk_profile_20260904/`.
 
 Primary evidence: `acceptance.json`, `full_baseline/`, `full_candidate/`,
 `features_dense_control/`, `features_final/`, `features_exact/`,
@@ -154,9 +140,3 @@ Primary evidence: `acceptance.json`, `full_baseline/`, `full_candidate/`,
 `labels_benchmark.json`, `labels_memory_*.json`, and `LABELS.md`.
 Each full run includes input/model identities, source hashes, per-chunk
 digests, phase logs, timings, memory high-water marks, and completion status.
-
-Regression command (explicitly preload the rebuilt release):
-
-```powershell
-uv run --no-sync python -c "import sys; sys.path.insert(0,'scratch/bulk_fixes_20260904/final_runtime'); import s2and_rust; assert not s2and_rust.get_build_info()['debug_assertions']; import pytest; raise SystemExit(pytest.main(['-q','tests/test_bulk_sparse_features.py','tests/test_bulk_constraint_labels.py','tests/test_model_distance_matrix_orchestration.py','tests/test_rust_distance_matrix_parity.py','tests/test_rust_lightgbm_tiled_scoring.py','tests/test_rust_lightgbm_booster_parity.py','tests/test_rust_batch_chunking.py','tests/test_feature_port_parity.py']))"
-```

@@ -11,8 +11,7 @@ estimates.
 The pair model sees the years between two papers capped at 50 (`YEAR_DIFF_CAP`), and few training
 pairs predate 1950. Topic overlap can therefore put a 1928 paper into a profile that starts in 2000.
 1.0.0b12 splits a cluster at an empty stretch of more than 50 years unless a certain close pair, an
-ORCID or a required seed group bridges it (see "Name-conflict repair" in
-[production_inference.md](production_inference.md)). That cut clusters spanning 70 or more years from
+ORCID or a required seed group bridges it. That cut clusters spanning 70 or more years from
 1,215 to 785. What remains:
 
 - **A close pair bridges the gap: about 360 clusters.** The split keeps them whole. In the judged
@@ -23,16 +22,13 @@ ORCID or a required seed group bridges it (see "Name-conflict repair" in
 - **Wrong splits by the year-gap step: about 1 in 10.** Both judges called 4 of 40 sampled splits
   wrong. Each moved one or two mentions: a reprint or a record with the wrong year that the model was
   not certain of (an 1818 paper reprinted in 1931, a 1930s patent dated 2017).
-- **Blocks under 11 mentions** are not repaired. The year-gap split runs on them. The numbers
-  below predate two later changes: parts that share a first name now stay together in these
-  blocks (9 of 28 decided such cuts were judged right), and the placeholder years 1601 and 1800
-  count as undated (10 of 50 decided gaps through them were judged right). In two samples
-  of production profiles with such a gap (259 run), judged blind to S2AND's output, the split cut
-  183: both judges called 131 of them two people or a mixture, 30 one person, and 22 were unsure
-  or split. In the 200-profile
-  sample every wrong cut split off a single mention, and in 21 of 23 the newer side was dated 2000
-  or later (mostly reprints and digitized old works). The first sample had two wrong cuts in bigger
-  profiles: 3 of 8 mentions and 1 of 10.
+- **Blocks under 11 mentions.** The year-gap split still runs below the minimum size for
+  name-conflict repair. In rare surname blocks, parts that share the first word of a full
+  first name now stay together. The split treats placeholder years 1601 and 1800 as undated.
+  A single reprint or digitized old work dated 2000 or later can still split off if the gap
+  has no bridge. The remaining small-block error rate is unmeasured.
+
+See the [year-gap split rules](production_inference.md#year-gap-split).
 
 A lasting fix belongs in the model: lift the year cap and add old labeled pairs, or add a
 cluster-level year signal. A year-gap veto inside linkage was tested and rejected: it changed

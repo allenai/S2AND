@@ -39,8 +39,8 @@ backends:
 Passing a Rust runtime context to an `ANDData` API, or a Python context to an
 Arrow API, is an error. Rust entry points load the bundled `s2and._s2and_rust`
 extension and reject a missing binary or a version mismatch.
-Classic `predict_incremental` is retired. Use `predict_incremental_from_arrow`.
-Classic `predict` rejects `batching_threshold`; use `predict_from_arrow` for subblocking.
+Use `predict_incremental_from_arrow` for incremental prediction and
+`predict_from_arrow` with `batching_threshold` for subblocking.
 
 Lower-level callers of `s2and.runtime.build_runtime_context(...)` get Python
 when they omit `backend`. No environment variable changes these routes.
@@ -93,10 +93,11 @@ with ArrowDataset.open_trusted(paths) as dataset:
 handle as `open`. It performs no dataset checksum scans and still checks required tables,
 paired optional inputs, Arrow schemas, index structure, and source sizes. The
 caller is responsible for supplying matching, immutable tables and indexes.
-It raises `ValueError` for the `cluster_seeds`, `cluster_seed_disallows`, and
-`altered_cluster_signatures` keys. Read those tables with `read_cluster_seeds_arrow`,
-`read_cluster_seed_disallows_arrow`, and `read_altered_cluster_signatures_arrow`, and
-pass them as prediction arguments.
+It raises `ValueError` for the request-local keys `cluster_seeds`,
+`cluster_seed_disallows`, `altered_cluster_signatures`, and `profile_exclusions`.
+Read those tables with `read_cluster_seeds_arrow`, `read_cluster_seed_disallows_arrow`,
+`read_altered_cluster_signatures_arrow`, and `read_profile_exclusions_arrow`,
+respectively, and pass the results as prediction arguments.
 Both modes open a name-count index with the same checks: manifest, file sizes, file headers,
 and section bounds.
 Each trusted open gets a fresh generation ID, so prediction caches can be reused
@@ -119,29 +120,8 @@ columns retain their normal validation.
 
 ### Rust training constructor
 
-Rust training has one constructor:
-`s2and.arrow_training.build_training_anddata_from_arrow`. It accepts one open
-handle, validates the training profile, and returns a fully initialized
-train-mode `ANDData` that retains that handle.
-
-```python
-from s2and.arrow_inputs import ArrowDataset
-from s2and.arrow_training import build_training_anddata_from_arrow
-
-arrow_dataset = ArrowDataset.open(
-    "/path/to/arrow_dataset",
-    require_name_counts_index=True,
-)
-dataset = build_training_anddata_from_arrow(
-    arrow_dataset,
-    "training_dataset",
-    clusters="/path/to/clusters.json",
-)
-```
-
-Python SPECTER arrays and name-count mappings are not materialized for this
-route. Rust reads them through the retained handle. Keep `arrow_dataset` open
-until the returned training dataset is no longer used.
+For `build_training_anddata_from_arrow` and its input requirements, see
+[Build a Rust-backed training dataset](training.md#build-a-rust-backed-training-dataset).
 
 ### Rust inference
 
@@ -170,10 +150,11 @@ groups attach through the production bundle's promoted incremental linker.
 Attachment and required-profile restoration stay within each original input
 block. Active required components are kept together within that block; a
 component larger than the threshold raises before subblocking. Blocks containing
-only initials use bulk prediction. See [subblocking.md](subblocking.md) for the
-same contract on the Python route.
-Bulk prediction uses ordinary required seed groups on both Python and Arrow,
-with or without subblocking. Altered-profile markers do not change bulk seed
+only initials use bulk prediction. See the algorithm and standalone Python
+reference in the [subblocking guide](subblocking.md).
+
+Bulk prediction uses ordinary required seed groups on the Python route and on
+the Arrow route with or without subblocking. Altered-profile markers do not change bulk seed
 membership or attachment policy. The Arrow `altered_cluster_signatures` argument
 is accepted but ignored by bulk prediction; the Python route likewise
 ignores `ANDData.altered_cluster_signatures` in bulk mode. Required components
@@ -256,244 +237,13 @@ anchor's cluster, and within its subblock it can still join any other cluster.
 - Eviction honors exclusions. It does not remove another person's papers that
   the user did not exclude.
 
-### ORCID name waiver
-
-Two mentions with the same ORCID always may share a cluster, whatever their names. One
-ORCID can therefore hold mentions whose names conflict, such as "André J." and "André A."
-for one person. Each of them then forbids the person's papers without an ORCID that carry
-the other name form, and the cluster cannot take those papers in.
-
-When a block's distances are built, a mention with an ORCID stops forbidding a mention
-without one if all of these hold:
-
-- its name conflicts with the names of other mentions of the same ORCID;
-- the name without an ORCID does not conflict with at least two of those mentions;
-- the name without an ORCID conflicts with at most 10% of that ORCID's mentions that have
-  a full first name, and the ORCID has at least five such mentions in the block.
-
-So the ORCID's "André A." mention stops forbidding an "André J." paper without an ORCID,
-because the ORCID itself holds two "André J." mentions. It still forbids an "André M." paper:
-the ORCID shows no name that fits "André M." and conflicts with "André A.". One "André J."
-mention would not be enough, so a single mention with a wrong ORCID waives nothing. A
-signature that a block lists twice counts as one mention.
-
-The pair then gets its model distance, and linkage decides as it does for any other pair.
-Seed constraints keep precedence, and two mentions with different ORCIDs are not affected.
-
-The waiver is on by default: `Clusterer.orcid_name_waiver` is `(5, 0.1)`, the fewest
-full-first-name mentions and the largest conflicting share. Set it to `None` to turn it off.
-The first value must be at least 1 and the second between 0 and 1.
-A model bundle does not record the setting: a loaded model starts at the default, and bundle
-export refuses a clusterer that holds another value. `Clusterer.suppress_orcid` also turns
-it off.
-
-```python
-clusterer.orcid_name_waiver = None
-clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
-```
-
-The waiver applies wherever a call builds a whole block's or subblock's distances with a Rust
-featurizer. It looks only at the mentions of that block or subblock. Constraint calls on
-separate pairs keep the plain name rules: incremental linking, the linker's training labels,
-and name-conflict repair's own name test. `ANDData.get_constraint` also keeps them.
-
-### Name-conflict repair
-
-One or two mentions with a wrong or misparsed name can keep a person's cluster away from
-the rest of their work, because the name rules forbid every pair they are in.
-Name-conflict repair handles this case. It is on by default, with
-`Clusterer.name_conflict_repair_max_distance` set to `0.2`. Set it to `None` to turn
-the repair off. A model bundle does not record the setting: a loaded model starts at
-`0.2`, and bundle export refuses a clusterer that holds another value.
-
-```python
-clusterer.name_conflict_repair_max_distance = None
-clusters, _ = clusterer.predict_from_arrow(block_dict, arrow_dataset, name_tuples=None)
-```
-
-The repair's other settings are fixed (`s2and/name_conflict_repair.py`). Since `1.0.0b12` they
-are the bounded close-pair rule; on 127 dev blocks, 7 ORCID-labelled giant blocks and 40 fresh
-blocks it made no ORCID-confirmed wrong merge:
-
-- The height is the close-pair linkage height: the average model distance less the cluster
-  model's `close_pair_bonus` times the share of pairs under `close_pair_distance`. Only codes
-  whose whole range lies under the close distance count as close, so the height is an upper
-  bound. A cluster model without a close-pair bonus compares the plain average.
-- A pair whose plain average is over the limit may use the bonus only when at least 10% of its
-  pairs are certainly close, its plain average is at most 0.40, and each side keeps at least
-  10 mentions. A few very close pairs then cannot carry two clusters that are otherwise far apart.
-- Each side must keep a mention with a full first name once the odd mentions are left out.
-- A block gets up to five repair rounds. A round merges each cluster at most once; a later round
-  sees the merged clusters, so a profile split three ways rejoins over two rounds.
-
-`1.0.0b14` removed the seven `Clusterer` attributes that set these
-(`name_conflict_repair_uses_close_pair_bonus`, `name_conflict_repair_requires_full_first_names`,
-`name_conflict_repair_rounds`, `name_conflict_repair_initials_side_min_mentions` and the three
-`name_conflict_repair_bonus_*` bounds). Prediction refuses a clusterer that still sets one.
-
-The setting applies wherever a call builds a block's distances and clusters them:
-`predict_from_arrow`, `predict`, `predict_from_rust_featurizer`, and the two clustering
-steps of incremental prediction (new mentions that attach to no profile, and the
-pre-split of altered profiles). Incremental prediction never merges two existing
-profiles, so the repair does not join them there.
-
-A prediction call that takes precomputed distances (`dists=`) skips the repair. Such a
-matrix can hold impossible pairs from the caller's own supervision, which nothing can
-tell from name conflicts when the names conflict too. Classic `Clusterer.fit` scores
-its EPS search on such matrices, so it does not see the repair.
-`predict_eps_grid` and `predict_eps_grid_from_rust_featurizer`, which EPS calibration and
-the giant-block sweep use, do apply the repair at every EPS. Pass them only matrices
-built from the same dataset or featurizer, with no supervision of your own.
-The repair and the year-gap split read each mention's facts (full first names, ORCIDs, joined
-readings, years) and the name test from a Rust featurizer. An Arrow-backed `ANDData` uses its
-cached featurizer; only a classic `ANDData`, which has none, reads them from its signatures.
-
-After a block or subblock is clustered, two clusters merge when all of these hold:
-
-- At most two mentions take part in every forbidden pair between the two clusters. The
-  smallest such set is the odd mentions; a larger set is not tried when the smallest
-  fails a later test.
-- Without them, each cluster has at least five mentions and a full first name:
-  a first name with a word longer than one letter. "J.-P." is two initials.
-- Without them, the average model distance between the clusters is certainly below the
-  value given. The repair knows the average to within 0.004 and merges only when the
-  upper end of that range is under the limit.
-- Every forbidden pair between the two clusters has conflicting names, is not a seed
-  disallow, and does not join two different required seed groups. A pair that is
-  forbidden while its names agree, such as a seed disallow held by the featurizer,
-  blocks the merge.
-- The clusters do not carry different majority ORCIDs. The odd mentions count toward
-  the majority. A clusterer that suppresses ORCIDs skips this test.
-- No pair across the clusters is a seed disallow or a profile exclusion.
-- With `dont_merge_cluster_seeds` on, the two clusters do not hold mentions of two
-  different cluster seeds, such as two claimed profiles.
-
-The odd mentions stay in the merged cluster. Each round selects disjoint pair merges,
-closest first. A person split three ways rejoins over two rounds: the second round tests the
-merged pair against the third cluster as one cluster, as average linkage would. Until
-`1.0.0b14` a selected pair could also absorb a third cluster in the same round when each
-original pair passed on its own; on 128 production blocks and 7 giant blocks the rounds give
-the same partitions without that step.
-
-Each repair round first runs a reading step for joined-initials readings (see
-"Canonical name contract" in `docs/canonical_names.md`). The name rules veto "Ec" against
-a bare "Edward", although "Ec" agrees with "Edward C.". When linkage puts "Ec" beside
-"Edward C." mentions, that one veto keeps the piece away from the profile that holds the
-bare "Edward". The step sets aside each impossible pair between a reading mention and a
-mention without a reading when either cluster, the reading mention's own included, holds a
-mention that spells the reading; the merged profile then spells it, which incremental linking
-accepts for restored profiles. When only the reading mention's own cluster spells it, the step
-sets aside the reading mention's pair with another mention only when some own-cluster speller has
-no impossible pair with that mention. If every speller also conflicts with it ("Edward C."
-against "Edward D."), the reading is not the only veto: the pair stays impossible and goes to
-the odd-mention tests below. A set-aside pair has
-no model distance, so it counts as the farthest possible pair; one speller then cannot carry
-two clusters whose pairs are mostly set aside. Two clusters with no other impossible pair
-merge when their close-pair height is under the linkage EPS, where linkage would have merged
-them even with every set-aside pair far apart. When other impossible pairs remain, at most two odd mentions
-must explain them, and the odd-mention tests above apply. The ORCID, seed, disallow,
-exclusion and name-rule tests apply to every merge. Pair verdicts and linkage do not change.
-The step runs only for an average-linkage `FastCluster`. Like the rest of the repair, it
-runs only on blocks of at least 11 mentions, so a smaller block keeps a reading split.
-
-### ORCID joins
-
-Within one distance matrix, equal ORCIDs get distance 0 before the name rules, so linkage
-merges their mentions first and no join is needed there. Subblocking can still put mentions
-of one ORCID into separate subblocks. At the end of subblocked Arrow prediction, average-linkage
-clustering therefore joins final clusters that separate subblocks of one original block
-support with the same leading ORCID. The ORCID must account for at least 80% of each cluster's
-observed ORCIDs, a tie does not qualify, and each cluster needs two mentions with the ORCID and
-at least 5% coverage. The same canonical full first-name word must occur in at least 80% of
-each cluster's full-name mentions. A cluster of initials only joins when the ORCID covers at
-least 20% of it and only one full first name holds the ORCID's other clusters. Anchors in the
-single-letter subblock, whose mentions attach one at a time, do not count as a shared subblock.
-Name forms that hold at least 20% of a cluster must not break the hard name rule against those
-of the other clusters, so different full middle names or different compound first names stay
-apart; rarer forms are strays and do not veto. Joined clusters can exceed the subblock size limit. The join skips seed disallows, profile exclusions, and
-distinct required seed groups when `dont_merge_cluster_seeds` is on.
-
-Set `Clusterer.orcid_join = False` to turn the join off. It also skips ORCID-suppressed
-requests. Bundle export requires the default switch because the bundle format has no field
-for it.
-
-### Year-gap split
-
-After the in-block merges, a year-gap split (`s2and/year_gap_split.py`) cuts each cluster wherever
-its dated mentions leave an empty stretch of more than 50 years. The pair model sees the
-years between two papers capped at 50, so it cannot tell 50 years from 80, and topic overlap
-can pull a 1928 paper into a profile that starts in 2000. A real career has papers all along,
-so a long career has no such stretch. Two parts across a cut stay together when some pair
-between them is certainly under the close-pair distance, as a reprint with the same title and
-coauthors usually is, or when they share an ORCID or a required seed group. When the surname
-block has under 11 mentions they also stay together when they share the first word of a full
-first name, since a shared first name under a rare surname usually means one person. The
-block size is counted in the request's dataset (`author_block` on the Arrow route,
-`author_info_block` on the Python route), so a claimed profile, an incremental residual or a
-subblock of a large block is not a small block. A last-name-and-first-initial name count of
-11 or more in the name-count index also rules the bridge out, for requests that hold only part
-of a block. The split
-treats the years 1601 and 1800 as
-undated: the corpus gives them to papers whose real year it does not know. Undated mentions
-that share an ORCID, a seed group or such a first name move as one group. A group follows the
-part that shares one with it. Otherwise a group stamped 1601 or 1800 follows the one part whose
-dated years span the stamp, and any other group the part with the lowest average distance; a
-group that shares one with two parts keeps them together. The split only separates, so no other cluster changes.
-It reads the same distance copy as the repair, so it needs a cluster model with a close-pair
-bonus, and runs on blocks of any size from two mentions whose dated mentions span more than
-50 years. It also runs on blocks without a name conflict, where no repair applies, and since
-`1.0.0b14` with the repair off (`name_conflict_repair_max_distance = None`). Turn off all three
-corrections for linkage-only clusters. Like the repair, it skips a prediction call that takes precomputed
-distances (`dists=`). A request with
-`incremental_dont_use_cluster_seeds=True`, such as the altered-profile pre-split, may split a
-seed group. The pre-split's cut is temporary: incremental linking returns the altered profile
-whole and uses the pieces only to decide where a new mention links. `Clusterer.year_gap_split = False` turns it off.
-
-The in-block corrections share a one-byte-per-pair copy of the distances while the block
-clusters, about one eighth of the matrix (`s2and/pair_codes.py`). The RAM guard accounts for the
-copy when a correction can use it. `s2and/block_corrections.py` runs the corrections in the same
-order on every bulk route that builds its distances and in the EPS grid.
-
-The repair reads a pair as forbidden only at the exact impossible-pair distance.
-A block is not repaired when its distances hold any other value above one, such as
-a caller's own soft "keep apart" distance. It is also not repaired when the matrix
-is not a contiguous float64 condensed matrix, or when the cluster model is not `FastCluster`.
-
-### Close-pair bonus
-
-The pair model scores a pair with shared evidence near zero and a pair without
-evidence above EPS. A plain average lets the many pairs without evidence outvote the
-few near-certain ones, so one person's papers from two periods or topics can stay in
-two clusters.
-
-With the close-pair bonus, the height at which two clusters merge is their average
-model distance minus `close_pair_bonus` times their share of close pairs, floored at
-zero. A close pair has a model distance under `close_pair_distance`. Impossible pairs
-still keep clusters apart, and heights stay comparable with EPS.
-
-The bonus is a property of the model bundle, not a library default, because EPS is
-selected together with it. `clusterer.json` carries both values under `cluster_model`
-when the bundle uses the bonus. A bundle without them clusters by plain average
-linkage, as before. Libraries older than `1.0.0b10` refuse a bundle that carries them.
-
-The bonus applies wherever a block is clustered from a distance matrix: full-block
-prediction, subblocks, and the clustering steps of incremental prediction. Name-conflict
-repair reads the model distances, not the lowered heights. The incremental linker is
-unchanged.
-
 ### Reunite-only memory and time
 
-Each pass of the [reunite-only step](subblocking.md#reunite-only-step) attaches
-the marked records of one subblock, at most `batching_threshold` records, to the
-marked-only clusters of its dead-end bucket. The memory checks of this attachment use
-`total_ram_bytes`. A prototype of the step ran on the `w wang` block, with
-270,088 records, a cap of 15,000 and 4 threads. A budget of 8 GiB raised
-`MemoryError` at 8.5 GiB RSS. A budget of 32 GiB gave a peak RSS of 9.2 GiB,
-about the same as without the step.
-
-The step added about 11.5 minutes on that block. Set `total_ram_bytes` well
-above the expected peak RSS of the process. A bucket without marked-only
-clusters in two or more subblocks skips the step.
+Each pass of the [reunite-only step](subblocking.md#reunite-only-step) attaches up
+to `batching_threshold` marked records from one subblock to marked-only clusters
+in the same dead-end bucket. Set `total_ram_bytes` with headroom above the
+expected peak resident set size (RSS). Buckets need marked-only clusters in at
+least two subblocks to run the step.
 
 ### Arrow validation in release and evaluation tools
 
@@ -508,6 +258,102 @@ undeclared, or the name-count index is undeclared; it reports the fallback
 reason. A manifest missing required base artifacts is an error. SPECTER
 generation selection uses the declared manifest filename, including when the
 resolved on-disk filename has different casing.
+
+## Clustering corrections and close-pair bonus
+
+Set these runtime-only `Clusterer` switches after loading a model. Each starts
+at the package default.
+
+| `Clusterer` switch | Default | Off value | Scope | Bundle export |
+| --- | --- | --- | --- | --- |
+| `orcid_name_waiver` | `(5, 0.1)` | `None` | Rust block and subblock constraint building | Requires the default |
+| `name_conflict_repair_max_distance` | `0.2` | `None` | In-block repair after linkage | Requires the default |
+| `orcid_join` | `True` | `False` | Final clusters across Arrow subblocks | Requires the default |
+| `year_gap_split` | `True` | `False` | In-block split after repair | Requires the default |
+
+Name-conflict repair and year-gap splitting share a one-byte-per-pair copy of
+the distances. The memory guard accounts for that copy when a correction can
+use it. Both steps skip ordinary prediction with precomputed `dists=`, including
+the epsilon (EPS) search in `Clusterer.fit`. The dedicated
+`predict_eps_grid` and `predict_eps_grid_from_rust_featurizer` methods apply both
+corrections when eligible. Pass them matrices built from the same dataset or
+featurizer, free of caller supervision. See the correction order in
+[`s2and/block_corrections.py`](../s2and/block_corrections.py).
+
+### ORCID name waiver
+
+When Rust builds a block or subblock distance matrix, an ORCID's own mentions
+can override a name conflict with a mention that lacks an ORCID. The outside
+name must be compatible with at least two same-ORCID mentions whose names
+conflict with the paired mention. The two setting values give the minimum
+number of full-first-name mentions and the maximum share of those mentions that
+may conflict with the outside name. The minimum must be at least 1 and the
+share must be in `[0, 1]`.
+
+Eligible pairs use their model distance, with seed constraints taking
+precedence. Pairwise constraint checks in incremental linking use the ordinary
+name rules. `suppress_orcid` also disables the waiver. See
+[the Rust featurizer](../s2and_rust/src/rust_featurizer.rs) for the full rule.
+
+### Name-conflict repair
+
+Repair can join two clusters in a block of at least 11 mentions when one or two
+odd mentions explain the name vetoes. Both sides must retain enough mentions
+and full first-name evidence, and the merge must respect ORCIDs, seed
+constraints, and profile exclusions. It uses an upper bound on the linkage
+height and retains the odd mentions in the merged cluster. When the plain
+average bound exceeds the repair limit, the bonus requires at least 10% of
+pairs to be certainly close, a plain average bound of at most 0.40, and at
+least 10 remaining mentions on each side.
+
+Repair requires `FastCluster` and a one-dimensional condensed matrix with a
+floating-point or integer dtype. It converts strided views and other supported
+dtypes to contiguous `float64` as needed. Repair needs an exact
+`LARGE_DISTANCE` pair and skips matrices with NaN or any other distance above
+one. It can run during incremental altered-profile splitting and residual
+clustering. The removed `name_conflict_repair_*` settings raise `ValueError`.
+See [`s2and/name_conflict_repair.py`](../s2and/name_conflict_repair.py) for the
+repair rounds and the joined-initials rule.
+
+### ORCID joins
+
+Average-linkage Arrow subblocking can join final clusters supported by the same
+dominant ORCID in separate subblocks of one original block. The join requires
+sufficient ORCID coverage and compatible name evidence and respects seed
+disallows, profile exclusions, and `dont_merge_cluster_seeds`. Joined clusters
+can exceed the subblock size limit. `suppress_orcid` also disables the join.
+See [`s2and/orcid_join.py`](../s2and/orcid_join.py) for the evidence thresholds.
+
+### Year-gap split
+
+After linkage and any in-block repair, the split separates dated mentions
+across gaps longer than 50 years. A certainly close pair, a shared ORCID or required seed group,
+or a shared first word of a full first name in a small surname block can bridge
+the gap. Small-block eligibility uses the original surname block and the
+name-count index where available. The years 1601 and 1800 count as undated.
+
+The split requires a cluster model with a close-pair bonus and runs
+independently of name-conflict repair. During altered-profile pre-splitting,
+`incremental_dont_use_cluster_seeds=True` permits temporary cuts within a seed
+group. Incremental linking restores the original profile in its result. See
+[`s2and/year_gap_split.py`](../s2and/year_gap_split.py) for undated mentions and bridges.
+
+### Close-pair bonus
+
+The bonus gives strong pairwise evidence more weight in average linkage.
+The merge height is the average model distance minus `close_pair_bonus` times
+the share of pairs below `close_pair_distance`, floored at zero. Impossible
+pairs still keep clusters apart.
+
+Calibration selects EPS together with the bonus. The bundle records both bonus
+settings under `cluster_model` in `clusterer.json`. Bundles without these fields
+use plain average linkage.
+
+The bonus applies to clustering with the configured model, including full
+blocks, subblocks, and the clustering steps of incremental prediction.
+[Name-conflict repair](#name-conflict-repair) uses an upper bound on the lowered
+height when the model sets a bonus, subject to the repair's bonus bounds. The
+incremental linker scores attachments separately.
 
 ## Caller supervision and dataset constraints
 
@@ -543,8 +389,8 @@ retrieval so an overridden dataset negative cannot remove a candidate before
 the caller's distance is applied. Other retrieval limits still apply.
 
 Incremental prediction preserves each original seed group. If an effective
-explicit disallow connects two members of that group, both Python and Arrow
-raise `ValueError` with `incremental_seed_disallow_conflict`, the group ID, and
+explicit disallow connects two members of that group, `predict_incremental_from_arrow`
+raises `ValueError` with `incremental_seed_disallow_conflict`, the group ID, and
 the conflicting signature pair before splitting or scoring. This includes
 seed members supplied separately from the query list and requests with no new
 papers. Caller distances equal to `LARGE_DISTANCE` are hard disallows; other
@@ -571,10 +417,8 @@ Caller supervision cannot be combined with precomputed matrices, and Arrow
 rejects supplied seed constraints with those matrices even when default
 constraints are off.
 
-Python subblocked prediction carries original required seed memberships into
-the initial-only attachment pass, including members not yet predicted. Explicit
-hard cannot-link supervision also constrains post-clustering seed merges;
-indirect merges cannot reconnect a forbidden pair.
+Explicit hard cannot-link supervision also constrains post-clustering seed
+merges. Indirect merges cannot reconnect a forbidden pair.
 
 ## Incremental decision semantics
 
@@ -614,18 +458,6 @@ Mutually disallowed queries likewise cannot attach to different splits that
 restore to the same profile; the lower-priority query is rescored through the
 existing exclusion mechanism. The additional bookkeeping uses explicit
 constraint edges and split mappings rather than enumerating paper pairs.
-
-Classic incremental prediction checks proposed attachments for conflicts
-before restoring their destination profiles. Explicit required attachments
-take priority, followed by effective distance and signature ID. Conflicting
-ordinary attachments return to residual clustering without trying another seed.
-Conflicting mandatory attachments raise an explicit error.
-Default name constraints apply between new attachments; altered profiles keep
-their existing compatibility policy for historical names. Explicit negatives
-are checked against restored profile identities. The default-constraints and
-ORCID flags, along with caller supervision precedence, govern these
-checks. Promoted Arrow linking uses its own conflict-resolution policy, described
-above.
 
 ## Complete model bundles
 
@@ -668,9 +500,10 @@ It rejects unversioned model stages instead of a silent legacy fallback.
 Pairwise production training records `name_tuples_data_sha256`,
 `name_counts_manifest_sha256`, and `orcid_prefix_counts_data_sha256` in
 `feature_contract`. Bundle export does not synthesize missing behavior hashes.
-Export and load compare tuple/ORCID data hashes with the canonical package
-artifacts; the exact name-count manifest and complete ordered feature contract
-are also bound into model and linker provenance.
+Export and load check the name-tuple hash against the packaged artifact by
+default. The ORCID prefix-count hash must match an
+[installed count set](#name-count-and-reuse-boundaries). The exact name-count
+manifest and complete ordered feature contract also bind the model and linker.
 
 The linker metadata records `kind: "s2and_incremental_linker"`, format and feature-contract versions, ordered feature names, retrieval top-k, gate configuration, and binding digests.
 Its checksums bind the booster, pairwise bundle, and complete target JSON.
@@ -693,34 +526,22 @@ a calibrated sibling bundle.
 
 ### Staged publication
 
-Pairwise training writes an immutable pairwise-only, EPS-pending source.
-Calibration changes only `clusterer.json` and `manifest.json` in a fresh
-pairwise-only sibling. Linker training and finalization accept only the
-calibrated sibling. Finalization does
-not add a linker to that directory and does not transition its manifest in
-place. It assembles a complete sibling staging directory, copies the verified
-pairwise files and newly trained linker into it, validates the complete staged
-bundle, and renames that directory once into a previously nonexistent final
-path. It does not use publication locks, directory fsyncs, or identical-tree
-rewrite handling.
+Pairwise training writes an immutable pairwise-only stage with EPS pending.
+Validation-only calibration writes a sibling stage, changing only
+`clusterer.json` and `manifest.json`. `train_linker_and_finalize.py` uses that
+calibrated stage to rematerialize pairwise-derived features and fit the linker
+once.
 
-A failed finalization therefore leaves the pairwise source unchanged and does
-not expose a partial final bundle. Publishing to an existing final path is an
-error; a changed release gets a new path.
+Finalization assembles and validates a complete sibling staging directory
+containing the verified pairwise files, the new linker, and
+`reproducibility/incremental_linker_training_target.json`. It publishes the
+directory with one rename to a new final path. A failed finalization leaves
+the pairwise source intact and keeps partial files out of the final path.
+The training command reloads the published bundle and evaluates the serialized
+artifact.
 
-Production training first writes an immutable pairwise-only stage. After
-validation-only EPS selection, the linker release command rematerializes
-pairwise-derived features, performs one fresh linker fit, writes a complete
-bundle in a new directory, reloads it, and evaluates through that exact
-serialized artifact. The embedded
-`reproducibility/incremental_linker_training_target.json` remains part of the
-complete manifest.
-
-`train_linker_and_finalize.py` is one direct, expensive-job entrypoint; its
-feature materialization and staging are temporary. The
-[production command reference](../scripts/production/README.md) documents its
-arguments, and the [v1.3 runbook](release.md) owns release order and
-gates.
+See the [production command reference](../scripts/production/README.md) for
+arguments and the [release process](release.md) for stage order and gates.
 
 ## Name-count and reuse boundaries
 
@@ -749,12 +570,23 @@ Python is the sole name-tuple artifact loader. It validates the canonical text
 directly, retains frozen pairs plus the computed `data_sha256`, and passes
 those pairs explicitly to Rust-backed flows.
 
-Each packaged ORCID prefix-count artifact has a JSON data file and an adjacent
-`.manifest.json` containing only the `name_tuples_sha256` dependency. The
-runtime loader validates the prefix pairs and retains immutable counts by data hash.
-Each production model uses the packaged hash in its feature contract. Loading a
-model with an unknown ORCID hash fails. New training contracts use the refreshed
-`1.4` artifact and verify its tuple hash against the canonical name-tuple artifact.
+The wheel ships two ORCID prefix-count sets. Each has
+`first_k_letter_counts_from_orcid.json` and an adjacent
+`first_k_letter_counts_from_orcid.manifest.json` with its `name_tuples_sha256`
+dependency.
+
+| Count set | Directory |
+| --- | --- |
+| Used by `1.3.x` models | `s2and/data/` |
+| Used by `1.4` models | `s2and/data/orcid_prefix_counts_v1_4/` |
+
+Arrow subblocking selects the set by `orcid_prefix_counts_data_sha256` in the
+model's feature contract. The packaged count loader rejects unknown hashes
+and data that fails the hash check. New training contracts use the `1.4` set and
+verify its tuple hash against the canonical name-tuple artifact. A clusterer
+without a contract hash uses the `1.4` set for subblocking. See
+[the packaged count loader](../s2and/orcid_prefix_counts.py) and
+[`Clusterer._subblocking_prefix_counts`](../s2and/model.py).
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
@@ -766,63 +598,6 @@ Unversioned artifacts require an explicit rebuild or export.
 Direct Arrow/Rust prediction reuses validated immutable native state within the
 process, and the bounded altered-profile presplit memo is a private in-process
 optimization. Nothing is cached on disk between processes.
-
-## Implementation notes
-
-These notes describe internal boundaries for contributors; they are not part
-of the public API.
-
-### Import boundaries
-
-Importing `s2and.production_model` does not load evaluation, plotting, or
-Hyperopt modules. Pure clustering metrics live in `s2and.metrics` and are also
-importable from `s2and.eval`. Evaluation loads plotting libraries
-when rendering and scopes its plot styling to that operation.
-
-Constructing a `Clusterer` or loading a production bundle does not create an
-optimizer search space or load Hyperopt. With the default `search_space=None`,
-the attribute remains `None` until `Clusterer.fit()` or Arrow validation
-calibration creates the default uniform EPS space. Explicit search spaces are
-used as given. Genie loads only when its subblocking algorithm is used.
-
-### Prediction state ownership
-
-Prediction orchestration keeps effective seed assignments, disallow pairs,
-altered-profile overrides, and internal diagnostics in request-owned state.
-Bulk subblocking builds synthetic seeds from its completed subblocks without
-temporarily replacing the seed collections on `ANDData`. Nested predictions
-and failed subblock calls therefore leave the dataset's original seed
-collections intact.
-
-Prepared Rust feature data is reusable; the effective seed constraints belong
-to the prediction using it. Python orchestration passes those constraints at
-the Rust boundary instead of installing request overrides into cached feature
-data.
-
-This ownership boundary is not a general thread-safety guarantee for every
-classifier or cache supplied by an application.
-
-Per-call `cluster_model_params` apply throughout bulk prediction, including
-initial-only attachment and residual clustering on the Python and Arrow routes.
-Each block fits a fresh clustering estimator. Explicit `preserve_input`
-choices survive nested calls, and the shared model's stored parameters are
-unchanged. Incremental altered-profile splitting uses the configured clustering
-model; its reusable cache distinguishes the model parameters. Graph subblocking
-uses its separate graph configuration.
-
-Seed-link application is a pure decision phase shared by classic Python and
-promoted Arrow incremental completion. It accepts ordered seed memberships,
-link decisions, altered-profile mappings, and first-name metadata; it returns
-owned cluster lists, residual signatures, and rejected links. It preserves
-split-specific name checks and restores original profile IDs.
-
-Both paths pass that result to a shared completion component. Completion owns
-safe residual grouping, numeric cluster-ID allocation, and request telemetry.
-It receives lazy first-name/ORCID views, explicit policy and supervision, and
-one typed operation for clustering a residual group. It has no model, dataset,
-or Arrow dependency. The orchestration boundary resolves aliases, logs rejected
-links, and binds backend execution, constraints, and memory limits. Name
-metadata is accessed lazily without copying the prepared dataset.
 
 ## Verification
 

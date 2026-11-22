@@ -28,8 +28,7 @@ uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
 ```
 
 The producer copies complete corrected sources and exact fit/evaluation inputs.
-The paired replay options preserve accepted raw replay records and vectors.
-They are optional, but the complete release snapshot supplies both.
+Supply both replay options to preserve accepted raw replay records and vectors in a complete snapshot.
 It writes `pairwise/inputs.json` and an internal `pairwise/model_plan.json` with relative paths.
 Publish and train from the bundles that `write_release_bundles.py` writes from this snapshot.
 See [release bundles](../README.md#release-bundles).
@@ -38,7 +37,7 @@ All projections reference one physical count index at the snapshot root.
 It validates hashes, boundaries, source identities, and native loaders.
 A changed package requires a new output path.
 
-The default EPS grid runs from `0.00` to `1.00` at steps of `0.01`.
+The default grid for the clustering threshold (`EPS`) spans `0.00` to `1.00` in steps of `0.01`.
 Both default minimum F1 floors equal zero.
 Set `--eps-grid`, `--minimum-dataset-f1`, and `--minimum-signature-weighted-f1` for a different declared policy.
 These options do not authorize a model fit.
@@ -131,24 +130,9 @@ A new abstract-based encoding for those giants requires another source of full a
 
 ## Incremental data updates
 
-Initial-only rows use query and paper copies; original master and profile records retain full names.
-The trainer uses origin maps to exclude original queries from candidate profiles.
-
-Reuse the corrected incremental source tables, labels, and assignments when their task evidence remains valid.
-Profile-member changes and query evidence changes require affected label checks.
-A changed pairwise model requires fresh incremental feature computation.
-The production finalizer performs that computation from the corrected source dataset.
-A feature change alone does not automatically require new manual labels.
-
-The dataset contains full-name and initial-only task views.
-Keep their judgments scoped to the supplied evidence.
-An abstention means the attachment lacks sufficient support under the safe-action target.
-Do not convert every abstention into a different-author label.
-
-Retain exposure annotations for pairwise, EPS, and paper overlap.
-Keep regression-only test views distinct from active release evaluation assignments.
-Adding components can alter retrieval features for other queries in the same block.
-Recompute the affected block's features.
+Create initial-only rows from query and paper copies. Keep full names in original master records and profiles.
+Follow the [incremental task guide](../../../docs/data.md#incremental-tasks) for labels and the [data update rules](../../../docs/data.md#update-rules) for rebuilds.
+Follow [Stage 5](../../../docs/release.md#stage-5-fit-evaluate-and-approve) for linker splits and evaluation.
 
 ## Arrow projections and publication
 

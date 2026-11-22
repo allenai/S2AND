@@ -1,8 +1,10 @@
 # Patent-free version 1.3 production candidate
 
+> **Archived, superseded on 2026-10-17:** This record preserves the mention-count candidate (M, EPS `0.55`) replaced by the [author-count candidate](../release_evidence/author_counts_mainline_20261017.md) and superseded by published model releases `1.3.1` and `1.3.2`.
+
 Release `1.3` excludes patent data from pairwise and incremental supervision.
 This candidate replaces the patent-inclusive package from commit `7e183c1`.
-The repository model is `artifacts/common/v1.3/production_model_v1.3`.
+At the time of the run, the local model path was `artifacts/common/v1.3/production_model_v1.3`.
 Its 11 files total 25,958,163 bytes.
 They match the evaluated package, except that the two JSON manifests omit the unread `generated_by_runtime` field.
 Manifest SHA-256: `b58e178c8b5089044dffcf7f5d95b8d7a5b59c2045a929bf12d1bc13ec46519b`.
@@ -15,7 +17,7 @@ Manifest SHA-256: `b58e178c8b5089044dffcf7f5d95b8d7a5b59c2045a929bf12d1bc13ec465
 
 EPS is 0.55. The gate uses 240 derived features.
 EPS 0.55 is the benchmark-validation choice.
-[Giant-block EPS review](../eps_calibration.md) remains pending before final acceptance.
+The [giant-block EPS review](../eps_calibration.md#recorded-release-decisions) was pending for this candidate.
 Pairwise uses seven benchmarks and the existing non-patent augmented dataset.
 The verified reused fit has 804,716 train pairs, 60,064 validation pairs, and 50 trials per head.
 All 33 source-role hashes and eight Arrow provenance records match the selected inputs.
@@ -65,4 +67,4 @@ These small runtime checks do not establish latency for large blocks.
 Run root: `D:/local-unsynced/s2and_incremental_fresh_20261014`.
 Exact commands: `nonpat_commands.json`. Reports and process records remain under `reports`, `stages`, and `logs`.
 The original patent research outputs remain outside the release payload.
-Final release acceptance and S3/PyPI publication remain pending.
+At this checkpoint, final acceptance and S3/PyPI publication were still pending.

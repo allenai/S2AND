@@ -19,16 +19,12 @@ Inference needs `inference/` only.
 Training and evaluation need `inference/` and `dataset/`.
 Release preparation needs all three bundles.
 
-Model release `1.3.1` uses the `1.3` data and changes only the model's linkage settings.
-Its `inference/` and `dataset/` bundles are under `s2and/1.3.1/`.
-That `dataset/` bundle differs from the `1.3` one only in `pairwise/model_plan.json`.
-The `source/` bundle is unchanged and stays under `s2and/1.3/`.
-The `1.3` model remains at `s2and/1.3/inference/`.
+| Release | `inference/` | `dataset/` | `source/` | Change |
+| --- | --- | --- | --- | --- |
+| `1.3` | `s2and/1.3/inference/` | `s2and/1.3/dataset/` | `s2and/1.3/source/` | Initial `1.3` release |
+| `1.3.1` | `s2and/1.3.1/inference/` | `s2and/1.3.1/dataset/` | `s2and/1.3/source/` | Changes only the model's linkage settings. The dataset changes only `pairwise/model_plan.json`. |
+| `1.3.2` | `s2and/1.3.2/inference/` | `s2and/1.3.1/dataset/` | `s2and/1.3/source/` | Binds the `1.3.1` model to an index rebuilt with the `1.0.0b11` Georgian and Armenian name rules. Requires `s2and` `1.0.0b11` or later. |
 
-Model release `1.3.2` is the `1.3.1` model bound to a rebuilt name-count index.
-The index applies the `1.0.0b11` name rules: Georgian and Armenian names count under their new spellings.
-Its `inference/` bundle is under `s2and/1.3.2/`; it has no `dataset/` bundle and uses the `1.3.1` one.
-It needs `s2and` `1.0.0b11` or later. The `1.3.1` model remains at `s2and/1.3.1/inference/`.
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
 Starting with `1.0.0b14`, the wheel ships the original `1.3.x` ORCID counts and the refreshed
 `1.4` counts. Each production model selects the counts by its contract's data SHA-256.
@@ -52,10 +48,20 @@ aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2an
 
 Git ignores everything in `s2and/data/` except its small tracked files.
 Code that reads the name-count index from the default location finds it there without configuration.
-Check the downloaded layout and every index file digest:
+After syncing `inference/` and `dataset/`, check the layout and index digests.
+The validator requires the root `manifest.json` from `dataset/`.
 
 ```bash
 uv run python scripts/verification/validate_local_arrow_release.py --release-root s2and/data
+```
+
+For an inference-only download, verify the index directly. `load_production_model`
+checks the model's manifest when it loads the model.
+
+```python
+from s2and.name_counts_index import NameCountsIndex
+
+NameCountsIndex.open("s2and/data/name_counts_index", verify=True)
 ```
 
 The model and the index bind their files through these manifests:
@@ -84,7 +90,10 @@ Each future refresh of the index is a staff step.
 
 ```text
 s2and/data/
-  path_config.json  s2and_name_tuples_*.txt  first_k_letter_counts_from_orcid*.json   # tracked files
+  path_config.json  s2and_name_tuples_*.txt  s2and_unnormalized_filtered_name_tuples.txt  # tracked files
+  s2and_surname_variants_canonical.txt               # tracked surname variants
+  first_k_letter_counts_from_orcid*.json             # tracked 1.3.x ORCID prefix counts and manifest
+  orcid_prefix_counts_v1_4/                          # tracked 1.4 ORCID prefix counts and manifest
   name_counts_index/          # inference: binary name-count index
   production_model_v1.3.2/    # inference: complete model
   manifest.json               # dataset: public-data manifest
@@ -115,7 +124,6 @@ The corrected populations do not reproduce the original model fit.
 A released model records the population it was fit on, and `evaluate-heldout` refuses other data.
 `pairwise/population_corrections.json` pairs each benchmark's original population fingerprint with its corrected one, so the command scores a released model on the corrected held-out blocks.
 Every corrected block is a subset of the same original block.
-Dataset manifests use portable paths to the one common index.
 
 The release owner writes the bundles from an internal snapshot with
 [`write_release_bundles.py`](../scripts/production/README.md#release-bundles).
@@ -183,21 +191,14 @@ Cluster labels remain JSON; fixed pairs and some split assignments remain CSV.
 The snapshot is not an all-IPC dataset.
 Precomputed features are optional derived caches, not the corrected source of truth.
 
-Dataset manifests require `kind: "s2and_arrow_dataset"`, `format_version: 1`, portable `paths`, and a checksum inventory.
-Name-count manifests require `kind: "s2and_name_counts"` and `format_version: 1`.
-Dataset and index compatibility depends on their formats and schemas, not an exact Python package version.
-Models additionally bind feature meanings, ordered feature names, and exact required artifact hashes.
-A dataset manifest gives the path of the name-count index and does not bind which index it is.
-The model binds the index: prediction refuses an index other than the one in the model's feature contract.
-So a dataset bundle works with every model release, and a new model or index needs only a new `inference` bundle.
-`evaluate-heldout` scores any model release with the dataset bundle's model plan.
-Manifests written before `1.0.0b11` also list the index in their checksum inventory; that entry is ignored.
-Python and Rust packages must still have compatible internal interfaces; the current install requires matched package versions.
+Dataset manifests reference `name_counts_index` by path. The model's feature contract
+pins `name_counts_manifest_sha256`, so the same dataset bundle can serve compatible models
+with different indexes. See [complete model bundles](production_inference.md#complete-model-bundles)
+for compatibility and the [Arrow dataset specification](rust/arrow_dataset_spec.md) for formats.
 
 Do not edit an open Arrow root.
 Publish changed records at a new path.
 Build Arrow tables and their batch indexes together.
-See [the public format specification](rust/arrow_dataset_spec.md) for table and manifest contracts.
 
 ## Update rules
 

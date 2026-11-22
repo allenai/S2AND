@@ -1,4 +1,4 @@
-# s2and-rust
+# s2and_rust
 
 Rust extension module for `s2and`.
 
@@ -21,5 +21,5 @@ uv sync --extra dev
 uses timestamps to detect ordinary build-input edits. The test guard checks
 the Rust build inputs by content, including additions and deletions that uv's
 timestamp keys can miss. See
-[build recovery](https://github.com/allenai/S2AND/blob/main/docs/install.md#build-the-rust-extension-from-source)
+[build recovery](../docs/install.md#build-the-rust-extension-from-source)
 for forced reinstall and Cargo cache-cleaning commands.

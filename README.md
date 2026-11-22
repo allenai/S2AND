@@ -14,9 +14,9 @@ Use [the release process](docs/release.md) for current preparation, fit, evaluat
 
 | Goal | Required input | Guide |
 | --- | --- | --- |
-| Run the production model | Common model and name-count index; your records and vectors | [Production inference](docs/production_inference.md) |
-| Use corrected research data | The `inference` and `dataset` S3 bundles | [Data and models](docs/data.md) |
-| Reproduce the production training process | The `inference` and `dataset` S3 bundles | [Reproduce the 1.3.1 model](docs/reproduce.md) |
+| Run the production model | Your records and vectors, plus the inference bundle | [Production inference](docs/production_inference.md) |
+| Use corrected research data | The inference bundle and the `dataset` bundle | [Data and models](docs/data.md) |
+| Reproduce the production training process | The `1.3.1` inference bundle and `dataset` bundle | [Reproduce the 1.3.1 model](docs/reproduce.md) |
 | Correct data or release another model | All three S3 bundles and maintained scripts | [Release process](docs/release.md) |
 | Train or evaluate with the API | Manifest-backed dataset and labels | [Training and evaluation](docs/training.md) |
 | Use current name normalization and small alias artifacts | Source checkout; optional count-index download | [Canonical names](docs/canonical_names.md#access-the-current-rules-and-artifacts) |
@@ -54,18 +54,15 @@ aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.2/inference/
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/dataset/ s2and/data/
 ```
 
-`inference` holds the complete model and the name-count index (2.4 GB).
+The inference bundle holds the complete model and the name-count index (2.4 GB).
 The `dataset` bundle works with every model release, so it stays under `s2and/1.3.1/`.
 `dataset` holds the benchmark Arrow data and labels (9.1 GB).
 The [data guide](docs/data.md#choose-the-required-data) states which bundles each user needs.
 Git ignores the downloaded files.
-Classic `ANDData` finds the index in `s2and/data/` without [path configuration](docs/data.md#configuring-s2anddatapath_configjson).
-Arrow and production script calls use explicit paths.
-Historical Arrow prefixes do not satisfy the current format-1 contract.
 
 ## Quick start
 
-After you [download](#download-data) `inference` and `dataset`, cluster every block of a released benchmark.
+After you [download](#download-data) the inference bundle and the `dataset` bundle, cluster every block of a released benchmark.
 For `qian` the model puts 6,312 signatures into 1,248 clusters:
 
 ```bash
@@ -111,19 +108,12 @@ The [inference guide](docs/production_inference.md) describes raw inputs, embedd
 
 ## Training and evaluation
 
-The [reproduction guide](docs/reproduce.md) runs the production training process on the published data.
-The production pairwise trainer reads `pairwise/model_plan.json` from the synced `dataset` bundle.
-It uses the dataset names that the plan declares.
-The [production commands](scripts/production/README.md#pairwise-model) describe pairwise fit, validation-only EPS selection, and incremental finalization.
-A historical baseline is not a prerequisite for a pairwise fit.
-Final release acceptance remains a separate step.
-
-The [research API guide](docs/training.md) provides smaller experiments and direct metric inspection.
-These examples do not replace the release test policy.
+- Reproduce the production model on published data with the [reproduction guide](docs/reproduce.md) and [production commands](scripts/production/README.md#pairwise-model).
+- Run smaller experiments and inspect metrics through the Python API with the [training and evaluation guide](docs/training.md).
 
 ## Runtime and scaling
 
-- Full-block `ANDData` prediction uses Python; subblocked and incremental prediction use Arrow/Rust.
+- `Clusterer.predict` on `ANDData` uses Python. `predict_from_arrow` (full-block and subblocked) and `predict_incremental_from_arrow` use Arrow/Rust.
 - `batching_threshold` enables subblocks for full prediction and caps incremental query batches.
 - `total_ram_bytes` controls the major memory allocation bounds.
 - `n_jobs` controls concurrency; model load defaults to one job unless you specify another value.
@@ -144,9 +134,7 @@ The original paper experiments use the `s2and_paper` branch and Python `3.7.9`.
 Use that branch's pinned environment and experiment commands for those results.
 Retired historical scripts remain in Git history; see [the script catalog](scripts/README.md#retired-historical-scripts).
 
-The current process starts from a complete corrected snapshot.
-It preserves exact pair and split identities and uses versioned native models.
-See [the release process](docs/release.md) for compatible artifacts and update rules.
+See the [reproduction guide](docs/reproduce.md) and the [release process](docs/release.md) for current models and release artifacts.
 
 ## Licensing
 

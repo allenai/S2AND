@@ -1,57 +1,26 @@
 # Reproduce the 1.3.1 model from public data
 
-This guide runs the production training process on the published `1.3` data.
-The result is approximately the released `1.3.1` model.
-`1.3.1` is the `1.3` fit with new linkage settings: close-pair bonus `8` for pairs under `0.05`, and EPS `0.40`.
-Its boosters and linker are the `1.3` files, so steps 1 and 3 reproduce the `1.3` fit.
-The current release, `1.3.2`, is this same model bound to a rebuilt name-count index; nothing in it is refitted.
-This guide uses the `1.3.1` index, the one the model was fitted with.
-Three steps stay outside public reproduction:
+Run the production training process on the published `1.3` data to approximate the released `1.3.1` model.
+`1.3.1` uses the `1.3` boosters and linker with a close-pair bonus of `8` for pairs under `0.05` and a clustering distance threshold (EPS) of `0.40`.
 
-- **Name counts.** Only AI2 staff can rebuild the name-count index from internal data. Use the released index.
-- **Final EPS review.** The release owner checks the calibrated EPS against giant-block EPS curves on internal production exports. For `1.3.1` that check kept the validation choice, `0.40`; see [giant-block EPS review](eps_calibration.md).
-- **LightGBM fits.** Multithreaded LightGBM sums leaf statistics in an order that depends on thread scheduling.
-  A rebuilt pairwise booster can differ from the released file in the last digits of some leaf values, even
-  between two runs on one machine with the same thread count. Splits, the selected hyperparameters, and every
-  metric in the reference table stayed the same in five reruns at 12 and 20 threads.
-  Compare a rebuilt model by those metrics, not by file hashes.
-  Files written on Windows also end in CRLF line breaks, so their bytes differ from files written elsewhere.
-
-The published data is the `1.3` data after its distribution correction of 2026-10-22.
-The correction removed papers absent from production S2AG and their dependent records; see [data](data.md).
-The released boosters and linker were fit before it.
-A reproduction therefore trains on slightly smaller populations.
-Its counts and scores are close to the reference results below, not equal to them.
-The released model records its original training population.
-The dataset bundle's `pairwise/population_corrections.json` pairs that population with the published one for each benchmark, so step 4 scores the released model on the published held-out blocks.
-
-The `1.3` reports also came from an earlier scorer.
-Scores are no longer rounded per dataset, prediction applies name-conflict repair, and calibration also scores the close-pair bonus.
+- **Name counts.** Use the released `1.3.1` index. Rebuilding it requires internal data.
+- **Final EPS review.** Internal production exports support this check, which kept the validation choice of `0.40`. See [giant-block EPS review](eps_calibration.md).
+- **LightGBM fits.** Thread scheduling can change the last digits of some leaf values. Compare rebuilt models using the reference metrics.
 
 ## Set up
 
-Check out the release tag and install the environment:
-
-```bash
-git clone https://github.com/allenai/S2AND.git
-cd S2AND
-git checkout <release-tag>
-uv sync
-```
+In a source checkout, run `git checkout <release-tag>` and set up the environment with the [install guide](install.md#repo-checkout).
 
 > **Update at v1.3 release:** Replace `<release-tag>` with the verified release tag.
 
-The training scripts live in this repository, not in the Python wheel.
-The [install guide](install.md) lists platform requirements.
-
-## Run inference: one sync
+## Sync the 1.3.1 index and reference model
 
 ```bash
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/inference/ s2and/data/
 ```
 
-`s2and/data/`, the default data folder, now holds `production_model_v1.3.1/` and `name_counts_index/`.
-[Load a production model](production_inference.md#load-a-production-model) for bulk and incremental prediction.
+`s2and/data/` now holds `production_model_v1.3.1/` and the `1.3.1` `name_counts_index/` used to fit it.
+For production inference, use the current `1.3.2` inference bundle from the [data download guide](data.md#download).
 
 ## Train and evaluate: a second sync
 
@@ -80,11 +49,11 @@ uv run --no-sync python scripts/production/model/train_pairwise.py \
 ```
 
 The trainer selects pairs from the development blocks and computes features from the same Arrow data.
-Each head runs a 50-trial TPE search against validation ROC AUC.
+Each head runs a 50-trial tree-structured Parzen estimator (TPE) search against validation ROC AUC.
 The H13 configuration competes with each search winner, as it did for `1.3`.
 The output is a pairwise-only model with pending EPS.
 
-### 2. EPS selection on validation B3
+### 2. EPS selection on validation blocks
 
 ```bash
 uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps \
@@ -98,7 +67,7 @@ uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-e
 
 Calibration clusters each source's validation blocks at every EPS in the plan's grid, once with plain
 average linkage and once with the close-pair bonus.
-It selects the setting with the best signature-weighted B3 F1.
+It selects the setting with the best signature-weighted B-cubed (B3) F1.
 When the plan sets `precision_f1_tolerance`, it selects the most precise setting within that tolerance of the best F1.
 The `1.3.1` plan sets it to `0.001`.
 Test blocks never select EPS.
@@ -147,8 +116,12 @@ Pass `"$ROOT/production_model_v1.3.1"` as the model in steps 4 and 5 to score th
 
 ## Reference results for 1.3.1
 
-The middle column comes from the `1.3` data before its distribution correction, which AI2 holds.
-The last column is the released model on the published data, where steps 4 and 5 can score it.
+The released boosters and linker were fit before the 2026-10-22 distribution correction removed papers absent from the production Semantic Scholar Academic Graph (S2AG) and their dependent records.
+The middle column reports results on the original data. The last column scores the released model on the smaller published data. Training on the published data yields counts and scores that can differ from the original fit.
+The `dataset` bundle's `pairwise/population_corrections.json` pairs the original and published populations for each benchmark so step 4 can score the released model on the published held-out blocks. Step 5 scores the published identity-gold cases. See [the data guide](data.md).
+
+The `1.3` report used an earlier scorer that rounded each dataset's score to three decimal places.
+The current scorer retains full precision, prediction applies name-conflict repair, and calibration also scores the close-pair bonus.
 
 | Measurement | Released `1.3.1` value | Released model on the published data |
 | --- | --- | --- |
@@ -157,7 +130,7 @@ The last column is the released model on the published data, where steps 4 and 5
 | Nameless head validation ROC AUC | 0.974620 (H13) | n/a |
 | Validation selection | EPS 0.40 with close-pair bonus 8 under 0.05: B3 precision 0.971954, recall 0.951028, F1 0.961184 on 72,649 signatures. The best F1 on the grid is 0.962106, at EPS 0.49 with the bonus | n/a |
 | Outer-test signature-weighted B3 | Precision 0.978019, recall 0.959062, F1 0.968204 on 72,853 signatures | Precision 0.977285, recall 0.962248, F1 0.969488 on 68,289 signatures |
-| The same test for the released `1.3` model | F1 0.964702; 0.964476 with name-conflict repair off. The `1.3` report says 0.964372: its scorer rounded each dataset's score to three decimals | F1 0.967302, with the `1.3` dataset bundle |
+| The same test for the released `1.3` model | F1 0.964702 (0.964476 with name-conflict repair off). The `1.3` report gives 0.964372 | F1 0.967302 with the `1.3` dataset bundle |
 | Outer-test pairwise AUROC | 0.989391 | 0.989664 |
 | Linker test accuracy | 96.715% on 10,837 queries, from the `1.3` fit; `1.3.1` keeps that linker | n/a |
 | Identity-gold cases | 134 of 152 correct, the same as `1.3` | 125 of 141 correct |
@@ -169,7 +142,12 @@ A reviewed EPS can differ from the calibrated one, as it did for `1.3`.
 `apply_reviewed_eps.py` then writes the reviewed EPS into a fresh complete model:
 
 ```bash
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py   --source-model "$RUN/complete/production_model_v1.3.1"   --output-model "$RUN/released-eps/production_model_v1.3.1"   --eps <reviewed-eps>   --review-note "<the review and its evidence>"   --output-report "$RUN/released_eps.json"
+uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py \
+  --source-model "$RUN/complete/production_model_v1.3.1" \
+  --output-model "$RUN/released-eps/production_model_v1.3.1" \
+  --eps "<reviewed-eps>" \
+  --review-note "<the review and its evidence>" \
+  --output-report "$RUN/released_eps.json"
 ```
 
 The command changes only `clusterer.json` and the manifest; the boosters stay the same.

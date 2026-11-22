@@ -19,9 +19,9 @@ paper state while building the scoring view.
 
 ## Summary
 
-Each Arrow dataset is a directory of Arrow IPC file-format tables plus a
-manifest. The hot path reads these files directly from Rust or through
-memory-mapped Arrow readers.
+Each Arrow dataset is a directory of Arrow interprocess communication (IPC)
+file-format tables plus a manifest. The hot path reads these files directly from
+Rust or through memory-mapped Arrow readers.
 
 Required by `ArrowDataset.open(...)` for every dataset:
 
@@ -29,45 +29,35 @@ Required by `ArrowDataset.open(...)` for every dataset:
 - their S2AND-generated batch indexes (`signatures_batch_index`,
   `papers_batch_index`, `paper_authors_batch_index`)
 
-Required when the model uses `embedding_similarity` (and always for
-subblocking):
+Declare at most one embedding table under `specter`, together with its
+`specter_batch_index`. Both are required for subblocking and for models that
+use `embedding_similarity`. Production and evaluation bundles use
+`specter2.arrow`. Research training can select the historical `specter.arrow`.
 
-- one selected embedding table under the canonical `specter` manifest key,
-  plus its `specter_batch_index`; production/eval bundles use physical
-  `specter2.arrow`. A manifest declares both or neither.
+The sidecars below are optional files for producers and validators.
+`ArrowDataset.open(...)` ignores their manifest paths.
+`ArrowDataset.open_trusted(...)` ignores `query_signatures` and raises `ValueError`
+for the other sidecar keys. Pass request-local values explicitly to public
+prediction.
 
-Public seeded prediction receives `cluster_seeds_require` explicitly.
-`predict_incremental_from_arrow(...)` requires this mapping to be nonempty;
-request-local disallows and altered profiles are supplied through
-`cluster_seeds_disallow` and `altered_cluster_signatures`. Published request
-sidecars do not supply these public API arguments.
+| Sidecar | Prediction argument or reader |
+|---|---|
+| `cluster_seeds.arrow` | `cluster_seeds_require` |
+| `cluster_seed_disallows.arrow` | `cluster_seeds_disallow` |
+| `altered_cluster_signatures.arrow` | `altered_cluster_signatures` for incremental prediction. Bulk prediction uses the required seed groups unchanged. |
+| `profile_exclusions.arrow` | `profile_exclusions` on `predict_from_arrow(...)` only. Read the pairs with `read_profile_exclusions_arrow(...)`. |
+| `query_signatures.arrow` | [Internal planner tests](#query_signaturesarrow) |
 
-The incremental route treats every requested signature that is absent from
-`cluster_seeds_require` as a query and plans those queries automatically. It
-materializes request-local `cluster_seeds.arrow` (and
-`cluster_seed_disallows.arrow` when disallows are supplied) from the explicit
-arguments.
-
-Optional producer/validation sidecars. Published copies are never read by
-`ArrowDataset.open(...)` or public prediction, which uses only the request-local
-tables it writes itself:
-
-- `cluster_seeds.arrow` for seed assignments
-- `cluster_seed_disallows.arrow` for pairwise seed disallow constraints
-- `altered_cluster_signatures.arrow` for altered claimed profiles
-- `query_signatures.arrow`, read only by the internal
-  `RawBlockQueryCandidatePlanner.from_query_signatures` constructor that tests
-  use; the public route ignores it
+`predict_incremental_from_arrow(...)` requires a nonempty `cluster_seeds_require`
+mapping. It plans requested signatures absent from that mapping as queries in
+automatic view mode and writes request-local seed and disallow tables from the
+arguments as needed.
 
 Offline evaluation datasets may also include labels:
 
 - `<dataset>_clusters.json` for cluster-labeled benchmarks
 - `train_pairs.csv`, `test_pairs.csv`, and optional `val_pairs.csv` for
   pair-labeled benchmarks such as MEDLINE
-
-Do not create per-dataset `name_pairs.arrow` files for production datasets.
-Name aliases are a shared runtime resource. `name_pairs` and `name_tuples` path
-keys are not read by the runtime; do not add them to manifests.
 
 ---
 
@@ -98,59 +88,21 @@ Preferred on-disk layout:
     cluster_seeds.arrow
     cluster_seed_disallows.arrow
     altered_cluster_signatures.arrow
+    profile_exclusions.arrow
     <dataset>_clusters.json
     train_pairs.csv
     val_pairs.csv
     test_pairs.csv
 ```
 
-Notes:
-
-- `query_signatures.arrow` is consumed only by the internal
-  `from_query_signatures` planner constructor used in tests. Public incremental
-  prediction derives its queries from the request and ignores this file and
-  its `query_signatures` path key.
-- `cluster_seeds.arrow` records seed assignments for producer/validation
-  tooling and raw planner inputs. Public Arrow prediction uses the explicit
-  `cluster_seeds_require` argument; incremental prediction requires a nonempty
-  mapping and materializes a request-local `cluster_seeds.arrow` from it.
-  Publishing a seed sidecar does not replace that argument.
-- `cluster_seed_disallows.arrow` preserves pairwise seed disallow constraints.
-  Hand-authored artifacts can omit it when the request has no seed disallows;
-  converters may emit an empty table instead. `ArrowDataset.open(...)` does not
-  read this path key, and `scripts/convert_to_arrow.py validate` checks the
-  table only when the file exists. Public Arrow prediction receives these
-  constraints through the explicit `cluster_seeds_disallow` argument.
-- When using `scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)` to publish physical
-  seeded/incremental seed sidecars, pass `include_empty_cluster_seeds=True` so
-  empty seed/disallow tables are still emitted.
-- `altered_cluster_signatures.arrow` records altered claimed profiles for
-  producer/validation tooling. Public Arrow incremental prediction reads altered profiles
-  from the explicit `altered_cluster_signatures` argument, with no fallback to
-  this sidecar. Classic incremental prediction reads `ANDData.altered_cluster_signatures`.
-  Bulk prediction ignores altered markers on both routes and uses ordinary required groups.
-  `altered_cluster_signatures.txt` is not a valid
-  production Arrow sidecar; it remains only for older fixtures and
-  ANDData-compatible training tooling.
-- `<dataset>_clusters.json` and the fixed-pair CSVs are ground truth for offline
-  evaluation only. They are not part of production inference scoring.
-- Each bundle contains exactly one selected embedding table under manifest key
-  `specter`. Production and evaluation bundles select physical
-  `specter2.arrow`. An explicit research-training bundle may instead select
-  historical `specter.arrow`; it does not ship both tables.
-- If embeddings are requested but no block papers have embeddings, the
-  `ANDData` conversion helper
-  (`scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata`)
-  emits a valid zero-row selected embedding table, so production prediction
-  degrades through missing-vector features. `scripts/convert_to_arrow.py`
-  instead fails when no SPECTER embeddings match the dataset's papers.
-- The Arrow files must be Arrow IPC file format, not Arrow stream format. The
-  current writer uses `pyarrow.ipc.new_file(...)`; readers use
-  `pyarrow.ipc.open_file(...)` and memory maps.
+Write Arrow IPC file-format tables with `pyarrow.ipc.new_file(...)`. Readers
+use `pyarrow.ipc.open_file(...)` and memory maps.
 
 The machine-readable column contract lives at
 `s2and/arrow_schema_contract.json`. It is a parity guard for producer/consumer
 drift; runtime readers still enforce their local validation rules directly.
+
+### Manifest paths
 
 Callers open the dataset root once with `ArrowDataset.open(root)`. The handle
 validates the manifest and retains the immutable tables, indexes, and optional
@@ -160,32 +112,31 @@ manifest `paths` object uses these keys:
 
 | Key | Meaning |
 |---|---|
-| `signatures` | Path to `signatures.arrow` |
-| `papers` | Path to `papers.arrow` |
-| `paper_authors` | Path to `paper_authors.arrow` |
-| `specter` | Path to the embedding table selected for the current model, even if the file is physically named `specter2.arrow` |
-| `query_signatures` | Producer/validation path to `query_signatures.arrow`; ignored by `ArrowDataset.open(...)` and public prediction |
-| `cluster_seeds` | Producer/validation path to a seed sidecar; public prediction receives seed mappings explicitly |
-| `cluster_seed_disallows` | Producer/validation path to pairwise seed-disallow constraints |
-| `altered_cluster_signatures` | Producer/validation path for altered claimed profiles |
+| `signatures` | Required path to `signatures.arrow` |
+| `papers` | Required path to `papers.arrow` |
+| `paper_authors` | Required path to `paper_authors.arrow` |
+| `specter` | Path to the embedding table selected for the current model. See the [embedding requirements](#summary). |
+| `query_signatures` | Optional path to `query_signatures.arrow` |
+| `cluster_seeds` | Optional path to `cluster_seeds.arrow` |
+| `cluster_seed_disallows` | Optional path to `cluster_seed_disallows.arrow` |
+| `altered_cluster_signatures` | Optional path to `altered_cluster_signatures.arrow` |
+| `profile_exclusions` | Optional path to `profile_exclusions.arrow` |
 | `clusters` | Path to eval-only ground-truth clusters JSON |
 | `train_pairs`, `val_pairs`, `test_pairs` | Paths to eval-only fixed-pair label CSVs for pair-labeled benchmarks; `val_pairs` is optional |
 | `name_counts_index` | Required manifest-declared shared/global name-count index directory when the selected model uses `name_counts` |
 | `signatures_batch_index` | S2AND-generated lookup index for `signatures.arrow`; always required by `ArrowDataset.open(...)` |
 | `papers_batch_index` | S2AND-generated lookup index for `papers.arrow`; always required by `ArrowDataset.open(...)` |
 | `paper_authors_batch_index` | S2AND-generated lookup index for `paper_authors.arrow`; always required by `ArrowDataset.open(...)` |
-| `specter_batch_index` | S2AND-generated lookup index for the selected embedding path passed as `specter`; required whenever `specter` is declared. The sidecar filename follows the selected file stem, for example `specter.specter_batch_index.bin` or `specter2.specter_batch_index.bin` |
+| `specter_batch_index` | S2AND-generated lookup index for the selected embedding table, typically named `<embedding-stem>.specter_batch_index.bin` |
+| `name_pairs`, `name_tuples` | Omit these keys. The runtime loads [name aliases](#name-aliases) separately. |
 
 ---
 
 ## Large-Block Physical Layout
 
-The schema above is the semantic artifact contract. The physical layout below
-makes indexed raw candidate planning cheap on large blocks such as common
-family-name blocks, and S2AND enforces it: the batch-index writer and the
-validator reject lookup tables whose record batches exceed these limits, so a
-dataset that violates them cannot get the batch indexes `ArrowDataset.open(...)`
-requires.
+Bounded record batches limit how much data indexed candidate planning reads on
+large blocks such as common family-name blocks. The batch-index writer and
+validator reject lookup tables with record batches above these limits.
 
 Producers must write the lookup tables below as Arrow IPC file-format files
 with bounded record batches. Do not write these tables as one giant record
@@ -198,18 +149,18 @@ batch when the row count exceeds the limit.
 | `paper_authors.arrow` | `paper_id` | 16,384 |
 | `specter.arrow` / `specter2.arrow` | `paper_id` | 2,048 |
 
-The smaller request-scoped tables do not need a random-access physical layout:
+The smaller request sidecars have no bounded-batch or lookup-index requirements:
 
 | Table | Layout guidance |
 |---|---|
-| `query_signatures.arrow` | Internal test input only; no bounded-batch requirement. |
-| `cluster_seeds.arrow` | Read fully by the raw planner; no bounded-batch requirement. |
-| `cluster_seed_disallows.arrow` | Read fully when present; no bounded-batch requirement. |
-| `altered_cluster_signatures.arrow` | Incremental request metadata; bounded batches do not address altered-profile pre-splitting cost. Bulk prediction ignores altered markers. |
+| `query_signatures.arrow` | Internal planner test input |
+| `cluster_seeds.arrow` | Read fully by the raw planner |
+| `cluster_seed_disallows.arrow` | Read fully when present |
+| `altered_cluster_signatures.arrow` | Bounded batches do not address altered-profile pre-splitting cost. |
+| `profile_exclusions.arrow` | Read fully by `read_profile_exclusions_arrow(...)` |
 
 Implementation notes for producers:
 
-- Use Arrow IPC file format, not stream format.
 - Prefer S2AND's `write_arrow_ipc_table(..., max_record_batch_rows=<limit>)`
   helper. Independent PyArrow writers should use `pyarrow.ipc.new_file(...)`
   and `writer.write_table(table, max_chunksize=<limit>)`, then verify the
@@ -228,13 +179,11 @@ Implementation notes for producers:
 
 S2AND binary batch indexes are derived artifacts over the final Arrow files.
 The preferred handoff is for producers to supply bounded Arrow IPC files and
-for an S2AND prep step to generate these indexes. Producers may include indexes
-only when they are generated with S2AND tooling, such as
+for an S2AND prep step to generate these indexes. Generate them from the final
+Arrow bytes with S2AND tooling, such as
 `s2and.incremental_linking.feature_block.write_raw_arrow_batch_lookup_indexes`.
-Do not hand-write the binary format in an independent pipeline. Do not generate
-these indexes before a later rewrite or deployment copy that changes the source
-Arrow file metadata; regenerate the indexes from the final files in their
-serving location.
+Regenerate the index if the table is rewritten. Keep each table and index
+together when copying files to their serving location.
 
 Every script that produces S2AND runtime Arrow artifacts should use the shared
 writers instead of open-coding the table or sidecar formats:
@@ -258,15 +207,9 @@ specter2.specter_batch_index.bin
 The double stem is intentional: the first stem identifies the Arrow file and the
 trailing `<table>_batch_index` stem matches the manifest path key.
 
-At runtime, the one selected embedding file is passed under the `specter` path
-key, and S2AND uses the adjacent
-`<embedding-stem>.specter_batch_index.bin` sidecar. A historical SPECTER1
-research-training bundle therefore uses `specter.specter_batch_index.bin`
-instead of the production `specter2.specter_batch_index.bin`.
-
 The batch-index format is S2AND-owned. Current writers and readers require
 format magic `S2ABI003`. Its 32-byte little-endian header is `<8sQQQ`: magic,
-record count, source byte count, and key-column hash. Each 16-byte `<QII>` record
+record count, source byte count, and key-column hash. Each 16-byte `<QII` record
 contains a key hash, batch index, and reserved zero. There is no full-file source
 fingerprint. Older batch indexes must be rebuilt with the current writer.
 Manifest-backed opens verify SHA-256 checksums; `open_trusted(paths)` skips the
@@ -296,27 +239,11 @@ the same feature view that S2AND would expose after normal preprocessing:
 as having no ORCID evidence; all non-ORCID features and constraints remain
 available. Name-count artifacts always use the canonical initial-character key.
 
-Use the script-only direct Arrow conversion writer as the reference
-implementation for physical layout and for benchmark/replay bundles whose
-inputs are derived from `ANDData`:
-`scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata`.
-That writer returns table paths and does not write `manifest.json`. All in-repo
-producers pass those paths through
-`s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
-`write_arrow_artifact_manifest(...)`, which own the portable paths,
-public-format identity, flat content inventory, and publication format.
 `scripts/convert_to_arrow.py` is the reference producer for deployable
-dataset manifests and current batch-index sidecars. Its `benchmark` command
-requires explicit `--source-root` and `--output-root`; `service-json` requires
-explicit `--input-json` and `--output-root`. Neither command discovers a
-production source or destination root.
-`scripts/verification/compare_full_predict_arrow_parity.py` is the reference
-bounded parity producer: it writes current batch-index sidecars, resolves a
-canonical name-count index, and publishes a public-format-1 manifest for
-its temporary Arrow bundle before validation. An independent assembly pipeline is fine, but
-production producers should send source/raw text and name inputs plus the same
-manifest contract as this document. Parity is measured after Rust preprocessing,
-not by requiring producer-side Python preprocessing before Arrow construction.
+dataset manifests and current batch-index sidecars. Use
+`s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
+`write_arrow_artifact_manifest(...)` to publish manifests from the paths the
+shared table writers return. Measure feature parity after Rust preprocessing.
 
 Important parity details:
 
@@ -426,11 +353,12 @@ One row per embedded paper. Required columns:
 | `embedding` | `fixed_size_list<float32>[dimension]` | no | SPECTER vector |
 
 All vectors in one file must have the same dimension, and `paper_id` values
-must be unique. A missing embedding means there is no row for that `paper_id`;
-do not represent missing vectors with a null `embedding` value. If the model
-uses `embedding_similarity`, the selected embedding table must exist, but
-partial coverage (including a valid zero-row table) is accepted. Missing vectors
-use the runtime's missing-vector feature behavior and can change scores.
+must be unique. Represent missing embeddings by omitting their rows. Partial
+coverage, including a valid zero-row table, is accepted. Missing vectors use
+the runtime's missing-vector feature behavior and can change scores.
+`scripts/convert_to_arrow.py service-json` and the shared `ANDData` table writer
+can emit an empty table. The `benchmark` command requires at least one matching
+vector when it writes the embedding table.
 For a source contract that guarantees complete coverage, validate with
 `--require-complete-embeddings`; `--require-embeddings` checks table presence
 and structure without requiring an embedding for every referenced paper.
@@ -439,8 +367,6 @@ and structure without requiring an embedding for every referenced paper.
 
 Query table for the internal `RawBlockQueryCandidatePlanner.from_query_signatures`
 constructor, which tests use to exercise declared per-query view policies.
-Public incremental prediction does not read it: it plans every requested
-signature absent from `cluster_seeds_require` in automatic view mode.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
@@ -454,29 +380,22 @@ and validates a non-empty `query_author` against that derived query author.
 
 ### `cluster_seeds.arrow`
 
-Seed assignment table for producer/validation tooling and raw incremental
-planning. Public Arrow prediction receives seeds through the explicit
-`cluster_seeds_require` mapping. Incremental prediction requires a nonempty
-mapping and writes a request-local `cluster_seeds.arrow` before entering raw
-Arrow retrieval; it does not load seed assignments from a published sidecar.
+One row per required seed assignment.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
 | `signature_id` | `string` | no | Seed signature id |
 | `cluster_id` | `string` | no | Required seed component/cluster id |
 
-Only required seed assignments are persisted here. Pairwise seed disallow
-constraints are persisted separately in `cluster_seed_disallows.arrow`.
 `signature_id` values must be unique, and `cluster_id` values must be non-empty
 strings.
 
 ### `cluster_seed_disallows.arrow`
 
-Optional producer/validation sidecar for seed disallow constraints. Public Arrow
-prediction receives these pairs through the explicit `cluster_seeds_disallow`
-argument. Omit the file when no seed disallows are present, or emit a valid empty
-table when using a converter configured to keep seed/disallow tables explicit.
-The `validate` command checks this table only when its file exists.
+Omit the file or write an empty table when no seed disallows are present.
+Pass `include_empty_cluster_seeds=True` to `write_raw_planner_arrow_from_anddata(...)`
+to emit both seed tables even when empty. The `validate` command checks the
+disallow table when its declared file exists.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
@@ -490,26 +409,36 @@ should fail validation.
 
 ### `altered_cluster_signatures.arrow`
 
-Producer/validation sidecar describing altered claimed profiles. Public Arrow
-incremental prediction receives these ids through the explicit `altered_cluster_signatures`
-argument and does not load them from this file. Omit it, or write an empty table,
-when no altered profiles are present.
-
-Required columns:
+Omit the file or write an empty table when no altered profiles are present.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
 | `signature_id` | `string` | no | Seed signature id belonging to an altered claimed profile |
 
-Each id must exist in `signatures.arrow` and in the active seed assignments. At
-incremental runtime, S2AND maps the explicitly supplied altered signature ids through the
-seed assignments to identify the claimed seed components that need
-altered-profile pre-splitting.
-`signature_id` values must be unique.
+Each id must be unique and exist in `signatures.arrow` and in the active seed
+assignments. Incremental prediction uses the seed assignments to identify the
+claimed seed components that need altered-profile pre-splitting.
 
 `altered_cluster_signatures.txt` with one signature id per line is supported
 only by classic ANDData/training inputs.
 The producer manifest path must point at the Arrow table.
+
+### `profile_exclusions.arrow`
+
+Each row keeps an excluded signature out of the cluster that contains its anchor.
+
+| Column | Arrow type | Nulls | Meaning |
+|---|---:|---:|---|
+| `anchor_signature_id` | `string` | no | Signature id placed on the claimed profile |
+| `excluded_signature_id` | `string` | no | Signature id excluded from the anchor's cluster |
+
+Both columns are required. Pairs are directional and unique, with distinct ids
+in each row. `scripts/convert_to_arrow.py service-json` writes this sidecar when
+the request supplies `profile_exclusions`. It checks the ids against the dataset
+and rejects exclusions that contradict required seed assignments. The writer
+sorts and deduplicates pairs. The `validate` command checks the declared file
+when present. It uses the sidecar reader and checks both ids against
+`signatures.arrow`.
 
 ### `<dataset>_clusters.json`
 
@@ -594,10 +523,12 @@ Its manifest has exactly this shape:
 }
 ```
 
-Paths are not serialized; each role resolves to `<role>.bin`. The Rust opener
-validates the manifest, declared sizes and digests, fixed filenames, contained
-paths, and every record. Python retains only the opened handle's path and exact
-manifest SHA-256 for orchestration and model binding.
+Each role resolves to `<role>.bin`. `NameCountsIndex.open(path)` validates the
+manifest, declared file sizes, fixed filenames, path containment, file headers,
+and section bounds. Use `NameCountsIndex.open(path, verify=True)` or call
+`verify()` on the open index to also check every file's SHA-256 digest and every
+record. Python uses the opened handle's path and exact manifest SHA-256 for
+orchestration and model binding.
 
 Each binary file starts with private magic `S2NCI001` and stores:
 
@@ -617,8 +548,8 @@ rather than mutating an open index.
 
 ## Name Aliases
 
-Production datasets must not contain per-dataset `name_pairs.arrow` files or
-manifest path keys. The runtime default is one packaged text file:
+Keep per-dataset `name_pairs.arrow` files out of production datasets. The
+runtime defaults to the shared, packaged text file below.
 
 ```text
 s2and_name_tuples_canonical.txt
@@ -626,8 +557,7 @@ s2and_name_tuples_canonical.txt
 
 The Python loader directly validates canonical row shape, ordering, uniqueness,
 and alias semantics. If a non-default alias set is needed, load its explicit
-text path through the same loader and pass the validated pairs to Rust. Do not
-duplicate it into every dataset or add it to dataset manifests.
+text path through the same loader and pass the validated pairs to Rust.
 
 ---
 
@@ -663,11 +593,13 @@ is:
 }
 ```
 
-Optional immutable roles such as `specter`, `specter_batch_index`, and
-`name_counts_index` appear in both `paths` and `files`. A name-count file entry
-describes the referenced index's `manifest.json`; its path points to the index
-directory. Physical paths are serialized only in `paths`; file/directory kind
-labels and derived generation IDs are not persisted.
+`files` inventories the immutable Arrow tables and their batch indexes,
+including `specter` and `specter_batch_index` when present. The
+`name_counts_index` key appears only in `paths` and points to the index
+directory. The model binds that index. `ArrowDataset.open()` ignores legacy
+`files.name_counts_index` entries written before `1.0.0b11`. Optional request
+sidecars also appear only in `paths`. File and directory kind labels and
+generation IDs are derived at runtime.
 
 The canonical manifest builder supplies exactly `kind`, `format_version`,
 `paths`, and `files`. The collection root owns dataset names. Dataset manifests
@@ -675,24 +607,12 @@ accept no open-ended metadata and no second schema, normalization, generation,
 or physical-layout authority.
 `ArrowDataset.open()` validates format before opening payloads, then validates
 manifest-relative paths, retained bytes, Arrow table schemas, batch-index
-bytes, and the native name-count index's manifest, file sizes, and headers.
-The release-root validator separately owns shared-index topology, including datasets
-in declared replay collections, and checks every index file digest and record.
+structure, and the [name-count index layout](#name-counts). The release-root
+validator checks that datasets and declared replay collections use the same
+index and verifies every index file digest and record.
 
-Conditional `paths` entries:
-
-- `specter` is required when the selected model uses `embedding_similarity`.
-  This is the selected embedding file for the run, even when the physical file is
-  named `specter2.arrow`.
-- `cluster_seeds`, `cluster_seed_disallows`, `altered_cluster_signatures`, and
-  `query_signatures` are optional producer/validation paths. Public Arrow
-  prediction receives seeds, disallows, and altered profiles as explicit
-  arguments; declaring these paths does not populate the request.
-- `clusters`, `train_pairs`, `val_pairs`, and `test_pairs` are eval-only
-  ground truth.
-- `name_counts_index` is required when the selected model uses name-count
-  features.
-- `paths.name_pairs` and `paths.name_tuples` are not read; do not add them.
+See the [manifest paths table](#manifest-paths) for required, conditional, and
+omitted keys.
 
 A generic multi-dataset conversion root uses:
 
@@ -743,9 +663,6 @@ Required checks:
 - `(paper_id, position)` values in `paper_authors.arrow` are unique.
 - Every `signatures.paper_id` exists in `papers.arrow`.
 - Every `paper_authors.paper_id` exists in `papers.arrow`.
-- When embeddings are required, the selected SPECTER Arrow file exists and
-  validates structurally. Require every referenced paper to have an embedding
-  only for datasets whose source contract guarantees complete coverage.
 - `cluster_seeds.signature_id` is a subset of `signatures.signature_id`.
 - `cluster_seeds.signature_id` values are unique and every `cluster_id` is a
   non-empty string.
@@ -756,6 +673,9 @@ Required checks:
   undirected pairs.
 - `altered_cluster_signatures.signature_id` is unique and is a subset of both
   `signatures.signature_id` and `cluster_seeds.signature_id`.
+- When `profile_exclusions.arrow` is present, both columns reference ids in
+  `signatures.arrow`, and the pairs meet the
+  [profile exclusions schema](#profile_exclusionsarrow).
 - `name_counts_index/manifest.json` exists when the selected model uses
   `name_counts`.
 - Manifest `files` entries match the retained files' byte counts and SHA-256
@@ -779,70 +699,23 @@ Required physical-layout checks:
   [Large-Block Physical Layout](#large-block-physical-layout).
 - Inspect actual IPC record batches; reject any batch above its table's
   maximum. This fact is not copied into a second manifest authority.
-- Every dataset contains batch indexes for signatures, papers, and paper
-  authors, plus the selected embedding when one is declared; they were
-  generated from the final Arrow files and the manifest path keys point to
-  them. A fixture without embeddings omits both `specter` and
-  `specter_batch_index`.
+- Generate the required batch indexes from the final Arrow files and point the
+  manifest path keys to them.
 - Batch-index validation must not require source file mtimes to match. Object
   store downloads can rewrite mtimes; index validators use source size and
   structure. Dataset manifests bind portable release files with SHA-256.
 
-Recommended smoke checks:
-
-These commands require a format-1 corrected snapshot and compatible complete model.
-They use the release owner's internal snapshot, which keeps the pre-cut fit projection.
-The published `dataset` bundle does not contain that projection.
-Use the snapshot's exact fit projection for evaluation of model-recorded internal test splits.
-A full benchmark projection does not replace that population.
-
-PowerShell:
-
-```powershell
-uv run python scripts/convert_to_arrow.py validate `
-  --dataset-dir <corrected-snapshot>/pairwise/arrow/release/qian `
-  --require-embeddings `
-  --require-name-counts-index
-```
-
-```powershell
-uv run python scripts/eval_prod_models.py `
-  --dataset full `
-  --use-arrow `
-  --arrow-data-root <corrected-snapshot>/pairwise/arrow/release `
-  --datasets qian `
-  --specter2-model-path path\to\production_model_bundle `
-  --n_jobs 4
-```
-
-Bash:
+Validate a dataset required to supply both embeddings and name counts.
+Set `--dataset-dir` to the directory containing its dataset manifest.
 
 ```bash
 uv run python scripts/convert_to_arrow.py validate \
-  --dataset-dir <corrected-snapshot>/pairwise/arrow/release/qian \
+  --dataset-dir /path/to/arrow_root/pubmed \
   --require-embeddings \
   --require-name-counts-index
-
-uv run python scripts/eval_prod_models.py \
-  --dataset full \
-  --use-arrow \
-  --arrow-data-root <corrected-snapshot>/pairwise/arrow/release \
-  --datasets qian \
-  --specter2-model-path /path/to/production_model_bundle \
-  --n_jobs 4
 ```
 
-The eval command should report `use_arrow=True` and the resolved absolute
-`Arrow data root` for the explicit fit projection.
-There is no implicit Arrow root.
-JSON/ANDData evaluation or training instead requires
-explicit `--json-data-root`, `--name-tuples-path`, and
-`--name-counts-index-root`; it does not discover those inputs from package
-defaults.
-Production-bundle evaluation rejects an explicit `--seed`; it evaluates the
-test blocks recorded in the bundle's training summary. The v1.3 release uses
-persisted, digested split identities and the one-shot evaluators in the
-release runbook.
+For release-model evaluation, see the [release runbook](../release.md).
 
 ---
 

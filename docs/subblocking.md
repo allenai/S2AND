@@ -2,29 +2,22 @@
 
 Subblocking keeps pairwise distance construction bounded for large blocks. It is
 used by `Clusterer.predict_from_arrow(..., batching_threshold=N)` on the
-Rust Arrow route (see [Python and Rust routing](#python-and-rust-routing)). The
-Python reference boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)`
-returns only the reference subblock dictionary. Production and EPS sweeps use the native planner.
+Rust Arrow route (see [Python and Rust routing](#python-and-rust-routing)). Production
+and EPS sweeps use the native planner. `make_subblocks_with_telemetry(...)` is the
+standalone Python reference for partition and quality checks. `make_subblocks(...)`
+returns just its subblock dictionary.
 
 `N` becomes the maximum subblock size. Every emitted subblock is expected to
 have at most `N` signatures.
 
-Production Arrow prediction uses the packaged ORCID prefix counts named in the model's
-contract under the [ORCID policy](#orcid-policy). The standalone Python reference uses
-the latest packaged counts by default and accepts an explicit mapping for parity checks.
-The producer excludes 19 reviewed groups and preserves the shared-surname rule.
-The wheel contains both versions of the count JSON and their tuple-dependency manifests.
-
 ## Default fallback
 
-Oversized groups that cannot be split by names go to a fallback cluster function:
+Oversized groups that cannot be split by names go to a fallback cluster function.
 
-- Prefix and middle-name splitting define the main subblock structure.
-- The Arrow prediction route uses the graph fallback.
+- Arrow prediction uses the graph fallback. Graph preparation and clustering failures propagate.
 - Direct callers of `make_subblocks(...)` or `make_subblocks_with_telemetry(...)`
   that do not pass a cluster function get the SPECTER fallback,
   `cluster_with_specter(...)`.
-- Graph preparation and clustering failures propagate; the selected algorithm does not change at runtime.
 
 The graph configuration is available on `Clusterer`:
 
@@ -39,7 +32,7 @@ Subblocking proceeds in this order:
 1. Give each compound first name one key token (see [compound first names](#compound-first-names)).
 2. Split signatures by first-name prefix.
 3. For first-name groups that remain too large, split by middle-name prefix.
-4. For groups that are still too large, call the fallback cluster function (graph for `Clusterer`; see above).
+4. For groups that are still too large, call the [fallback cluster function](#default-fallback).
 5. Merge compatible small subblocks back up to the maximum size.
 6. Run the optional same-ORCID repair pass.
 
@@ -50,28 +43,22 @@ incremental pass so initial-only signatures can attach back to established clust
 subblock by the key first name of its first member. Between these two passes, the
 [reunite-only step](#reunite-only-step) reattaches no-middle records that step 4 cut across subblocks.
 
-Average linkage does not put a pair at exactly `LARGE_DISTANCE` in one cluster.
-Other linkage methods give no such guarantee. The synthetic attachment pass
-preserves the computed clusters and omits any internal hard negatives only from
-its local request. Cross-group and fresh-signature exclusions remain active.
-Caller-supplied incremental seed groups with internal disallows still raise.
+Follow-on attachment preserves bulk clusters and omits internal hard negatives only
+from its local request. See [caller supervision](production_inference.md#caller-supervision-and-dataset-constraints).
 
-Required profiles spanning several subblocks are kept together. When a profile
-has a member in a full-name subblock, both Python and Arrow place it there,
-preferring the first such subblock in sorted order. Members native to that
-subblock stay first so an imported initial does not change its classification.
-This keeps compatible full-name neighbours available during bulk clustering.
-Packing still respects the subblock capacity; separate full-name groups can
-remain separate when they do not fit. The threshold does not cap the size of a
-final cluster after initial-only attachment.
+Arrow prediction packs active required seed components together within each original
+input block. A component larger than the threshold in that block raises before
+subblocking. Packing prefers the first full-name subblock in sorted order that
+already holds a member. Members native to that subblock precede imported members
+of the same component, preserving the destination's classification.
+Packing respects the subblock cap. Final clusters can grow beyond that cap through attachment.
 
 ## Reunite-only step
 
 A key first name with more than `maximum_size` records in a block is a first-name dead end. Prefix
 subdivision cannot split it, so step 3 splits it by middle name. Its records without a key middle name share one
 bucket. When that bucket is over the cap, the fallback in step 4 cuts it into pieces of at most the cap. Bulk
-prediction runs on each subblock alone, so records of one person in different pieces never meet. For example, on
-the `w wang` block at a cap of 15,000, the fallback cut 63,948 "wei" records into five pieces.
+prediction runs on each subblock alone, so records of one person in different pieces never meet in bulk clustering.
 
 A record is marked when all of these conditions are true:
 
@@ -80,10 +67,9 @@ A record is marked when all of these conditions are true:
 - Its key middle name is empty.
 - It is not a member of an active caller-required seed group.
 
-The planners report the records that meet the first three conditions, as one bucket for each dead end. The native
-Arrow planner returns the buckets from its dead ends. On the Python route, `no_middle_dead_end_buckets(...)` applies
-the same rule to the canonical names, and a parity test compares the two. The piece of a record is the subblock that
-bulk prediction ran on. This is the final subblock after the packing of required seed groups.
+The native Arrow planner returns one bucket per dead end for records that meet the first three conditions.
+The Python reference helper `no_middle_dead_end_buckets(...)` computes the same buckets for parity checks.
+A record's piece is its final subblock after required seed groups are packed.
 
 After bulk prediction, the step does these operations for each bucket of each original block:
 
@@ -92,8 +78,8 @@ After bulk prediction, the step does these operations for each bucket of each or
 2. Keep the clusters of the piece with the most of these records as seeds. On a tie, use the first of these pieces
    in key order. The attachment pass needs at least one seed. A merged piece that holds only the small leftover of
    the cut can sort first, so the largest piece keeps the most bulk clusters.
-3. Detach the clusters of the other pieces. Send the records of each piece, in key order, to the sequential
-   attachment of the route as one group.
+3. Detach the clusters of the other pieces. Send the records of each piece, in key order, to the incremental
+   linker as one query group.
 4. Then run the initial-only groups with all clusters visible.
 
 A group in step 3 sees only the seeds and the clusters that earlier groups of its bucket made. It never sees a
@@ -102,16 +88,11 @@ of marked records to clusters with unmarked records were wrong. A bulk cluster w
 stays as it is. Members of required seed groups are never marked, so their groups do not split or merge
 differently. Explicit disallows and caller supervision apply as in initial-only attachment.
 
-On the Arrow route, each group also gets the attach name checks of initial-only attachment (see
-[incremental decision semantics](production_inference.md#incremental-decision-semantics)). No required member is
-visible, so the set of exempt members is empty. Each route uses its own attachment. The promoted Arrow linker
-decides each query alone. By default, classic attachment first clusters the queries of a group and then decides for
-each of these clusters as a unit. Thus disallows can give different clusters on the two routes.
-
-When no bucket has marked-only clusters in two or more pieces, the step changes nothing and the clusters are
-identical to the clusters without the step. The Python route with `use_s2_clusters=True` skips the step. The
-request telemetry `subblocked_reunite` counts the marked records, the reunited buckets, the detached and seed
-clusters, the query groups and their records.
+The promoted Arrow linker decides each query individually using the name checks of
+[initial-only attachment](production_inference.md#incremental-decision-semantics).
+No required member is visible, so the set of exempt members is empty.
+The `subblocked_reunite` telemetry counts marked records, reunited buckets,
+detached and seed clusters, query groups, and their records.
 See [production_inference.md](production_inference.md#reunite-only-memory-and-time) for memory and time.
 
 ## Dash normalization
@@ -120,9 +101,8 @@ Current normalization handles every dash-like given-name separator uniformly. Da
 canonical first name regardless of the dash code point: both `Sang-Min` and `Sang<U+2010>Min` normalize to
 `first="sang min", middle=""`. Subblock keys then apply the [compound first-name rule](#compound-first-names).
 
-The Python implementation uses precomputed canonical first/middle fields when available and reconstructs them with the
-same canonicalizer when Rust preprocessing deferred those fields. The Rust Arrow path applies the same
-normalization while reading raw name columns.
+The Python reference uses precomputed canonical first and middle fields when available and reconstructs them
+with the same canonicalizer when Rust preprocessing deferred those fields. The native Arrow planner normalizes raw name columns.
 
 ## Compound first names
 
@@ -153,17 +133,25 @@ classification uses canonical first names.
 
 ## ORCID policy
 
-The default merge-prior mapping is loaded lazily from the packaged
-`first_k_letter_counts_from_orcid.json` and its required adjacent
-`.manifest.json`, then resolved at subblocking entry. The loader validates the
-canonical prefix-pair keys and positive integer counts directly; the minimal
-manifest records the canonical name-tuple data hash used to generate them.
-Missing or malformed files fail closed before partitioning, and production
-contracts bind their computed hashes. These learned prefix-pair
-counts are considered
-only after exact-name and `same_prefix_tokens` merge candidates, so they do not
-override stronger compatibility evidence. A caller may supply an explicit
-mapping for a controlled experiment.
+`Clusterer._subblocking_prefix_counts` selects the packaged merge priors by the
+feature contract's `orcid_prefix_counts_data_sha256`. The wheel ships two sets.
+
+| Model | Packaged directory |
+| --- | --- |
+| `1.3.x` | `s2and/data/` |
+| `1.4` | `s2and/data/orcid_prefix_counts_v1_4/` |
+
+Each directory contains `first_k_letter_counts_from_orcid.json` and
+`first_k_letter_counts_from_orcid.manifest.json`, which records the name-tuple
+data hash used to build the counts. The producer excludes 19 reviewed groups and
+preserves the shared-surname rule. The [loader](../s2and/orcid_prefix_counts.py)
+validates the count data hash, canonical prefix-pair keys, and positive integer
+counts. Missing or malformed artifacts raise before partitioning. Models without
+a contract hash and the standalone Python reference default to the `1.4` counts.
+The reference also accepts an explicit mapping for parity checks.
+
+The planner considers these counts after exact-name and `same_prefix_tokens`
+merge candidates.
 
 `make_subblocks(...)` and `make_subblocks_with_telemetry(...)` have a `use_orcid_subblocking` flag. When enabled, the
 final repair pass can merge whole subblocks that contain the same ORCID, but it never extracts only ORCID signatures
@@ -194,66 +182,38 @@ Default `GraphSubblockingConfig` behavior:
 - `neighbor_mode="projection"` with `projection_count=12` and `projection_window=12`.
 - `min_edge_score=0.30`.
 - `component_pack_strategy="edge-greedy"` and `pack_components=True`.
-- Exact kNN remains available with `neighbor_mode="exact"`, but it is capped by `max_exact_knn_group_size`.
+- Exact k-nearest neighbors are available with `neighbor_mode="exact"` and capped by `max_exact_knn_group_size`.
 - Sparse coauthor evidence is enabled by default with `sparse_evidence_max_posting_size=8`,
   `sparse_evidence_neighbors=1`, `sparse_evidence_min_weight=0.40`, and affiliations excluded. This adds only
   bounded coauthor-posting edges after projection edges have been scored.
 - Adaptive projection, aggregate packing, and local moves are experimental knobs and are off by default.
 
-The internal Arrow graph helper loads the union of required `signatures`,
-`paper_authors`, and selected embedding rows through raw-planner batch lookup
-indexes, then slices that in-memory evidence for each fallback group. It
-refuses filtered full scans: `signatures_batch_index`,
-`paper_authors_batch_index`, and the selected embedding index (`specter_batch_index`) must be
-present, and malformed Arrow schemas or declared missing artifacts raise before
-graph clustering starts. This helper is not selected by the public
-Python/`ANDData` `Clusterer.predict(...)` route.
-
-`Clusterer.predict(...)` selects the graph implementation directly, and graph
-read/prepare/call failures propagate. Direct callers of `make_subblocks(...)`
-that do not supply a cluster function retain the explicitly selected legacy
-`cluster_with_specter(...)` behavior.
+For bounded samples, the [graph quality comparison](../scripts/verification/compare_graph_subblocking_arrow_quality.py)
+uses the Python helper `_read_arrow_rows_by_values` to load the union of required
+`signatures`, `paper_authors`, and selected embedding rows, then slices the
+in-memory evidence for each fallback group. The helper uses raw-planner batch
+lookup indexes (`signatures_batch_index`, `paper_authors_batch_index`, and
+`specter_batch_index` for embeddings) and refuses filtered full scans. Missing
+required artifacts and malformed Arrow schemas raise before graph clustering.
 
 ## Python and Rust routing
 
-The public routes are method-based:
+Call `Clusterer.predict_from_arrow(blocks, arrow_dataset, batching_threshold=N,
+total_ram_bytes=...)` to partition oversized blocks with the native Rust graph
+planner and reuse one Rust featurizer across the emitted subblocks.
 
-- **Rust Arrow prediction.** Call
-  `Clusterer.predict_from_arrow(blocks, arrow_dataset,
-  batching_threshold=N, total_ram_bytes=...)`. This validates the indexed Arrow
-  handle, partitions oversized blocks with the native Rust graph
-  subblocker, and reuses one Rust featurizer across the emitted subblocks.
+The graph quality comparison checks coverage and the size cap for both planners.
+In projection mode, their deterministic random-number generators and seed derivations
+can produce different edges and partitions for the same signatures. For a fixed
+candidate edge set, each planner resolves score ties deterministically.
 
-The retained Python reference and native graph implementations have a quality-equivalence contract, not an identical-partition
-contract. In the default projection mode, Python and Rust use separate deterministic
-random-number generators and seed derivations, so the projection edges and resulting
-subblocks may differ for the same signatures. Verification requires both routes to
-cover the same signatures, honor the size cap, and preserve required components; it
-does not require matching unlabeled partitions. For a fixed candidate edge set,
-score ties are resolved deterministically within each route.
-
-`batching_threshold=None` retains full-block prediction. A positive threshold
-is the maximum native subblock size; blocks at or below it are unchanged.
-Multi-letter subblocks are predicted first, then initial-only groups attach to
-those clusters through the promoted Rust incremental linker. `total_ram_bytes`
-controls pair-batch sizing and allocation checks; it is not a block
-partitioning knob. Missing required Arrow tables, embedding evidence, batch
-indexes, or the incremental artifact raise instead of falling back to Python or
-`ANDData`.
-
-Both prediction routes keep active required seed components together within
-each original input block. A component larger than `batching_threshold` in one
-block raises `ValueError` before subblocking; the size of a profile across
-different blocks does not trigger this check. Disabling required-seed supervision
-also disables this packing and size check.
-
-Initial-only groups can attach only to predictions from their original input
-block. A block containing only initials uses bulk prediction, even when other
-blocks contain full names. Restoring a profile spanning several input blocks
-does not join their output clusters. With constraint supervision enabled,
-explicit disallows remain effective during sequential attachment, including
-pairs whose other endpoint is processed later. Ignoring required seeds with
-`incremental_dont_use_cluster_seeds` does not disable these disallows.
+`batching_threshold=None` keeps full-block prediction. A positive threshold caps
+native subblock size and leaves blocks at or below the cap intact. `total_ram_bytes`
+controls pair-batch sizing and allocation checks. Prediction raises if a required
+Arrow table, embedding resource, batch index, or the incremental linker is missing.
+See [Rust inference](production_inference.md#rust-inference) for initial-only attachment
+scope and [caller supervision](production_inference.md#caller-supervision-and-dataset-constraints)
+for disallow precedence.
 
 ## Telemetry
 
@@ -273,10 +233,7 @@ pairs whose other endpoint is processed later. Ignoring required seeds with
 Subblocking applies to full-block prediction. On
 `Clusterer.predict_incremental_from_arrow`, `batching_threshold` has a different
 meaning: it caps the number of unassigned query signatures per linker batch.
-The classic `Clusterer.predict_incremental` API is retired. See
-[production_inference.md](production_inference.md#incremental-decision-semantics)
-for the incremental contract.
+See the [incremental contract](production_inference.md#incremental-decision-semantics).
 
 The EPS sweep uses the same native graph planner as production. ORCID-B3 evaluation
 keeps ORCID evidence hidden in subblocking and distance constraints to prevent label leakage.
-Historical Python-graph sweep partitions must not be treated as native production partitions.

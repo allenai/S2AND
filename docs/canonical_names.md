@@ -107,7 +107,7 @@ first, last, first_last, last_first_initial = index.lookup_many(
 )
 ```
 
-Dataset and model contracts bind the SHA-256 of the index manifest, so keep its bytes unchanged.
+The model contract binds the SHA-256 of the index manifest, so keep its bytes unchanged.
 The index requires about 2.42 GB of local space.
 `None` keys yield `NaN`; informative keys absent from the index yield the default count `1.0`.
 Use [the data guide](data.md) for model assets and the data bundles.
@@ -124,8 +124,8 @@ authorities. Given raw `first`, `middle`, and `last` values, they:
 3. treat supported Unicode dash variants as one separator;
 4. replace remaining nonletters with spaces and collapse whitespace;
 5. drop at most one leading title from first name, except `md`;
-6. split 2-3 joined capitals, or a short mixed-case first name with no vowel,
-   into initials when the last name is not in capitals (decision D9);
+6. split eligible joined capitals and short mixed-case first names into initials
+   when the last name passes the case check (decision D9);
 7. retain a dash-bound first-name group, otherwise keep the first token and
    spill remaining first-name tokens into middle; and
 8. normalize last name independently, preserving spaces and surname particles.
@@ -134,113 +134,66 @@ Examples: `Anne-Marie Claire` becomes first `anne marie`, middle `claire`;
 apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
 `Ou Yang` both become last `ou yang`.
 
-Decision D10 romanizes Georgian and Armenian before transliteration.
-It uses the tables planned for scholar's block keys (`BlockKeyNormalizers`).
-Scholar has not shipped them yet; once it does, S2AND and scholar spell these
-names alike.
-`text_unidecode` wrote `ბერიძე` as `berize` and `Արթուր` as `artowr`, and it
-dropped every Georgian capital (Mtavruli).
-Now they become `beridze` and `artur`.
-Georgian uses the national system without apostrophes.
-A Mtavruli capital maps like its small letter, but in capitals, so D9 reads an
-all-capitals Georgian last name as capitals.
-Armenian uses these context rules:
+### D10. Georgian and Armenian romanization
 
-- `ու` becomes `u`;
-- a word-initial `ե` becomes `ye`;
-- a word-initial `ո` becomes `vo`, unless `վ` follows; and
-- the ligatures `և` and U+FB13 to U+FB17 split into their letters, as NFKC
-  splits them.
+Before transliteration, D10 applies the tables planned for Scholar's block keys
+(`BlockKeyNormalizers`). See [`s2and/text.py`](../s2and/text.py) for the full tables.
 
-As in scholar, a letter's neighbors skip punctuation, nonspacing marks, and
-format and control characters, so `Տեր-Եղիազարյան` becomes `ter eghiazaryan`.
-A word starts after a character that is not a letter (Unicode category L), so
-a space starts a word and a Latin letter does not.
-Python reads categories from `unicodedata` and Rust from `unicode-properties`.
-They can differ for letters added in a newer Unicode version than Python's.
-Python `_canonical_name_pretranslate` and Rust `canonical_name_pretranslate`
-apply the rule, and the frozen examples cover both scripts.
-Name-count indexes built before D10 hold these names under the old spellings.
-Until an index is rebuilt, such a name looks up the counts of its Latin spelling.
+| Script | Rule | Examples |
+| --- | --- | --- |
+| Georgian | Use the national system without apostrophes. Romanize a Mtavruli capital with the uppercase form of its lowercase letter's mapping, preserving the case evidence for D9. | `ბერიძე` → `beridze` |
+| Armenian | Expand `և` and U+FB13 through U+FB17 into their letters. Read `ու` as `u`, word-initial `ե` as `ye`, and word-initial `ո` as `vo` unless `վ` follows. | `Արթուր` → `artur`, `Տեր-Եղիազարյան` → `ter eghiazaryan` |
 
-Decision D9 reads joined capitals as initials.
-The rule removes whitespace and periods from the raw first name.
-If 2-3 ASCII capitals remain, the first capital becomes first.
-Each other capital becomes a middle token before the existing middle tokens.
-For example, `HG` with last `Wells` becomes first `h`, middle `g`.
-`JHM` becomes first `j`, middle `h m`.
+Armenian context skips punctuation and Unicode categories `Mn`, `Cf`, `Cc`, `Co`, and `Cs`.
+A word starts at the beginning or after a remaining character outside the letter category `L`.
+Python's `unicodedata` and Rust's `unicode-properties` can differ on newly added letters.
+Pre-D10 indexes retain the older keys. Until a rebuild, lookups use counts for the new Latin spelling.
 
-The rule needs case evidence from the raw last name.
-`last_name_allows_joined_initials` transliterates the raw last name with the
-canonical table and then counts ASCII letters.
-The rule applies only when the result has at least one lowercase letter and no
-more capitals than lowercase letters.
-Thus `á` counts as lowercase, and `HG` with last `WELLS` stays first `hg`.
-The pinned transliteration tables make this definition identical in Python
-and Rust.
+### D9. Joined capitals and mixed-case initials
 
-The rule does not apply to these first names:
+| Branch | Pattern in the raw first name | Exclusions |
+| --- | --- | --- |
+| Joined capitals | Two or three ASCII capitals after removing whitespace and periods. | `_JOINED_INITIALS_GIVEN_NAMES` (`ED`, `MD`), `NAME_PREFIXES`, and a two-capital entry in `_DOTTED_GIVEN_NAME_ABBREVIATIONS` with a final period, such as `PH.` |
+| Mixed case | One ASCII capital and one or two ASCII lowercase letters after removing whitespace. A period prevents a match. | Any `a`, `e`, `i`, `o`, `u`, or `y`, plus `NAME_PREFIXES` and `_MIXED_CASE_NON_INITIALS`, such as `Md`, `Kh`, and `Jr` |
 
-- `ED`, a frequent given name, and `MD`, which abbreviates Muhammad (D7);
-- a title prefix such as `DR`, which D7 drops;
-- a two-capital abbreviation of one given name with a final period: `CH`,
-  `SH`, `ZH`, `KH`, `TS`, `YU`, `YA`, `YE`, `GY`, `NY`, `SZ`, `ZS`, `CS`, `PH`,
-  or `TH`, for example `PH.` (Philippe), `GY.` (György), and `YU.` (Yuri).
+See [`s2and/text.py`](../s2and/text.py) for the full exclusion lists.
+Both branches require `last_name_allows_joined_initials` to pass. The canonical
+transliteration of the raw last name must contain at least one ASCII lowercase
+letter and at least as many lowercase letters as capitals. For example, `á`
+counts as lowercase, and `HG` with last `WELLS` stays `hg`.
+The first initial becomes the canonical first name. Later initials go before
+any existing middle tokens, so `JHM` with last `Wells` gives `j` and `h m`, and
+`Jm` with middle `Kevin` and last `Smith` gives `j` and `m kevin`.
 
-A second branch of D9 reads short mixed-case first names as initials.
-It removes whitespace from the raw first name, but it keeps periods.
-If one ASCII capital and 1-2 lowercase ASCII letters remain, the branch reads
-them as initials.
-The letters must not include a vowel: `a`, `e`, `i`, `o`, `u`, or `y`.
-For example, `Jh` with last `Smith` becomes first `j`, middle `h`.
-`Jm` with middle `Kevin` becomes first `j`, middle `m kevin`.
-The last-name rule is the same as for joined capitals.
+Supply the raw last name for the case check. When canonicalizing first and last names
+in separate maps, compute `last_name_allows_joined_initials` once per distinct raw
+last name and pass it as `last_allows_initials` to `canonicalize_name_parts`.
 
-The mixed-case branch does not apply to these first names:
-
-- a first name with a period, such as `Jh.` or `Kh.`;
-- a title prefix such as `Dr`, which D7 drops;
-- `Ty` and other strings with a vowel or `y`;
-- abbreviations of one given name: `ch`, `chr`, `cs`, `dzh`, `fr`, `gh`,
-  `kh`, `khr`, `lj`, `ll`, `md`, `mhd`, `ph`, `sh`, `sk`, `st`, `sw`, `sz`,
-  `th`, `vl`, `wm`, `zh`, and `zs`, for example `Md` (Muhammad) and `Kh`
-  (Khristo);
-- titles before the given name: `ds`, `hjh`, `lt`, `mst`, `rr`, and `smt`;
-- the suffixes `jr` and `sr`;
-- the real names `lv`, `ng`, and `tsz`; and
-- the company word `ltd`.
-
-A review of mention counts and gold clusters on 2026-10-16 selected this list.
-Python `_MIXED_CASE_NON_INITIALS` and Rust `MIXED_CASE_NON_INITIALS` hold it.
-A Rust test keeps the two lists equal.
-
-Every caller must supply the raw last name.
-A count generator can canonicalize first and last names in separate maps.
-Such a generator computes `last_name_allows_joined_initials` once for each
-distinct last name.
-It then supplies that result to `canonicalize_name_parts` as
-`last_allows_initials`.
+### Name-count keys
 
 `s2and.text.canonical_name_count_keys` emits no sentinel keys. It emits
 `first` only when first has more than one character, `last` when present,
 `first_last` when both are informative, and `last_first_initial` when both
 components exist.
 
-At comparison time, `same_prefix_tokens` checks aligned token pairs up to the
-shorter token list. In each pair, either token must prefix the other; the
-direction can differ between pairs (`ann marie` matches `anna m`). Empty input
-is missing evidence. Alias tuples are unordered. Canonical last names retain
-spaces in storage, but `canonical_lasts_equivalent` ignores spaces when
-comparing them: `ou yang` equals `ouyang`. Dash variants become spaces during
-canonicalization, before this comparison.
+## Hard name comparison rules
 
-The comparison also treats two spellings of one surname as equal:
+`same_prefix_tokens` checks aligned tokens up to the shorter list. Either token
+can prefix the other in each pair, so `ann marie` matches `anna m`. Empty input
+is missing evidence. First-name alias tuples are unordered.
 
-- a listed variant equals its canonical spelling, such as `mueller` and
+### Surnames
+
+`canonical_lasts_equivalent` ignores spaces, so `ou yang` equals `ouyang`.
+Dash variants already became spaces during canonicalization.
+
+The comparison also treats two kinds of surname variants as equal.
+
+- Listed variants equal their canonical spellings, such as `mueller` and
   `muller`. The list is
   [s2and_surname_variants_canonical.txt](../s2and/data/s2and_surname_variants_canonical.txt),
   279 `variant,canonical` lines from people who write their name both ways.
-- the Slavic endings `-sky`, `-skiy`, `-skyi`, `-skyy`, `-skii`, `-skij`, and
+- Slavic endings `-sky`, `-skiy`, `-skyi`, `-skyy`, `-skii`, `-skij`, and
   `-skyj` are equal after at least two letters, so `tartakovsky` equals
   `tartakovskiy`. `sky` and `osky` keep their own spelling.
 
@@ -250,62 +203,68 @@ features keep the stored spelling. Python `canonical_surname_family` and Rust
 [surname_family_examples.json](../tests/fixtures/surname_family_examples.json)
 keeps the two equal.
 
-Given names written in Han, kana, or hangul are compared whole.
-Transliteration writes each Han character as one pinyin syllable, so the
-canonical name of `重喜` is first `zhong`, middle `xi`, and the canonical name
-of `重郷` is first `zhong`, middle `xiang`. The prefix rules would let these
-match, and they would also let `孝` (first `xiao`) match `孝徳` (first `xiao`,
-middle `de`). `is_cjk_given_name` holds when the raw first and middle names
-together contain a Han, kana, or hangul character and no other character that
-transliterates to a letter. `cjk_given_name_for_constraint` joins the raw fields,
-normalizes them to Unicode NFC, expands `々` after a Han character, and
-transliterates the result. So `拓海` matches `拓海`, `奈々` matches `奈奈`,
-`张伟` matches `張偉`, and `민수` matches `민 수`.
-The value starts with a script tag: `G` when the name holds hangul, else `K`
-when it holds kana, else `H`. When both records have complete transliterations
-with the same tag, the whole given name replaces the ordinary first and middle
-name checks, and two different values veto the pair, as in `ひろ` and `ひろし`.
-Every other pair uses the ordinary rules: a pair with one romanized name, such
-as `Xiao` and `孝徳`; a pair in two scripts, such as `민수` and `敏洙`, whose
-pinyin and hangul romanization differ; and a pair where transliteration loses a
-name character, such as the long-vowel mark in `ピーター` or `𠮷` in `𠮷秀`. This normalization
-applies only to the constraint. Feature and count keys use canonical_v2.
+### CJK given names
 
-A short given name can be joined initials: `Ka` for K. A., `Mal` for M. A. L.
-`joined_initials_for_constraint` reads a raw title-case given name of two or three
-letters with no middle name as initials (`Ka` gives `Jka`), and a capital run into a
-name as an initial and a name (`MArfan` gives `Wm arfan`). Words in
-`_MIXED_CASE_NON_INITIALS` and `NAME_PREFIXES` take no reading. When the ordinary rules
-veto a pair, the reading clears the veto only if the other name has a full first name
-and spells exactly these initials in order, with every later token an initial or at
-least four letters. So `Ka` matches `Kristan Allan` and `Kristian A.`, `Mal` matches
-`Marco Aurelio Lisboa`, and `MArfan` matches `Mohammad Arfan`, while `Li` and `Lei`,
-`Ji` and `Jong In`, and `Ka` and `Kristian` still conflict. Two readings never clear a
-veto. Canonical names keep a middle of joined capitals as one token (`Johanna IP` gives
-middle `ip`), so `spelled_middle_initials_for_constraint` records its initials (`Sip`).
-The middle is the last word of the raw middle field, or of the raw first field when the middle
-field is empty, so `Johanna A IP` reads `IP` and agrees with `Johanna A. Inge Petra`. Only
-that last word is spelled, so in `IP A` the `IP` stays unspelled. It must pass the D9 initials test (2-3 capitals, or vowel-less mixed case
-such as `Hg`) and not be a suffix such as `JR` or `III` or the prefix `Mc`, and the first
-name must pass the D9 letter-case test.
-The name rule then reads the middle as initials: `Johanna IP` agrees with `Johanna Inge
-Petra`, and `Jip` spells `Johanna I P`. Like the CJK rule, the reading changes only the constraint, not canonical names
-or count keys.
+The Chinese, Japanese, and Korean (CJK) rule requires at least one Han, kana,
+or hangul character in the raw first and middle names. Any other character must
+transliterate to no letters. `cjk_given_name_for_constraint` joins the raw fields,
+removes whitespace, normalizes kana width and Unicode composition (NFC), expands
+`々` after Han, and transliterates the result. Thus `拓海` matches `拓海`, `奈々`
+matches `奈奈`, `张伟` matches `張偉`, and `민수` matches `민 수`.
+
+The script tag is `G` for hangul, otherwise `K` for kana, otherwise `H` for Han.
+When both transliterations are complete and have the same tag, compare the
+whole given names in place of the first- and middle-name checks. Different
+values veto the pair, as in `重喜` and `重郷`, `孝` and `孝徳`, or `ひろ` and
+`ひろし`. Use ordinary rules for romanized names (`Xiao` and `孝徳`), different
+script tags (`민수` and `敏洙`), and incomplete transliteration (such as
+`ピーター` or `𠮷秀`). Feature and count keys still use canonical_v2.
+
+### Joined-initials and spelled-middle readings
+
+With an empty raw middle name, `joined_initials_for_constraint` reads a
+title-case first name of two or three ASCII letters as initials (`Ka` → `Jka`).
+It excludes `_MIXED_CASE_NON_INITIALS`, `NAME_PREFIXES`, and
+`_JOINED_INITIALS_GIVEN_NAMES` (`Ed`, `Md`). An ASCII capital followed by a
+capitalized word of at least three letters gives an initial and a word
+(`MArfan` → `Wm arfan`).
+
+A reading can clear an ordinary given-name veto if exactly one side has a
+joined-initials reading and the other side has a full first name and spells it
+exactly. For `J`, every later token must be an initial or at least four letters.
+For `W`, there must be exactly two tokens, with the first initial and second
+word matching the reading. `Ka` matches `Kristan Allan` or `Kristian A.`, `Mal`
+matches `Marco Aurelio Lisboa`, and `MArfan` matches `Mohammad Arfan`. `Li` and
+`Lei`, `Ji` and `Jong In`, and `Ka` and `Kristian` still conflict.
+
+`spelled_middle_initials_for_constraint` tests the last word of the raw middle
+field, or the last word of the raw first field when the middle field is empty.
+The word must pass D9's initials test and fall outside `_MIDDLE_NON_INITIALS`
+(for example `JR`, `III`, and `Mc`). The raw first name must pass D9's case
+check. Only the final middle token is split, so `Johanna A IP` agrees with
+`Johanna A. Inge Petra`, while `IP A` leaves `IP` unspelled. `Johanna IP` gives
+`Sip`, agrees with `Johanna Inge Petra`, and spells `Jip` through `Johanna I P`.
+These readings affect the constraint only. Canonical names and count keys
+keep the original tokenization.
+
+### Middle names
 
 Full middle names also use `same_prefix_tokens` before a full-token conflict
 causes a veto. For example, `meg` matches `megan`, and `ch` matches `charles`.
 The rule compares aligned tokens up to the shorter list, as for first names.
 Middle initial conflicts still cause a veto. Seed, ORCID, surname, and first-name
-rules retain their precedence. Middle names do not use the alias tuple file.
+rules retain their precedence. Alias tuples apply to first names only.
+
+### Dash-bound first-name tails
 
 A dash-bound first name can have more tokens than the other first name. When
-the first names match by prefix, the middle comparison starts with the
-first-name tokens that the other first name does not cover. Thus `jean daniel`
+the first names match by prefix or one is missing, the middle comparison starts
+with the first-name tokens that the other first name does not cover. Thus `jean daniel`
 agrees with first `jean` and middle `daniel`, and conflicts with first `jean`
 and middle `paul`. A joined token covers the tokens that it contains, so
-`xiaoqing` covers `xiao qing`. Aligned tokens do not move: two `jean pierre`
-records compare only their middle names. An alias match covers the full first
-names, so no first-name token moves.
+`xiaoqing` covers `xiao qing`. Two `jean pierre` records compare only their
+middle names because all first-name tokens align. When the match comes only from an
+alias, it covers the full first names, so no first-name token moves.
 
 The live authorities are `s2and.text`, its Rust implementation, and
 [the frozen examples](../tests/fixtures/canonical_name_examples.json).

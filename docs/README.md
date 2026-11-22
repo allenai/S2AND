@@ -11,7 +11,7 @@ The [project README](../README.md) provides the installation and workflow overvi
 | --- | --- |
 | Run the model on your own records | [Production inference](production_inference.md) |
 | Obtain the model, the index, and the data bundles | [Data and models](data.md) |
-| Reproduce the production training process on public data | [Reproduce the 1.3 model](reproduce.md) |
+| Reproduce the production training process on public data | [Reproduce the 1.3.1 model](reproduce.md) |
 | Correct data, add a dataset, or release another model | [Release process](release.md) |
 | Prepare a new corrected snapshot | [Data preparation commands](../scripts/production/data/README.md) |
 | Fit the production model | [Production commands](../scripts/production/README.md) |
@@ -35,6 +35,8 @@ The [data guide](data.md) defines the shared local layout and update rules.
 ## Contributor guides
 
 - [Development and local CI](development.md)
+- [Bounded model runs](bounded_runs.md)
+- [Giant-block EPS review](eps_calibration.md)
 - [Test guide](../tests/README.md)
 - [Native package overview](../s2and_rust/README.md)
 - [Script catalog](../scripts/README.md)
@@ -43,10 +45,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 
 ## Historical notes
 
-Dated notes in `rust/profiling` describe their named runs.
-They are not current preparation commands or mandatory inputs to a new correction cycle.
-The corrected snapshot already contains accepted corrections.
-Use historical records only for questions about those prior decisions or measurements.
+Dated notes in the [archive](archive/) and [release evidence](release_evidence/) record prior profiling runs, experiments, and release checks.
 The original paper process belongs to the [paper branch](../README.md#reproducibility).
 
 ## Glossary
@@ -65,7 +64,7 @@ The original paper process belongs to the [paper branch](../README.md#reproducib
 | Incremental linker | The 53-feature link-or-abstain model and gate |
 | Safe-action label | Whether the supplied evidence supports attachment to the complete candidate profile |
 | Corrected snapshot | Complete current records, accepted labels, masks, vectors, and exact task/split definitions |
-| Common assets | Complete model and count index reused by inference and research |
+| Inference bundle | Complete model and name-count index reused by inference and research |
 | Runtime Arrow projection | Fast runtime tables derived from corrected records; full abstract text remains in the corrected source |
 | Batch index | A `*_batch_index.bin` sidecar that maps lookup keys to Arrow record batches |
 | Pairwise-only stage | Both pairwise boosters with pending or calibrated EPS; not a complete inference model |

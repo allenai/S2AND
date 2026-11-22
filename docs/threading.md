@@ -45,42 +45,15 @@ Rationale (high level): `preprocess_paper_1` is CPU-bound and benefits from `for
 `spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For signature preprocessing,
 the overhead of shipping large Python objects around dominates, so pooling is net negative.
 
-Python pair featurization (`many_pairs_featurize` on the classic route) follows the same idea. When `n_jobs > 1`, it
-uses a process pool on Linux and a thread pool on macOS, and it runs **serially on Windows**. It is GIL-bound, and the
-Windows thread pool was measured slower than serial with bit-identical output (4,485 pairs/s with six threads versus 6,591 pairs/s serial
-on 15k qian pairs, 2026-09-24).
+Python pair featurization (`many_pairs_featurize`) uses processes on Linux and
+threads on macOS with `n_jobs > 1` for large batches. Windows runs serially
+because the Python global interpreter lock (GIL) makes the thread pool slower
+for this work.
 
-Implementation notes:
-
-- `preprocess_paper_1` takes an explicit `preprocess=...` flag (spawn-safe; no worker globals).
-- `preprocess_papers_parallel` uses `UniversalPool` only on Linux.
-- Production `UniversalPool` call sites pass explicit `use_threads=...` so pool mode does not rely on implicit defaults.
-- `UniversalPool` remains platform-aware for helpers/callers that do not pass `use_threads`: processes on Linux (`fork`), threads on Windows/macOS by default.
-
-Benchmark script:
-
-- `scripts/bench_preprocess_phases.py` benchmarks the phases separately.
-
-Arrow-backed Rust training:
-
-When training/eval runs use Arrow-backed Rust featurization, paper preprocessing can be deferred to Rust
-(see [the Arrow training constructor](training.md#build-a-rust-backed-training-dataset)). The fixed constructor
-binds an open `ArrowDataset` before preprocessing; no lifecycle flag controls
-this route. In that mode,
-`preprocess_papers_parallel` is **skipped entirely**, and Rust Arrow readers handle paper normalization,
-ngrams, and language detection via Rayon parallelism, making the Python parallelism discussion above moot
-for those runs.
-
-Conditions for the bypass:
-
-- The dataset is constructed by the fixed Rust-training constructor,
-  `build_training_anddata_from_arrow(...)`.
-- The constructor pins `preprocess=True`; callers cannot select a partial
-  preprocessing lifecycle for this route.
-
-The constructor selects Rust explicitly and retains the caller's open dataset
-handle. Classic `ANDData` construction remains on the Python preprocessing
-route.
+`build_training_anddata_from_arrow` skips Python paper preprocessing and uses
+Rust Rayon. See [Build a Rust-backed training dataset](training.md#build-a-rust-backed-training-dataset).
+Use [`scripts/bench_preprocess_phases.py`](../scripts/bench_preprocess_phases.py)
+to benchmark the Python phases separately.
 
 ## Recommended run setup
 
@@ -88,43 +61,33 @@ route.
    - `ANDData(..., n_jobs=N)`
    - `clusterer.n_jobs = N` (or pass `n_jobs=N` when constructing `Clusterer`)
 
-2. **Set thread env vars before importing compute-heavy libraries** (especially on Windows; the
-   variables are listed in [environment.md](environment.md#threading--parallelism)):
-   - `OMP_NUM_THREADS=N` for OpenMP phases such as Python LightGBM training;
-     production Rust scoring is controlled by `n_jobs` instead
-   - Usually `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`
-   - Optional: `RAYON_NUM_THREADS=N` (only affects Rust code that uses Rayon’s global pool; S2AND’s Rust extension
-     primarily uses explicit `num_threads` arguments instead)
+2. **Set thread environment variables before imports.** See the
+   [environment variable reference](environment.md#threading--parallelism).
 
-   Why are the BLAS / NumExpr knobs usually pinned to `1` while OpenMP / Rayon may be set to `N`?
+   Keep Basic Linear Algebra Subprograms (BLAS) and NumExpr pools at one thread
+   by default. Rayon and OpenMP already parallelize the main inference and
+   training work. Helper pools can oversubscribe CPUs when they run inside those
+   phases. Increase the helper budget only when profiling shows a benefit.
 
-   - Production inference parallelizes Rust featurization, constraint resolution,
-     and model scoring through Rayon. Python LightGBM training uses OpenMP.
-   - MKL, OpenBLAS, and NumExpr can create their own thread pools for helper operations inside NumPy / SciPy expressions.
-   - If those helper libraries also fan out to `N` threads, a single S2AND process can end up with nested parallelism
-     (`Rayon x BLAS`, `OpenMP x BLAS`, etc.), which usually hurts end-to-end throughput through oversubscription.
-   - So the safe default is: let the intended top-level engine use threads, and keep BLAS / NumExpr at `1` unless a
-     profile shows a BLAS-heavy phase dominates and benefits from a different setting.
+   Pairwise training, model evaluation, and the promoted incremental profiler
+   overwrite `OMP_NUM_THREADS` after import using their `n_jobs` settings.
+   `train_pairwise.py`, `train_linker_and_finalize.py`, and
+   `profile_promoted_incremental_arrow.py` require `--n-jobs`.
+   `eval_prod_models.py` takes `--n_jobs`. Set the script's allocation
+   explicitly. The parent setting still matters for runtimes that initialize
+   before the override.
+   [Pairwise trainer](../scripts/production/model/train_pairwise.py) ·
+   [Linker trainer](../scripts/production/model/train_linker_and_finalize.py) ·
+   [Profiler](../scripts/verification/profile_promoted_incremental_arrow.py) ·
+   [Evaluator](../scripts/eval_prod_models.py)
 
-   Many OpenMP runtimes read environment variables at first use / first load; setting them after importing `lightgbm`
-   is not reliable.
+   For release jobs, follow the [operating rules](release.md#operating-rules).
 
-   Most S2AND scripts, including `train_pairwise.py`, `eval_prod_models.py`,
-   and `profile_promoted_incremental_arrow.py`, overwrite `OMP_NUM_THREADS`
-   after import from their own `n_jobs` setting (a CLI flag or, for the
-   profiler, the frozen workload). `train_pairwise.py` and
-   `train_linker_and_finalize.py` require `--n-jobs`. Set each script's `n_jobs` explicitly and treat the parent's
-   `OMP_NUM_THREADS` as applying only to libraries that read it before the
-   override.
+3. **Choose one parallelism layer per phase.** Let Rayon handle Rust batch
+   featurization and production scoring. Avoid additional pools around
+   featurization and concurrent `predict_proba()` calls from outer workers.
 
-   For v1.3 jobs, set this envelope in the parent before detached launch,
-   require children to inherit it, and retain the values in the durable job
-   log. Operational logs are not release authorities. See the release
-   [operating rules](release.md#operating-rules).
-
-3. **Choose the env pattern that matches your deployment shape**:
-
-   - **One S2AND process should use the machine**:
+   - **One S2AND process uses the available thread budget.**
 
      ```bash
      export PYTHONUNBUFFERED=1
@@ -138,11 +101,10 @@ route.
      ```
 
      `--n_jobs 36` controls production Rust inference concurrency.
-     `OMP_NUM_THREADS=36` configures any OpenMP phases in the same job; it does
-     not increase production Rust scoring concurrency. For an inference-only
-     process, leaving `OMP_NUM_THREADS=1` does not limit the Rust scorer.
+     `OMP_NUM_THREADS=36` sets the budget for any OpenMP phases in the same job.
+     Set `OMP_NUM_THREADS=1` when the process only uses the Rust inference route.
 
-   - **An outer scheduler / worker pool is already parallelizing the job**:
+   - **An outer scheduler or worker pool supplies concurrency.**
 
      ```bash
      export PYTHONUNBUFFERED=1
@@ -155,27 +117,10 @@ route.
      uv run python your_worker_script.py --n_jobs 1
      ```
 
-     If an outer launcher runs `W` workers on a machine with `N` cores, size each worker to roughly `floor(N / W)`
-     inner threads, often `1`.
+     With `W` workers and a budget of `N` logical CPUs, allocate up to
+     `floor(N / W)` inner threads per worker, often one.
 
-4. **Treat `PYTHONUNBUFFERED=1` as a logging knob**:
-   - It helps flush logs promptly.
-   - It does not make compute faster.
-
-## Avoiding nested parallelism
-
-Oversubscription usually comes from *stacking* an outer pool (threads/processes) on top of an inner thread pool
-(Rayon/OpenMP/BLAS).
-
-Rules of thumb:
-
-- If you use an **outer process pool** with `W` workers, cap **inner threads** to ~`floor(N / W)` (often `1`) inside each
-  worker.
-- Prefer **one parallelism layer per phase**:
-  - Rust batch featurization: Rayon handles parallelism; avoid wrapping it in additional thread pools.
-  - Production model inference: scoring runs in Rust (`RustLightGBMBooster`) on the estimator's configured `n_jobs` via the
-    shared Rayon pools; avoid concurrent `predict_proba()` calls from multiple workers.
-- Keep BLAS / NumExpr at `1` unless profiling shows otherwise (see step 2 of the recommended setup above).
+4. **Set `PYTHONUNBUFFERED=1` to flush logs promptly.**
 
 ## Rust Rayon pool lifetime
 

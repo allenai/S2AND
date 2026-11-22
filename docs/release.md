@@ -1,16 +1,15 @@
 # S2AND release process
 
-This guide defines the production release process.
-The Python and Rust package version is `1.0.0`.
+Read [`VERSION`](../VERSION) for the package version, currently `1.0.0b14`.
+The target final package version is `1.0.0`.
 The current model version is `1.3.2`, on research snapshot `1.3`.
 Public Arrow and name-count data use format `1`.
 
-The [data guide](data.md#download) lists the release `1.3` populations.
+The `1.3`, `1.3.1`, and `1.3.2` prefixes are published on Amazon S3.
+See the [data guide](data.md#download) for download locations.
+Keep each new release's S3 prefix empty until acceptance and publication.
 Fresh author-table counts, A, define the production count authority.
-The selected rebuild uses current normalization and the current packaged tuple and ORCID assets.
-See the [A mainline record](release_evidence/author_counts_mainline_20261017.md) for its status.
-A production release still requires final acceptance and publication.
-The S3 prefixes stay empty until acceptance and publication.
+See the [A mainline record](release_evidence/author_counts_mainline_20261017.md) for the rebuild evidence.
 
 ## Release inputs
 
@@ -24,34 +23,25 @@ The current benchmark masters retain full text where available.
 The seven giant replay sources lack full abstract text.
 Preserve their available current records and vectors; a new abstract-based encoding needs another source of full abstracts.
 
-The [data guide](data.md) defines the audience, artifact layout, and update rules.
+See the [data guide](data.md) for artifact layout and required bundles.
 The [production command reference](../scripts/production/README.md) contains executable commands.
 Keep source snapshots and fit outputs in separate directories.
 
 ## Fixed decisions
 
-- Publish the common binary name-count index and complete production model only in the `inference` S3 bundle.
-- Build the common index from author-table rows. Archive mention counts, M, as a research alternative.
-- Keep small name tuples and ORCID prefix counts in normal Git and the Python wheel.
-- Keep the ORCID prefix artifacts required by supported model contracts. Use the newest
-  packaged counts for new training contracts. Verify both the count JSON and its
-  tuple-dependency manifest in each distribution.
-- Publish three S3 bundles, `inference`, `dataset`, and `source`, with one copy of each file.
-- Publish only papers present in production S2AG and remove their excluded dependent records.
-- Publish abstract text only when the production S2AG sharing gate permits it.
+- Publish the binary name-count index and complete model only in the `inference` bundle.
+- Track name tuples and Open Researcher and Contributor ID (ORCID) prefix counts in Git.
+- Keep the ORCID prefix counts required by supported models.
+- Use the newest packaged ORCID counts in new training contracts.
 - Preserve abstract presence and existing SPECTER2 vectors when removing restricted text.
-- Train every release model from the published `inference` and `dataset` bundles.
 - Use supported formats and schemas for dataset compatibility.
 - Bind models to feature-contract versions, ordered feature names, and exact required artifact hashes.
-- Treat the model's generating runtime version as provenance.
-- Require matched installed Python and Rust package versions for their internal interfaces.
-- Reject old unversioned model stages; rebuild or explicitly export them under the current contract.
-- Select pairwise hyperparameters and EPS from development data.
-- Review giant-block EPS curves before the final operating-point decision.
-- Keep test metrics separate from model selection.
-- Recompute incremental features after a pairwise booster or feature-contract change.
-- Retain incremental features after an EPS-only change when their other inputs stay fixed.
-- Publish only a complete serialized model after evaluation through that same model.
+- Record the model's generating runtime version as provenance.
+- Rebuild unversioned model stages or export them explicitly under the current contract.
+- Train every release model from the published `inference` and `dataset` bundles.
+- Select hyperparameters and EPS on development data. Keep test metrics out of model selection.
+- Rebuild distributions and rerun installed checks after a package change.
+- Rerun affected evaluations after a runtime change, even when the contract stays compatible.
 
 ## Operating rules
 
@@ -71,11 +61,11 @@ A historical baseline is not a prerequisite for snapshot preparation or a pairwi
 
 1. Select the final corrected master records and accepted incremental dataset.
 2. Select the exact common name-count index and packaged tuple/ORCID assets.
-3. Declare fit datasets, split identities, pair lists, and the EPS policy.
+3. Declare fit datasets, split identities, pair lists, and the clustering threshold (`EPS`) policy.
 4. Verify the declared workload and resource bounds.
 5. Keep the selected snapshot immutable for the run.
 
-Before publication, compare every released paper corpus ID with production S2AG papers.
+Before publication, check each paper corpus ID against the production Semantic Scholar Academic Graph (S2AG).
 Use the same production snapshot's abstract-sharing gate for source text.
 Check augmented paper origins and initial-query source mappings too.
 Remove excluded papers, signatures, vectors, cluster memberships, pairs, and task references.
@@ -100,12 +90,13 @@ Regenerate a common asset only when its source data or semantics change.
 Regenerate A after a canonical name-rule change, even when the raw Athena export stays unchanged.
 Only AI2 staff can run the Athena export and rebuild A. Expect this for every future refresh.
 Recompute pairwise and linker features after a count-authority change.
-The ORCID producer preserves the surname rule and excludes the 14 reviewed groups.
+Exclude the 19 mixed-identity ORCID groups listed in `EXCLUDED_ORCID_GROUPS`.
+Keep the rule requiring matching, nonempty canonical surnames.
 Run the focused producer checks before a bounded rebuild.
 See [the count commands](../scripts/production/README.md#count-artifacts).
 
-Do not put the large index into the Python wheel.
-Verify that the wheel contains the canonical tuple and both ORCID runtime files.
+Verify that the wheel contains the canonical tuple file and `s2and_surname_variants_canonical.txt`.
+Check for the ORCID counts and their tuple-dependency manifest in both `s2and/data/` and `s2and/data/orcid_prefix_counts_v1_4/`.
 See [distribution checks](../scripts/production/README.md#distribution-and-arrow-checks).
 
 ## Stage 2: build training and evaluation data
@@ -142,10 +133,10 @@ Training and external evaluation must satisfy the declared identity overlap rule
 Sync the `inference` and `dataset` bundles into one root.
 Run `train_pairwise.py` with that root's model plan and common index.
 Use a separate run output and matrix workspace.
-The trainer searches main and nameless models from the declared datasets.
-Pass a known configuration with `--incumbent-parameters` to let it compete with each search winner.
-It writes an immutable pairwise-only stage with EPS marked `pending`.
-It does not require an evaluation baseline or a historical release record.
+Search main and nameless models on the declared development data.
+Pass `--incumbent-parameters` to let a known configuration compete with each search winner.
+Use `--fixed-parameters` instead to refit both heads directly.
+The trainer writes an immutable pairwise-only stage with EPS marked `pending`.
 
 Review finite validation metrics, source counts, pair counts, and resource use.
 Verify both boosters after serialization.
@@ -158,8 +149,8 @@ uv run cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-featu
 Remove-Item Env:S2AND_PAIRWISE_MODEL_DIR
 ```
 
-The pairwise search and `--incumbent-parameters` allow at most 256 leaves per tree, the native fast-plan limit.
-Larger trees fall back to slow native scoring, so no release model may use them.
+Cap `num_leaves` at 256 (`MAX_FAST_PLAN_LEAVES`) in the search, incumbent parameters, and fixed parameters.
+Larger trees fall back to slower native scoring.
 A failed native fast-plan check still requires representative latency measurements and a candidate review.
 
 ## Stage 4: select EPS and freeze linker inputs
@@ -167,7 +158,7 @@ A failed native fast-plan check still requires representative latency measuremen
 Calibrate EPS from validation data with `release_pairwise.py calibrate-eps`.
 Calibration also decides whether the bundle uses the close-pair bonus.
 It scores every EPS for each entry of `CLOSE_PAIR_CANDIDATES` and keeps the best pair; ties go to plain linkage.
-Calibration and held-out B3 scores are not rounded.
+Calibration and held-out B-cubed (B3) scores retain full precision.
 By default the best signature-weighted F1 wins.
 
 Set `precision_f1_tolerance` in the model plan's `eps` section to lean toward precision.
@@ -181,7 +172,7 @@ This benchmark selection supplies the initial EPS for giant-block review.
 
 Freeze the calibrated pairwise model, corrected incremental source, common assets, linker target, and fit resources.
 Recheck safe-action labels if query evidence or profile memberships change.
-A pairwise model change requires new incremental features; it does not automatically invalidate manual judgments.
+See the [data update rules](data.md#update-rules) for changes that require new artifacts, fits, or evaluations.
 
 ## Stage 5: fit, evaluate, and approve
 
@@ -192,20 +183,27 @@ Do not compare historical rates from different data or split populations as a ma
 
 Run `train_linker_and_finalize.py` once against the calibrated model and the synced data root.
 The command computes fresh features, fits the linker, writes a complete sibling, reloads it, and evaluates its declared test split.
-The classic booster fits train rows.
-Both calibration splits select gate features and fit gate coefficients; they serve as dev populations.
-Retain existing manual dev labels after verified query-paper exposure exclusions.
+
+The fixed classic booster uses 53 features and 675 trees and fits training rows.
+Before computing features, the trainer reads complete holdout query and base identities from the source tables.
+It needs only the identity columns, even when it computes features for calibration rows only.
+An overlap excludes the whole training query and preserves each retained query's candidate context.
+The trainer checks the same identities again before fitting and records the early exclusion counts.
+It uses origin maps to remove original queries from candidate profiles.
+
+Use `calibration_fit` and `calibration_check` as development splits for gate feature selection and coefficient fitting.
+Exclude verified query-paper exposure before gate calibration. Retain the remaining manual development labels.
+Keep the exposure annotations for pairwise training, EPS selection, and paper overlap.
 
 Complete [giant-block EPS review](eps_calibration.md) before final release evaluation.
 The release owner selects the final EPS there; that guide also records the `1.3` decision.
 Apply the reviewed EPS to a fresh complete model without another fit.
 Freeze that package before final acceptance tests.
 
-Prior development includes the inherited test population, so its stratified scores provide regression evidence.
+Read `evaluation_summary.stratified_eval_test_split.overall.test` as regression evidence because earlier development used that population.
 Full-source diagnostics can also include gate-calibration queries.
-Use [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_gold.py) for frozen fresh identity cases through the complete model.
-Identity gold differs from manual safe-action labels.
-Keep these reports separate.
+Score frozen identity-gold cases through the complete model with [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_gold.py).
+Report those scores separately from the [manual safe-action label](data.md#incremental-tasks) scores.
 
 The public loader requires the two pairwise prediction fixtures and complete incremental artifact.
 Evaluate the outer test, the identity-gold cases, parity, subblocking quality, and representative performance.
@@ -262,7 +260,7 @@ Model release `1.3.1` changes only linkage settings, so it publishes `inference/
 Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan.
 Model release `1.3.2` rebinds the `1.3.1` model to a rebuilt name-count index with
 `scripts/production/model/rebind_name_counts_index.py`, so it publishes only `inference/` under `s2and/1.3.2/`.
-A dataset bundle does not name an index or a model release; publish a new one only when the data changes.
+Reuse the dataset bundle for model-only updates with unchanged data.
 Sync `inference` and `dataset` into one fresh local root.
 Verify hashes and repeat installed bulk and incremental smoke checks.
 Run one public step from the [reproduction guide](reproduce.md) on that root.
@@ -272,12 +270,3 @@ Record the common Git ref, asset paths, S3 prefix, manifest hashes, and evaluati
 Replace unpublished placeholders only with verified download locations.
 Resolve every `Update at v1.3 release` note (`git grep -n "Update at v1.3 release"`).
 Tag the exact reviewed source commit.
-
-## Invalidation rules
-
-An input change invalidates the downstream results that consume it.
-A pairwise booster or feature-contract change invalidates incremental features and the linker fit.
-An EPS-only change does not invalidate unchanged incremental features.
-A source-label or profile-membership change requires checks of affected task labels and features.
-A package change requires new distributions and installed artifact checks.
-A runtime implementation change requires new affected evaluation evidence, even when the artifact contract version remains compatible.

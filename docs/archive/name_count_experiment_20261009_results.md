@@ -2,7 +2,7 @@
 
 The author-row count policy replaces M on 2026-10-17. This report preserves the earlier study and its original recommendation.
 
-Keep M, the plain mention count policy. Keep EVENT threshold 10 with all ORCIDs as the existing prefix default.
+The study originally recommended keeping M, the plain mention count policy, and EVENT threshold 10 with all ORCIDs as the prefix default.
 The experiments do not identify a unique best prefix threshold.
 
 Compute corpus counts once per data refresh. Apply the ORCID event threshold before the alias merge, then save the prefix table.

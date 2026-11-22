@@ -6,7 +6,7 @@ Giant-block curves supply the final operating-point review.
 The release owner chooses EPS after review of both views and benchmark validation.
 The scripts do not choose EPS automatically.
 
-## Inputs and the 1.3 decision
+## Inputs
 
 Use one root that combines the `inference` and `dataset` bundles, and the complete candidate model.
 The seven giant datasets are `a_khan`, `a_silva`, `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`.
@@ -14,19 +14,6 @@ Their Arrow data, profile memberships, dev labels, and initial-query source map 
 Use `--replay-bundle incremental` to select that catalog from the combined public root.
 Obtain the model and index from the `inference` bundle.
 No second giant-data copy is required.
-
-The final `1.3` review uses fresh internal Semantic Scholar exports instead of the snapshot giants.
-The NEW `a_khan`, `a_silva`, and `j_smith` blocks carry ORCID references.
-The claimed blocks are `f_matsen`, `s_feldman`, `s_gupta`, `s_park`, `s_lee`, and `h_wang`.
-These exports are not part of the released data, so public users cannot repeat the final review.
-Future releases can also use internal exports for this step.
-
-The release owner chose EPS `0.53` for `1.3` on 2026-10-19.
-The review scores each tested EPS on nine blocks with S = (2 × B3 precision + B3 recall) / 3.
-It weights each scored signature equally.
-EPS `0.53` gives the best S of the tested values: 90.09%, against 88.99% at `0.57`.
-The same ORCID references select and assess EPS, so this review is not an independent test.
-On the benchmark outer test, signature-weighted B3 F1 rises from 0.963514 at `0.57` to 0.964372 at `0.53`.
 
 ## Close-pair bonus
 
@@ -38,7 +25,7 @@ Without snapshot curves, `--close-pair BONUS DISTANCE` sets a reviewed bonus, an
 `--release-version` names a model that differs from its source only in these linkage settings.
 
 With the bonus, a score that weights precision above recall has no peak on giant blocks: recall falls slowly as EPS falls, so the score keeps rising.
-The 1.3 review score, (2 x precision + recall) / 3, therefore cannot select EPS for a bundle that uses the bonus.
+The precision-weighted review score, (2 × precision + recall) / 3, therefore cannot select EPS for a bundle that uses the bonus.
 Use the model plan's `precision_f1_tolerance` instead, in benchmark calibration and in this review.
 
 Pass the plan's tolerance to `apply_reviewed_eps.py` as `--precision-f1-tolerance`.
@@ -47,21 +34,12 @@ Benchmark calibration picks the most precise EPS within the tolerance on validat
 If it rejects the EPS, review the next higher value on the grid.
 Sweep enough EPS values around the candidate for the best swept F1 to be meaningful.
 
-### The 1.3.1 decision
-
-`1.3.1` keeps both `1.3` boosters and the linker, and changes only the linkage: close-pair bonus `8` for pairs under `0.05`, EPS `0.40`.
-Calibration with `precision_f1_tolerance` `0.001` selects that setting on the validation blocks.
-On the benchmark outer test, with both bundles scored by this version of the code, signature-weighted B3 precision rises from 0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204.
-The validation blocks selected the setting, but outer-test curves over EPS were inspected during development, so this is not an untouched test.
-On the seven giant blocks, pooled ORCID-B3 F1 over ten EPS values from `0.30` to `0.53` peaks at `0.40` (0.9317), so the giant-block tolerance check passes.
-The choice of `0.40` over its neighbors is not sharp: validation F1 varies by less than 0.001 from EPS `0.40` to `0.53`.
-
 ## Freeze populations
 
 Treat EPS reference labels as development data.
 Freeze the giant dataset list, EPS grid, subblock size, input snapshot, and model before the sweep.
 Keep final test labels out of EPS selection.
-The B3 sweep reads the snapshot's frozen final-test assignments.
+The B-cubed (B3) sweep reads the snapshot's frozen final-test assignments.
 It resolves each initial-only query copy to its source record through the snapshot map.
 A final-test record excludes its entire ORCID group from both reference views.
 Excluded records remain available as inference context.
@@ -69,7 +47,7 @@ Excluded records remain available as inference context.
 The sweep stops if a final-test record remains in a reference.
 
 The identity view uses repeated ORCID references after normalization.
-It excludes the 14 reviewed mixed-identity groups and synthetic initial-query copies.
+It excludes the 19 reviewed mixed-identity groups and synthetic initial-query copies.
 It also excludes each record in `orcid_error_query_signatures.json`; the rest of that ORCID group remains.
 A second B3 curve, `eps_b3_with_singletons.tsv`, also keeps one-record ORCID groups.
 Those records cannot lose recall, but a wrong merge lowers their precision.
@@ -185,9 +163,11 @@ Record the reason for that choice.
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `
+  --precision-f1-tolerance 0.001 `
   --review-note '<human decision and tradeoff>' --output-report "$EpsRun/eps_review.json"
 ```
 
+For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
 It requires exactly the seven frozen giants and both complete curves for each.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
@@ -201,7 +181,7 @@ Release `1.3` used this form:
 
 ```powershell
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
-  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
+  --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3" `
   --eps 0.53 --review-note '<decision, tradeoff, and internal evidence location>' `
   --output-report "$EpsRun/eps_review.json"
 ```
@@ -212,3 +192,10 @@ Repeat affected cluster evaluation and real-model inference checks with the revi
 Keep sweep outputs and distance caches local.
 Keep their input roles and hashes distinct from untouched final tests.
 See [the release process](release.md) for acceptance and publication.
+
+## Recorded release decisions
+
+| Release | Linkage | Reviewed EPS | Key metrics | Review population and caveats |
+| --- | --- | --- | --- | --- |
+| `1.3` (2026-10-19) | Plain average linkage | `0.53` | Signature-weighted (2 × B3 precision + B3 recall) / 3 peaked at 90.09%, versus 88.99% at `0.57`. Benchmark outer-test B3 F1 rose from 0.963514 to 0.964372. | Nine internal exports outside the public snapshot. New `a_khan`, `a_silva`, and `j_smith` had ORCID references. Claimed blocks were `f_matsen`, `s_feldman`, `s_gupta`, `s_park`, `s_lee`, and `h_wang`. The same references selected and assessed EPS. |
+| `1.3.1` | Same boosters and linker as `1.3`. Close-pair bonus `8` below `0.05`. | `0.40` | Pooled ORCID-B3 F1 peaked at 0.9317 over ten EPS values from `0.30` to `0.53`. Signature-weighted benchmark outer-test precision rose from 0.973500 to 0.978019, recall from 0.956478 to 0.959062, and F1 from 0.964702 to 0.968204. | Validation selected EPS with tolerance `0.001`, and the seven giants passed the same tolerance check. Validation F1 varied by less than 0.001 from `0.40` to `0.53`. Outer-test curves were inspected during development. |

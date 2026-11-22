@@ -25,7 +25,8 @@ These settings exclude dynamic-table mutations and debug output buffers.
 Keep the Rust version-string lock because the C++ version function writes a shared buffer.
 
 Preserve the upstream source licenses in `cld2/LICENSE` and the crate metadata.
-Test serial-versus-parallel language results and complete request partitions before retaining this experiment.
+After each patch or vendor update, run `parallel_detection_matches_serial_results` in
+[`language_detection.rs`](../../src/language_detection.rs).
 
 ## Audit or reproduce
 

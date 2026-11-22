@@ -1,9 +1,7 @@
 # Scripts
 
-This catalog describes implemented entry points in the current worktree. It
-does not authorize expensive production work or imply that the
-v1.3 release work is complete. Release operators must follow
-[../docs/release.md](../docs/release.md).
+Find runnable entry points under `scripts/`.
+Follow the [release process](../docs/release.md) for production runs.
 
 ## Quick reference
 
@@ -12,13 +10,19 @@ v1.3 release work is complete. Release operators must follow
 | Script | What it does |
 |---|---|
 | `production/model/train_pairwise.py` | Release-only training of the pairwise half of a native `production_model_vX.Y/` bundle |
+| `production/data/prepare_pairwise_inputs.py` | Prepare corrected benchmark splits (`benchmarks`), generate omission variants (`augmentation`), and attach vectors and verify populations (`finalize`) |
+| `production/data/package_pairwise_inputs.py` | Copy prepared pairwise sources and Arrow data into one portable directory |
 | `production/data/package_corrected_datasets.py` | Package the final corrected records, pairwise populations, and complete incremental tasks with one common index |
 | `production/data/write_release_bundles.py` | Write the published `inference`, `dataset`, and `source` bundles from the prepared snapshot |
 | `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
 | `production/model/release_pairwise.py` | Validation-only EPS calibration (`calibrate-eps`) and outer-test evaluation (`evaluate-heldout`) |
+| `production/model/rebind_name_counts_index.py` | Bind a copy of a complete model to a rebuilt `name_counts_index/` without refitting |
+| `production/data/prepare_linker_replay.py` | Prepare current metadata and SPECTER2 inputs for fixed linker replay IDs |
+| `production/data/prepare_linker_support.py` | Prepare linker support tables from reviewed benchmark and ORCID labels |
 | `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](production/data/README.md) |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `production/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](production/counts/README.md) |
+| `production/counts/generate_name_counts_from_parquet.py` | Build a canonical binary `name_counts_index/` from reviewed weighted raw-name Parquet files. Invoke with `python -m`. |
 | `production/counts/generate_orcid_name_prefix_counts.py` | Convert one reviewed, guardrailed CSV export into canonical ORCID prefix-count JSON bound to the packaged tuple artifact; invoke with `python -m` |
 
 ### Tutorials
@@ -56,7 +60,7 @@ Use [the data guide](../docs/data.md) to download them.
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/profile_promoted_incremental_arrow.py` | Produce the release performance report from a bounded promoted incremental Arrow workload |
 | `verification/compare_graph_subblocking_arrow_quality.py` | Produce the release subblocking-quality report by comparing Python and Rust graph subblocking on the frozen Arrow and component inputs |
-| `verification/smoke_installed_rust_api.py` | CI smoke that checks the installed `s2and-rust` extension exposes the expected API |
+| `verification/smoke_installed_rust_api.py` | Check that the installed `s2and._s2and_rust` extension exposes the expected API |
 | `verification/verify_rust_distribution_licenses.py` | Release CI check that Rust wheels and source distributions keep their license notices |
 
 ### CI & release

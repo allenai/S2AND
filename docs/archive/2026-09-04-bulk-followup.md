@@ -1,5 +1,7 @@
 # Bulk Arrow specialization follow-up
 
+> **Historical note (2026-09-04, baseline `a5bfdeb`).** This profiling record predates the unified `s2and._s2and_rust` package.
+
 This follow-up measures candidates against the already optimized bulk path
 in commit `a5bfdeb`. The acceptance gates remain: at least 10% less time in
 the affected category, unchanged outputs, and at most 10% more peak working
@@ -91,7 +93,7 @@ Probe scripts and JSON evidence are in
 
 The workload is the same five largest natural AMiner blocks, 9,267
 signatures and 8,762,170 pairs, using the historical v1.21 pairwise models.
-The explicit `--limit 2500` truncates none of the selected blocks.
+The 2,500-signature limit truncated none of the selected blocks.
 This does not evaluate current-model quality.
 
 The baseline Python files are immutable exports from `a5bfdeb` under
@@ -106,28 +108,12 @@ from aggregated `rust_featurizer_predict` telemetry, not the last block's
 `GetProcessMemoryInfo` high-water counters, not S2AND's fallback estimates.
 Exact-feature comparison runs are separate from memory acceptance runs.
 
-```powershell
-uv run --no-sync python scratch/bulk_followup_20260904/profile_compare.py --dataset aminer --limit 2500 --blocks 5 --repeat 3 --runtime scratch/bulk_followup_20260904/runtime --baseline --output scratch/bulk_followup_20260904/full_baseline
-```
-
-Omit `--baseline` for the candidate. `--full-features` restores the expanded
-sparse matrices; `--coordinates` restores unused coordinate generation.
-Their combinations isolate the two changes. `--skip-scoring` removes model
-time from category experiments. `--capture-consumed --check-features`
-enables the separate bit-exact feature checks.
-
 ## Verification and build
 
-The release wheel was built with:
-
-```powershell
-uv run --no-sync maturin build --release --manifest-path s2and_rust/Cargo.toml --out scratch/bulk_followup_20260904/wheels
-```
-
-It is extracted under `scratch/bulk_followup_20260904/runtime`; the default
-local extension was not replaced. Tests explicitly preload this runtime
-before importing S2AND. The final regression run passed **219 tests** in
-10.07 s. Its exact test selection is the nine files covering bulk sparse
+The original reproduction commands used the pre-unification `s2and_rust`
+package and local scratch artifacts. The tests preloaded the release build
+from `scratch/bulk_followup_20260904/runtime`. The final regression run passed
+**219 tests** in 10.07 s. Its exact test selection is the nine files covering bulk sparse
 features, constraint values/labels, distance orchestration/parity, tiled
 LightGBM scoring/parity, Rust batch chunking, and feature-port parity.
 `regression_final.log` records the outcome. The initial broader run exposed

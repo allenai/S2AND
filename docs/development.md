@@ -4,10 +4,11 @@ This document collects the repo-level development commands and workflows that do
 
 ## Core commands
 
-For a fresh development environment, install the `dev` extra and build the matching Rust extension using the
-[local development build instructions](../s2and_rust/README.md#local-dev-build). The full pytest suite requires that
-native runtime. The [local CI wrapper](#local-ci-mirror) prepares it, while the
-[static-check fast path](#static-check-fast-path) supports lint/type checks without a native build.
+Follow the [checkout setup](install.md#repo-checkout) to install the `dev` extra
+and build the matching Rust extension. The full pytest suite requires the
+extension, including the native name-count index used by Python orchestration.
+The [local CI wrapper](#local-ci-mirror) prepares the test environment.
+Use the [static-check fast path](#static-check-fast-path) for lint and type checks.
 
 ```bash
 uv run pytest -q -n auto
@@ -96,10 +97,6 @@ uv run --no-project python scripts/run_ci_locally.py lint
 uv run --no-project python scripts/run_ci_locally.py typecheck-and-test
 ```
 
-The current runtime requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
-the bundled native extension once, requires it to import, and then runs full-suite coverage of the Python
-route.
-
 The CI runner's `ty` checks use Python 3.11 and the `linux` platform to match
 the GitHub Linux runners. Set `S2AND_CI_TY_PLATFORM` (for example, `windows`)
 to change the platform it emulates.
@@ -115,19 +112,16 @@ uv run --active --no-project ty check s2and
 uv run --active --no-project ty check scripts --ignore unresolved-reference --ignore unresolved-attribute
 ```
 
-The scripts check above covers the top-level and nested scripts; hosted CI checks the same
-set. Both checks use the `[tool.ty]` defaults; the scripts
-check additionally ignores unresolved references and attributes from optional
-and native modules. Type errors remain blocking; warnings remain visible.
-
-The full pytest suite requires the native name-count index. `uv sync --extra dev` builds and installs the extension;
-`uv run --no-project python scripts/run_ci_locally.py` does the same before testing.
+The local `ty check scripts` command scans the whole `scripts/` tree and can
+include untracked subdirectories. Hosted CI checks top-level `scripts/*.py` and the
+`scripts/eps_sweep`, `scripts/production`, and `scripts/verification` directories.
+Both checks use the `[tool.ty]` defaults. The scripts check also ignores
+unresolved references and attributes from optional and native modules. Type
+errors remain blocking. Warnings remain visible.
 
 ## Runtime routing verification
 
-After building the matching extension with the
-[local development build instructions](../s2and_rust/README.md#local-dev-build),
-run the focused constructor and backend-routing tests:
+Run the focused constructor and backend-routing tests from the development environment.
 
 ```bash
 uv run pytest -q tests/test_runtime.py tests/test_data.py tests/test_arrow_training_ingestion.py
@@ -139,103 +133,60 @@ the runtime contract. The production command reference covers
 [packaging](../scripts/production/README.md#distribution-and-arrow-checks), and
 [installed-runtime checks](../scripts/production/README.md#installed-release-smoke).
 
+## Implementation notes
+
+These notes describe the internal boundaries of production inference.
+
+### Import boundaries
+
+Importing `s2and.production_model` does not load evaluation, plotting, or
+Hyperopt modules. Pure clustering metrics live in `s2and.metrics` and are also
+importable from `s2and.eval`. Evaluation loads plotting libraries
+when rendering and scopes its plot styling to that operation.
+
+Constructing a `Clusterer` or loading a production bundle does not create an
+optimizer search space or load Hyperopt. With the default `search_space=None`,
+the attribute remains `None` until `Clusterer.fit()` or Arrow validation
+calibration creates the default uniform EPS space. Explicit search spaces are
+used as given. Genie loads only when its subblocking algorithm is used.
+
+### Prediction state ownership
+
+Prediction orchestration keeps effective seed assignments, disallow pairs,
+altered-profile overrides, and internal diagnostics in request-owned state.
+Arrow subblocking builds synthetic seeds from its completed subblocks and
+keeps them in request-owned state. Nested predictions and failed subblock calls
+leave the original seed assignments intact.
+
+Rust feature data can be reused across predictions. Python orchestration
+passes each prediction's seed constraints at the Rust boundary. Applications
+control the thread safety of their own classifiers and caches.
+
+Per-call `cluster_model_params` apply throughout bulk prediction on both
+routes, including initial-only attachment and residual clustering on Arrow.
+Each block fits a fresh clustering estimator. Explicit `preserve_input`
+choices survive nested calls, and the shared model's stored parameters are
+unchanged. Incremental altered-profile splitting uses the configured clustering
+model. Its reusable cache distinguishes the model parameters. Graph subblocking
+uses its own configuration.
+
+Seed-link application is a pure decision phase in promoted Arrow incremental
+prediction. It accepts ordered seed memberships, link decisions, altered-profile
+mappings, and first-name metadata. It returns owned cluster lists, residual
+signatures, and rejected links. It preserves split-specific name checks and
+restores original profile IDs.
+
+The completion component uses that result to group residuals, allocate numeric
+cluster IDs, and record request telemetry. It receives lazy first-name and
+ORCID views, explicit policy and supervision, and a typed residual-clustering
+operation. The orchestration boundary resolves aliases, logs rejected links,
+and binds backend execution, constraints, and memory limits. The lazy views
+read name metadata from the prepared dataset in place.
+
 ## Bounded model runs
 
-Detect available logical CPUs from process affinity before each CPU-intensive launch.
-Reserve two logical CPUs. Share the remaining `k - 2` thread budget across concurrent jobs.
-Apply a lower total limit when the user requests one.
-For a 12-thread total limit, allocate four threads to each of three workers.
-Apply each allocation to model prediction, OpenMP, and Rayon. Keep secondary BLAS pools at one thread.
-Use disjoint CPU affinity leases as a backstop for parallel library pools.
-Record the detected capacity and allocations. Do not give each worker the complete shared budget.
-
-For comparisons of complete production models, complete one model before more
-variants. Require a strict reload of the complete production bundle. Then run a
-bounded public prediction on one representative full block. Verify its outputs
-before the next variant. For example, the giant-block count study uses full
-Silva at EPS 0, .55, and 1. An interim pairwise export does not meet this gate.
-
-Run one serial milestone at a time. Do not queue later variants before this gate
-passes. Use a bounded representative sample before an expensive milestone.
-Record its command, inputs, resource limits, expected duration, and required
-outputs.
-
-Before a threshold sweep, identify work that does not depend on the threshold.
-Reuse that work across cuts after exact output checks. Keep threshold-dependent
-constraints, temporary seeds, attachment, and residual prediction in the public
-production path. Cache pristine arrays before a consumer can change them. Bind
-the cache to fixed inputs, models, counts, source, native code, and resource
-settings. Measure cold and warm runs before the full runtime estimate.
-
-Wrap each milestone with `scripts/run_bounded.py`. Set `--output-dir` and
-`--max-rss-gib`. Select `--max-seconds SECONDS` or `--no-deadline`.
-Use `--no-deadline` when the approved workload has no wall deadline.
-The memory limit and process ownership remain active.
-The records store `max_seconds` as `null` for this choice.
-
-Repeat `--expected-output PATH` for each
-required output file. Put the child command after `--`. Use a fresh output
-directory for each attempt.
-
-Use expected output files that do not exist before launch. Do not use runner
-records as expected outputs. The runner checks file presence and records file
-size. Validate artifact contents separately.
-
-Preserve `run.json`, `events.jsonl`, `stdout.log`, and `stderr.log`. The terminal
-`result.json` and validated outputs establish completion. Require `status` equal
-to `complete` and child exit code zero. Process disappearance, stale status,
-and file presence alone do not establish success. Preserve partial outputs and
-worker logs after failure.
-
-Use `supervisor_pid` in `run.json` to identify the actual supervisor. Outer `uv`
-and environment launcher PIDs can differ.
-
-Use one timed query for each progress check. Do not start parallel status
-monitors. On timeout, stop only the bounded command's owned process tree.
-Preserve unrelated workers. The runner uses a 0.1-second resource poll interval.
-Samples can miss short memory peaks.
-
-On Windows, a Job Object contains the supervisor and descendants from launch.
-Actual supervisor death closes its private handle and stops remaining
-descendants. On POSIX, ownership covers the command's process group. A
-descendant can start a new session outside this group. Hard supervisor death
-can leave group members alive.
-
-A remaining descendant keeps the run open after the command exits. One Windows
-exception exists: MSVC `link.exe` starts `vctip.exe` to upload telemetry, and it
-can linger after a Rust build. Ten seconds after the command exits, the runner
-checks the remaining job members. If each one is `vctip.exe` inside a
-`Microsoft Visual Studio` folder or the command's console host (`conhost.exe`),
-it stops the `vctip.exe` processes and lists them in `telemetry_cleanup` in
-`result.json`. The console host then exits by itself. Any other remaining
-process still keeps the run open.
-
-On Windows, a reader without delete sharing can block atomic file replacement.
-Prefer immutable records and append-only telemetry. If a status file requires
-replacement, close readers promptly and permit delete sharing. Report optional
-telemetry failures without termination of an active worker. Failure to publish a
-required artifact must fail the milestone.
-
-Before an expensive launch, run these Git checks in order. Each command has its
-own time and memory limit.
-
-```bash
-uv run --no-sync python scripts/run_bounded.py --output-dir scratch/git-head-check --max-seconds 15 --max-rss-gib 1 -- git rev-parse --verify "HEAD^{commit}"
-uv run --no-sync python scripts/run_bounded.py --output-dir scratch/git-tree-check --max-seconds 15 --max-rss-gib 1 -- git cat-file -e "HEAD^{tree}"
-uv run --no-sync python scripts/run_bounded.py --output-dir scratch/git-ref-check --max-seconds 15 --max-rss-gib 1 -- git for-each-ref --sort=-committerdate "--format=%(refname)%00%(objectname)%00%(*objectname)"
-```
-
-These three checks cover the HEAD commit, root tree, and ref enumeration. They
-do not establish complete repository health. Stop the launch if any check fails
-or exceeds its limit. Preserve the checkout and request a separate Git
-diagnosis. Do not reset or delete repository files. Do not run unbounded Git
-checks.
-
-Keep active checkouts and their Git directories outside cloud-sync folders.
-Transfer commits with Git push and fetch. The [Git FAQ](https://git-scm.com/docs/gitfaq#_transfers)
-states that cloud sync can cause missing objects and broken refs. This risk
-does not establish the cause of any specific failure. Do not move an active
-checkout while jobs use its files or environment.
+Use `scripts/run_bounded.py` for long model jobs with shared thread budgets and
+durable logs. Follow the [bounded model runs runbook](bounded_runs.md).
 
 ## Version bumping
 
@@ -268,11 +219,10 @@ Notes:
 
 - The pre-commit hook only runs when `VERSION` is staged; it runs steps 2 and 3
   and stages the updated files.
-- `scripts/sync_version.py` rewrites the version in `pyproject.toml`,
-  the root `pyproject.toml`, `s2and_rust/Cargo.toml`, and the package entries
-  in `s2and_rust/Cargo.lock` and `uv.lock`. The result passes
-  `cargo metadata --locked` and `uv lock --check`, so a bump does not re-resolve
-  other dependencies.
+- `scripts/sync_version.py` rewrites the version in `pyproject.toml` and
+  `s2and_rust/Cargo.toml` and updates the package entries in `s2and_rust/Cargo.lock`
+  and `uv.lock`. `cargo metadata --locked` and `uv lock --check` validate the
+  updated files without re-resolving other dependencies.
 - `uv.lock` and `s2and_rust/Cargo.lock` are generated files.
 
 ## Related docs

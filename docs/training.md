@@ -1,21 +1,12 @@
 # Training and Evaluation
 
 This guide describes research training and evaluation through the API.
-It uses the published data bundles and the same common name-count index as inference.
+It uses the published benchmark data and the name-count index from the inference bundle. See [where to download both bundles](data.md#download).
 The examples expose test metrics for direct research inspection.
 Production release selection uses development data and keeps candidate test scores separate until the declared release evaluation.
 See [the production commands](../scripts/production/README.md#pairwise-model) for the maintained production trainer.
+See [the reproduction guide](reproduce.md) for the production training steps on published data.
 See [the release process](release.md) for model acceptance and publication.
-
-## Production training inputs
-
-The production pairwise trainer reads `pairwise/model_plan.json` from the published `dataset` bundle.
-The [data guide](data.md#folder-layout) defines the plan's roles and the release populations.
-The trainer selects pairs and computes features from each source's benchmark Arrow data and the one shared `name_counts_index`.
-It has no fixed seven-source requirement.
-The [reproduction guide](reproduce.md) lists the production commands in order.
-Use a separate output directory for models and matrix work.
-Calibration and held-out evaluation check the model's recorded development blocks.
 
 ## Build a Rust-backed training dataset
 
@@ -24,8 +15,7 @@ The maintained training constructor consumes an open, manifest-backed
 papers, paper authors, embeddings, batch indexes, and name counts come from the
 same corrected snapshot and common index.
 
-The example requires a manifest-backed training root from the corrected snapshot.
-Set `bundle_dir` to the selected dataset's fit Arrow directory.
+Set `bundle_dir` to a benchmark Arrow directory, such as `s2and/data/benchmarks/pubmed`.
 
 ```python
 import json
@@ -34,7 +24,7 @@ from pathlib import Path
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
 
-bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
+bundle_dir = Path("s2and/data/benchmarks/pubmed")
 manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
 manifest_paths = manifest["paths"]
 arrow_dataset = ArrowDataset.open(
@@ -54,12 +44,11 @@ dataset = build_training_anddata_from_arrow(
 )
 ```
 
-Set `bundle_dir` to a canonical training root. Opening the handle validates
-required tables, raw-planner batch indexes, checksums, public format `1`, and
-the name-count index before any pairs are sampled. Keep `arrow_dataset`
-open while the returned dataset is used, then close it. The constructor always
-selects the Rust training runtime and pins canonical preprocessing. The requested pair counts are upper bounds when a split
-contains fewer eligible within-block pairs.
+Opening the handle validates required tables, raw-planner batch indexes,
+checksums, public format `1`, and the name-count index before any pairs are sampled.
+Keep `arrow_dataset` open while using the returned dataset, then close it.
+The constructor selects the Rust training runtime and pins canonical preprocessing.
+The requested pair counts are upper bounds when a split contains fewer eligible within-block pairs.
 The returned dataset's Python-visible signatures and papers are reconstructed
 from the validated Arrow bundle; the constructor never injects pre-conversion
 source objects. Keep source and reconstructed datasets separate in parity
@@ -189,9 +178,8 @@ print(metrics)
 training signatures, and test prediction includes observed training and
 validation signatures in the tested blocks. Only signatures belonging to the
 requested evaluation split contribute per-signature scores. Records outside
-explicit split lists are excluded from prediction context. B3 retains its
-existing context-aware calculation; pairwise metrics use evaluation-only
-memberships.
+explicit split lists are excluded from prediction context. B-cubed (B3) uses
+the prediction context, and pairwise metrics use evaluation-only memberships.
 
 ## Publish and reload a trained model
 
@@ -204,49 +192,8 @@ files, feature provenance, checksums, and staged publication. Follow the
 [release process](release.md) for pairwise training, validation-only EPS
 selection, linker finalization, and evaluation through the reloaded bundle.
 
-Linker training excludes complete holdout query and base identities before
-feature materialization, using identity columns from the source tables even
-when only calibration rows are materialized for fitting. An overlap excludes
-the whole training query.
-Holdout exclusion preserves each retained query's declared candidate context.
-The trainer uses origin maps to remove original queries from candidate profiles.
-
-The same identity authority is checked again before the fit.
-Diagnostics retain the early exclusion counts.
-Frozen test labels and features are not required for this check.
-
-The classic booster uses the fixed target.
-It fits train rows.
-Both `calibration_fit` and `calibration_check` select gate features and fit gate coefficients.
-Both splits serve as dev populations.
-Retain existing manual dev labels after verified query-paper exposure exclusions.
-
-The report's `evaluation_summary` contains stratified test results and full-source diagnostics.
-`stratified_eval_test_split.overall.test` reports inherited regression performance.
-Prior development includes this test population.
-The `overall_s2and_eval`, `hwang_cleaned_eval`, and `overall_<dataset>_eval` diagnostics can include gate-calibration queries.
-
-Use [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_gold.py) for frozen fresh identity cases and the complete serialized model.
-Identity gold differs from manual safe-action labels.
-Keep identity and safe-action reports separate.
-
-After a complete bundle passes the acceptance checks, reload it explicitly:
-
-```python
-from s2and.arrow_inputs import ArrowDataset
-from s2and.production_model import load_production_model
-
-clusterer = load_production_model("/path/to/production_model_vX.Y", n_jobs=8)
-blocks = {"block key": ["signature_id_1", "signature_id_2"]}
-with ArrowDataset.open("/path/to/arrow_dataset") as arrow_dataset:
-    pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow(
-        blocks,
-        arrow_dataset,
-        total_ram_bytes=32 * 1024**3,
-    )
-```
-
-`pred_distance_matrices` may be `None` when the fused clustering path is active.
+See [production linker training and evaluation](../scripts/production/README.md#complete-model-and-linker-evaluation) for the training splits and reports.
+After a complete bundle passes the acceptance checks, [load the model and run inference](production_inference.md#load-a-production-model).
 
 ## Reference scripts
 

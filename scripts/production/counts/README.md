@@ -6,15 +6,17 @@ Plan a staff rebuild for every future count refresh.
 
 ## ORCID prefix evidence
 
-Use `generate_orcid_name_prefix_counts` for the final ORCID prefix artifact.
-The producer excludes 19 mixed-identity ORCID groups from the September 25 and November 20 reviews.
-`EXCLUDED_ORCID_GROUPS` contains the reviewed identifiers.
+Use `generate_orcid_name_prefix_counts` for Open Researcher and Contributor ID (ORCID) prefix counts.
+The producer excludes the 19 mixed-identity groups in `EXCLUDED_ORCID_GROUPS`.
 The producer records excluded group and row counts in its result log.
 It preserves raw source data and requires matching, nonempty canonical surnames for all retained ORCID evidence.
+The surname comparison removes spaces after canonicalization, so `Ou Yang` and `Ouyang` match.
+Each pair must share the same surname key.
 It retains the EVENT threshold of 10 and the curated alias threshold of 2.
 The exclusion does not affect curated aliases or the separate runtime same-ORCID subblocking rule.
 Package the refreshed `1.4` output and its manifest in `s2and/data/orcid_prefix_counts_v1_4/`.
 Keep the original `1.3.x` files at the root of `s2and/data/` for existing contracts.
+Keep `first_k_letter_counts_from_orcid.json` and `first_k_letter_counts_from_orcid.manifest.json` together in each directory.
 Register the refreshed data SHA-256 as the new training default in `s2and/orcid_prefix_counts.py`.
 
 ```powershell
@@ -33,8 +35,6 @@ Supply exact source bounds and reviewed name-expansion bounds.
 Use fresh author-table counts, A, for production.
 One source author row supplies one contribution.
 This quantity is an author-table row count. It is not an independently verified count of people.
-The retired mention-count study remains in [the archive](../../../docs/archive/name_count_experiment_20261009_results.md).
-The separate ORCID prefix artifact retains its current policy.
 
 ### Athena author-row export
 
@@ -83,8 +83,6 @@ The scan-price input is configurable. The workgroup cutoff supplies the service-
 Confirm population counts against the selected source snapshot.
 Add `--execute` to the same command to start the export and local build.
 
-The October 15 source has 192,718,689 author rows in 84,128,144 raw name groups.
-These figures identify that snapshot. Do not assume they describe a later refresh.
 The producer verifies the downloaded author-row mass and optional raw-group count.
 It uses only the query's exact data manifest, with file, schema, size, and SHA-256 checks.
 The query ID, SQL, token, source manifest, and completion status remain under the output directory.
@@ -137,7 +135,8 @@ If the manifest contains `status`, its value must be `complete`.
 
 Set exact raw-group and author-row bounds before the run.
 Use a new output directory.
-This example uses the verified October 15 author-table population.
+This example uses the verified October 15 export with 84,128,144 raw name groups and 192,718,689 author rows.
+Use verified counts from the selected snapshot for each refresh.
 
 ```powershell
 uv run --no-sync --with 'duckdb>=1.5,<2' python -m scripts.production.counts.generate_name_counts_from_parquet `
@@ -165,4 +164,3 @@ A completed resume preserves published files and timestamps.
 For A, `--expected-source-rows` counts raw name groups.
 The retained `--expected-source-mentions` option counts author-table rows.
 The Parquet producer publishes `<fresh-output>/name_counts_index`.
-The earlier M source policy remains in the archived study.

@@ -9,41 +9,14 @@ The [reproduction guide](../../docs/reproduce.md) lists the public commands in o
 
 The [data guide](../../docs/data.md#download) lists the release `1.3` populations.
 The production count authority is fresh author-table counts, A.
-The [mainline record](../../docs/release_evidence/author_counts_mainline_20261017.md) defines the selected policy and rebuild status.
-The [earlier candidate record](../../docs/release_evidence/production_candidate_20261013.md) preserves the previous model's evidence.
+See the [A mainline record](../../docs/release_evidence/author_counts_mainline_20261017.md) for the rebuild evidence.
 [Stage 0 of the release process](../../docs/release.md#stage-0-choose-the-input-snapshot) records the selected local snapshot.
 
 ## Corrected snapshot
 
-Create a fresh combined local root:
-
-```powershell
-uv run --no-sync python scripts/production/data/package_corrected_datasets.py `
-  --corrected-source-root <final-corrected-master> `
-  --pairwise-inputs-root <prepared-pairwise-package> `
-  --public-data-root <prepared-public-root> `
-  --linker-source-bundle <accepted-incremental-root> `
-  --corrected-replay-root <current-replay-raw-root> `
-  --corrected-replay-embeddings-root <current-replay-vector-root> `
-  --name-counts-index <common-name-counts-index> `
-  --output-root <new-combined-snapshot>
-```
-
-The output contains full corrected records, exact pairwise populations, benchmark Arrow tables, and complete incremental support.
-The internal `pairwise/model_plan.json` names the JSON fit inputs and the EPS policy.
-The trainer rejects it; train from the published plan in the `dataset` bundle.
-The default EPS grid uses steps of `0.01` from `0.00` to `1.00`; both minimum F1 floors equal zero.
-Use explicit EPS options to declare a different policy.
-All operational paths remain relative to the snapshot.
-One physical `name_counts_index` serves all Arrow datasets.
-The dataset manifests bind the common index's exact hash.
-The `inference` bundle publishes that index; the `dataset` bundle does not contain it.
-
-A future data correction starts from `corrected_sources` in this snapshot.
-Historical review archives and separate pre-correction inputs are not required.
-The two replay options preserve current raw records and vectors for future updates.
-Supply both options together when the snapshot includes replay sources.
-See [data preparation](data/README.md) for augmentation and embedding updates.
+Package corrected records, pairwise populations, and incremental inputs with `package_corrected_datasets.py`.
+The dataset manifests store only the relative `name_counts_index` path. The model binds the index manifest hash.
+See [snapshot packaging](data/README.md#package-the-current-inputs) for the command, replay options, and clustering threshold (`EPS`) defaults.
 
 ## Release bundles
 
@@ -103,18 +76,16 @@ Existing augmented records derive from non-patent sources and remain part of rel
 Use `--help` for pair-count, search, and seed options.
 `--n-jobs` also sets `OMP_NUM_THREADS` for the run.
 The plan binds each Arrow manifest by digest, and the Arrow row order fixes pair selection.
-The published `1.3` data reproduces the `1.3` training and validation matrices exactly.
 The trainer rejects invalid augmented source membership before artifact loading and feature allocation.
 Unknown signatures remain in inference context but do not supply supervised labels.
 
-Each head runs the official 50-trial TPE search.
+Each head runs a 50-trial tree-structured Parzen estimator (TPE) search by default.
 `--incumbent-parameters` adds one known LightGBM configuration per head.
-The incumbent fits on the same training rows and wins ties on validation ROC AUC.
-Release `1.3` used the H13 configuration in `pairwise_incumbent_h13.json`.
+The incumbent and the search candidates fit on the same training rows.
+The incumbent wins ties on validation area under the receiver operating characteristic curve (ROC AUC).
 `--fixed-parameters` takes the same JSON shape for both heads and fits them directly, with no search.
-Use it to refit a chosen configuration after a data correction; it excludes `--incumbent-parameters`.
-Every head's `num_leaves` must stay within 256, the native fast-plan limit.
-The `1.3` main head kept search trial 26; the nameless head kept H13.
+Use it to refit a chosen configuration after a data correction. Pass only one parameter option.
+The search and both parameter options limit `num_leaves` to 256 (`MAX_FAST_PLAN_LEAVES`).
 The training summary records the selected source and both validation scores.
 
 The output is an immutable pairwise-only model with `eps_calibration: "pending"` and placeholder EPS `0.5`.
@@ -139,7 +110,7 @@ uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-e
 ```
 
 The EPS grid and minimum floors come from the model plan.
-Calibration uses validation B3 partitions and the fixed aggregation and tie-break policy.
+Calibration uses validation B-cubed (B3) partitions and the fixed aggregation and tie-break policy.
 It requires the development blocks that the model recorded at training time.
 It writes a fresh calibrated sibling and preserves the boosters.
 This benchmark calibration supplies the initial EPS.
@@ -190,35 +161,14 @@ Preparation rejects an invalid basename before it creates output.
 Preparation, augmentation, packaging, and model readers use the same resolver.
 Legacy model inputs without a sidecar retain an empty exclusion set.
 
-The fixed classic booster target uses 53 features and 675 trees.
-The booster fits train rows.
-Both `calibration_fit` and `calibration_check` select gate features and fit gate coefficients.
-Both splits serve as dev populations.
-Retain existing manual dev labels.
-Exclude verified query-paper exposure before gate calibration.
-
-The safe-action target is not universal identity gold.
-An abstention can indicate ambiguity or insufficient evidence.
-Recheck affected labels when query evidence or profile membership changes.
-A new pairwise model requires fresh features but does not automatically require new manual judgments.
-Added components can change other queries' features within the same block.
-
-Linker reports distinguish stratified test results from full-source diagnostics.
-The latter can include gate-calibration queries.
-Prior development includes the inherited test population.
-Its stratified test scores provide regression evidence.
-
-Use [evaluate_incremental_gold.py](../verification/evaluate_incremental_gold.py) for frozen fresh identity cases and the complete serialized model.
-Identity gold differs from manual safe-action labels.
-Keep their reports separate.
+Follow [Stage 5](../../docs/release.md#stage-5-fit-evaluate-and-approve) for linker splits and evaluation.
+Use the [incremental task guide](../../docs/data.md#incremental-tasks) for safe-action labels.
 
 ## Count artifacts
 
 Reuse unchanged common assets.
-Small tuple and ORCID files remain in normal Git and the wheel.
-The binary name-count index and the complete model ship only in the `inference` S3 bundle, outside the wheel.
-The `1.3` bundle holds the A release candidate. Final release acceptance remains pending.
-See [the count producers](counts/README.md) for source columns, workload bounds, and native index construction.
+Build global author-table counts with the [count index producers](counts/README.md#global-name-count-index).
+Build Open Researcher and Contributor ID (ORCID) prefix counts with the [ORCID producer](counts/README.md#orcid-prefix-evidence).
 
 The reviewed tuple source reproduces the canonical artifact byte-for-byte:
 
@@ -229,74 +179,35 @@ uv run --no-sync python scripts/production/generate_canonical_name_tuples.py `
 ```
 
 Regenerate it only when the source or canonical rules change.
-Generate global A counts from every row in the Athena author table.
-Use the [Athena author-count command](counts/README.md#athena-author-row-export).
-It preserves raw name groups before the current repository normalizer creates the count keys.
-
-For an existing verified author-row export, use the shared Parquet producer:
-
-```powershell
-uv run --no-sync --with 'duckdb>=1.5,<2' python -m scripts.production.counts.generate_name_counts_from_parquet `
-  --input-manifest <approved-name-count-export.json> `
-  --expected-source-rows <raw-name-group-count> `
-  --expected-source-mentions <author-table-row-count> `
-  --threads 4 --memory-limit 12GB `
-  --output-dir <fresh-count-output>
-
-uv run --no-sync python -m scripts.production.counts.generate_orcid_name_prefix_counts `
-  --input-csv <orcid-name-export.csv> `
-  --guardrails-json <approved-orcid-bounds.json> `
-  --output-dir <fresh-orcid-output>
-```
-
-The shared producer retains `mention_count` and `--expected-source-mentions` as weight field names.
-For A, both values represent author-table rows.
-The archived M study does not define the current production count authority.
-
-The ORCID input contains `raw_orcid,orcid,first_name,middle,last_name` in the required source order.
-The producer enforces the shared nonempty surname rule and the 19-group exclusion.
-The surname comparison removes spaces after canonicalization; `Ou Yang` and `Ouyang` match.
-Pairs must share their own surname key; surname agreement is not transitive.
-
-Package the approved ORCID JSON and tuple-dependency manifest together.
-The `1.3.x` files live in `s2and/data/`. The `1.4` files live in
-`s2and/data/orcid_prefix_counts_v1_4/`. Each directory holds:
-
-- `first_k_letter_counts_from_orcid.json`
-- `first_k_letter_counts_from_orcid.manifest.json`
-
-New model exports bind the training artifacts' hashes. Existing models keep the ORCID
-counts named in their contracts while those counts remain packaged.
 
 ## Distribution and Arrow checks
 
-Build one local-platform candidate of each distribution and verify the Python
-wheel/sdist contents. Use a fresh external `$DistRoot` for the asset
-check and `$RunRoot\stages\local-dist` for the final candidate:
+Build one source distribution and one unified wheel for the local platform.
+Set `$DistRoot` to a fresh external directory for an asset-only check.
+Run from the repository root so Maturin reads `[tool.maturin]` in `pyproject.toml`.
+Build for Python 3.11 to match the installed release smoke.
 
 ```powershell
-$PythonDist = "$DistRoot\python"
-$RustDist = "$DistRoot\rust"
-
+$DistRoot = "$RunRoot\stages\local-dist"
 uv run --no-project python scripts/sync_version.py --check
-$PackageVersion = (Get-Content -Raw VERSION).Trim()
-uv build --sdist --out-dir $PythonDist --clear
-uv build "$PythonDist\s2and-$PackageVersion.tar.gz" --wheel --out-dir $PythonDist
-uv run --no-project maturin build `
-  --manifest-path s2and_rust/Cargo.toml `
+uv build --sdist --out-dir $DistRoot --clear
+uv run --no-project --python 3.11 --with 'maturin==1.14.1' maturin build `
+  --interpreter python `
   --release `
   --locked `
   --compatibility pypi `
-  --out $RustDist
+  --out $DistRoot
 uv run --no-project python `
   scripts/verification/verify_production_model_distributions.py `
-  --dist-dir $PythonDist `
+  --dist-dir $DistRoot `
   --source-root .
+uv run --no-project python `
+  scripts/verification/verify_rust_distribution_licenses.py `
+  --dist-dir $DistRoot
 ```
 
-The verifier requires the package's tuple and ORCID runtime assets and rejects
-packaged model/default paths.
-The fresh source archive excludes stale files from the checkout's `build/` directory.
+The inventory verifier checks declared runtime assets and rejects packaged model paths and default model declarations.
+The license verifier checks both archives for the required notices.
 
 For a bounded local Arrow layout check:
 
@@ -334,15 +245,13 @@ It uses saved production constraints for B3 prediction.
 Unknown signatures remain in prediction context but do not supply supervised scores.
 The report contains pairwise metrics, B3 metrics, counts, and input identities.
 It requires no baseline and makes no comparison claim.
-Keep fresh incremental identity tests and inherited safe-action reports separate.
 
 ## Acceptance checks
 
 Run these checks on the final complete model before publication.
 Freeze their populations, thresholds, and workloads before you look at candidate scores.
 Compare old and new models only on the same population and workload.
-No command applies thresholds; the release owner reads the reports and decides.
-Keep the finalizer's linker report and the identity-gold report separate from these checks.
+The release owner applies the thresholds to the reports and decides whether to publish.
 
 ### Full-prediction parity
 
@@ -416,17 +325,16 @@ uv run --with psutil python scripts/verification/profile_promoted_incremental_ar
 With the released data in `s2and/data/`, use `--arrow-root s2and/data --dataset aminer`.
 The report path must be new.
 Add `--full-run` after the bounded run for a workload above the built-in query or seed limits.
-The report records the workload, the Rust extension identity, per-run time and process-tree RSS, and summary statistics.
+The report records the workload and Rust extension identity.
+It records per-run time, process-tree resident set size (RSS), and summary statistics.
 Keep command logs beside the report.
-Historical measurements remain in [the profiling directory](../../docs/rust/profiling/); they are evidence snapshots, not active commands.
 
 ## Installed release smoke
 
-Install the exact candidate wheels into an empty environment and run from
-outside the checkout. The path config must select the downloaded public-data
-root before Python imports `s2and`:
+Install the candidate wheel into an empty environment and run outside the checkout.
+Set the path config to the downloaded public-data root before Python imports `s2and`.
 
-The smoke command uses an 8 GiB budget. The common count index alone exceeds the previous 2 GB budget.
+The smoke command uses an 8 GiB budget.
 
 ```powershell
 $DistRoot = "$RunRoot\stages\local-dist"

@@ -1,9 +1,11 @@
 # Author-count 1.3 release candidate
 
-The release owner selects fresh author-table counts, A, on 2026-10-17.
+> **Historical record (2026-10-17 to 2026-10-19):** This record covers the initial author-row count (A) candidate before S3 publication. Published models `1.3.1` and `1.3.2` supersede `1.3`. Local paths refer to the build machine used for the run.
+
+The release owner selected fresh author-table counts, A, on 2026-10-17.
 A replaces paper-author mention counts, M, as the common count authority.
 The candidate retains the current 1.3 architecture and promoted incremental linker.
-Final release acceptance and publication remain separate steps.
+At this checkpoint, release acceptance and publication were separate steps.
 
 ## Inputs and model selection
 
@@ -45,7 +47,7 @@ The seven-dataset external test reports signature-weighted B3 F1 of 96.35% on 72
 Dataset-macro B3 F1 is 95.67%; INSPIRE supplies 73.7% of scored signatures.
 The inherited linker test reports 96.715% accuracy on 10,837 queries.
 
-The local `artifacts/common/v1.3` path contains the matching A index and complete model.
+At the time of the run, the local `artifacts/common/v1.3` directory held the matching A index and complete model.
 Full project checks pass, with 2,128 Python tests and 162 Rust tests.
 
 On 2026-10-19 the release owner applied EPS `0.53` from the final giant-block review.
@@ -62,7 +64,7 @@ The Athena producer has focused tests and an offline plan. Live Athena execution
 
 ## Evidence and limits
 
-The run root is `D:/local-unsynced/s2and_ca_mainline_20261017`.
+The run root was `D:/local-unsynced/s2and_ca_mainline_20261017`.
 Its `commands/`, `bounds/`, `orcid_audit/`, and `checks/` directories preserve commands, decisions, resource records, and verification outputs.
 The previous common artifacts remain in `archive/previous_common_v1.3_M` under that root.
 The [count guide](../../scripts/production/counts/README.md) defines the Athena source and canonical key contract.
@@ -71,4 +73,4 @@ The [archived M report](../archive/name_count_experiment_20261009_results.md) pr
 Earlier giant-block wins and the 96.0540% versus 96.0548% benchmark comparison belong to runtime `2a6563c` and its exact artifacts.
 They do not establish scores for this new candidate.
 The frozen ORCID reference has measured linker-supervision overlap.
-Giant-block acceptance tests remain the next step.
+At the October 17 checkpoint, giant-block acceptance tests were still pending.

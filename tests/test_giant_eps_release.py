@@ -563,6 +563,8 @@ def test_release_review_rejects_a_completed_curve_copied_under_another_name(tmp_
     root = tmp_path / "curves"
     dataset = _curve(root, sha256_file(source / "manifest.json"))
     shutil.copytree(dataset, root / "other")
+    snapshot_datasets = root / "snapshot" / "datasets"
+    shutil.copytree(snapshot_datasets / "unit", snapshot_datasets / "other")
     output = tmp_path / "output"
     report = tmp_path / "review.json"
 

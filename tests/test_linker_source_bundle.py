@@ -32,9 +32,6 @@ from s2and.incremental_linking_training.source_bundle_preflight import (
 from scripts.production.model.linker_source_bundle import (
     assemble_source_bundle,
 )
-from scripts.production.model.linker_source_bundle import (
-    main as assemble_main,
-)
 from scripts.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
@@ -471,7 +468,9 @@ def test_assembly_rejects_an_eval_table_with_only_fallback_assignments(tmp_path:
         assemble_source_bundle(**inputs)
 
 
-def _write_singleton_orcid_views(source_root: Path, *, view_count: int, reviewed: bool) -> None:
+def _write_singleton_orcid_views(
+    source_root: Path, *, view_count: int, positive_view_count: int = 0, candidates_per_view: int = 1
+) -> None:
     path = source_root / "labels" / "s2and_eval.parquet"
     template = pd.read_parquet(path).assign(supervision_type="negative_singleton_orcid")
     rows = pd.concat(
@@ -484,47 +483,75 @@ def _write_singleton_orcid_views(source_root: Path, *, view_count: int, reviewed
         ],
         ignore_index=True,
     )
-    rows["label"] = [int(reviewed), *([0] * (view_count - 2)), None]
+    rows["label"] = [1] * positive_view_count + [0] * (view_count - positive_view_count - 1) + [None]
+    if candidates_per_view > 1:
+        rows = pd.concat(
+            [
+                rows,
+                *(
+                    rows.assign(candidate_component_key=f"candidate-{rank}", retrieval_rank=rank, label=0)
+                    for rank in range(2, candidates_per_view + 1)
+                ),
+            ],
+            ignore_index=True,
+        )
     rows.to_parquet(path, index=False)
 
 
-@pytest.mark.parametrize(("view_count", "reviewed"), [(9, False), (10, True)])
+@pytest.mark.parametrize(("view_count", "positive_view_count"), [(9, 0), (10, 1)])
 def test_assembly_accepts_small_or_reviewed_singleton_orcid_tables(
-    tmp_path: Path, view_count: int, reviewed: bool
+    tmp_path: Path, view_count: int, positive_view_count: int
 ) -> None:
     inputs = _inputs(tmp_path)
-    _write_singleton_orcid_views(inputs["source_root"], view_count=view_count, reviewed=reviewed)
+    _write_singleton_orcid_views(
+        inputs["source_root"], view_count=view_count, positive_view_count=positive_view_count, candidates_per_view=2
+    )
+    labels = inputs["source_root"] / "labels" / "s2and_eval.parquet"
+    rows = pd.read_parquet(labels)
+    rows.loc[rows["label"].eq(1), "supervision_type"] = "positive_manual"
+    rows.to_parquet(labels, index=False)
 
     report = assemble_source_bundle(**inputs)
 
-    assert report["selected_source_rows"] == view_count + 3
-    assert "singleton_orcid_review_note" not in report
+    assert report["selected_source_rows"] == 2 * view_count + 3
 
 
-@pytest.mark.parametrize("review_note", [None, "   "])
-def test_assembly_rejects_all_negative_singleton_orcid_tables_with_null_labels(
-    tmp_path: Path, review_note: str | None
-) -> None:
+@pytest.mark.parametrize("positive_location", ["unmarked", "unlabeled", "other-dataset", "one-marked-view"])
+def test_assembly_rejects_singleton_orcid_views_below_the_positive_floor(tmp_path: Path, positive_location: str) -> None:
     inputs = _inputs(tmp_path)
-    _write_singleton_orcid_views(inputs["source_root"], view_count=10, reviewed=False)
+    _write_singleton_orcid_views(inputs["source_root"], view_count=20)
+    labels = inputs["source_root"] / "labels" / "s2and_eval.parquet"
+    rows = pd.read_parquet(labels)
+    positive = rows.iloc[:1].assign(label=1, candidate_component_key="positive-candidate")
+    positive_count = 0
+    if positive_location == "unmarked":
+        positive = positive.assign(query_group_id="unmarked", supervision_type="positive_manual")
+    elif positive_location == "unlabeled":
+        positive = positive.assign(supervision_type="unlabeled_singleton_orcid")
+    elif positive_location == "other-dataset":
+        positive = positive.assign(dataset="other")
+    else:
+        positive_count = 1
+        positive = pd.concat([positive, positive.assign(candidate_component_key="another-positive-candidate")])
+    pd.concat([rows, positive], ignore_index=True).to_parquet(labels, index=False)
 
-    with pytest.raises(ValueError, match="10 all-negative negative_singleton_orcid views"):
-        assemble_source_bundle(**inputs, singleton_orcid_review_note=review_note)
+    with pytest.raises(
+        ValueError, match=rf"dataset 'replay_demo' has {positive_count}/20 marked negative_singleton_orcid views"
+    ):
+        assemble_source_bundle(**inputs)
     assert not inputs["output_source_bundle"].exists()
     assert not inputs["output_data_root"].exists()
 
 
-def test_assembly_cli_records_singleton_orcid_review(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_assembly_accepts_unlabeled_singleton_orcid_views_without_split_assignments(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
-    _write_singleton_orcid_views(inputs["source_root"], view_count=10, reviewed=False)
-    args = [arg for name, path in inputs.items() for arg in (f"--{name.replace('_', '-')}", str(path))]
-    note = "Reviewed the all-negative table in the release ledger."
+    _write_singleton_orcid_views(inputs["source_root"], view_count=11, positive_view_count=1)
+    labels = inputs["source_root"] / "labels" / "s2and_eval.parquet"
+    rows = pd.read_parquet(labels)
+    rows.loc[rows["query_group_id"].ne("s2and:q1"), "supervision_type"] = "unlabeled_singleton_orcid"
+    rows.to_parquet(labels, index=False)
 
-    assert assemble_main([*args, "--singleton-orcid-review-note", note]) == 0
-
-    report = json.loads(capsys.readouterr().out)
-    assert report["singleton_orcid_review_note"] == note
-    assert report["selected_source_rows"] == 13
+    assert assemble_source_bundle(**inputs)["selected_source_rows"] == 14
 
 
 def test_assembly_rejects_source_leakage_and_published_arrow_inputs(tmp_path: Path) -> None:

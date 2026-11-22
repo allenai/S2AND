@@ -1745,13 +1745,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     validate_source_bundle_support_files(source_bundle)
     holdout_identities = read_classic_holdout_identities(source_bundle)
     name_counts_index_root = Path(args.name_counts_index_root)
-    singleton_orcid_review_note = getattr(args, "singleton_orcid_review_note", None)
     with ExitStack() as arrow_stack:
         _, arrow_datasets = preflight_source_rows(
             source_bundle,
             name_counts_index_root=name_counts_index_root,
             arrow_stack=arrow_stack,
-            singleton_orcid_review_note=singleton_orcid_review_note,
         )
         query_sources = load_initial_query_sources(
             source_bundle.root,
@@ -1885,8 +1883,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "artifact_summary": artifact_summary,
         "component_scope": "block-local",
     }
-    if singleton_orcid_review_note and singleton_orcid_review_note.strip():
-        result["singleton_orcid_review_note"] = singleton_orcid_review_note
     _write_json(output_dir / "linker_evaluation_report.json", result)
     work.cleanup()
     return result
@@ -1904,10 +1900,6 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--expected-initial-query-map-sha256",
         help="Require this digest for the initial-query source map.",
-    )
-    parser.add_argument(
-        "--singleton-orcid-review-note",
-        help="Cite the review of tables with at least ten singleton-ORCID views and no positive among them.",
     )
     parser.add_argument("--target-json", type=Path, required=True, help="Explicit promoted-linker target JSON.")
     parser.add_argument("--output-dir", type=Path, required=True)

@@ -226,7 +226,6 @@ def _validate_bundle_paths(root: Path) -> None:
 def validate_portable_source_bundle(
     root: Path,
     *,
-    singleton_orcid_review_note: str | None = None,
     _label_summary: SourceLabelSummary | None = None,
 ) -> dict[str, Any]:
     """Verify all operational paths and payloads within one portable root."""
@@ -255,7 +254,6 @@ def validate_portable_source_bundle(
             bundle,
             name_counts_index_root=shared_index,
             arrow_stack=arrow_stack,
-            singleton_orcid_review_note=singleton_orcid_review_note,
             label_summary=_label_summary,
         )
         opened_roots = {dataset.root.resolve() for dataset in datasets.values()}
@@ -267,16 +265,13 @@ def validate_portable_source_bundle(
                     ArrowDataset.open(dataset_root, require_specter=True, require_name_counts_index=True)
                 )
                 opened_roots.add(dataset_root)
-    report = {
+    return {
         "dataset_count": len(entries),
         "datasets": sorted(entries),
         "name_counts_manifest_sha256": index_sha256,
         "selected_source_rows": selected_rows,
         "source_bundle": str(root),
     }
-    if singleton_orcid_review_note and singleton_orcid_review_note.strip():
-        report["singleton_orcid_review_note"] = singleton_orcid_review_note
-    return report
 
 
 def assemble_source_bundle(
@@ -288,7 +283,6 @@ def assemble_source_bundle(
     model_plan: Path,
     output_source_bundle: Path,
     output_data_root: Path,
-    singleton_orcid_review_note: str | None = None,
 ) -> dict[str, Any]:
     """Copy reviewed inputs into fresh source and public-data roots."""
 
@@ -326,7 +320,7 @@ def assemble_source_bundle(
 
     bundle = load_bundle(source_root)
     validate_source_bundle_support_files(bundle)
-    label_summary = validate_source_label_tables(bundle, singleton_orcid_review_note=singleton_orcid_review_note)
+    label_summary = validate_source_label_tables(bundle)
 
     _copy_arrow_root_without_name_counts(replay_arrow_root, output_source_bundle)
     shutil.copytree(name_counts_index, output_source_bundle / "name_counts_index")
@@ -357,20 +351,15 @@ def assemble_source_bundle(
         release_version=release_version,
     )
 
-    source_report = validate_portable_source_bundle(
-        output_source_bundle, singleton_orcid_review_note=singleton_orcid_review_note, _label_summary=label_summary
-    )
+    source_report = validate_portable_source_bundle(output_source_bundle, _label_summary=label_summary)
     validate_release_root(output_data_root)
-    report = {
+    return {
         "data_root": str(output_data_root),
         "name_counts_manifest_sha256": authoritative_manifest_sha256,
         "release_version": release_version,
         "selected_source_rows": source_report["selected_source_rows"],
         "source_bundle": str(output_source_bundle),
     }
-    if "singleton_orcid_review_note" in source_report:
-        report["singleton_orcid_review_note"] = source_report["singleton_orcid_review_note"]
-    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -385,10 +374,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output-data-root",
     ):
         parser.add_argument(f"--{option}", type=Path, required=True)
-    parser.add_argument(
-        "--singleton-orcid-review-note",
-        help="Cite the review of tables with at least ten singleton-ORCID views and no positive among them.",
-    )
     print(json.dumps(assemble_source_bundle(**vars(parser.parse_args(argv))), indent=2, sort_keys=True))
     return 0
 

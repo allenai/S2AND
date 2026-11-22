@@ -143,10 +143,9 @@ Carry current cluster labels and uncertainty masks into the prepared projections
 `package_pairwise_inputs.py` packages the exact fit/evaluation populations before the combined snapshot step.
 Use `linker_source_bundle.py` only when the accepted support or replay Arrow roots change.
 A query whose ORCID occurs once is `unlabeled_singleton_orcid` until review establishes its labels.
-The linker drops those unlabeled rows. Source preflight rejects a table with at least ten
-`negative_singleton_orcid` views if none of those views has a positive candidate and no review is cited.
-For a reviewed table that meets this condition, cite its review with `--singleton-orcid-review-note`
-when running assembly, packaging, or linker training.
+The linker drops those unlabeled rows. For each dataset in each label table, source preflight
+requires at least 10% of marked `negative_singleton_orcid` views to have a positive candidate
+after filtering when ten or more views are marked. Remove split assignments for excluded queries.
 
 Preflight uses the trainer's rules to resolve calibration and test assignments to eligible rows with
 matching `base_group_id` values. Calibration groups can resolve from the calibration source, and each

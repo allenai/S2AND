@@ -452,12 +452,12 @@ def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
 
 
-@pytest.mark.parametrize("review_note", [None, "Reviewed the all-negative table in the release ledger."])
+@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group"])
 def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    review_note: str | None,
+    problem: str | None,
 ) -> None:
     target = {
         "features": ["f0"],
@@ -468,7 +468,12 @@ def test_release_serializes_complete_bundle_before_evaluation(
     source_root = tmp_path / "source"
     _write_arrow_root(source_root, dataset="replay_demo", replay=True)
     _write_linker_inputs(source_root, leak=False)
-    _write_singleton_orcid_views(source_root, view_count=10, reviewed=review_note is None)
+    _write_singleton_orcid_views(
+        source_root, view_count=10, positive_view_count=0 if problem == "unreviewed-singletons" else 1
+    )
+    if problem == "missing-test-group":
+        labels = source_root / "labels" / "hwang_eval.parquet"
+        pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
     bundle = promoted_train.load_bundle(source_root)
     bundle.models["classic"]["best_params"] = {"n_estimators": 1}
     map_path = bundle.root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
@@ -609,16 +614,20 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "--output-dir",
         str(output_dir),
     ]
-    if review_note is not None:
-        with pytest.raises(ValueError, match="10 all-negative negative_singleton_orcid views"):
+    if problem is not None:
+        message = {
+            "unreviewed-singletons": "0/10 marked negative_singleton_orcid views",
+            "missing-test-group": "did not all match source rows.*hwang:q1",
+        }[problem]
+        with pytest.raises(ValueError, match=message):
             promoted_train.main(args)
         assert not output_dir.exists()
-        args.extend(("--singleton-orcid-review-note", review_note))
+        assert not order
+        return
 
     promoted_train.main(args)
 
     result = json.loads(capsys.readouterr().out)
-    assert result.get("singleton_orcid_review_note") == review_note
     assert order == [
         "materialize_training",
         "fit",

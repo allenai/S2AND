@@ -114,20 +114,6 @@ def test_packaging_cli_requires_a_precision_tolerance(
     assert not package_inputs["output_root"].exists()
 
 
-def test_packaging_cli_records_singleton_orcid_review(
-    package_inputs: dict[str, Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    _write_singleton_orcid_views(package_inputs["linker_source_bundle"], view_count=10, reviewed=False)
-    args = [arg for name, path in package_inputs.items() for arg in (f"--{name.replace('_', '-')}", str(path))]
-    note = "Reviewed the all-negative table in the release ledger."
-
-    assert main([*args, "--precision-f1-tolerance", "0", "--singleton-orcid-review-note", note]) == 0
-
-    report = json.loads(capsys.readouterr().out)
-    assert report["singleton_orcid_review_note"] == note
-    assert report["incremental_source_rows"] == 13
-
-
 @pytest.mark.parametrize("problem", ["missing-test-group", "unreviewed-singletons"])
 def test_packaging_rejects_invalid_linker_labels_before_copy(package_inputs: dict[str, Path], problem: str) -> None:
     linker = package_inputs["linker_source_bundle"]
@@ -136,8 +122,8 @@ def test_packaging_rejects_invalid_linker_labels_before_copy(package_inputs: dic
         pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
         message = "did not all match source rows.*hwang:q1"
     else:
-        _write_singleton_orcid_views(linker, view_count=10, reviewed=False)
-        message = "10 all-negative negative_singleton_orcid views"
+        _write_singleton_orcid_views(linker, view_count=10)
+        message = "0/10 marked negative_singleton_orcid views"
 
     with pytest.raises(ValueError, match=message):
         _package(package_inputs)

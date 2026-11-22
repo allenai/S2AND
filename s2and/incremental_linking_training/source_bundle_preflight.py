@@ -15,6 +15,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking_training.classic import (
     OfficialBundle,
     _classic_stratified_eval_source_specs,
+    _drop_unlabeled_singleton_orcid_rows,
     _promoted_stratified_gate_spec,
     _resolve_path,
     _select_classic_stratified_eval_rows,
@@ -210,23 +211,29 @@ def _release_table_plan(
 
 
 def _validate_singleton_orcid_labels(rows: pa.Table, table_key: str, labels_path: Path) -> None:
-    """Require review of tables with at least ten marked views and no positive in those views."""
+    """Require a positive label in at least 10% of marked views per dataset."""
     marked_rows = rows.filter(pa_dataset.field("supervision_type") == "negative_singleton_orcid")
     if len(marked_rows) < 10:
         return
     view_keys = ["dataset", "query_group_id"]
     marked_views = marked_rows.select(view_keys).to_pandas().drop_duplicates()
-    if len(marked_views) < 10:
+    marked_counts = marked_views.groupby("dataset", dropna=False).size()
+    checked = marked_counts[marked_counts.ge(10)]
+    if checked.empty:
         return
-    labels = pd.to_numeric(rows["label"].to_pandas(), errors="coerce").fillna(0)
-    positive_views = rows.select(view_keys).filter(pa.array(labels.eq(1))).to_pandas()
-    if positive_views.merge(marked_views, on=view_keys).empty:
-        examples = marked_views.head(5).to_dict(orient="records")
+    candidates = rows.filter(pa_dataset.field("query_group_id").isin(marked_views["query_group_id"].unique()))
+    eligible, _ = _drop_unlabeled_singleton_orcid_rows(candidates.to_pandas(), context=table_key)
+    labels = pd.to_numeric(eligible["label"], errors="coerce")
+    positive_views = eligible.loc[labels.eq(1), view_keys].drop_duplicates()
+    positive_counts = marked_views.merge(positive_views, on=view_keys).groupby("dataset", dropna=False).size()
+    for dataset, marked_count in checked.items():
+        positive_count = int(positive_counts.get(dataset, 0))
+        if 10 * positive_count >= marked_count:
+            continue
         raise ValueError(
-            f"source table {table_key!r} has {len(marked_views)} all-negative negative_singleton_orcid views "
-            f"without review provenance: {examples} ({labels_path}). "
-            "Mark unreviewed queries unlabeled_singleton_orcid and remove their split assignments. "
-            "For reviewed tables, cite the review with --singleton-orcid-review-note."
+            f"source table {table_key!r} dataset {dataset!r} has {positive_count}/{marked_count} marked "
+            f"negative_singleton_orcid views with a positive label (minimum 10%): {labels_path}. "
+            "Mark unreviewed views unlabeled_singleton_orcid and remove split assignments for excluded queries."
         )
 
 
@@ -266,8 +273,6 @@ def _validate_source_split_coverage(source_bundle: OfficialBundle, label_tables:
 
 def validate_source_label_tables(
     source_bundle: OfficialBundle,
-    *,
-    singleton_orcid_review_note: str | None = None,
 ) -> SourceLabelSummary:
     """Validate source labels, split coverage, and base group IDs without opening Arrow datasets."""
 
@@ -282,24 +287,20 @@ def validate_source_label_tables(
         _resolve_path(source_bundle, source["path"]).resolve()
         for source in _classic_stratified_eval_source_specs(classic)
     }
-    has_singleton_review = bool(singleton_orcid_review_note and singleton_orcid_review_note.strip())
     source_rows = 0
     observed_datasets: set[str] = set()
     label_tables: dict[Path, pa.Table] = {}
     for table_key in available_tables:
         labels_path = source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve()
         labels = pa_dataset.dataset(labels_path, format="parquet")
-        has_supervision_type = "supervision_type" in labels.schema.names
-        check_singletons = has_supervision_type and not has_singleton_review
+        check_singletons = "supervision_type" in labels.schema.names
         columns = ["dataset"]
         if labels_path in split_paths:
             columns.append("base_group_id")
         if labels_path in split_paths or check_singletons:
             columns.append("query_group_id")
-            if has_supervision_type:
-                columns.append("supervision_type")
         if check_singletons:
-            columns.append("label")
+            columns.extend(("supervision_type", "label"))
         rows = labels.to_table(columns=columns)
         if not len(rows):
             raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
@@ -322,14 +323,11 @@ def preflight_source_rows(
     *,
     name_counts_index_root: Path | None,
     arrow_stack: ExitStack,
-    singleton_orcid_review_note: str | None = None,
     label_summary: SourceLabelSummary | None = None,
 ) -> tuple[int, dict[str, ArrowDataset]]:
     """Validate source rows and open the Arrow generations they reference."""
     if label_summary is None:
-        label_summary = validate_source_label_tables(
-            source_bundle, singleton_orcid_review_note=singleton_orcid_review_note
-        )
+        label_summary = validate_source_label_tables(source_bundle)
 
     arrow_datasets: dict[str, ArrowDataset] = {}
     for dataset_name in sorted(label_summary.datasets):

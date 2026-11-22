@@ -100,7 +100,8 @@ def _validated_sweep_plans(
     if sorted(datasets) != planned_datasets:
         raise ValueError(f"Release EPS review dataset list must match the sweep plans: {planned_datasets}")
     plans: dict[str, dict[str, Any]] = {}
-    source_maps: dict[Path, InitialQuerySources] = {}
+    snapshot_root: Path | None = None
+    query_sources: InitialQuerySources | None = None
     for dataset in datasets:
         plan_path = sweep_root / dataset / "plan.json"
         raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -144,20 +145,23 @@ def _validated_sweep_plans(
             raise ValueError(f"Unknown EPS score mode: {dataset}")
         if not curve[metric_columns].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
             raise ValueError(f"Invalid EPS metrics: {dataset}")
-        snapshot_root = Path(plan["arrow_root"]).resolve()
-        if snapshot_root not in source_maps:
+        plan_snapshot = Path(plan["arrow_root"]).resolve()
+        if query_sources is None:
+            snapshot_root = plan_snapshot
             release_datasets = _release_datasets_from_snapshot(snapshot_root)
             if planned_datasets != release_datasets:
                 raise ValueError(
                     "Release EPS sweep plans must match the snapshot's calibration assignments outside s2and_eval: "
                     f"expected {release_datasets}, found {planned_datasets}"
                 )
-            source_maps[snapshot_root] = load_initial_query_sources(
+            query_sources = load_initial_query_sources(
                 snapshot_root, dataset_names=release_datasets, expected_sha256=plan.get(MAP_SHA256_FIELD)
             )
-        reference = _require_test_separated_reference(
-            sweep_root, dataset, plan, test_identities, source_maps[snapshot_root]
-        )
+        elif plan_snapshot != snapshot_root:
+            raise ValueError(
+                f"Release EPS sweep plans must use one snapshot: {dataset} uses {plan_snapshot}, expected {snapshot_root}"
+            )
+        reference = _require_test_separated_reference(sweep_root, dataset, plan, test_identities, query_sources)
         diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)
         if not diagnostic["reference_coverage"].eq(1).all():
             raise ValueError(f"Incomplete singleton-inclusive ORCID reference coverage: {dataset}")

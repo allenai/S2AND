@@ -143,10 +143,15 @@ Carry current cluster labels and uncertainty masks into the prepared projections
 `package_pairwise_inputs.py` packages the exact fit/evaluation populations before the combined snapshot step.
 Use `linker_source_bundle.py` only when the accepted support or replay Arrow roots change.
 A query whose ORCID occurs once is `unlabeled_singleton_orcid` until review establishes its labels.
-The linker drops those unlabeled rows. Source preflight rejects any `negative_singleton_orcid` view
-whose candidates all have label zero and whose review has not been cited.
-For a source with reviewed all-negative views, pass `--singleton-orcid-review-note` to assembly,
-packaging, or linker training and cite the evidence covering all those views.
+The linker drops those unlabeled rows. Source preflight rejects a table with at least ten
+`negative_singleton_orcid` views if none of those views has a positive candidate and no review is cited.
+For a reviewed table that meets this condition, cite its review with `--singleton-orcid-review-note`
+when running assembly, packaging, or linker training.
+
+Preflight uses the trainer's rules to resolve calibration and test assignments to eligible rows with
+matching `base_group_id` values. Calibration groups can resolve from the calibration source, and each
+assigned eval table must still contribute eligible calibration rows. Test groups resolve from their
+assigned eval tables.
 
 The snapshot uses Arrow IPC, Parquet, JSON, and CSV according to the current contracts.
 It is not an all-IPC dataset.

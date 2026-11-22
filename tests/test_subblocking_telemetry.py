@@ -721,6 +721,18 @@ def test_loaded_models_use_their_orcid_prefix_counts_in_both_planners(tmp_path: 
             assert sorted(map(sorted, native_subblocks.values())) == expected
 
 
+def test_unexported_model_uses_the_orcid_prefix_counts_its_contract_records() -> None:
+    from s2and.model import Clusterer
+
+    original = "fcb4cb7bdf30f07366b946b9fdb1bb0a807bdb00f7dda521575daea6b2b9d8ce"
+    # Export records the contract hash, so prediction before export must already use it.
+    bound = SimpleNamespace(feature_contract={"orcid_prefix_counts_data_sha256": original})
+    unbound = SimpleNamespace(feature_contract={})
+
+    assert Clusterer._subblocking_prefix_counts(bound).get("ch", {}).get("cy") is None
+    assert Clusterer._subblocking_prefix_counts(unbound)["ch"]["cy"] == 16
+
+
 def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
     load_s2and_rust_extension()
     cases = (

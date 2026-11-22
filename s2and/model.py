@@ -85,7 +85,11 @@ from s2and.model_pairwise import (
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
 from s2and.orcid_join import join_orcids_across_subblocks
-from s2and.orcid_prefix_counts import DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256, load_packaged_orcid_prefix_counts
+from s2and.orcid_prefix_counts import (
+    DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
+    ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD,
+    load_packaged_orcid_prefix_counts,
+)
 from s2and.prediction_state import PredictionState
 from s2and.profile_exclusions import (
     enforce_profile_exclusions_in_block,
@@ -1944,9 +1948,6 @@ class Clusterer:
     # Join same-ORCID clusters with enough evidence after bulk linkage.
     # Previously exported model bundles use this package default.
     orcid_join: bool = True
-
-    # Production bundles pin this hash at load time.
-    _orcid_prefix_counts_data_sha256: str = DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256
 
     # Block distances drop a name conflict that an ORCID's own mentions disprove.
     # A mention with an ORCID stops forbidding a mention without one when its name
@@ -4448,9 +4449,15 @@ class Clusterer:
         return _resolve_graph_subblocking_config(getattr(self, "subblocking_graph_config", None))
 
     def _subblocking_prefix_counts(self) -> Mapping[str, Mapping[str, int]]:
-        """Get the ORCID prefix counts this model uses for subblocking."""
+        """Get the ORCID prefix counts named by this model's feature contract.
 
-        return load_packaged_orcid_prefix_counts(self._orcid_prefix_counts_data_sha256).counts
+        The contract is the hash a bundle export records, so prediction before export and after
+        reload use the same counts. A model without a contract hash uses the package default.
+        """
+
+        contract = getattr(self, "feature_contract", None)
+        data_sha256 = contract.get(ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD) if isinstance(contract, Mapping) else None
+        return load_packaged_orcid_prefix_counts(data_sha256 or DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256).counts
 
     def _partition_subblocked_first_name_groups(
         self,

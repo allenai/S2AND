@@ -91,7 +91,8 @@ def test_fixed_parameters_fit_both_heads_without_search(tmp_path: Path) -> None:
     )
 
     assert selection == {"selected_source": "fixed", "fixed_validation_roc_auc": auc}
-    assert model.best_params == fixed
+    # The summary records the applied values, not the file's overridden ones.
+    assert model.best_params == {**fixed, "n_jobs": 1, "monotone_constraints": "1,0,0"}
     assert model.hyperopt_trials_store == {}
     assert model.classifier is not None
     params = model.classifier.get_params()

@@ -419,13 +419,14 @@ def _fit_pairwise_model(
         # Fit the search's own estimator with known parameters and skip the search, so a
         # refit on corrected data repeats the chosen recipe exactly.
         model.search_space = {}
-        model.estimator.set_params(**fixed)
         # The run's thread budget and the featurizer's constraint string override the file.
-        model.estimator.set_params(n_jobs=int(args.n_jobs))
+        applied = {**fixed, "n_jobs": int(args.n_jobs)}
         if monotone_constraints is not None:
-            model.estimator.set_params(monotone_constraints=monotone_constraints)
+            applied["monotone_constraints"] = monotone_constraints
+        model.estimator.set_params(**applied)
         model.fit(X_train, y_train, X_val, y_val, feature_names=feature_names)
-        model.best_params = dict(fixed)
+        # Record what the booster used, so the summary can seed a later refit unchanged.
+        model.best_params = applied
         validation_roc_auc = _finite_validation_roc_auc(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
         gc.collect()
         return model, validation_roc_auc, {"selected_source": "fixed", "fixed_validation_roc_auc": validation_roc_auc}

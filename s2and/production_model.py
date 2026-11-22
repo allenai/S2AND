@@ -670,7 +670,7 @@ def _load_bundle_clusterer(
     )
     feature_contract = clusterer_config["feature_contract"]
     # Explicit authorities still need an installed artifact when constructing a model.
-    orcid_counts = load_packaged_orcid_prefix_counts(feature_contract[ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD])
+    load_packaged_orcid_prefix_counts(feature_contract[ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD])
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
     if any("name_counts" in info.features_to_use for info in (featurizer_info, nameless_featurizer_info)):
@@ -733,7 +733,6 @@ def _load_bundle_clusterer(
         suppress_orcid=bool(clusterer_config["suppress_orcid"]),
     )
     clusterer.feature_contract = dict(feature_contract)
-    clusterer._orcid_prefix_counts_data_sha256 = orcid_counts.data_sha256
     clusterer.best_params = (
         {
             "eps": effective_eps,

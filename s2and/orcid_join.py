@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 def _supported_orcid(observed: Counter[str], size: int) -> str | None:
-    """Return the cluster's one leading ORCID when at least two mentions and 5% of the cluster carry it."""
+    """Return the cluster's one leading ORCID when enough of its mentions carry it.
+
+    The ORCID must hold 80% of the cluster's ORCID mentions, at least two mentions, and 5% of
+    the cluster.
+    """
     leaders = leading_orcids(observed)
     if len(leaders) != 1:
         return None

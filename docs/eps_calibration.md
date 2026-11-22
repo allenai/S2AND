@@ -167,6 +167,7 @@ Set `$ReviewedEps` to the value you select.
 Record the reason for that choice.
 
 ```powershell
+$PrecisionF1Tolerance = (Get-Content -Raw "$Snapshot/pairwise/model_plan.json" | ConvertFrom-Json).eps.precision_f1_tolerance
 uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `

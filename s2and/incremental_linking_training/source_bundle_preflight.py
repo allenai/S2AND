@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -22,14 +21,6 @@ from s2and.incremental_linking_training.classic import (
     _validate_stratified_split_assignments,
 )
 from s2and.production_training_contract import REQUIRED_LINKER_TABLE_KEYS
-
-
-@dataclass(frozen=True)
-class SourceLabelSummary:
-    """Row count and Arrow datasets referenced by validated source label tables."""
-
-    row_count: int
-    datasets: frozenset[str]
 
 
 def source_featureless_table_keys(bundle: OfficialBundle) -> tuple[str, ...]:
@@ -159,57 +150,6 @@ def validate_source_bundle_support_files(source_bundle: OfficialBundle) -> list[
     return [str(path) for path in dict.fromkeys(required_files)]
 
 
-def _release_table_plan(
-    source_bundle: OfficialBundle,
-) -> tuple[tuple[str, ...], dict[str, set[str]], tuple[str, ...]]:
-    """Separate train/calibration rows from frozen evaluation tables."""
-
-    classic = dict(source_bundle.models["classic"])
-    split_spec = dict(classic["stratified_eval_test_split"])
-    gate_spec = _promoted_stratified_gate_spec(classic)
-    if gate_spec is None:
-        raise ValueError("classic.promoted_stratified_gate is required")
-    assignments = pd.read_csv(_resolve_path(source_bundle, str(split_spec["assignments_path"])))
-    _validate_stratified_split_assignments(assignments)
-    calibration_splits = {str(split) for split in gate_spec["calibration_splits"]}
-    calibration_assignments = assignments[assignments["split"].astype(str).isin(calibration_splits)]
-    if calibration_assignments.empty:
-        raise ValueError("Linker calibration splits contain no assigned queries")
-
-    table_keys = source_featureless_table_keys(source_bundle)
-    path_to_table_key = {
-        source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve(): table_key
-        for table_key in table_keys
-    }
-    calibration_query_ids: dict[str, set[str]] = {}
-    for source_spec in _classic_stratified_eval_source_specs(classic):
-        if source_spec["source_kind"] == "calibration_source":
-            continue
-        table_key = path_to_table_key.get(_resolve_path(source_bundle, source_spec["path"]).resolve())
-        if table_key is None:
-            raise ValueError(f"Stratified source has no featureless table: {source_spec['path']}")
-        query_ids = set(
-            calibration_assignments.loc[
-                calibration_assignments["source_key"].astype(str).eq(str(source_spec["source_key"])),
-                "query_group_id",
-            ].astype(str)
-        )
-        if query_ids:
-            calibration_query_ids[table_key] = query_ids
-
-    training_keys = tuple(
-        dict.fromkeys(
-            (
-                "train_path",
-                "classic_gate_source_path",
-                *calibration_query_ids,
-            )
-        )
-    )
-    evaluation_keys = tuple(key for key in table_keys if key not in {"train_path", "classic_gate_source_path"})
-    return training_keys, calibration_query_ids, evaluation_keys
-
-
 def _validate_singleton_orcid_labels(rows: pa.Table, table_key: str, labels_path: Path) -> None:
     """Require a positive label in at least 10% of marked views per dataset."""
     marked_rows = rows.filter(pa_dataset.field("supervision_type") == "negative_singleton_orcid")
@@ -273,7 +213,7 @@ def _validate_source_split_coverage(source_bundle: OfficialBundle, label_tables:
 
 def validate_source_label_tables(
     source_bundle: OfficialBundle,
-) -> SourceLabelSummary:
+) -> tuple[int, frozenset[str]]:
     """Validate source labels, split coverage, and base group IDs without opening Arrow datasets."""
 
     available_tables = source_featureless_table_keys(source_bundle)
@@ -315,7 +255,7 @@ def validate_source_label_tables(
         raise ValueError(f"Stratified sources have no featureless tables: {sorted(missing_paths)}")
     _validate_source_split_coverage(source_bundle, label_tables)
 
-    return SourceLabelSummary(source_rows, frozenset(observed_datasets))
+    return source_rows, frozenset(observed_datasets)
 
 
 def preflight_source_rows(
@@ -323,14 +263,12 @@ def preflight_source_rows(
     *,
     name_counts_index_root: Path | None,
     arrow_stack: ExitStack,
-    label_summary: SourceLabelSummary | None = None,
 ) -> tuple[int, dict[str, ArrowDataset]]:
     """Validate source rows and open the Arrow generations they reference."""
-    if label_summary is None:
-        label_summary = validate_source_label_tables(source_bundle)
+    source_rows, dataset_names = validate_source_label_tables(source_bundle)
 
     arrow_datasets: dict[str, ArrowDataset] = {}
-    for dataset_name in sorted(label_summary.datasets):
+    for dataset_name in sorted(dataset_names):
         arrow_datasets[dataset_name] = arrow_stack.enter_context(
             open_source_arrow_dataset(
                 source_bundle,
@@ -348,4 +286,4 @@ def preflight_source_rows(
         raise ValueError(
             f"linker source datasets reference multiple name-count generations: {sorted(name_count_hashes)}"
         )
-    return label_summary.row_count, arrow_datasets
+    return source_rows, arrow_datasets

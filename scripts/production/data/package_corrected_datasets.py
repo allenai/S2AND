@@ -24,7 +24,6 @@ from s2and.arrow_inputs import (  # noqa: E402
 from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
-    SourceLabelSummary,
     validate_source_bundle_support_files,
     validate_source_label_tables,
 )
@@ -132,11 +131,7 @@ def _validate_corrected_source_inventory(root: Path, corrected: Path) -> int:
     return len(inventory)
 
 
-def validate_corrected_datasets(
-    root: Path,
-    *,
-    _label_summary: SourceLabelSummary | None = None,
-) -> dict[str, Any]:
+def validate_corrected_datasets(root: Path) -> dict[str, Any]:
     """Validate the public, pairwise, and incremental inputs within one root."""
 
     root = root.resolve()
@@ -145,7 +140,7 @@ def validate_corrected_datasets(
     if index_dirs != [index]:
         raise ValueError(f"Require one shared name_counts_index directory: {index_dirs}")
     public = validate_release_root(root)
-    incremental = validate_portable_source_bundle(root, _label_summary=_label_summary)
+    incremental = validate_portable_source_bundle(root)
     pairwise = root / "pairwise"
     inputs = _read_json(pairwise / "inputs.json")
     if _local_path(pairwise, inputs["name_counts_index"], boundary=root) != index:
@@ -276,7 +271,7 @@ def package_corrected_datasets(
     _validate_bundle_paths(linker)
     bundle = load_bundle(linker)
     validate_source_bundle_support_files(bundle)
-    label_summary = validate_source_label_tables(bundle)
+    validate_source_label_tables(bundle)
 
     _copy_arrow_root_without_name_counts(linker, output)
     _copy_file(license_source, output / "LICENSE.txt")
@@ -347,7 +342,7 @@ def package_corrected_datasets(
         replay_bundles={"incremental": "replay_manifest.json"},
         release_version=version,
     )
-    return validate_corrected_datasets(output, _label_summary=label_summary)
+    return validate_corrected_datasets(output)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -28,7 +28,6 @@ from s2and.arrow_inputs import (  # noqa: E402
 )
 from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
-    SourceLabelSummary,
     preflight_source_rows,
     validate_source_bundle_support_files,
     validate_source_label_tables,
@@ -223,11 +222,7 @@ def _validate_bundle_paths(root: Path) -> None:
         check(runtime_root, "runtime_contract.arrow_dataset_root")
 
 
-def validate_portable_source_bundle(
-    root: Path,
-    *,
-    _label_summary: SourceLabelSummary | None = None,
-) -> dict[str, Any]:
+def validate_portable_source_bundle(root: Path) -> dict[str, Any]:
     """Verify all operational paths and payloads within one portable root."""
 
     root = root.resolve()
@@ -254,7 +249,6 @@ def validate_portable_source_bundle(
             bundle,
             name_counts_index_root=shared_index,
             arrow_stack=arrow_stack,
-            label_summary=_label_summary,
         )
         opened_roots = {dataset.root.resolve() for dataset in datasets.values()}
         # Unreferenced datasets can become active after a future label update.
@@ -320,7 +314,7 @@ def assemble_source_bundle(
 
     bundle = load_bundle(source_root)
     validate_source_bundle_support_files(bundle)
-    label_summary = validate_source_label_tables(bundle)
+    validate_source_label_tables(bundle)
 
     _copy_arrow_root_without_name_counts(replay_arrow_root, output_source_bundle)
     shutil.copytree(name_counts_index, output_source_bundle / "name_counts_index")
@@ -351,7 +345,7 @@ def assemble_source_bundle(
         release_version=release_version,
     )
 
-    source_report = validate_portable_source_bundle(output_source_bundle, _label_summary=label_summary)
+    source_report = validate_portable_source_bundle(output_source_bundle)
     validate_release_root(output_data_root)
     return {
         "data_root": str(output_data_root),

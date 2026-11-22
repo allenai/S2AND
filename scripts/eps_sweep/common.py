@@ -83,13 +83,15 @@ def read_sweep_curve(
     *,
     weight: str = "weight_query_class_balanced",
 ) -> tuple[dict[str, Any], pd.DataFrame]:
-    """Bind each review curve to its completed plan and source model."""
+    """Bind each review curve to its dataset and completed plan."""
     dataset_root = root / dataset
     plan_path = dataset_root / "plan.json"
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     summary = json.loads((dataset_root / "summary.json").read_text(encoding="utf-8"))
     if summary["plan_sha256"] != sha256_file(plan_path) or plan["score_mode"] != score_mode:
         raise ValueError(f"The completed sweep does not match its plan: {dataset}")
+    if plan.get("dataset") != dataset:
+        raise ValueError(f"The EPS sweep for {dataset!r} records dataset={plan.get('dataset')!r}")
     score_path = dataset_root / ("eps_b3.tsv" if score_mode == "orcid-b3" else "eps_overall.tsv")
     if summary["score_sha256"] != sha256_file(score_path):
         raise ValueError(f"The EPS scores change after completion: {dataset}")

@@ -22,8 +22,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking_training.classic import (
     _promoted_stratified_gate_spec,
+    _read_classic_stratified_source_rows,
     _read_csv,
     _resolve_path,
+    _select_classic_stratified_eval_rows,
+    _validate_stratified_split_assignments,
     load_bundle,
 )
 from s2and.production_bundle import _staged_production_bundle
@@ -79,12 +82,27 @@ def _release_datasets_from_snapshot(snapshot_root: Path) -> list[str]:
     if gate is None:
         raise ValueError("classic.promoted_stratified_gate is required")
     split_spec = classic["stratified_eval_test_split"]
-    assignments = _read_csv(
-        _resolve_path(bundle, str(split_spec["assignments_path"])), usecols=["dataset", "split", "source_key"]
-    )
+    assignments = _read_csv(_resolve_path(bundle, str(split_spec["assignments_path"])))
+    _validate_stratified_split_assignments(assignments)
     is_calibration = assignments["split"].astype(str).isin(gate["calibration_splits"])
     is_giant = assignments["source_key"].ne("s2and_eval")
-    return sorted(set(assignments.loc[is_calibration & is_giant, "dataset"].astype(str)))
+    selected = assignments.loc[is_calibration & is_giant, ["query_group_id", "source_key", "base_group_id", "dataset"]]
+    if selected.empty:
+        return []
+    rows = _select_classic_stratified_eval_rows(
+        bundle,
+        classic,
+        selected,
+        include_calibration_source=True,
+        read_source_rows=_read_classic_stratified_source_rows,
+    )
+    mismatched = rows["dataset"].astype(str).ne(rows["dataset_split"].astype(str))
+    if mismatched.any():
+        sample = rows.loc[mismatched, ["query_group_id", "source_key", "dataset", "dataset_split"]]
+        raise ValueError(
+            f"Calibration assignment dataset does not match its eval source: {sample.head(5).to_dict(orient='records')}"
+        )
+    return sorted(set(rows["dataset"].astype(str)))
 
 
 def _validated_sweep_plans(
@@ -96,9 +114,11 @@ def _validated_sweep_plans(
     test_identities: TestIdentityLoader,
 ) -> dict[str, dict[str, Any]]:
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
-    planned_datasets = sorted(path.parent.name for path in sweep_root.glob("*/plan.json") if path.is_file())
-    if sorted(datasets) != planned_datasets:
-        raise ValueError(f"Release EPS review dataset list must match the sweep plans: {planned_datasets}")
+    folders = {path.name for path in sweep_root.iterdir() if path.is_dir()}
+    if ignored := sorted(folders - set(datasets)):
+        print(f"Ignoring EPS sweep folders outside --datasets: {ignored}", file=sys.stderr)
+    if missing := sorted(set(datasets) - folders):
+        raise ValueError(f"Release EPS review datasets have no sweep folders: {missing}")
     plans: dict[str, dict[str, Any]] = {}
     snapshot_root: Path | None = None
     query_sources: InitialQuerySources | None = None
@@ -106,8 +126,6 @@ def _validated_sweep_plans(
         plan_path = sweep_root / dataset / "plan.json"
         raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
         plan, curve = read_sweep_curve(sweep_root, dataset, raw_plan["score_mode"])
-        if plan.get("dataset") != dataset:
-            raise ValueError(f"The EPS sweep for {dataset!r} records dataset={plan.get('dataset')!r}")
         if plan["score_mode"] != "orcid-b3":
             raise ValueError("Release EPS requires identity B3 curves; safe-action curves are diagnostic")
         if plan["model_manifest_sha256"] != source_hash:
@@ -149,10 +167,10 @@ def _validated_sweep_plans(
         if query_sources is None:
             snapshot_root = plan_snapshot
             release_datasets = _release_datasets_from_snapshot(snapshot_root)
-            if planned_datasets != release_datasets:
+            if sorted(datasets) != release_datasets:
                 raise ValueError(
-                    "Release EPS sweep plans must match the snapshot's calibration assignments outside s2and_eval: "
-                    f"expected {release_datasets}, found {planned_datasets}"
+                    "Release EPS review --datasets must match the snapshot's calibration assignments outside "
+                    f"s2and_eval: expected {release_datasets}, found {sorted(datasets)}"
                 )
             query_sources = load_initial_query_sources(
                 snapshot_root, dataset_names=release_datasets, expected_sha256=plan.get(MAP_SHA256_FIELD)
@@ -252,7 +270,7 @@ def apply_reviewed_eps(
     ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
 
     With a sweep root, check the expected subblock limit and require the requested datasets
-    and sweep plans to match the snapshot's calibration assignments outside ``s2and_eval``.
+    to match the snapshot's calibration assignments outside ``s2and_eval``.
     Without one, the review note must cite the internal evidence, because the curves are not on disk here.
     """
     source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()

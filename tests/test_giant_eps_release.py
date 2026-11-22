@@ -54,15 +54,31 @@ def _source_snapshot(root: Path, *, source: str = "q1", with_clone: bool = False
     return path
 
 
-def _write_sweep_assignments(root: Path, calibration_datasets: tuple[str, ...] = ("unit",)) -> None:
+def _write_sweep_assignments(
+    root: Path, calibration_datasets: tuple[str, ...] = ("unit",), *, test_signature: str = "q1"
+) -> None:
     assignments = root / "splits" / "assignments.csv"
     assignments.parent.mkdir(parents=True, exist_ok=True)
+    extra_datasets = (*calibration_datasets, "held_out")
     rows = [
         (dataset, "fit" if index == 0 else "check", f"{dataset}_eval")
         for index, dataset in enumerate(calibration_datasets)
     ]
-    rows.extend([("s2and", "fit", "s2and_eval"), ("held_out", "test", "held_out_eval")])
-    pd.DataFrame(rows, columns=pd.Index(["dataset", "split", "source_key"])).to_csv(assignments, index=False)
+    rows.extend([("s2and", "fit", "s2and_eval"), ("held_out", "test", "held_out_eval"), ("unit", "test", "unit_eval")])
+    frame = pd.DataFrame(rows, columns=pd.Index(["dataset", "split", "source_key"]))
+    frame["query_group_id"] = frame["dataset"] + ":" + frame["split"]
+    frame["base_group_id"] = frame["query_group_id"]
+    frame.to_csv(assignments, index=False)
+    candidates = frame.drop(columns=["source_key", "split"]).assign(
+        query_signature_id="calibration",
+        candidate_component_key="candidate",
+        retrieval_rank=1,
+        label=1,
+    )
+    candidates.loc[frame["split"].eq("test"), "query_signature_id"] = test_signature
+    for dataset, dataset_rows in candidates.groupby("dataset"):
+        dataset_rows.to_parquet(root / f"{dataset}.parquet", index=False)
+    candidates.iloc[:1].assign(query_group_id="unassigned").to_parquet(root / "calibration.parquet", index=False)
     write_json(
         root / "bundle.json",
         {
@@ -71,8 +87,12 @@ def _write_sweep_assignments(root: Path, calibration_datasets: tuple[str, ...] =
             "expected_metrics": {},
             "models": {
                 "classic": {
+                    "classic_gate_source_path": "calibration.parquet",
+                    "s2and_eval_path": "s2and.parquet",
+                    "hwang_eval_path": "hwang.parquet",
+                    "extra_eval_paths": {dataset: f"{dataset}.parquet" for dataset in extra_datasets},
                     "promoted_stratified_gate": {"calibration_splits": ["fit", "check"]},
-                    "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv"},
+                    "stratified_eval_test_split": {"assignments_path": "splits/assignments.csv", "test_split": "test"},
                 }
             },
         },
@@ -417,7 +437,7 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     manifest.write_text("{}", encoding="utf-8")
     dataset = _curve(tmp_path / "curves", sha256_file(manifest))
 
-    with pytest.raises(ValueError, match="must match the sweep plans"):
+    with pytest.raises(ValueError, match="must match the snapshot's calibration assignments"):
         _apply(tmp_path, source, datasets=("unit", "unit"))
 
     with pytest.raises(ValueError, match="contains final-test records"):
@@ -621,23 +641,45 @@ def test_release_review_rejects_curves_from_different_snapshots(tmp_path: Path) 
     assert not (tmp_path / "review.json").exists()
 
 
-def test_release_review_rejects_a_dataset_list_that_omits_a_sweep_plan(tmp_path: Path) -> None:
+def test_release_review_reports_and_ignores_an_extra_sweep_folder(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
     source = _complete_model(tmp_path)
     root = tmp_path / "curves"
     dataset = _curve(root, sha256_file(source / "manifest.json"))
-    other = root / "other"
+    other = root / "unit_archived"
     shutil.copytree(dataset, other)
-    plan_path, summary_path = other / "plan.json", other / "summary.json"
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    write_json(plan_path, plan | {"dataset": "other"})
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    write_json(summary_path, summary | {"plan_sha256": sha256_file(plan_path)})
 
-    with pytest.raises(ValueError, match=r"must match the sweep plans.*other"):
+    report = _apply(tmp_path, source)
+
+    assert report["sweep_plans"].keys() == {"unit"}
+    assert "unit_archived" in capsys.readouterr().err
+
+
+def test_release_review_rejects_an_assignment_dataset_that_differs_from_eval_rows(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    root = tmp_path / "curves"
+    _curve(root, sha256_file(source / "manifest.json"))
+    snapshot = root / "snapshot"
+    _write_sweep_assignments(snapshot, ("unit", "other"))
+    assignments_path = snapshot / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    assignments.loc[assignments["source_key"].eq("other_eval"), "dataset"] = "unit"
+    assignments.to_csv(assignments_path, index=False)
+
+    with pytest.raises(ValueError, match="Calibration assignment dataset does not match.*other"):
         _apply(tmp_path, source)
 
     assert not (tmp_path / "output").exists()
     assert not (tmp_path / "review.json").exists()
+
+
+def test_plot_rejects_a_completed_curve_copied_under_another_name(tmp_path: Path) -> None:
+    dataset = _curve(tmp_path)
+    shutil.copytree(dataset, tmp_path / "other")
+
+    with pytest.raises(ValueError, match=r"for 'other' records dataset='unit'"):
+        plot_b3_eps_sweeps.plot(tmp_path, ["other"], tmp_path / "plot.png")
 
 
 def _changed_files(source: Path, output: Path) -> set[str]:
@@ -757,6 +799,7 @@ def _second_block(tmp_path: Path, *, eps: list[float], recall: list[float], refe
     rows = {"eps": eps, "precision": [1.0] * len(eps), "recall": recall, "f1": [0.5] * len(eps)}
     pd.DataFrame(rows | {"reference_coverage": 1}).to_csv(dataset / "eps_b3.tsv", sep="\t", index=False)
     plan = json.loads((dataset / "plan.json").read_text(encoding="utf-8"))
+    plan["dataset"] = "other"
     plan["eps_values"] = eps
     plan["reference"]["sha256"] = sha256_file(dataset / "orcid_reference.parquet")
     write_json(dataset / "plan.json", plan)

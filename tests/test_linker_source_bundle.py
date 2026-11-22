@@ -403,6 +403,78 @@ def test_assembly_rejects_a_missing_calibration_group(tmp_path: Path) -> None:
     assert assemble_source_bundle(**inputs)["selected_source_rows"] == 4
 
 
+@pytest.mark.parametrize("problem", ["swapped", "undeclared", "wrong-extra-path"])
+def test_assembly_rejects_inconsistent_eval_table_paths_before_copy(tmp_path: Path, problem: str) -> None:
+    inputs = _inputs(tmp_path)
+    bundle_path = inputs["source_root"] / "bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    files = bundle["assets"]["featureless_rows"]["files"]
+    classic = bundle["models"]["classic"]
+    if problem == "swapped":
+        files["s2and_eval_path"], files["hwang_eval_path"] = files["hwang_eval_path"], files["s2and_eval_path"]
+        message = "Stratified source path for 's2and_eval_path'"
+    else:
+        classic["extra_eval_paths"] = {"other": files["hwang_eval_path"]}
+        if problem == "wrong-extra-path":
+            files["extra_eval_paths.other"] = files["s2and_eval_path"]
+            message = r"Stratified source path for 'extra_eval_paths\.other'"
+        else:
+            message = r"featureless table keys differ.*extra_eval_paths\.other"
+    _write_json(bundle_path, bundle)
+
+    with pytest.raises(ValueError, match=message):
+        assemble_source_bundle(**inputs)
+
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
+
+
+def test_assembly_rejects_labels_for_a_dataset_outside_the_replay_before_copy(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    train_path = inputs["source_root"] / "labels" / "train.parquet"
+    pd.read_parquet(train_path).assign(dataset="unshipped").to_parquet(train_path, index=False)
+
+    with pytest.raises(ValueError, match="absent from the replay collection.*unshipped"):
+        assemble_source_bundle(**inputs)
+
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
+
+
+@pytest.mark.parametrize("duplicate_label", [0, 1])
+def test_assembly_rejects_duplicate_eval_candidates_before_copy(tmp_path: Path, duplicate_label: int) -> None:
+    inputs = _inputs(tmp_path)
+    labels_path = inputs["source_root"] / "labels" / "hwang_eval.parquet"
+    rows = pd.read_parquet(labels_path)
+    pd.concat([rows, rows.assign(label=duplicate_label)]).to_parquet(labels_path, index=False)
+
+    conflict_count = int(duplicate_label == 0)
+    with pytest.raises(ValueError, match=f"duplicate_pairs=1, conflicting_pairs={conflict_count}"):
+        assemble_source_bundle(**inputs)
+
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
+
+
+def test_assembly_rejects_query_ids_assigned_to_multiple_sources_before_copy(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    source = inputs["source_root"]
+    labels_path = source / "labels" / "hwang_eval.parquet"
+    hwang_rows = pd.read_parquet(labels_path)
+    s2and_rows = pd.read_parquet(source / "labels" / "s2and_eval.parquet")
+    pd.concat([hwang_rows, s2and_rows]).to_parquet(labels_path, index=False)
+    assignments_path = source / "splits" / "assignments.csv"
+    assignments = pd.read_csv(assignments_path)
+    cross_source = assignments.loc[assignments["query_group_id"].eq("s2and:q1")].assign(source_key="hwang_eval")
+    pd.concat([assignments, cross_source]).to_csv(assignments_path, index=False)
+
+    with pytest.raises(ValueError, match="query_group_id values present under multiple source_keys.*s2and:q1"):
+        assemble_source_bundle(**inputs)
+
+    assert not inputs["output_source_bundle"].exists()
+    assert not inputs["output_data_root"].exists()
+
+
 @pytest.mark.parametrize("query_id", ["s2and:q1", "cal:q1", "hwang:q1"])
 def test_source_label_preflight_rejects_a_mismatched_base_group_id(tmp_path: Path, query_id: str) -> None:
     source_root = _inputs(tmp_path)["source_root"]
@@ -517,7 +589,9 @@ def test_assembly_accepts_small_or_reviewed_singleton_orcid_tables(
 
 
 @pytest.mark.parametrize("positive_location", ["unmarked", "unlabeled", "other-dataset", "one-marked-view"])
-def test_assembly_rejects_singleton_orcid_views_below_the_positive_floor(tmp_path: Path, positive_location: str) -> None:
+def test_assembly_rejects_singleton_orcid_views_below_the_positive_floor(
+    tmp_path: Path, positive_location: str
+) -> None:
     inputs = _inputs(tmp_path)
     _write_singleton_orcid_views(inputs["source_root"], view_count=20)
     labels = inputs["source_root"] / "labels" / "s2and_eval.parquet"

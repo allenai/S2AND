@@ -23,10 +23,7 @@ from s2and.arrow_inputs import (  # noqa: E402
 )
 from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
 from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
-from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
-    validate_source_bundle_support_files,
-    validate_source_label_tables,
-)
+from s2and.incremental_linking_training.source_bundle_preflight import validate_source_bundle_support_files  # noqa: E402
 from s2and.production_training_contract import _unit_float, load_model_plan  # noqa: E402
 from scripts.convert_to_arrow import _write_root_manifest  # noqa: E402
 from scripts.production.model.linker_source_bundle import (  # noqa: E402
@@ -36,6 +33,7 @@ from scripts.production.model.linker_source_bundle import (  # noqa: E402
     _rebind_dataset_manifests,
     _reject_filesystem_links,
     _validate_bundle_paths,
+    _validate_label_replay_datasets,
     _validate_root_name_counts_binding,
     validate_portable_source_bundle,
 )
@@ -267,11 +265,14 @@ def package_corrected_datasets(
     _validate_root_name_counts_binding(
         public, authoritative_manifest_sha256=index_digest, dataset_manifests=public_manifests
     )
-    _validate_root_name_counts_binding(linker, authoritative_manifest_sha256=index_digest)
+    replay_manifests = _dataset_manifests(linker)
+    _validate_root_name_counts_binding(
+        linker, authoritative_manifest_sha256=index_digest, dataset_manifests=replay_manifests
+    )
     _validate_bundle_paths(linker)
     bundle = load_bundle(linker)
     validate_source_bundle_support_files(bundle)
-    validate_source_label_tables(bundle)
+    _validate_label_replay_datasets(bundle, replay_manifests)
 
     _copy_arrow_root_without_name_counts(linker, output)
     _copy_file(license_source, output / "LICENSE.txt")

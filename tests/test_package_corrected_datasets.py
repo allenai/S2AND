@@ -114,16 +114,20 @@ def test_packaging_cli_requires_a_precision_tolerance(
     assert not package_inputs["output_root"].exists()
 
 
-@pytest.mark.parametrize("problem", ["missing-test-group", "unreviewed-singletons"])
+@pytest.mark.parametrize("problem", ["missing-test-group", "unreviewed-singletons", "missing-replay-dataset"])
 def test_packaging_rejects_invalid_linker_labels_before_copy(package_inputs: dict[str, Path], problem: str) -> None:
     linker = package_inputs["linker_source_bundle"]
     if problem == "missing-test-group":
         labels = linker / "labels" / "hwang_eval.parquet"
         pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
         message = "did not all match source rows.*hwang:q1"
-    else:
+    elif problem == "unreviewed-singletons":
         _write_singleton_orcid_views(linker, view_count=10)
         message = "0/10 marked negative_singleton_orcid views"
+    else:
+        labels = linker / "labels" / "train.parquet"
+        pd.read_parquet(labels).assign(dataset="unshipped").to_parquet(labels, index=False)
+        message = "absent from the replay collection.*unshipped"
 
     with pytest.raises(ValueError, match=message):
         _package(package_inputs)

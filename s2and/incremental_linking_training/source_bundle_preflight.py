@@ -223,36 +223,47 @@ def validate_source_label_tables(
         raise ValueError(f"official linker source bundle is missing required tables: {missing_required}")
 
     classic = dict(source_bundle.models["classic"])
+    required_eval_keys = set(REQUIRED_LINKER_TABLE_KEYS) - {"train_path"}
+    if missing_model_paths := sorted(required_eval_keys - classic.keys()):
+        raise ValueError(f"classic is missing required source table paths: {missing_model_paths}")
     split_paths = {
-        _resolve_path(source_bundle, source["path"]).resolve()
+        source["table_key"]: _resolve_path(source_bundle, source["path"]).resolve()
         for source in _classic_stratified_eval_source_specs(classic)
     }
+    if undeclared_tables := sorted(split_paths.keys() ^ (available_table_set - {"train_path"})):
+        raise ValueError(f"Stratified sources and featureless table keys differ: {undeclared_tables}")
+    label_paths = {
+        table_key: source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve()
+        for table_key in available_tables
+    }
+    for table_key, split_path in split_paths.items():
+        labels_path = label_paths[table_key]
+        if split_path != labels_path:
+            raise ValueError(f"Stratified source path for {table_key!r} is {split_path}, expected {labels_path}")
+
     source_rows = 0
     observed_datasets: set[str] = set()
     label_tables: dict[Path, pa.Table] = {}
-    for table_key in available_tables:
-        labels_path = source_bundle_asset_file(source_bundle, "featureless_rows", table_key).resolve()
+    for table_key, labels_path in label_paths.items():
         labels = pa_dataset.dataset(labels_path, format="parquet")
         check_singletons = "supervision_type" in labels.schema.names
         columns = ["dataset"]
-        if labels_path in split_paths:
-            columns.append("base_group_id")
-        if labels_path in split_paths or check_singletons:
-            columns.append("query_group_id")
+        if table_key in split_paths:
+            columns.extend(("base_group_id", "candidate_component_key"))
+        if table_key in split_paths or check_singletons:
+            columns.extend(("label", "query_group_id"))
         if check_singletons:
-            columns.extend(("supervision_type", "label"))
+            columns.append("supervision_type")
         rows = labels.to_table(columns=columns)
         if not len(rows):
             raise ValueError(f"source table {table_key!r} is empty: {labels_path}")
-        if labels_path in split_paths:
+        if table_key in split_paths:
             label_tables[labels_path] = rows
         if check_singletons:
             _validate_singleton_orcid_labels(rows, table_key, labels_path)
         source_rows += len(rows)
         observed_datasets.update(str(value) for value in rows["dataset"].unique().to_pylist())
 
-    if missing_paths := split_paths - label_tables.keys():
-        raise ValueError(f"Stratified sources have no featureless tables: {sorted(missing_paths)}")
     _validate_source_split_coverage(source_bundle, label_tables)
 
     return source_rows, frozenset(observed_datasets)

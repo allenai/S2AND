@@ -26,7 +26,7 @@ from s2and.arrow_inputs import (  # noqa: E402
     require_name_counts_index_artifact,
     write_arrow_artifact_manifest,
 )
-from s2and.incremental_linking_training.classic import load_bundle  # noqa: E402
+from s2and.incremental_linking_training.classic import OfficialBundle, load_bundle  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
     preflight_source_rows,
     validate_source_bundle_support_files,
@@ -63,6 +63,13 @@ def _portable_dataset_manifests(root: Path) -> dict[str, Path]:
             raise ValueError(f"Replay manifest must contain a generic Arrow collection: {manifest_path}")
         entries.update({f"{bundle_name}/{name}": path for name, path in nested.items()})
     return entries
+
+
+def _validate_label_replay_datasets(bundle: OfficialBundle, replay_manifests: Mapping[str, Path]) -> None:
+    """Require a replay dataset for every dataset referenced by source labels."""
+    _, label_datasets = validate_source_label_tables(bundle)
+    if missing := sorted(label_datasets - replay_manifests.keys()):
+        raise ValueError(f"Source label datasets are absent from the replay collection: {missing}")
 
 
 def _resolved_manifest_artifact_path(manifest_path: Path, raw_path: Any, *, key: str) -> Path:
@@ -306,15 +313,19 @@ def assemble_source_bundle(
         verify=True,
     )
     authoritative_manifest_sha256 = sha256_file(name_counts_index / "manifest.json")
-    for arrow_root in (benchmark_arrow_root, replay_arrow_root):
-        _validate_root_name_counts_binding(
-            arrow_root,
-            authoritative_manifest_sha256=authoritative_manifest_sha256,
-        )
+    replay_manifests = _dataset_manifests(replay_arrow_root)
+    _validate_root_name_counts_binding(
+        benchmark_arrow_root, authoritative_manifest_sha256=authoritative_manifest_sha256
+    )
+    _validate_root_name_counts_binding(
+        replay_arrow_root,
+        authoritative_manifest_sha256=authoritative_manifest_sha256,
+        dataset_manifests=replay_manifests,
+    )
 
     bundle = load_bundle(source_root)
     validate_source_bundle_support_files(bundle)
-    validate_source_label_tables(bundle)
+    _validate_label_replay_datasets(bundle, replay_manifests)
 
     _copy_arrow_root_without_name_counts(replay_arrow_root, output_source_bundle)
     shutil.copytree(name_counts_index, output_source_bundle / "name_counts_index")

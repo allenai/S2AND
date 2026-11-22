@@ -1277,20 +1277,22 @@ def _classic_stratified_eval_source_specs(spec: dict[str, Any]) -> tuple[dict[st
     sources = [
         {
             "source_key": "calibration_source",
+            "table_key": "classic_gate_source_path",
             "path": str(spec["classic_gate_source_path"]),
             "source_kind": "calibration_source",
         },
-        {"source_key": "s2and_eval", "path": str(spec["s2and_eval_path"]), "source_kind": "public_test"},
-        {"source_key": "hwang_eval", "path": str(spec["hwang_eval_path"]), "source_kind": "public_test"},
     ]
     for path_key, source_key in (
+        ("s2and_eval_path", "s2and_eval"),
+        ("hwang_eval_path", "hwang_eval"),
         ("s_park_eval_path", "s_park_eval"),
         ("s_lee_eval_path", "s_lee_eval"),
     ):
-        if path_key in spec:
+        if path_key in spec or source_key in {"s2and_eval", "hwang_eval"}:
             sources.append(
                 {
                     "source_key": source_key,
+                    "table_key": path_key,
                     "path": str(spec[path_key]),
                     "source_kind": "public_test",
                 }
@@ -1299,6 +1301,7 @@ def _classic_stratified_eval_source_specs(spec: dict[str, Any]) -> tuple[dict[st
         sources.append(
             {
                 "source_key": f"{_normalize_dataset_slug(dataset_name)}_eval",
+                "table_key": f"extra_eval_paths.{dataset_name}",
                 "path": str(path_like),
                 "source_kind": "public_test",
             }
@@ -1564,6 +1567,15 @@ def _select_classic_stratified_eval_rows(
             "Stratified split assignment base_group_id does not match source rows: "
             f"mismatched_rows={int(mismatched_base_ids.sum())}, sample={sample.to_dict(orient='records')}"
         )
+    _validate_unique_stratified_candidate_rows(rows)
+    source_keys_per_query = rows.groupby("query_group_id")["source_key"].nunique()
+    cross_source_queries = source_keys_per_query[source_keys_per_query > 1]
+    if not cross_source_queries.empty:
+        raise ValueError(
+            "Stratified eval rows contain query_group_id values present under multiple source_keys; "
+            "downstream scoring groups by query_group_id only and would silently collapse them: "
+            f"count={len(cross_source_queries)}, sample={cross_source_queries.head(5).to_dict()}"
+        )
     return rows.drop(columns=[assignment_base_column])
 
 
@@ -1625,15 +1637,6 @@ def _load_classic_stratified_eval_rows(
         if assignment_column in rows.columns:
             rows[column] = rows[assignment_column]
             rows = rows.drop(columns=[assignment_column])
-    _validate_unique_stratified_candidate_rows(rows)
-    source_keys_per_query = rows.groupby("query_group_id")["source_key"].nunique()
-    cross_source_queries = source_keys_per_query[source_keys_per_query > 1]
-    if not cross_source_queries.empty:
-        raise ValueError(
-            "Stratified eval rows contain query_group_id values present under multiple source_keys; "
-            "downstream scoring groups by query_group_id only and would silently collapse them: "
-            f"count={len(cross_source_queries)}, sample={cross_source_queries.head(5).to_dict()}"
-        )
     rows, assignments = _refresh_stratified_metadata_from_active_labels(rows, assignments)
     return rows, assignments
 

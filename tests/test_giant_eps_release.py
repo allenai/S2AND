@@ -540,6 +540,25 @@ def test_release_review_rejects_a_completed_curve_copied_under_another_name(tmp_
     assert not report.exists()
 
 
+def test_release_review_rejects_matching_lists_that_omit_a_sweep_plan(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    root = tmp_path / "curves"
+    dataset = _curve(root, sha256_file(source / "manifest.json"))
+    other = root / "other"
+    shutil.copytree(dataset, other)
+    plan_path, summary_path = other / "plan.json", other / "summary.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    write_json(plan_path, plan | {"dataset": "other"})
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    write_json(summary_path, summary | {"plan_sha256": sha256_file(plan_path)})
+
+    with pytest.raises(ValueError, match=r"must match the sweep plans.*other"):
+        _apply(tmp_path, source)
+
+    assert not (tmp_path / "output").exists()
+    assert not (tmp_path / "review.json").exists()
+
+
 def _changed_files(source: Path, output: Path) -> set[str]:
     before = {path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()}
     after = {path.relative_to(output).as_posix(): path.read_bytes() for path in output.rglob("*") if path.is_file()}

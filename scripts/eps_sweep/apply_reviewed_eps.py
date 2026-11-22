@@ -77,6 +77,9 @@ def _validated_sweep_plans(
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
     if len(set(datasets)) != len(datasets) or sorted(datasets) != sorted(release_datasets):
         raise ValueError(f"Release EPS review requires exactly the frozen datasets: {sorted(release_datasets)}")
+    planned_datasets = sorted(path.parent.name for path in sweep_root.glob("*/plan.json") if path.is_file())
+    if sorted(release_datasets) != planned_datasets:
+        raise ValueError(f"Release EPS review dataset list must match the sweep plans: {planned_datasets}")
     plans: dict[str, dict[str, Any]] = {}
     source_maps: dict[Path, InitialQuerySources] = {}
     for dataset in dict.fromkeys(datasets):
@@ -221,7 +224,7 @@ def apply_reviewed_eps(
     ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
 
     With a sweep root, check the snapshot giant curves against the expected subblock limit
-    and the explicitly frozen release dataset list.
+    and the frozen release dataset list, which must cover every plan under the sweep root.
     Without one, the review note must cite the internal evidence, because the curves are not on disk here.
     """
     source, output, report_path = source.resolve(), output.resolve(), report_path.resolve()
@@ -316,7 +319,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Snapshot giant-block sweep root; omit it with --datasets when internal exports supply the review",
     )
     parser.add_argument("--datasets", nargs="+", default=[], help="Datasets in the sweep being reviewed.")
-    parser.add_argument("--release-datasets", nargs="+", help="Frozen dataset list required for a snapshot sweep.")
+    parser.add_argument(
+        "--release-datasets",
+        nargs="+",
+        help="Frozen dataset list, covering every dataset with a plan under the sweep root.",
+    )
     parser.add_argument(
         "--expected-batching-threshold", type=int, help="Production subblock limit required for a snapshot sweep."
     )

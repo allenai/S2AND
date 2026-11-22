@@ -177,8 +177,9 @@ uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
 For a snapshot sweep of a close-pair bonus bundle, use the tolerance from its model plan (`0.001` in this example).
 The command rejects stale models, partial curves, hidden-label violations, and bounded smoke results.
 It requires each plan's subblock limit to match `--expected-batching-threshold`.
-Pass the frozen dataset list as `--release-datasets`. The command requires `--datasets` to match it
-and checks both complete curves for each dataset.
+Pass the frozen dataset list as `--release-datasets`.
+Both dataset lists must include every dataset with a `plan.json` under the dedicated sweep root.
+The command checks each plan's recorded dataset name and both completed curves.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
 It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
 It writes a fresh complete model and preserves every trained artifact byte.

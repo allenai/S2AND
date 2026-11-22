@@ -221,6 +221,50 @@ def test_orcid_reference_normalizes_ids_and_excludes_copies(tmp_path: Path) -> N
             orcid_b3.read_reference(dataset, tmp_path, "unit", test_identities=frozenset(), error_records=frozenset())
 
 
+def test_final_test_identities_only_open_sources_for_the_reviewed_dataset(tmp_path: Path) -> None:
+    _source_snapshot(tmp_path, source="origin", with_clone=True)
+    write_json(
+        tmp_path / "bundle.json",
+        {
+            "bundle_name": "snapshot",
+            "assets": {},
+            "expected_metrics": {},
+            "models": {
+                "classic": {
+                    "classic_gate_source_path": "calibration.parquet",
+                    "s2and_eval_path": "unit.parquet",
+                    "hwang_eval_path": "unavailable.parquet",
+                    "stratified_eval_test_split": {"test_split": "test", "assignments_path": "assignments.csv"},
+                }
+            },
+        },
+    )
+    pd.DataFrame(
+        {
+            "dataset": ["unit", "h_wang"],
+            "query_group_id": ["unit-query", "other-query"],
+            "base_group_id": ["unit-base", "other-base"],
+            "source_key": ["s2and_eval", "hwang_eval"],
+            "split": ["test", "test"],
+        }
+    ).to_csv(tmp_path / "assignments.csv", index=False)
+    rows = pd.DataFrame(
+        {
+            "dataset": ["unit"],
+            "query_group_id": ["unit-query"],
+            "base_group_id": ["unit-base"],
+            "query_signature_id": [derived_query_id("visibleq:", "origin", "source-paper")],
+            "candidate_component_key": ["candidate"],
+            "retrieval_rank": [1],
+            "label": [1],
+        }
+    )
+    rows.to_parquet(tmp_path / "calibration.parquet", index=False)
+    rows.to_parquet(tmp_path / "unit.parquet", index=False)
+
+    assert orcid_b3.final_test_query_identities(tmp_path, "unit") == frozenset({"origin"})
+
+
 def test_final_test_identities_resolve_copies_and_reject_unmapped_or_missing_rows() -> None:
     assignments = pd.DataFrame({"dataset": ["unit", "unit", "other"], "query_group_id": ["g1", "g2", "g3"]})
     rows = pd.DataFrame(

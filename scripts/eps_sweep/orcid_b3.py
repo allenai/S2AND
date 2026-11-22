@@ -61,8 +61,15 @@ def final_test_query_identities(
     spec = dict(bundle.models["classic"])
     split_spec = dict(spec["stratified_eval_test_split"])
     rows, assignments = _load_classic_stratified_eval_rows(
-        bundle, spec, split_spec, splits=(str(split_spec["test_split"]),), include_calibration_source=True
+        bundle,
+        spec,
+        split_spec,
+        splits=(str(split_spec["test_split"]),),
+        include_calibration_source=True,
+        dataset=dataset,
     )
+    if assignments.empty:
+        return frozenset()
     return resolve_test_query_identities(rows, assignments, query_sources.origins.get(dataset, {}), dataset)
 
 

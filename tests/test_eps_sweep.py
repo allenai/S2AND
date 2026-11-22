@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import pickle
@@ -295,7 +296,7 @@ def test_cli_enforces_production_route_and_compute_bounds(monkeypatch: pytest.Mo
 )
 def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neighbors, orcid):
     calls = []
-    dataset = object()
+    dataset = cast(ArrowDataset, object())
     counts = {"ch": {"cy": 16}}
 
     def native(arrow_dataset, signature_ids, **kwargs):
@@ -309,7 +310,7 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
     monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", native)
     monkeypatch.setattr(subblocking, "make_subblocks_with_telemetry", reject_python)
     blocks, telemetry = sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
-        args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=orcid),
+        args=argparse.Namespace(batching_threshold=2, use_orcid_subblocking=orcid),
         clusterer=SimpleNamespace(
             subblocking_graph_config=raw_config, random_state=7, _subblocking_prefix_counts=lambda: counts
         ),
@@ -335,22 +336,22 @@ def test_eps_sweep_rejects_invalid_native_partition(monkeypatch, result):
     monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", lambda *a, **k: (result, {}, {}))
     with pytest.raises(ValueError, match="every input signature exactly once|oversized subblock"):
         sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
-            args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
+            args=argparse.Namespace(batching_threshold=2, use_orcid_subblocking=False),
             clusterer=SimpleNamespace(_subblocking_prefix_counts=dict),
             block_dict={"block": ["1", "2", "3"]},
             target_signature_ids={"1"},
-            arrow_dataset=object(),
+            arrow_dataset=cast(ArrowDataset, object()),
         )
 
 
 def test_eps_sweep_rejects_invalid_graph_config_type():
     with pytest.raises(ValueError, match="GraphSubblockingConfig, mapping, or None"):
         sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
-            args=SimpleNamespace(batching_threshold=2, use_orcid_subblocking=False),
+            args=argparse.Namespace(batching_threshold=2, use_orcid_subblocking=False),
             clusterer=SimpleNamespace(subblocking_graph_config="invalid"),
             block_dict={},
             target_signature_ids=set(),
-            arrow_dataset=object(),
+            arrow_dataset=cast(ArrowDataset, object()),
         )
 
 
@@ -388,7 +389,7 @@ def test_production_assignments_take_cached_clusters_for_the_bulk_step() -> None
             # The later production steps attach "5" to the bulk cluster that holds "1".
             return {**bulk, "b|subblock=full_1": [*bulk["b|subblock=full_1"], "5"]}, None
 
-    args = SimpleNamespace(batching_threshold=3, total_ram_bytes=1)
+    args = argparse.Namespace(batching_threshold=3, total_ram_bytes=1)
     assignments = sweep_eps_on_linking_gold._production_assignments_for_eps(  # noqa: SLF001
         eps=0.5,
         clusterer=Model(),

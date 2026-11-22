@@ -11,6 +11,9 @@ from typing import Any
 import numpy as np
 import pytest
 
+from s2and.name_counts_index import NameCountsIndex
+from s2and.name_tuple_artifact import NameTupleArtifact
+from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts
 from s2and.production_training_contract import block_membership_sha256, load_model_plan
 from scripts.production.model import release_pairwise
 
@@ -84,11 +87,15 @@ class _FakeRustFeaturizer:
 
 
 def _artifact_authority() -> release_pairwise.ProductionArtifactAuthority:
-    tuples = argparse.Namespace(data_sha256="d" * 64, pairs=frozenset({("a", "b")}))
+    tuples = NameTupleArtifact(pairs=frozenset({("a", "b")}), data_sha256="d" * 64)
     return release_pairwise.ProductionArtifactAuthority(
-        name_counts_index=argparse.Namespace(manifest_sha256="c" * 64),
+        name_counts_index=NameCountsIndex(
+            native=argparse.Namespace(name_counts_manifest_sha256="c" * 64), path="counts"
+        ),
         name_tuples=tuples,
-        orcid_prefix_counts=argparse.Namespace(data_sha256="e" * 64, name_tuples_sha256=tuples.data_sha256),
+        orcid_prefix_counts=LoadedOrcidPrefixCounts(
+            counts={}, data_sha256="e" * 64, name_tuples_sha256=tuples.data_sha256
+        ),
     )
 
 
@@ -144,10 +151,13 @@ def _calibration_bundle(tmp_path: Path) -> Path:
     return bundle
 
 
+_CalibrationScores = dict[float | tuple[bool, float], float | tuple[float, float, float]]
+
+
 def _patch_calibration(
     monkeypatch: pytest.MonkeyPatch,
     clusterer: _StubCalibrationClusterer,
-    scores: dict[float, float],
+    scores: _CalibrationScores,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     finalizations: list[dict[str, Any]] = []
     featurizer_calls: list[dict[str, Any]] = []
@@ -190,6 +200,7 @@ def _patch_calibration(
             bonus_on, eps = int(ids[0]) >= 10_000, (int(ids[0]) % 10_000) / 1000
             # Scores keyed by EPS apply to both linkage settings; a (bonus_on, EPS) key overrides.
             score = scores.get((bonus_on, eps), scores.get(eps))
+            assert score is not None
             # A bare number is F1 at full precision and recall; a triple gives all three.
             precision, recall, f1 = score if isinstance(score, tuple) else (1.0, 1.0, score)
             return {"precision": precision, "recall": recall, "f1": f1, "signature_count": 2}
@@ -268,7 +279,7 @@ def test_calibrate_eps_requires_an_opt_in_to_select_a_bonus_at_zero_tolerance(
     model_plan = _arrow_model_plan(tmp_path, eps_grid=[0.6, 0.4, 0.2])
     bundle = _calibration_bundle(tmp_path)
     clusterer = _StubCalibrationClusterer()
-    scores = {0.2: 0.7, 0.4: 0.8, 0.6: 0.75, (True, 0.4): 0.9}
+    scores: _CalibrationScores = {0.2: 0.7, 0.4: 0.8, 0.6: 0.75, (True, 0.4): 0.9}
     finalizations, _ = _patch_calibration(monkeypatch, clusterer, scores)
 
     args = _calibration_args(tmp_path, bundle, model_plan)
@@ -302,7 +313,7 @@ def test_calibrate_eps_requires_an_opt_in_to_select_a_bonus_at_zero_tolerance(
     }
 
 
-_FLOOR_SCORES = {
+_FLOOR_SCORES: _CalibrationScores = {
     # Plain linkage.
     0.2: (0.99, 0.50, 0.66),
     0.4: (0.93, 0.70, 0.80),

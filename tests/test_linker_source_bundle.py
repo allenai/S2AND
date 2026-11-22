@@ -6,6 +6,7 @@ import os
 import shutil
 from contextlib import ExitStack
 from pathlib import Path
+from typing import TypedDict
 
 import pandas as pd
 import pyarrow as pa
@@ -236,7 +237,17 @@ def _write_linker_inputs(root: Path, *, leak: bool, dataset: str = "replay_demo"
     _write_json(root / "bundle.json", bundle)
 
 
-def _inputs(tmp_path: Path, *, leak: bool = False) -> dict[str, Path]:
+class _AssemblyInputs(TypedDict):
+    source_root: Path
+    benchmark_arrow_root: Path
+    replay_arrow_root: Path
+    name_counts_index: Path
+    model_plan: Path
+    output_source_bundle: Path
+    output_data_root: Path
+
+
+def _inputs(tmp_path: Path, *, leak: bool = False) -> _AssemblyInputs:
     source_root = tmp_path / "linker-input"
     benchmark_root = tmp_path / "benchmark-arrow"
     replay_root = tmp_path / "replay-arrow"
@@ -279,13 +290,13 @@ def _inputs(tmp_path: Path, *, leak: bool = False) -> dict[str, Path]:
 
 
 @pytest.fixture
-def assembled(tmp_path: Path) -> tuple[dict[str, Path], dict]:
+def assembled(tmp_path: Path) -> tuple[_AssemblyInputs, dict]:
     inputs = _inputs(tmp_path)
     return inputs, assemble_source_bundle(**inputs)
 
 
 def test_assembled_source_bundle_is_valid_bound_and_portable(
-    assembled: tuple[dict[str, Path], dict],
+    assembled: tuple[_AssemblyInputs, dict],
     tmp_path: Path,
 ) -> None:
     inputs, report = assembled

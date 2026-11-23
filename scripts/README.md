@@ -19,6 +19,11 @@ Follow the [release process](../docs/release.md) for production runs.
 | `production/model/rebind_name_counts_index.py` | Bind a copy of a complete model to a rebuilt `name_counts_index/` without refitting |
 | `production/data/prepare_linker_replay.py` | Prepare current metadata and SPECTER2 inputs for fixed linker replay IDs |
 | `production/data/prepare_linker_support.py` | Prepare linker support tables from reviewed benchmark and ORCID labels |
+| `production/data/prepare_identity_labels.py` | Join and audit external Gold ORCID `(paper_id, position)` labels onto Arrow block signatures |
+| `production/data/assign_block_roles.py` | Deterministically partition production blocks into ORCID-disjoint 1.5 training, tuning, and test pools |
+| `production/data/gate_public_snapshot.py` | Intake-once S2AG paper filtering, abstract redaction, email scrubbing, and `population_corrections.json` generation |
+| `production/data/review_packets.py` | Leak-proof blind Sol 6.2 review packet builder, embedded ORCID control injector, and pre-launch validator |
+| `production/data/hash_release_emails.py` | Hash structured emails, scrub free-text emails at intake, and scan staged release bundles for plaintext emails |
 | `production/model/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](production/data/README.md) |
 | `production/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `production/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](production/counts/README.md) |

@@ -33,7 +33,10 @@ from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
 from s2and.incremental_linking.policy import NAME_COUNTS_MANIFEST_SHA256_FIELD  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
-from scripts.production.data.hash_release_emails import hash_release_emails  # noqa: E402
+from scripts.production.data.hash_release_emails import (  # noqa: E402
+    hash_release_emails,
+    scan_tree_for_plaintext_emails,
+)
 from scripts.production.model.plan_datasets import require_arrow_plan  # noqa: E402
 from scripts.production.model.unknown_signatures import load_unknown_signatures  # noqa: E402
 
@@ -161,9 +164,9 @@ def _fixed_pair_roles(
     *,
     arrow_source: Path,
     dataset: Path,
-    source: Path,
+    source: Path | None,
 ) -> dict[str, Path]:
-    """Publish one Arrow copy with its fixed pairs, and its editable records as source."""
+    """Publish one Arrow copy with its fixed pairs, and optionally its editable records as source."""
 
     target = dataset / "pairwise" / name
     for path in sorted(arrow_source.iterdir()):
@@ -177,8 +180,9 @@ def _fixed_pair_roles(
     _place(model["train_pairs"], target / "train_pairs.csv")
     _place(model["val_pairs"], target / "val_pairs.csv")
     _place(evaluation["pairs"], target / "test_pairs.json")
-    for role in ("signatures", "papers", "specter_embeddings"):
-        _place(model[role], source / name / model[role].name)
+    if source is not None:
+        for role in ("signatures", "papers", "specter_embeddings"):
+            _place(model[role], source / name / model[role].name)
     return {
         "arrow": target / "manifest.json",
         "train_pairs": target / "train_pairs.csv",
@@ -200,21 +204,35 @@ def _resolve_inputs(snapshot: Path) -> tuple[dict[str, Any], dict[str, dict[str,
     return inputs, files
 
 
-def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | None = None) -> dict[str, Any]:
-    """Write ``inference``, ``dataset``, and ``source`` under ``output_root``.
+def write_release_bundles(
+    snapshot: Path,
+    output_root: Path,
+    *,
+    model: Path | None = None,
+    skip_source_bundle: bool = False,
+    scrub_free_text_emails: bool = False,
+    verify_no_plaintext_emails: bool = False,
+) -> dict[str, Any]:
+    """Write ``inference``, ``dataset``, and optionally ``source`` under ``output_root``.
 
     Args:
         snapshot: Prepared snapshot from ``package_corrected_datasets.py``.
-        output_root: New directory for the three bundles.
+        output_root: New directory for the bundles.
         model: Optional complete model directory for the inference bundle.
+        skip_source_bundle: Omit the ``source`` bundle (recommended for 1.5+).
+        scrub_free_text_emails: Scrub plaintext emails from free-text fields in addition
+            to hashing structured email columns.
+        verify_no_plaintext_emails: Scan staged bundles and fail if any plaintext email
+            remains.
 
     Returns:
         File counts, byte counts, and the dataset model-plan digest.
 
     Raises:
         FileExistsError: If ``output_root`` exists.
-        ValueError: If the model is bound to another name-count index, or the Arrow data
-            does not rebuild the prepared populations.
+        ValueError: If the model is bound to another name-count index, the Arrow data
+            does not rebuild the prepared populations, or plaintext emails remain when
+            ``verify_no_plaintext_emails`` is enabled.
     """
 
     snapshot = snapshot.resolve()
@@ -249,16 +267,17 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
     for name in DATASET_OPTIONAL_DIRS:
         if (snapshot / name).is_dir():
             _place_tree(snapshot / name, dataset / name)
-    for name in SOURCE_FILES:
-        _place(snapshot / name, source / name)
-    for name in SOURCE_OPTIONAL_FILES:
-        if (snapshot / name).is_file():
+    if not skip_source_bundle:
+        for name in SOURCE_FILES:
             _place(snapshot / name, source / name)
-    for name in SOURCE_DIRS:
-        _place_tree(snapshot / name, source / name)
-    for name in SOURCE_OPTIONAL_DIRS:
-        if (snapshot / name).is_dir():
+        for name in SOURCE_OPTIONAL_FILES:
+            if (snapshot / name).is_file():
+                _place(snapshot / name, source / name)
+        for name in SOURCE_DIRS:
             _place_tree(snapshot / name, source / name)
+        for name in SOURCE_OPTIONAL_DIRS:
+            if (snapshot / name).is_dir():
+                _place_tree(snapshot / name, source / name)
 
     pairwise = dataset / "pairwise"
     plan_roles: dict[str, dict[str, Path]] = {}
@@ -280,7 +299,7 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
                 evaluation_files,
                 arrow_source=(snapshot / "pairwise" / inputs["arrow"]["model"] / name).resolve(),
                 dataset=dataset,
-                source=source,
+                source=None if skip_source_bundle else source,
             )
     plan = {
         "release_version": old_plan["release_version"],
@@ -296,10 +315,14 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
     plan_path = pairwise / "model_plan.json"
     _write_json(plan_path, plan)
     require_arrow_plan(load_model_plan(plan_path).datasets)
-    hash_release_emails(output_root)
-    bundle_files = {
-        bundle.name: [path for path in bundle.rglob("*") if path.is_file()] for bundle in (inference, dataset, source)
-    }
+    hash_release_emails(output_root, scrub_free_text=scrub_free_text_emails)
+    if verify_no_plaintext_emails:
+        findings = scan_tree_for_plaintext_emails(output_root)
+        if findings:
+            sample = ", ".join(f"{item['path']} ({item['location']})" for item in findings[:5])
+            raise ValueError(f"Plaintext email scan found {len(findings)} match(es) in staged bundles: {sample}")
+    bundles = (inference, dataset) if skip_source_bundle else (inference, dataset, source)
+    bundle_files = {bundle.name: [path for path in bundle.rglob("*") if path.is_file()] for bundle in bundles}
     return {
         "output_root": str(output_root),
         "files": {name: len(paths) for name, paths in bundle_files.items()},
@@ -311,10 +334,33 @@ def write_release_bundles(snapshot: Path, output_root: Path, *, model: Path | No
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True, help="Prepared snapshot root.")
-    parser.add_argument("--output-root", type=Path, required=True, help="New directory for the three bundles.")
+    parser.add_argument("--output-root", type=Path, required=True, help="New directory for the bundles.")
     parser.add_argument("--model", type=Path, help="Complete model directory for the inference bundle.")
+    parser.add_argument("--skip-source-bundle", action="store_true", help="Omit the redundant source bundle.")
+    parser.add_argument(
+        "--scrub-free-text-emails",
+        action="store_true",
+        help="Also scrub plaintext email mentions from affiliations, titles, and abstracts.",
+    )
+    parser.add_argument(
+        "--verify-no-plaintext-emails",
+        action="store_true",
+        help="Scan staged bundles and fail if any plaintext email remains.",
+    )
     args = parser.parse_args(argv)
-    print(json.dumps(write_release_bundles(args.snapshot, args.output_root, model=args.model), indent=2))
+    print(
+        json.dumps(
+            write_release_bundles(
+                args.snapshot,
+                args.output_root,
+                model=args.model,
+                skip_source_bundle=args.skip_source_bundle,
+                scrub_free_text_emails=args.scrub_free_text_emails,
+                verify_no_plaintext_emails=args.verify_no_plaintext_emails,
+            ),
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

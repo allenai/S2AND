@@ -34,8 +34,11 @@ def package_pairwise_inputs(
     output_root: Path,
     *,
     datasets: Sequence[str] = BENCHMARKS,
+    release_version: str = "1.3",
 ) -> dict[str, Any]:
     """Preserve source bytes and bind both Arrow collections to a shared index."""
+    if not isinstance(release_version, str) or not release_version.strip():
+        raise ValueError(f"Require a nonempty release_version: {release_version!r}")
     prepared = prepared_root.resolve()
     output = output_root.resolve()
     if output.exists():
@@ -133,7 +136,7 @@ def package_pairwise_inputs(
                 pass
         collections[mode] = destination.relative_to(output).as_posix()
     result = {
-        "release_version": "1.3",
+        "release_version": release_version,
         "sources": sources,
         "arrow": collections,
         "name_counts_index": "name_counts_index",
@@ -147,6 +150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepared-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--release-version", required=True, help="Explicit release version, e.g. 1.5.")
     args = parser.parse_args(argv)
     print(json.dumps(package_pairwise_inputs(**vars(args)), indent=2))
     return 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -45,6 +46,8 @@ from scripts.verification.validate_local_arrow_release import validate_release_r
 ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 MODEL_ROLES = frozenset((*ARROW_SOURCE_ROLES, "clusters", "train_pairs", "val_pairs"))
 DEFAULT_EPS_GRID = tuple(step / 100 for step in range(101))
+# Windows reports a cross-volume hardlink as ERROR_NOT_SAME_DEVICE.
+_WINDOWS_NOT_SAME_DEVICE = 17
 
 
 def _relative_path(path: Path, root: Path) -> str:
@@ -67,9 +70,18 @@ def _copy_file(source: Path, destination: Path, *, expected_sha256: str | None =
     if expected_sha256 is not None and digest != expected_sha256:
         raise ValueError(f"Source SHA-256 mismatch: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
-    if sha256_file(destination) != digest:
-        raise ValueError(f"Copied file SHA-256 mismatch: {destination}")
+    if destination.exists():
+        if sha256_file(destination) == digest:
+            return digest
+        raise ValueError(f"Existing destination SHA-256 mismatch: {destination}")
+    try:
+        os.link(source, destination)
+    except OSError as error:
+        if error.errno != errno.EXDEV and getattr(error, "winerror", None) != _WINDOWS_NOT_SAME_DEVICE:
+            raise
+        shutil.copyfile(source, destination)
+        if sha256_file(destination) != digest:
+            raise ValueError(f"Copied file SHA-256 mismatch: {destination}") from None
     return digest
 
 

@@ -18,7 +18,14 @@ from s2and.featurizer import NUM_FEATURES
 from s2and.incremental_linking import linker_pairwise
 from s2and.incremental_linking.feature_block_arrow import write_arrow_batch_lookup_index
 from s2and.text import email_prefix_suffix
-from scripts.production.data.hash_release_emails import hash_feature_email, hash_release_emails
+from scripts.production.data.hash_release_emails import (
+    EMAIL_REDACTED_TOKEN,
+    hash_feature_email,
+    hash_release_emails,
+    redact_source_tree,
+    scan_tree_for_plaintext_emails,
+    scrub_text_emails,
+)
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 
@@ -129,3 +136,84 @@ def test_hashing_preserves_native_pairwise_and_incremental_aggregates(tmp_path: 
         aggregates.append(stats.feature_matrix())
     np.testing.assert_allclose(*matrices, rtol=0, atol=0, equal_nan=True)
     np.testing.assert_allclose(*aggregates, rtol=0, atol=0, equal_nan=True)
+
+
+def test_scrub_text_emails_handles_unicode_dashes_and_malformed_at_dot() -> None:
+    hashed = hash_feature_email("alice@example.org")
+    assert hashed is not None
+    text = f"Contact first\u2010last@uni\u2013dept.edu or odd@.mail.example.org; already hashed {hashed} stays intact."
+    scrubbed = scrub_text_emails(text)
+    assert scrubbed is not None
+    assert "first\u2010last@" not in scrubbed
+    assert "odd@.mail.example.org" not in scrubbed
+    assert scrubbed.count(EMAIL_REDACTED_TOKEN) == 2
+    assert hashed in scrubbed
+
+
+def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_path: Path) -> None:
+    # Non-hardcoded dataset name (not in legacy 7-giant list) is discovered and redacted.
+    dataset_dir = tmp_path / "dataset" / "datasets" / "b_chen"
+    dataset_dir.mkdir(parents=True)
+    sig_table = pa.table(
+        {
+            "signature_id": ["s1"],
+            "author_email": ["b.chen@example.org"],
+            "author_affiliations": [["Dept of AI, contact b\u2010chen@example.org"]],
+        }
+    )
+    with (
+        pa.OSFile(str(dataset_dir / "signatures.arrow"), "wb") as sink,
+        pa.ipc.new_file(sink, sig_table.schema) as writer,
+    ):
+        writer.write_table(sig_table)
+    papers_table = pa.table({"paper_id": ["p1"], "title": ["Study"], "abstract": ["Write to foo@.bar.edu"]})
+    with (
+        pa.OSFile(str(dataset_dir / "papers.arrow"), "wb") as sink,
+        pa.ipc.new_file(sink, papers_table.schema) as writer,
+    ):
+        writer.write_table(papers_table)
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps({"paths": {"signatures": "signatures.arrow", "papers": "papers.arrow"}, "files": {}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "dataset" / "replay_manifest.json").write_text(
+        json.dumps({"dataset_manifests": {"b_chen": {"sha256": "old"}}}), encoding="utf-8"
+    )
+    (tmp_path / "dataset" / "manifest.json").write_text(
+        json.dumps({"replay_bundles": {"incremental": {"sha256": "old"}}}), encoding="utf-8"
+    )
+    raw_dir = tmp_path / "source" / "corrected_replay" / "raw" / "b_chen"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "signatures.json").write_text(
+        json.dumps(
+            {"s1": {"author_info": {"email": "b.chen@example.org", "affiliations": ["mail: b.chen@example.org"]}}}
+        ),
+        encoding="utf-8",
+    )
+    (raw_dir / "papers.json").write_text(
+        json.dumps({"p1": {"title": "Email x@y.org", "abstract": "Plain abstract"}}), encoding="utf-8"
+    )
+
+    findings_before = scan_tree_for_plaintext_emails(tmp_path)
+    assert len(findings_before) >= 4
+    # Findings must not leak raw plaintext addresses.
+    assert "b.chen@example.org" not in json.dumps(findings_before)
+
+    report = hash_release_emails(tmp_path, scrub_free_text=True)
+    assert report == {"b_chen": {"arrow_values": 3, "source_fields": 3}}
+    assert scan_tree_for_plaintext_emails(tmp_path) == []
+
+    # Standalone intake-once redaction also handles *_signatures.json / *_papers.json trees.
+    intake = tmp_path / "intake"
+    intake.mkdir()
+    (intake / "block_signatures.json").write_text(
+        json.dumps({"s1": {"author_info": {"email": "a@b.edu", "affiliations": ["lab a@b.edu"]}}}),
+        encoding="utf-8",
+    )
+    (intake / "block_papers.json").write_text(
+        json.dumps({"p1": {"title": "T", "abstract": "Contact c\u2013d@e.org"}}), encoding="utf-8"
+    )
+    counts = redact_source_tree(intake)
+    assert counts["signature_json_fields"] == 2
+    assert counts["paper_json_fields"] == 1
+    assert scan_tree_for_plaintext_emails(intake) == []

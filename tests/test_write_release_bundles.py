@@ -269,3 +269,15 @@ def test_bundles_reject_a_model_bound_to_another_index(snapshot: Path, tmp_path:
     with pytest.raises(ValueError, match="bound to name-count index"):
         write_release_bundles(snapshot, output, model=model)
     assert not output.exists()
+
+
+def test_bundles_support_skip_source_and_plaintext_email_verification(snapshot: Path, tmp_path: Path) -> None:
+    out_skip = tmp_path / "no_source"
+    summary = write_release_bundles(snapshot, out_skip, skip_source_bundle=True)
+    assert set(summary["files"]) == {"inference", "dataset"}
+    assert not (out_skip / "source").exists()
+
+    # The fixture writes plaintext fixture emails into benchmarks/qian, so verification catches them.
+    out_verify = tmp_path / "verify_fail"
+    with pytest.raises(ValueError, match="Plaintext email scan found"):
+        write_release_bundles(snapshot, out_verify, skip_source_bundle=True, verify_no_plaintext_emails=True)

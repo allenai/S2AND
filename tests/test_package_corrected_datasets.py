@@ -353,3 +353,23 @@ def test_complete_snapshot_requires_public_license_before_copy(package_inputs: d
     with pytest.raises(FileNotFoundError, match="LICENSE.txt"):
         _package(package_inputs)
     assert not package_inputs["output_root"].exists()
+
+
+def test_copy_file_hardlinks_and_is_idempotent_on_matching_sha256(tmp_path: Path) -> None:
+    import os
+
+    from scripts.production.data.package_corrected_datasets import _copy_file
+
+    source = tmp_path / "source.txt"
+    source.write_text("immutable payload\n", encoding="utf-8")
+    destination = tmp_path / "nested" / "dest.txt"
+
+    digest = _copy_file(source, destination)
+    assert os.path.samefile(source, destination)
+    # Matching SHA-256 on retry succeeds without error.
+    assert _copy_file(source, destination, expected_sha256=digest) == digest
+
+    other = tmp_path / "other.txt"
+    other.write_text("different payload\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Existing destination SHA-256 mismatch"):
+        _copy_file(other, destination)

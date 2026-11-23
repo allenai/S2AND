@@ -143,3 +143,19 @@ def test_package_preserves_custom_sidecar_and_opens_after_copy(prepared: Path, t
         assert actual.ids
         assert actual.path == files["clusters"].with_name(filename)
         assert actual.sha256 == result["sources"][mode]["qian"]["unknown_signatures"]["sha256"]
+
+
+def test_package_pairwise_inputs_respects_release_version_and_cli_requires_it(
+    prepared: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.production.data.package_pairwise_inputs import main
+
+    output = tmp_path / "pkg_v15"
+    result = package_pairwise_inputs(prepared, output, datasets=("qian",), release_version="1.5")
+    assert result["release_version"] == "1.5"
+    assert json.loads((output / "inputs.json").read_text(encoding="utf-8"))["release_version"] == "1.5"
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--prepared-root", str(prepared), "--output-root", str(tmp_path / "cli_fail")])
+    assert exc.value.code == 2
+    assert "--release-version" in capsys.readouterr().err

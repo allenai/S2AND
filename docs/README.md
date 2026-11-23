@@ -42,6 +42,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 - [Script catalog](../scripts/README.md)
 - [Release notes](release_notes.md)
 - [Experiments that did not help](negative_results.md)
+- [S2AND 1.5 training, split, and labeling design](v15_training_design.md)
 
 ## Historical notes
 

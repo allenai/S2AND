@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -529,6 +530,31 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
         raise ValueError("classic.promoted_stratified_gate calibration_splits must not include test_split")
     out["calibration_splits"] = resolved_calibration_splits
     out["test_split"] = test_split
+
+    fit_splits_raw = out.get("fit_splits")
+    validation_splits_raw = out.get("validation_splits")
+    if fit_splits_raw is not None:
+        if isinstance(fit_splits_raw, str) or not isinstance(fit_splits_raw, Sequence):
+            raise ValueError("classic.promoted_stratified_gate.fit_splits must be a sequence of split names")
+        fit_splits = [str(s).strip() for s in fit_splits_raw]
+        if not fit_splits or any(not s for s in fit_splits) or len(set(fit_splits)) != len(fit_splits):
+            raise ValueError("classic.promoted_stratified_gate.fit_splits must contain unique nonempty names")
+        if not set(fit_splits).issubset(resolved_calibration_splits):
+            raise ValueError("classic.promoted_stratified_gate.fit_splits must be a subset of calibration_splits")
+        out["fit_splits"] = fit_splits
+    if validation_splits_raw is not None:
+        if isinstance(validation_splits_raw, str) or not isinstance(validation_splits_raw, Sequence):
+            raise ValueError("classic.promoted_stratified_gate.validation_splits must be a sequence of split names")
+        val_splits = [str(s).strip() for s in validation_splits_raw]
+        if not val_splits or any(not s for s in val_splits) or len(set(val_splits)) != len(val_splits):
+            raise ValueError("classic.promoted_stratified_gate.validation_splits must contain unique nonempty names")
+        if not set(val_splits).issubset(resolved_calibration_splits):
+            raise ValueError(
+                "classic.promoted_stratified_gate.validation_splits must be a subset of calibration_splits"
+            )
+        if fit_splits_raw is not None and set(out["fit_splits"]).intersection(val_splits):
+            raise ValueError("classic.promoted_stratified_gate fit_splits and validation_splits must be disjoint")
+        out["validation_splits"] = val_splits
     return out
 
 
@@ -1030,11 +1056,19 @@ def _fit_promoted_logistic_gate(
     probabilities: np.ndarray,
     *,
     calibration_splits: Sequence[str],
+    fit_splits: Sequence[str] | None = None,
+    validation_splits: Sequence[str] | None = None,
+    error_weights: Mapping[str, float] | None = None,
     selection_feature_count: int = LOGISTIC_GATE_SELECTION_FEATURE_COUNT,
     selection_c: float = LOGISTIC_GATE_SELECTION_C,
     final_c: float = LOGISTIC_GATE_FINAL_C,
 ) -> dict[str, Any]:
-    """Fit the prod-safe NumPy logistic gate on configured calibration splits."""
+    """Fit the prod-safe NumPy logistic gate on configured calibration/fit splits.
+
+    When ``fit_splits`` and ``validation_splits`` are separated, feature selection and
+    model weights are fit strictly on ``fit_splits`` and out-of-sample ``validation_metrics``
+    are computed on ``validation_splits``.
+    """
 
     all_feature_names = default_logistic_gate_feature_names()
     full_matrix, query_rows = build_logistic_gate_matrix(
@@ -1065,14 +1099,25 @@ def _fit_promoted_logistic_gate(
         ]
         raise ValueError(f"logistic gate query order mismatch between candidate rows and choices: sample={sample}")
     split_values = choices["split"].astype(str)
+    active_fit_splits = tuple(str(split) for split in (calibration_splits if fit_splits is None else fit_splits))
+    active_val_splits = tuple(str(split) for split in validation_splits) if validation_splits is not None else ()
+    if active_val_splits and set(active_fit_splits).intersection(active_val_splits):
+        raise ValueError(
+            f"logistic gate fit_splits and validation_splits must be disjoint: "
+            f"fit={list(active_fit_splits)}, validation={list(active_val_splits)}"
+        )
     calibration_mask = split_values.isin(tuple(str(split) for split in calibration_splits)).to_numpy(dtype=bool)
-    if not np.any(calibration_mask):
-        raise ValueError(f"logistic gate requires non-empty calibration splits: {list(calibration_splits)}")
+    fit_mask = split_values.isin(active_fit_splits).to_numpy(dtype=bool)
+    val_mask = split_values.isin(active_val_splits).to_numpy(dtype=bool) if active_val_splits else None
+    if not np.any(fit_mask):
+        raise ValueError(f"logistic gate requires non-empty fit splits: {list(active_fit_splits)}")
+    if val_mask is not None and not np.any(val_mask):
+        raise ValueError(f"logistic gate requires non-empty validation splits: {list(active_val_splits)}")
     labels = outcome_labels(choices["query_safe_target"], choices["chosen_candidate_target"])
 
     selection_model, _selection_scaler, _selection_medians = _fit_multiclass_logistic_gate(
-        full_matrix[calibration_mask],
-        labels[calibration_mask],
+        full_matrix[fit_mask],
+        labels[fit_mask],
         c_value=float(selection_c),
     )
     selection_coef = np.asarray(selection_model.coef_, dtype=np.float64)
@@ -1083,33 +1128,46 @@ def _fit_promoted_logistic_gate(
     selected_matrix = full_matrix[:, selected_indices]
 
     final_model, final_scaler, final_medians = _fit_multiclass_logistic_gate(
-        selected_matrix[calibration_mask],
-        labels[calibration_mask],
+        selected_matrix[fit_mask],
+        labels[fit_mask],
         c_value=float(final_c),
     )
     weights, bias = _fold_standard_scaler_into_logistic(final_scaler, final_model)
+    resolved_error_weights = dict(LOGISTIC_GATE_ERROR_WEIGHTS if error_weights is None else error_weights)
+    training_summary: dict[str, Any] = {
+        "calibration_splits": [str(split) for split in calibration_splits],
+        "fit_splits": list(active_fit_splits),
+        "validation_splits": list(active_val_splits),
+        "selection_feature_count": int(selection_feature_count),
+        "selection_c": float(selection_c),
+        "final_c": float(final_c),
+        "all_feature_count": int(len(all_feature_names)),
+        "selected_feature_count": int(len(selected_feature_names)),
+        "calibration_queries": int(calibration_mask.sum()),
+        "fit_queries": int(fit_mask.sum()),
+        "validation_queries": int(val_mask.sum()) if val_mask is not None else 0,
+    }
     gate_config = logistic_gate_config(
         feature_names=selected_feature_names,
         weights=weights,
         bias=bias,
         missing_values=final_medians,
         calibration_mode=_PROMOTED_LOGISTIC_GATE_MODE,
-        error_weights=LOGISTIC_GATE_ERROR_WEIGHTS,
-        training_summary={
-            "calibration_splits": [str(split) for split in calibration_splits],
-            "selection_feature_count": int(selection_feature_count),
-            "selection_c": float(selection_c),
-            "final_c": float(final_c),
-            "all_feature_count": int(len(all_feature_names)),
-            "selected_feature_count": int(len(selected_feature_names)),
-            "calibration_queries": int(calibration_mask.sum()),
-        },
+        error_weights=resolved_error_weights,
+        training_summary=training_summary,
     )
     gate = load_logistic_gate_config(gate_config)
     calibration_predictions = _apply_logistic_gate_predictions(
         choices[calibration_mask].copy(),
         gate.predict_link(selected_matrix[calibration_mask]),
     )
+    validation_metrics = None
+    if val_mask is not None:
+        validation_predictions = _apply_logistic_gate_predictions(
+            choices[val_mask].copy(),
+            gate.predict_link(selected_matrix[val_mask]),
+        )
+        validation_metrics = _summarize_predictions(validation_predictions)
     split_predictions = {
         str(split): _apply_logistic_gate_predictions(
             choices[split_values.eq(str(split)).to_numpy(dtype=bool)].copy(),
@@ -1127,10 +1185,123 @@ def _fit_promoted_logistic_gate(
             for index in selected_indices
         ],
         "calibration_metrics": _summarize_predictions(calibration_predictions),
+        "validation_metrics": validation_metrics,
         "split_metrics": {
             split: _summarize_predictions(predictions) for split, predictions in split_predictions.items()
         },
         "predictions": _apply_logistic_gate_predictions(choices.copy(), gate.predict_link(selected_matrix)),
+    }
+
+
+def select_logistic_gate_error_weights(
+    base_gate_config: Mapping[str, Any],
+    candidate_rows: pd.DataFrame,
+    choices: pd.DataFrame,
+    probabilities: np.ndarray,
+    *,
+    false_abstain_weights: Sequence[float] = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0),
+) -> dict[str, Any]:
+    """Tune the logistic gate ``false_abstain`` decision weight on held-out validation rows.
+
+    Keeps the fitted logistic probabilities fixed and sweeps ``error_weights["false_abstain"]``
+    out-of-sample on ``choices`` (e.g. the 1.5 ``gate_thresh`` split), selecting the weight
+    that minimizes ``weighted_average_error`` (tie-breaking on higher ``balanced_accuracy``).
+    """
+    if not false_abstain_weights:
+        raise ValueError("false_abstain_weights must be nonempty")
+    sweep: list[dict[str, Any]] = []
+    best_config: dict[str, Any] | None = None
+    best_key: tuple[float, float, float] | None = None
+    base_weights = dict(base_gate_config.get("error_weights", LOGISTIC_GATE_ERROR_WEIGHTS))
+    for w_fa in false_abstain_weights:
+        w_val = float(w_fa)
+        if not np.isfinite(w_val) or w_val <= 0:
+            raise ValueError(f"false_abstain weight must be finite and positive, got {w_fa!r}")
+        trial_config = copy.deepcopy(dict(base_gate_config))
+        trial_config["error_weights"] = {**base_weights, "false_abstain": w_val}
+        gate = load_logistic_gate_config(trial_config)
+        preds = _apply_promoted_logistic_gate_to_candidate_rows(candidate_rows, choices.copy(), probabilities, gate)
+        metrics = _summarize_predictions(preds)
+        sweep.append({"false_abstain_weight": w_val, "metrics": metrics})
+        key = (
+            float(metrics["weighted_average_error"]),
+            -float(metrics["balanced_accuracy"]),
+            abs(w_val - 1.0),
+        )
+        if best_key is None or key < best_key:
+            best_key = key
+            best_config = trial_config
+    assert best_config is not None
+    return {
+        "gate_config": best_config,
+        "selected_false_abstain_weight": float(best_config["error_weights"]["false_abstain"]),
+        "sweep": sweep,
+    }
+
+
+def build_whole_author_holdout_rows(
+    candidate_rows: pd.DataFrame,
+    *,
+    query_to_author: Mapping[str, str],
+    component_to_authors: Mapping[str, Sequence[str] | set[str] | frozenset[str]],
+    holdout_query_ids: Sequence[str] | set[str] | frozenset[str],
+    retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Synthesize realistic ``no_safe`` abstention queries via whole-author holdout.
+
+    For each query in ``holdout_query_ids``, removes every candidate component containing
+    any signature of that query's author, sets ``label = 0`` on all remaining candidates,
+    re-indexes ``retrieval_rank`` consecutively starting at 1, and truncates to
+    ``retrieval_top_k``. Held-out queries left with zero candidates are dropped.
+    """
+    required = {"query_group_id", "candidate_component_key", "retrieval_rank", "label"}
+    missing = sorted(required - set(candidate_rows.columns))
+    if missing:
+        raise ValueError(f"candidate_rows missing required columns for whole-author holdout: {missing}")
+    holdout_set = {str(qid) for qid in holdout_query_ids}
+    if not holdout_set:
+        return candidate_rows.copy(), {
+            "holdout_queries_requested": 0,
+            "holdout_queries_retained": 0,
+            "holdout_queries_dropped_empty": 0,
+            "author_rows_removed": 0,
+        }
+
+    qids = candidate_rows["query_group_id"].astype(str)
+    untouched = candidate_rows.loc[~qids.isin(holdout_set)].copy()
+    target_rows = candidate_rows.loc[qids.isin(holdout_set)].copy()
+
+    kept_parts: list[pd.DataFrame] = [untouched]
+    retained = 0
+    dropped_empty = 0
+    author_rows_removed = 0
+    for qid, group in target_rows.groupby(target_rows["query_group_id"].astype(str), sort=True):
+        author = query_to_author.get(str(qid))
+        if author is None:
+            raise KeyError(f"Missing author mapping for holdout query_group_id={qid!r}")
+        keep_mask = [
+            author not in component_to_authors.get(str(comp_key), ())
+            for comp_key in group["candidate_component_key"].astype(str)
+        ]
+        removed = int(len(keep_mask) - sum(keep_mask))
+        author_rows_removed += removed
+        filtered = (
+            group.loc[keep_mask].sort_values("retrieval_rank", kind="mergesort").head(int(retrieval_top_k)).copy()
+        )
+        if filtered.empty:
+            dropped_empty += 1
+            continue
+        filtered["label"] = np.int8(0)
+        filtered["retrieval_rank"] = np.arange(1, len(filtered) + 1, dtype=np.int64)
+        kept_parts.append(filtered)
+        retained += 1
+
+    combined = pd.concat(kept_parts, ignore_index=True)
+    return combined, {
+        "holdout_queries_requested": int(target_rows["query_group_id"].astype(str).nunique()),
+        "holdout_queries_retained": retained,
+        "holdout_queries_dropped_empty": dropped_empty,
+        "author_rows_removed": author_rows_removed,
     }
 
 
@@ -1991,6 +2162,8 @@ def fit_classic(
         stratified_scores.choices,
         stratified_scores.probabilities,
         calibration_splits=calibration_splits,
+        fit_splits=promoted_gate_config.get("fit_splits"),
+        validation_splits=promoted_gate_config.get("validation_splits"),
     )
     logistic_gate_config = dict(selected_gate_result["gate_config"])
     calibration_metrics = {
@@ -2019,6 +2192,11 @@ def fit_classic(
             "training_summary": dict(logistic_gate_config.get("training_summary", {})),
         },
         "calibration_metrics": dict(selected_gate_result["calibration_metrics"]),
+        "validation_metrics": (
+            dict(selected_gate_result["validation_metrics"])
+            if selected_gate_result.get("validation_metrics") is not None
+            else None
+        ),
         "calibration_split_metrics": {
             split: metrics
             for split, metrics in dict(selected_gate_result["split_metrics"]).items()

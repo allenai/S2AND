@@ -1285,6 +1285,65 @@ def _finalize_arrow_rust_bundle_metadata(
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target)
 
 
+def _sample_query_groups_for_smoke(labels: pd.DataFrame, max_query_groups: int) -> pd.DataFrame:
+    """Deterministically cap a row table to at most ``max_query_groups`` query groups.
+
+    Preserves both positive-bearing and all-negative query groups when both exist so
+    smoke runs exercise ranker fitting and gate calibration end-to-end.
+    """
+    if max_query_groups <= 0:
+        raise ValueError("max_query_groups must be > 0")
+    if labels.empty:
+        return labels
+    query_ids = labels["query_group_id"].astype(str)
+    unique_qids = sorted(query_ids.unique())
+    if len(unique_qids) <= max_query_groups:
+        return labels
+    if "label" in labels.columns and max_query_groups >= 2:
+        has_pos = labels.groupby(query_ids)["label"].max() > 0
+        pos_qids = sorted(str(qid) for qid, flag in has_pos.items() if bool(flag))
+        neg_qids = sorted(str(qid) for qid, flag in has_pos.items() if not bool(flag))
+        selected: list[str] = []
+        pos_idx = 0
+        neg_idx = 0
+        while len(selected) < max_query_groups and (pos_idx < len(pos_qids) or neg_idx < len(neg_qids)):
+            if pos_idx < len(pos_qids):
+                selected.append(pos_qids[pos_idx])
+                pos_idx += 1
+            if len(selected) < max_query_groups and neg_idx < len(neg_qids):
+                selected.append(neg_qids[neg_idx])
+                neg_idx += 1
+    else:
+        selected = unique_qids[:max_query_groups]
+    selected_set = set(selected)
+    return labels.loc[query_ids.isin(selected_set)].reset_index(drop=True)
+
+
+def _subset_smoke_assignments_file(assignments_path: Path, max_query_groups: int) -> dict[str, set[str]]:
+    """Cap a staged assignments.csv to at most ``max_query_groups`` per (source_key, split)."""
+    assignments = pd.read_csv(assignments_path)
+    kept_frames: list[pd.DataFrame] = []
+    for _group_key, group in assignments.groupby(["source_key", "split"], sort=True):
+        if len(group) <= max_query_groups:
+            kept_frames.append(group)
+            continue
+        if "has_positive_candidate" in group.columns and max_query_groups >= 2:
+            pos = group[group["has_positive_candidate"].astype(bool)].sort_values("query_group_id")
+            neg = group[~group["has_positive_candidate"].astype(bool)].sort_values("query_group_id")
+            n_pos = min(len(pos), (max_query_groups + 1) // 2)
+            n_neg = min(len(neg), max_query_groups - n_pos)
+            n_pos = min(len(pos), max_query_groups - n_neg)
+            kept_frames.append(pd.concat([pos.head(n_pos), neg.head(n_neg)], ignore_index=True))
+        else:
+            kept_frames.append(group.sort_values("query_group_id").head(max_query_groups))
+    subset = pd.concat(kept_frames, ignore_index=True)
+    subset.to_csv(assignments_path, index=False)
+    by_source: dict[str, set[str]] = {}
+    for source_key, group in subset.groupby("source_key", sort=True):
+        by_source[str(source_key)] = set(group["query_group_id"].astype(str))
+    return by_source
+
+
 def _materialize_arrow_rust_feature_bundle(
     *,
     source_bundle: OfficialBundle,
@@ -1302,6 +1361,7 @@ def _materialize_arrow_rust_feature_bundle(
     pairwise_aggregate_nan_value: float,
     arrow_datasets: Mapping[str, ArrowDataset],
     query_sources: InitialQuerySources | None = None,
+    max_query_groups_per_table: int | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     if query_sources is None:
         query_sources = load_initial_query_sources(source_bundle.root, arrow_datasets=arrow_datasets)
@@ -1309,6 +1369,13 @@ def _materialize_arrow_rust_feature_bundle(
     classic_spec = source_bundle.models.get("classic")
     if not isinstance(classic_spec, Mapping):
         raise ValueError("Source bundle models.classic must be an object")
+    smoke_source_queries: dict[str, set[str]] | None = None
+    if max_query_groups_per_table is not None:
+        split_spec = classic_spec.get("stratified_eval_test_split")
+        if isinstance(split_spec, Mapping) and split_spec.get("assignments_path"):
+            staged_assignments = output_bundle_root / str(split_spec["assignments_path"])
+            if staged_assignments.is_file():
+                smoke_source_queries = _subset_smoke_assignments_file(staged_assignments, max_query_groups_per_table)
     retrieval_top_k = int(classic_spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
     selected_keys = list(dict.fromkeys(table_keys))
     materialized_keys: list[str] = []
@@ -1358,14 +1425,21 @@ def _materialize_arrow_rust_feature_bundle(
             ),
             flush=True,
         )
+        table_query_ids = None if query_ids_by_table is None else query_ids_by_table.get(table_key)
+        if smoke_source_queries is not None and table_key not in {"train_path", "classic_gate_source_path"}:
+            # Keep only query groups retained in the smoke-subsetted assignments.csv.
+            all_smoke_ids = set().union(*smoke_source_queries.values()) if smoke_source_queries else set()
+            table_query_ids = all_smoke_ids if table_query_ids is None else (table_query_ids & all_smoke_ids)
         labels = read_source_parquet_rows(
             labels_path,
-            query_ids=(None if query_ids_by_table is None else query_ids_by_table.get(table_key)),
+            query_ids=table_query_ids,
         )
         labels, label_filtering_summary = _drop_unlabeled_singleton_orcid_rows(
             labels,
             context=f"arrow-rust:{table_key}",
         )
+        if max_query_groups_per_table is not None and table_key in {"train_path", "classic_gate_source_path"}:
+            labels = _sample_query_groups_for_smoke(labels, max_query_groups_per_table)
         if table_key == "train_path" and holdout_identities is not None:
             labels, holdout_summary = _apply_classic_train_holdout_filter(
                 labels,
@@ -1834,6 +1908,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         work_dir = Path(work.name)
         artifact_dir = work_dir / LINKER_STAGING_DIRNAME
         feature_bundle_root = work_dir / "training_features"
+        max_query_groups = getattr(args, "max_query_groups_per_table", None)
         feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
             source_bundle=source_bundle,
             output_bundle_root=feature_bundle_root,
@@ -1850,6 +1925,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
             query_sources=query_sources,
+            max_query_groups_per_table=max_query_groups,
         )
 
         started = time.perf_counter()
@@ -1902,6 +1978,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             arrow_datasets=arrow_datasets,
             query_sources=query_sources,
+            max_query_groups_per_table=max_query_groups,
         )
     evaluation = evaluate_classic(
         evaluation_feature_bundle,
@@ -1936,6 +2013,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "feature_nan_policy": feature_nan_policy,
         "artifact_summary": artifact_summary,
         "component_scope": "block-local",
+        "smoke_mode": max_query_groups is not None,
+        "max_query_groups_per_table": max_query_groups,
     }
     _write_json(output_dir / "linker_evaluation_report.json", result)
     work.cleanup()
@@ -1972,6 +2051,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     # Require an explicit allocation; a fixed default can exceed the shared CPU budget.
     parser.add_argument("--n-jobs", type=_positive_int, required=True)
     parser.add_argument("--total-ram-bytes", type=_positive_int, default=DEFAULT_TOTAL_RAM_BYTES)
+    parser.add_argument(
+        "--max-query-groups-per-table",
+        type=_positive_int,
+        default=None,
+        help="Small-sample smoke mode: cap each table and split to at most N query groups.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

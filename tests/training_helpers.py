@@ -116,6 +116,8 @@ def write_classic_tiny_bundle(root: Path) -> OfficialBundle:
                 "classic_gate_internal_eval_base_groups_path": "internal_eval_base_groups.csv",
                 "s2and_eval_path": "s2and.csv.gz",
                 "hwang_eval_path": "hwang.csv.gz",
+                # Real bundles keep each giant's calibration groups in its eval table too.
+                "extra_eval_paths": {"a_khan": "gate.csv.gz"},
                 "promoted_stratified_gate": {
                     "calibration_splits": ["calibration_fit", "calibration_check"],
                     "test_split": "test",

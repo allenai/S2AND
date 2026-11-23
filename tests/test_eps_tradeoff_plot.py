@@ -17,6 +17,7 @@ def _write_curve(root: Path) -> Path:
     plan_path.write_text(
         json.dumps(
             {
+                "dataset": "j_smith",
                 "score_mode": "safe-action-proxy",
                 "eps_values": [0.55, 0.65],
                 "model_manifest_sha256": "a" * 64,

@@ -2,10 +2,10 @@
 
 Read [`VERSION`](../VERSION) for the package version, currently `1.0.0b14`.
 The target final package version is `1.0.0`.
-The current model version is `1.3.2`, on research snapshot `1.3`.
+The current model version is `1.4`, on research snapshot `1.4`.
 Public Arrow and name-count data use format `1`.
 
-The `1.3`, `1.3.1`, and `1.3.2` prefixes are published on Amazon S3.
+The `1.3`, `1.3.1`, `1.3.2`, and `1.4` prefixes are published on Amazon S3.
 See the [data guide](data.md#download) for download locations.
 Keep each new release's S3 prefix empty until acceptance and publication.
 Fresh author-table counts, A, define the production count authority.
@@ -262,6 +262,7 @@ Model release `1.3.1` changes only linkage settings, so it publishes `inference/
 Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan.
 Model release `1.3.2` rebinds the `1.3.1` model to a rebuilt name-count index with
 `scripts/production/model/rebind_name_counts_index.py`, so it publishes only `inference/` under `s2and/1.3.2/`.
+Release `1.4` publishes `inference/` and `dataset/` under `s2and/1.4/` and no `source/` bundle.
 Reuse the dataset bundle for model-only updates with unchanged data.
 Sync `inference` and `dataset` into one fresh local root.
 Verify hashes and repeat installed bulk and incremental smoke checks.

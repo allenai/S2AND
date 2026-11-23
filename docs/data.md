@@ -11,9 +11,9 @@ Historical correction archives are not required.
 
 | Bundle | Use | Contents | Size |
 | --- | --- | --- | --- |
-| `inference/` | Run the production model | Complete production model and binary name-count index | 2.4 GB |
-| `dataset/` | Train, tune, and evaluate models | Benchmark Arrow data with labels, held-out test blocks and pairs, augmented pairs, the model plan, and incremental linker tasks | 9.1 GB |
-| `source/` | Correct records and prepare the next release | Editable JSON records with full paper text, SPECTER2 pickles, and giant-block replay records | 25.6 GB |
+| `inference/` | Run the production model | Complete production model and binary name-count index | 3.0 GB (`1.4`) |
+| `dataset/` | Train, tune, and evaluate models | Benchmark Arrow data with labels, held-out test blocks and pairs, augmented pairs, the model plan, and incremental linker tasks | 12.3 GB (`1.4`) |
+| `source/` | Correct records and prepare the next release | Editable JSON records with full paper text, SPECTER2 pickles, and giant-block replay records | 25.6 GB (`1.3` only) |
 
 Inference needs `inference/` only.
 Training and evaluation need `inference/` and `dataset/`.
@@ -24,6 +24,7 @@ Release preparation needs all three bundles.
 | `1.3` | `s2and/1.3/inference/` | `s2and/1.3/dataset/` | `s2and/1.3/source/` | Initial `1.3` release |
 | `1.3.1` | `s2and/1.3.1/inference/` | `s2and/1.3.1/dataset/` | `s2and/1.3/source/` | Changes only the model's linkage settings. The dataset changes only `pairwise/model_plan.json`. |
 | `1.3.2` | `s2and/1.3.2/inference/` | `s2and/1.3.1/dataset/` | `s2and/1.3/source/` | Binds the `1.3.1` model to an index rebuilt with the `1.0.0b11` Georgian and Armenian name rules. Requires `s2and` `1.0.0b11` or later. |
+| `1.4` | `s2and/1.4/inference/` | `s2and/1.4/dataset/` | none | Retrained model (EPS `0.38`) on corrected labels and November giant-block ORCID data, a refreshed name-count index and ORCID counts. Every published paper is in the 2026-11-17 Semantic Scholar Academic Graph (S2AG) snapshot; abstracts appear only where sharing is permitted, and emails are hashed. Use `s2and` `1.0.0b14` or later; earlier wheels lack the `1.4` ORCID counts. |
 
 Small canonical name tuples and ORCID prefix counts remain in normal Git and the Python wheel.
 Starting with `1.0.0b14`, the wheel ships the original `1.3.x` ORCID counts and the refreshed
@@ -40,9 +41,9 @@ Sync the bundles into `s2and/data/`, the default data folder of a source checkou
 The commands use the AWS CLI and need no AWS account.
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.2/inference/ s2and/data/
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3.1/dataset/ s2and/data/
-# Release preparation only:
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.4/inference/ s2and/data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.4/dataset/ s2and/data/
+# Release preparation only (published for 1.3):
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and/1.3/source/ s2and/data/
 ```
 
@@ -68,8 +69,8 @@ The model and the index bind their files through these manifests:
 
 | Manifest | SHA-256 |
 | --- | --- |
-| `production_model_v1.3.2/manifest.json` | `10f19730fd355cf31770cde85bb11b12cd3c1144af3521da3f2e421d2a5cda02` |
-| `name_counts_index/manifest.json` | `cf0dac4845e8f7a5ef0b2efc0b0e0618310ccb13367347dfc0dc84abdd6da1b3` |
+| `production_model_v1.4/manifest.json` | `7b8fc77341a0061eac3b4b24805d55e84a47b1f47cb0e7bef0738bcc9461db2b` |
+| `name_counts_index/manifest.json` | `d3ff6450a6b58a10a9c403871564f87cf1cb785aaced6118159b2551b802704c` |
 
 The [reproduction guide](reproduce.md) runs the full training process on the synced folder.
 Release `1.3` excludes patent data.
@@ -95,7 +96,7 @@ s2and/data/
   first_k_letter_counts_from_orcid*.json             # tracked 1.3.x ORCID prefix counts and manifest
   orcid_prefix_counts_v1_4/                          # tracked 1.4 ORCID prefix counts and manifest
   name_counts_index/          # inference: binary name-count index
-  production_model_v1.3.2/    # inference: complete model
+  production_model_v1.4/      # inference: complete model
   manifest.json               # dataset: public-data manifest
   benchmarks/<source>/        # dataset: Arrow tables, <source>_clusters.json, unknown-signature list
   pairwise/

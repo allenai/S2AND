@@ -1,6 +1,18 @@
 # Release Notes
 
-## Unreleased
+## 1.0.0b14 and model 1.4 (2026-11-23)
+
+- Model and data release `1.4` is published under `s3://ai2-s2-research-public/s2and/1.4/`
+  (`inference/` and `dataset/`; no `source/` bundle). Load `production_model_v1.4` with
+  `s2and` `1.0.0b14` or later. See [data](data.md).
+- `1.4` retrains both pairwise heads and the incremental linker on corrected labels and
+  November giant-block ORCID data, with a refreshed name-count index and ORCID counts.
+  EPS is `0.38`; see [the EPS decisions](eps_calibration.md#recorded-release-decisions).
+- Against `1.3.2`: benchmarks tie (overlap F1 0.9674 vs 0.9683); on six giant blocks scored on all
+  gold-ORCID authors, F1 rises 0.67 points; on 27 held-out production blocks the two tie
+  (pooled F1 0.9479 vs 0.9487).
+- Every paper in the `1.4` data is in the 2026-11-17 S2AG snapshot. Abstract text appears only
+  where sharing is permitted, and emails are hashed.
 
 - Linker source preflight resolves calibration and test assignments with the trainer's selector
   and rejects missing eligible rows, mismatched `base_group_id` values, inconsistent eval-table

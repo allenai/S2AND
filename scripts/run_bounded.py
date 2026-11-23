@@ -7,10 +7,12 @@ import ctypes
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Mapping
 from ctypes import wintypes
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -42,11 +44,103 @@ TELEMETRY_GRACE_SECONDS = 10.0
 # The command's hidden console stays open while vctip.exe is attached to it. It exits
 # by itself after its last client, so the runner tolerates it but never stops it.
 CONSOLE_HOST = PureWindowsPath(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "conhost.exe")
+PRIMARY_THREAD_ENV_VARS = (
+    "RAYON_NUM_THREADS",
+    "POLARS_MAX_THREADS",
+    "S2AND_NUM_THREADS",
+    "LOKY_MAX_CPU_COUNT",
+)
+SECONDARY_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "PYARROW_IO_THREAD_COUNT",
+)
 
 
 def utc_now() -> str:
     """Return an explicit UTC timestamp."""
     return datetime.now(UTC).isoformat()
+
+
+def detect_cpu_capacity() -> dict[str, int]:
+    """Detect logical CPU count and process CPU affinity when exposed."""
+    logical_cpus = os.cpu_count() or 1
+    affinity_cpus = logical_cpus
+    try:
+        affinity = psutil.Process().cpu_affinity()
+        if affinity:
+            affinity_cpus = len(affinity)
+    except (AttributeError, NotImplementedError, psutil.Error, OSError):
+        pass
+    return {
+        "logical_cpus": int(logical_cpus),
+        "affinity_cpus": int(affinity_cpus),
+        "effective_cpus": int(min(logical_cpus, affinity_cpus)),
+    }
+
+
+def build_thread_environment(
+    threads: int, base_env: Mapping[str, str] | None = None
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Build a child environment applying one compute-thread budget and 1-thread secondary pools."""
+    if threads <= 0:
+        raise ValueError("--threads must be a positive integer")
+    env = dict(os.environ if base_env is None else base_env)
+    primary = {name: str(threads) for name in PRIMARY_THREAD_ENV_VARS}
+    secondary = {name: "1" for name in SECONDARY_THREAD_ENV_VARS}
+    env.update(primary)
+    env.update(secondary)
+    capacity = detect_cpu_capacity()
+    record: dict[str, Any] = {
+        **capacity,
+        "allocated_threads": int(threads),
+        "primary_pools": primary,
+        "secondary_pools": secondary,
+    }
+    return env, record
+
+
+def _existing_ancestor(path: Path) -> Path:
+    current = path.resolve()
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return current
+
+
+def check_min_free_disk(target: Path, min_free_gib: float | None) -> int:
+    """Return free bytes on the volume of ``target`` and enforce ``min_free_gib`` if set."""
+    anchor = _existing_ancestor(target)
+    free_bytes = int(shutil.disk_usage(anchor).free)
+    if min_free_gib is not None:
+        required_bytes = int(min_free_gib * 1024**3)
+        if free_bytes < required_bytes:
+            raise OSError(
+                f"Insufficient free disk space under {anchor}: "
+                f"{free_bytes / 1024**3:.2f} GiB free < {min_free_gib:.2f} GiB required"
+            )
+    return free_bytes
+
+
+def detect_git_head(cwd: Path | None = None) -> str | None:
+    """Return the current git HEAD SHA if inside a git repository, else None."""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(cwd or Path.cwd()),
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    sha = completed.stdout.strip()
+    return sha or None
 
 
 class WindowsJob:
@@ -358,6 +452,13 @@ def supervise(args: argparse.Namespace) -> int:
             raise FileExistsError(f"An expected output already exists: {path}")
         if path.parent == output and os.path.normcase(path.name) in RECORD_NAMES:
             raise ValueError(f"An expected output cannot be a runner record: {path}")
+    threads = getattr(args, "threads", None)
+    min_free_gib = getattr(args, "min_free_gib", None)
+    disk_free_bytes_at_start = check_min_free_disk(output, min_free_gib)
+    child_env: dict[str, str] | None = None
+    thread_budget: dict[str, Any] | None = None
+    if threads is not None:
+        child_env, thread_budget = build_thread_environment(threads)
     output.mkdir(parents=True, exist_ok=False)
     telemetry = Telemetry(output)
     child = None
@@ -366,10 +467,15 @@ def supervise(args: argparse.Namespace) -> int:
         "status": "supervisor_error",
         "command": command,
         "cwd": str(Path.cwd()),
+        "git_head": detect_git_head(Path.cwd()),
         "supervisor_pid": os.getpid(),
         "started_utc": utc_now(),
         "max_seconds": args.max_seconds,
         "max_rss_bytes": int(args.max_rss_gib * 1024**3),
+        "min_free_gib": min_free_gib,
+        "disk_free_bytes_at_start": disk_free_bytes_at_start,
+        "cpu_capacity": detect_cpu_capacity(),
+        "thread_budget": thread_budget,
         "peak_tree_rss_bytes": 0,
         "rss_samples": 0,
         "command_exit_code": None,
@@ -385,6 +491,7 @@ def supervise(args: argparse.Namespace) -> int:
                     command,
                     stdout=stdout,
                     stderr=stderr,
+                    env=child_env,
                     start_new_session=os.name != "nt",
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
@@ -493,14 +600,30 @@ def main() -> int:
     deadline.add_argument("--max-seconds", type=float)
     deadline.add_argument("--no-deadline", action="store_true", help="Keep the memory limit without a wall deadline")
     parser.add_argument("--max-rss-gib", type=float, required=True)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Apply a primary compute-thread budget and set secondary BLAS/OMP/Arrow pools to 1.",
+    )
+    parser.add_argument(
+        "--min-free-gib",
+        type=float,
+        default=None,
+        help="Fail before launch if free disk space on the output volume is below this threshold.",
+    )
     parser.add_argument("--expected-output", type=Path, action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     limits = [args.max_rss_gib]
     if args.max_seconds is not None:
         limits.append(args.max_seconds)
+    if args.min_free_gib is not None:
+        limits.append(args.min_free_gib)
     if any(not math.isfinite(value) or value <= 0 for value in limits):
         parser.error("Resource limits must be finite and greater than zero")
+    if args.threads is not None and args.threads <= 0:
+        parser.error("--threads must be greater than zero")
     if not args.command or args.command[0] != "--" or len(args.command) < 2:
         parser.error("A command must follow --")
     try:

@@ -4,10 +4,12 @@ import argparse
 import hashlib
 import json
 import pickle
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 import s2and.subblocking as subblocking
@@ -422,3 +424,106 @@ def test_production_assignments_take_cached_clusters_for_the_bulk_step() -> None
             arrow_dataset=cast(Any, None),
             args=args,
         )
+
+
+def test_distance_cache_key_reuses_pairwise_across_linker_and_eps_variants(tmp_path) -> None:
+    def write_bundle(root: Path, *, pairwise_bytes: bytes, linker_bytes: bytes, eps: float) -> Path:
+        (root / "pairwise").mkdir(parents=True)
+        (root / "incremental_linker").mkdir(parents=True)
+        (root / "pairwise" / "main.lgb").write_bytes(pairwise_bytes)
+        (root / "incremental_linker" / "linker.lgb").write_bytes(linker_bytes)
+        (root / "clusterer.json").write_text(
+            json.dumps(
+                {
+                    "feature_contract": {"version": 1},
+                    "best_params": {"eps": eps},
+                    "cluster_model": {"params": {"eps": eps}},
+                    "incremental_linker": {"gate_version": len(linker_bytes)},
+                    "production_model_release_version": f"1.5-eps-{eps}",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "manifest.json").write_text(json.dumps({"linker_len": len(linker_bytes)}), encoding="utf-8")
+        return root
+
+    bundle_a = write_bundle(tmp_path / "model_a", pairwise_bytes=b"pw-v1", linker_bytes=b"lnk-v1", eps=0.38)
+    bundle_b = write_bundle(tmp_path / "model_b", pairwise_bytes=b"pw-v1", linker_bytes=b"lnk-v2-different", eps=0.46)
+    bundle_c = write_bundle(tmp_path / "model_c", pairwise_bytes=b"pw-v2", linker_bytes=b"lnk-v1", eps=0.38)
+
+    def meta(model_path):
+        args = SimpleNamespace(
+            arrow_root=tmp_path / "arrow",
+            batching_threshold=10,
+            dataset="dummy",
+            model_path=model_path,
+            pair_chunk_size=3,
+            suppress_orcid_constraints=True,
+            use_orcid_subblocking=False,
+        )
+        return sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["s1", "s2"], "gen1")
+
+    meta_a = meta(bundle_a)
+    meta_b = meta(bundle_b)
+    meta_c = meta(bundle_c)
+    assert meta_a["pairwise_model_sha256"] == meta_b["pairwise_model_sha256"]
+    assert meta_a["pairwise_model_sha256"] != meta_c["pairwise_model_sha256"]
+
+    cache_path = tmp_path / "cache.pkl"
+    with cache_path.open("wb") as outfile:
+        pickle.dump({"metadata": meta_a, "dist": [0.25]}, outfile)
+    # Linker/EPS variant at a different path reuses the cached pairwise distance matrix.
+    assert sweep_eps_on_linking_gold._load_cached_distance(cache_path, meta_b) == [0.25]
+    # Changing pairwise booster invalidates the cache.
+    with pytest.raises(ValueError, match="pairwise_model_sha256"):
+        sweep_eps_on_linking_gold._load_cached_distance(cache_path, meta_c)
+
+
+def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
+    from scripts.eps_sweep import orcid_b3
+    from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
+    from tests.raw_arrow_helpers import base_arrow_paths
+
+    raw = base_arrow_paths(tmp_path / "raw")
+    with pa.OSFile(raw["signatures"], "rb") as source:
+        table = pa.ipc.open_file(source).read_all()
+    rows = table.to_pylist()
+    # Wipe author_orcid in Arrow so labels must come from the external parquet.
+    for row in rows:
+        row["author_orcid"] = None
+    paths = write_arrow_tables_bundle(tmp_path / "raw", {"signatures": pa.Table.from_pylist(rows, schema=table.schema)})
+    write_test_arrow_artifact_manifest(tmp_path / "raw", {**raw, **paths})
+
+    valid = "0000-0002-1694-233X"
+    labels_path = tmp_path / "gold_orcid.parquet"
+    pd.DataFrame(
+        {
+            "signature_id": [rows[0]["signature_id"], rows[1]["signature_id"]],
+            "orcid": [f"https://orcid.org/{valid}", valid],
+        }
+    ).to_parquet(labels_path, index=False)
+    external = orcid_b3.load_external_reference_labels(labels_path)
+
+    with ArrowDataset.open(Path(paths["signatures"]).parent) as dataset:
+        ref = orcid_b3.read_reference(
+            dataset,
+            tmp_path,
+            "unit",
+            test_identities=frozenset(),
+            error_records=frozenset(),
+            external_labels=external,
+            allow_all_identities=True,
+        )
+        assert ref.repeated == {rows[0]["signature_id"]: valid, rows[1]["signature_id"]: valid}
+        assert ref.stats["reference_policy"] == orcid_b3.REFERENCE_POLICY_ALL_IDENTITIES
+        assert ref.stats["reference_source"] == "external_labels"
+        with pytest.raises(ValueError, match="allow_all_identities"):
+            orcid_b3.read_reference(
+                dataset,
+                tmp_path,
+                "unit",
+                test_identities=frozenset({rows[0]["signature_id"]}),
+                error_records=frozenset(),
+                external_labels=external,
+                allow_all_identities=True,
+            )

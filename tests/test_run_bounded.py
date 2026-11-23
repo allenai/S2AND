@@ -528,3 +528,40 @@ def test_lingering_compiler_telemetry(tmp_path: Path, install: Path, seconds: fl
         assert result["telemetry_cleanup"] == []
         assert result["cleanup"]["forced"]
     assert_family_stops(marker)
+
+
+def test_threads_budget_and_git_head_recorded_in_run_and_result(tmp_path: Path) -> None:
+    output = tmp_path / "threads"
+    code = (
+        "import json, os; from pathlib import Path; "
+        "Path('env.json').write_text(json.dumps({k: os.environ.get(k) for k in "
+        "['RAYON_NUM_THREADS','POLARS_MAX_THREADS','S2AND_NUM_THREADS','LOKY_MAX_CPU_COUNT',"
+        "'OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','PYARROW_IO_THREAD_COUNT']}))"
+    )
+    args = arguments(output, code)
+    args[0:0] = ["--threads", "4", "--min-free-gib", "0.001", "--expected-output", "env.json"]
+    process = start(args, tmp_path)
+    finish(process)
+    assert process.returncode == 0
+    observed = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
+    for primary in ("RAYON_NUM_THREADS", "POLARS_MAX_THREADS", "S2AND_NUM_THREADS", "LOKY_MAX_CPU_COUNT"):
+        assert observed[primary] == "4"
+    for secondary in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "PYARROW_IO_THREAD_COUNT"):
+        assert observed[secondary] == "1"
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    assert result["thread_budget"]["allocated_threads"] == 4
+    assert result["cpu_capacity"]["logical_cpus"] >= 1
+    assert result["disk_free_bytes_at_start"] > 0
+    assert "git_head" in result
+
+
+def test_min_free_gib_blocks_launch_when_insufficient(tmp_path: Path) -> None:
+    output, marker = tmp_path / "disk_fail", tmp_path / "launched.txt"
+    args = arguments(output, f"from pathlib import Path; Path({str(marker)!r}).touch()")
+    args[0:0] = ["--min-free-gib", "1000000000"]
+    process = start(args, tmp_path)
+    _, stderr = finish(process)
+    assert process.returncode == 1
+    assert "Insufficient free disk space" in stderr
+    assert not marker.exists()
+    assert not output.exists()

@@ -88,6 +88,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--score-mode", choices=["safe-action-proxy", "orcid-b3"], default="safe-action-proxy")
     parser.add_argument(
+        "--reference-labels",
+        type=Path,
+        default=None,
+        help="Optional external parquet (signature_id, orcid) for --score-mode orcid-b3.",
+    )
+    parser.add_argument(
+        "--allow-all-reference-identities",
+        action="store_true",
+        help="Use all reference identities without final-test exclusion (only for block-disjoint E-Cal/test pools).",
+    )
+    parser.add_argument(
         "--expected-initial-query-map-sha256", help="Require this frozen initial-query source-map SHA-256."
     )
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -204,6 +215,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--compute-missing-dists requires --max-subblocks or explicit --allow-full-run")
     if args.score_mode == "orcid-b3" and (args.use_orcid_subblocking or not args.suppress_orcid_constraints):
         raise ValueError("ORCID-B3 requires hidden ORCID constraints and hidden ORCID subblocking")
+    if args.score_mode != "orcid-b3" and (args.reference_labels is not None or args.allow_all_reference_identities):
+        raise ValueError("--reference-labels and --allow-all-reference-identities require --score-mode orcid-b3")
     if args.route == "production" and args.max_subblocks is not None:
         raise ValueError("--route production clusters whole blocks; use --route bulk with --max-subblocks")
     if args.route == "production" and args.use_orcid_subblocking == args.suppress_orcid_constraints:
@@ -536,6 +549,69 @@ def _cache_metadata(
     }
 
 
+def _is_linker_artifact_relpath(rel_path: str) -> bool:
+    return rel_path.split("/", 1)[0] == "incremental_linker"
+
+
+def _canonical_pairwise_clusterer_bytes(clusterer_path: Path) -> bytes:
+    """Return canonical JSON bytes for pairwise-distance-determining clusterer settings."""
+    payload = json.loads(clusterer_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        # Linker, EPS, and release version do not change bulk pairwise distances.
+        filtered = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"incremental_linker", "production_model_release_version"}
+        }
+        if isinstance(filtered.get("best_params"), dict):
+            filtered["best_params"] = {k: v for k, v in filtered["best_params"].items() if k != "eps"}
+        if isinstance(filtered.get("cluster_model"), dict):
+            cm = dict(filtered["cluster_model"])
+            if isinstance(cm.get("params"), dict):
+                cm["params"] = {k: v for k, v in cm["params"].items() if k != "eps"}
+            cm.pop("eps", None)
+            filtered["cluster_model"] = cm
+        return json.dumps(filtered, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return clusterer_path.read_bytes()
+
+
+def _pairwise_model_sha256(model_path: Path) -> str | None:
+    """Hash only the pairwise-distance-determining parts of a model bundle.
+
+    Allows linker, gate, and EPS variants sharing identical pairwise boosters and
+    clusterer feature contracts to reuse cached pairwise distance matrices.
+    """
+    if not model_path.exists():
+        return None
+    if model_path.is_file():
+        return _hash_file(model_path)
+    digest = hashlib.sha256()
+    digest.update(b"s2and-pairwise-model-fingerprint-v1\0")
+    has_pairwise_dir = (model_path / "pairwise").is_dir()
+    for child in sorted(candidate for candidate in model_path.rglob("*") if candidate.is_file()):
+        rel_path = child.relative_to(model_path).as_posix()
+        if _is_linker_artifact_relpath(rel_path):
+            continue
+        if has_pairwise_dir and rel_path == "manifest.json":
+            # Top-level manifest hashes incremental_linker and EPS-mutated clusterer.json;
+            # pairwise files and canonical clusterer settings are hashed directly below.
+            continue
+        rel_bytes = rel_path.encode("utf-8")
+        digest.update(len(rel_bytes).to_bytes(8, "little", signed=False))
+        digest.update(rel_bytes)
+        if rel_path == "clusterer.json":
+            canonical = _canonical_pairwise_clusterer_bytes(child)
+            digest.update(len(canonical).to_bytes(8, "little", signed=False))
+            digest.update(canonical)
+            continue
+        child_stat = child.stat()
+        digest.update(int(child_stat.st_size).to_bytes(8, "little", signed=False))
+        with child.open("rb") as infile:
+            for chunk in iter(lambda: infile.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _path_stat_cache_key(path: Path) -> tuple[Any, ...]:
     if not path.exists():
         return ("missing", str(path))
@@ -545,10 +621,13 @@ def _path_stat_cache_key(path: Path) -> tuple[Any, ...]:
     if path.is_dir():
         entries: list[tuple[str, int, int]] = []
         for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+            rel_path = child.relative_to(path).as_posix()
+            if _is_linker_artifact_relpath(rel_path):
+                continue
             child_stat = child.stat()
             entries.append(
                 (
-                    child.relative_to(path).as_posix(),
+                    rel_path,
                     int(child_stat.st_size),
                     int(child_stat.st_mtime_ns),
                 )
@@ -563,8 +642,10 @@ def _hash_directory(path: Path) -> tuple[int, int, str]:
     total_size = 0
     max_mtime_ns = int(path.stat().st_mtime_ns)
     for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
-        child_stat = child.stat()
         rel_path = child.relative_to(path).as_posix()
+        if _is_linker_artifact_relpath(rel_path):
+            continue
+        child_stat = child.stat()
         total_size += int(child_stat.st_size)
         max_mtime_ns = max(max_mtime_ns, int(child_stat.st_mtime_ns))
         rel_bytes = rel_path.encode("utf-8")
@@ -583,7 +664,13 @@ def _model_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
     model_path = args.model_path.resolve()
     model_stat = model_path.stat() if model_path.exists() else None
     if model_stat is None:
-        return {"model_path": str(model_path), "model_size": None, "model_mtime_ns": None, "model_sha256": None}
+        return {
+            "model_path": str(model_path),
+            "model_size": None,
+            "model_mtime_ns": None,
+            "model_sha256": None,
+            "pairwise_model_sha256": None,
+        }
     cache_key = _path_stat_cache_key(model_path)
     cached = getattr(args, "_s2and_model_fingerprint_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -599,6 +686,7 @@ def _model_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
         "model_size": model_size,
         "model_mtime_ns": model_mtime_ns,
         "model_sha256": model_sha256,
+        "pairwise_model_sha256": _pairwise_model_sha256(model_path),
     }
     try:
         args._s2and_model_fingerprint_cache = (cache_key, dict(fingerprint))
@@ -621,10 +709,7 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
     metadata = dict(payload.get("metadata", {}))
     for key in [
         "dataset",
-        "model_path",
-        "model_size",
-        "model_mtime_ns",
-        "model_sha256",
+        "pairwise_model_sha256",
         "arrow_root",
         "arrow_generation_id",
         "distance_source",
@@ -1234,19 +1319,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         reference_stats: dict[str, Any] = {}
         if args.score_mode == "orcid-b3":
             from scripts.eps_sweep.orcid_b3 import (
+                ORCID_ERROR_RECORDS,
                 final_test_query_identities,
+                load_external_reference_labels,
                 planning_targets,
                 read_reference,
                 reviewed_error_records,
             )
 
+            allow_all = bool(getattr(args, "allow_all_reference_identities", False))
+            external_path = getattr(args, "reference_labels", None)
+            external_labels = load_external_reference_labels(external_path) if external_path is not None else None
+            test_identities = (
+                frozenset() if allow_all else final_test_query_identities(snapshot_root, args.dataset, query_sources)
+            )
+            error_records = (
+                reviewed_error_records(snapshot_root, args.dataset)
+                if (snapshot_root / ORCID_ERROR_RECORDS).is_file() or not allow_all
+                else frozenset()
+            )
             reference = read_reference(
                 arrow_dataset,
                 snapshot_root,
                 args.dataset,
-                test_identities=final_test_query_identities(snapshot_root, args.dataset, query_sources),
-                error_records=reviewed_error_records(snapshot_root, args.dataset),
+                test_identities=test_identities,
+                error_records=error_records,
                 query_sources=query_sources,
+                external_labels=external_labels,
+                allow_all_identities=allow_all,
             )
             identity_reference = reference.repeated
             diagnostic_reference = reference.with_singletons

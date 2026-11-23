@@ -29,7 +29,32 @@ from scripts.production.model.initial_query_sources import (
 
 # Selection references exclude final-test identities and reviewed ORCID errors.
 REFERENCE_POLICY = "final_test_orcid_groups_and_reviewed_error_records_excluded"
+REFERENCE_POLICY_ALL_IDENTITIES = "all_reference_identities_block_disjoint"
 ORCID_ERROR_RECORDS = "orcid_error_query_signatures.json"
+
+
+def load_external_reference_labels(path: Path) -> dict[str, str]:
+    """Load verified external (signature_id, orcid) reference labels from parquet."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    frame = pd.read_parquet(path)
+    required = {"signature_id", "orcid"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"External reference labels missing required columns: {missing}")
+    labels: dict[str, str] = {}
+    for signature_id, raw_orcid in zip(frame["signature_id"], frame["orcid"], strict=True):
+        if signature_id is None or raw_orcid is None or pd.isna(signature_id) or pd.isna(raw_orcid):
+            continue
+        sid = str(signature_id)
+        orcid = normalize_orcid(str(raw_orcid))
+        if not sid or not orcid:
+            continue
+        existing = labels.get(sid)
+        if existing is not None and existing != orcid:
+            raise ValueError(f"Conflicting external ORCID labels for signature_id={sid!r}: {existing} vs {orcid}")
+        labels[sid] = orcid
+    return labels
 
 
 @dataclass(frozen=True)
@@ -117,24 +142,36 @@ def read_reference(
     test_identities: frozenset[str],
     error_records: frozenset[str],
     query_sources: InitialQuerySources | None = None,
+    external_labels: Mapping[str, str] | None = None,
+    allow_all_identities: bool = False,
 ) -> OrcidReference:
-    """Build ORCID references outside final-test identities.
+    """Build ORCID references outside final-test identities (or all identities for block-disjoint pools).
 
     A final-test record excludes its complete ORCID group, so test identities do not
-    select EPS. Reviewed wrong-ORCID records leave only their own row.
+    select EPS. Reviewed wrong-ORCID records leave only their own row. When
+    ``external_labels`` is supplied, verified ``(signature_id, orcid)`` pairs are read
+    from that mapping instead of the Arrow ``author_orcid`` column.
     """
+    if allow_all_identities and test_identities:
+        raise ValueError("allow_all_identities cannot be set when test_identities is non-empty")
     if query_sources is None:
         query_sources = load_initial_query_sources(snapshot_root, arrow_datasets={dataset: arrow_dataset})
     origins = query_sources.origins.get(dataset, {})
     clones = frozenset(origins)
     with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
         with pa.PythonFile(infile, mode="r") as source:
-            table = ipc.open_file(source).read_all().select(["signature_id", "author_orcid"])
+            columns = ["signature_id"] if external_labels is not None else ["signature_id", "author_orcid"]
+            table = ipc.open_file(source).read_all().select(columns)
     rows = table.to_pydict()
     candidates: dict[str, str] = {}
     excluded_rows = 0
     excluded_errors = 0
-    for signature_id, raw_orcid in zip(rows["signature_id"], rows["author_orcid"], strict=True):
+    raw_orcids = (
+        [external_labels.get(str(sid)) for sid in rows["signature_id"]]
+        if external_labels is not None
+        else rows["author_orcid"]
+    )
+    for signature_id, raw_orcid in zip(rows["signature_id"], raw_orcids, strict=True):
         signature_id = str(signature_id)
         if signature_id.startswith("visibleq:") and signature_id not in clones:
             raise ValueError("Derived query copies require their source map in the snapshot")
@@ -147,7 +184,11 @@ def read_reference(
             excluded_errors += bool(orcid)
         elif orcid:
             candidates[signature_id] = orcid
-    test_groups = {candidates[signature] for signature in test_identities if signature in candidates}
+    test_groups = (
+        set()
+        if allow_all_identities
+        else {candidates[signature] for signature in test_identities if signature in candidates}
+    )
     with_singletons = {signature: orcid for signature, orcid in candidates.items() if orcid not in test_groups}
     counts = Counter(with_singletons.values())
     repeated = {signature: orcid for signature, orcid in with_singletons.items() if counts[orcid] >= 2}
@@ -155,13 +196,15 @@ def read_reference(
         raise ValueError(f"EPS reference contains final-test records: {dataset} {sorted(overlap)[:5]}")
     if not repeated:
         raise ValueError(f"No repeated ORCID references for dataset={dataset}")
+    excluded_fraction = (len(candidates) - len(with_singletons)) / len(candidates) if candidates else 0.0
     return OrcidReference(
         repeated=repeated,
         with_singletons=with_singletons,
         excluded_copies=clones,
         stats={
             "reference_kind": "repeated_orcid_identity",
-            "reference_policy": REFERENCE_POLICY,
+            "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES if allow_all_identities else REFERENCE_POLICY,
+            "reference_source": "external_labels" if external_labels is not None else "arrow_author_orcid",
             MAP_SHA256_FIELD: query_sources.sha256,
             "reference_signatures": len(repeated),
             "reference_groups": len(set(repeated.values())),
@@ -171,7 +214,7 @@ def read_reference(
             "final_test_reference_overlap": 0,
             "excluded_final_test_orcid_groups": len(test_groups),
             "excluded_final_test_group_signatures": len(candidates) - len(with_singletons),
-            "excluded_final_test_signature_fraction": (len(candidates) - len(with_singletons)) / len(candidates),
+            "excluded_final_test_signature_fraction": excluded_fraction,
             "excluded_reviewed_error_records": excluded_errors,
             "excluded_initial_query_copies": len(clones),
             "excluded_mixed_orcid_rows": excluded_rows,

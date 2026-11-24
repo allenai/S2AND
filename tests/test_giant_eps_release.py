@@ -1050,3 +1050,56 @@ def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Pa
     _update_curve_plan(dataset, plan | {"distance_policy_version": DISTANCE_POLICY_VERSION - 1})
     with pytest.raises(ValueError, match="another distance policy"):
         read_sweep_curve(tmp_path, "unit", "orcid-b3")
+
+
+@pytest.mark.parametrize("mode", ["strict", "home_pool"])
+def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mode: str) -> None:
+    from types import SimpleNamespace
+
+    from s2and._sha256 import sha256_file
+    from scripts.eps_sweep.apply_reviewed_eps import _require_test_separated_reference
+    from scripts.eps_sweep.orcid_b3 import BLOCK_ROLE_SHA256_FIELD, REFERENCE_POLICY_ALL_IDENTITIES
+    from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+    from scripts.production.data.block_roles import load_block_roles
+    from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD
+
+    block = "a ross"
+    home, sealed = "0000-0001-5000-0007", "0000-0002-1694-233X"
+    role_path = tmp_path / "roles.json"
+    role_path.write_text(
+        json.dumps(
+            assign_block_roles(
+                [BlockSpec(block, 2, frozenset({home})), BlockSpec("b ross", 2, frozenset({sealed}))],
+                {"eps_cal": 1, "final_test_a": 1},
+                pinned_roles={block: "eps_cal", "b ross": "final_test_a"},
+                closure_mode=mode,
+            )
+        ),
+        encoding="utf-8",
+    )
+    roles = load_block_roles(role_path)
+    assert not roles.orcid_home_role
+    ref = tmp_path / block / "orcid_reference.parquet"
+    ref.parent.mkdir()
+    pd.DataFrame({"signature_id": ["one", "two"], "orcid": [sealed, sealed]}).to_parquet(ref, index=False)
+    digest = "a" * 64
+    report = {
+        "arrow_root": str(tmp_path),
+        MAP_SHA256_FIELD: digest,
+        "reference": {
+            "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES,
+            "sha256": sha256_file(ref),
+            MAP_SHA256_FIELD: digest,
+            BLOCK_ROLE_SHA256_FIELD: roles.sha256,
+        },
+    }
+    with pytest.raises(ValueError, match="ORCID .* absent .* frozen block"):
+        _require_test_separated_reference(
+            tmp_path,
+            block,
+            report,
+            lambda *_: frozenset(),
+            SimpleNamespace(sha256=digest),
+            verified_eps_cal_blocks=frozenset({block}),
+            block_roles=roles,
+        )

@@ -355,15 +355,13 @@ def score_block_role(
         block_roles=roles,
         require_repeated=False,
     )
+    if missing := reference.with_singletons.keys() - assignments.keys():
+        raise ValueError(f"Incomplete ORCID reference coverage for {block!r}: missing {len(missing)} assignments")
     return {
         "block": normalize_block_key(block),
         "role": role,
         "reference": reference.stats,
-        "repeated": (
-            score_assignments(reference.repeated, assignments, eps)
-            if reference.repeated.keys() & assignments.keys()
-            else None
-        ),
+        "repeated": (score_assignments(reference.repeated, assignments, eps) if reference.repeated else None),
         "with_singletons": score_assignments(reference.with_singletons, assignments, eps),
     }
 

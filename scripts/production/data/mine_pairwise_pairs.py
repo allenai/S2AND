@@ -13,25 +13,40 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.ipc as ipc
 
+from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
+from s2and.text import normalize_orcid
 from scripts.production.data.block_roles import load_block_roles, normalize_block_key
 
 
-def _real_signatures(root: Path, block: str) -> list[str]:
+def _real_signatures(root: Path, block: str, orcid_home_roles: Mapping[str, str]) -> tuple[list[str], int]:
     with (
         ArrowDataset.open(root) as dataset,
         dataset.use() as lease,
         lease.open_file("signatures") as infile,
         pa.PythonFile(infile, mode="r") as source,
     ):
-        rows = ipc.open_file(source).read_all().select(["signature_id", "author_block"]).to_pydict()
-    real = set()
-    for signature, raw_block in zip(rows["signature_id"], rows["author_block"], strict=True):
-        if not signature or normalize_block_key(raw_block) != block or signature in real:
-            raise ValueError(f"Expected unique signatures from block {block!r} in {root}")
-        if not signature.startswith("visibleq:"):
-            real.add(signature)
-    return sorted(real)
+        reader = ipc.open_file(source)
+        columns = ["signature_id", "author_block"]
+        if "author_orcid" in reader.schema.names:
+            columns.append("author_orcid")
+        signatures: list[str] = []
+        seen: set[str] = set()
+        excluded = 0
+        for batch_index in range(reader.num_record_batches):
+            for row in reader.get_batch(batch_index).select(columns).to_pylist():
+                signature = row["signature_id"]
+                if not signature or normalize_block_key(row["author_block"]) != block or signature in seen:
+                    raise ValueError(f"Expected unique signatures from block {block!r} in {root}")
+                seen.add(signature)
+                if signature.startswith("visibleq:"):
+                    continue
+                orcid = normalize_orcid(row.get("author_orcid") or "")
+                if orcid and orcid_home_roles.get(orcid, "pairwise_train") != "pairwise_train":
+                    excluded += 1
+                else:
+                    signatures.append(signature)
+    return sorted(signatures), excluded
 
 
 def mine_pairs(
@@ -53,12 +68,27 @@ def mine_pairs(
         if roles.role_for(block) != "pairwise_train":
             raise ValueError(f"Block {block!r} is outside pairwise_train")
 
+    homes = {
+        orcid: roles.orcid_home_role.get(orcid, roles.block_to_role[block])
+        for block, orcids in roles.block_orcids.items()
+        for orcid in orcids
+    }
+    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+    if manifest_path.exists():
+        raise FileExistsError(manifest_path)
     rng = random.Random(seed)
+    counts = {}
     rows: list[tuple[str, str, str, float]] = []
     for block, root in sorted(normalized.items()):
-        signatures = _real_signatures(root, block)
+        signatures, excluded = _real_signatures(root, block, homes)
         population = math.comb(len(signatures), 2)
         count = min(population, per_block)
+        counts[block] = {
+            "eligible_signatures": len(signatures),
+            "excluded_non_home_signatures": excluded,
+            "eligible_pairs": population,
+            "sampled_pairs": count,
+        }
         for index in sorted(rng.sample(range(population), count)):
             # Invert the triangular index without enumerating the pair population.
             right = (1 + math.isqrt(1 + 8 * index)) // 2
@@ -69,6 +99,21 @@ def mine_pairs(
         writer = csv.writer(handle)
         writer.writerow(["block_key", "signature_id_1", "signature_id_2", "inclusion_probability"])
         writer.writerows(rows)
+    with manifest_path.open("x", encoding="utf-8", newline="\n") as handle:
+        json.dump(
+            {
+                "block_role_assignments_sha256": roles.sha256,
+                "seed": seed,
+                "role": "pairwise_train",
+                "pairs_per_block": per_block,
+                "output_sha256": sha256_file(output_path),
+                "blocks": counts,
+            },
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
     return len(rows)
 
 

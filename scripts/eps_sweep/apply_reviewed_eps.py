@@ -96,16 +96,13 @@ def _require_test_separated_reference(
     reference_path = sweep_root / dataset / "orcid_reference.parquet"
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
-    if block_roles is not None and (
-        policy == REFERENCE_POLICY_ALL_IDENTITIES or block_roles.closure_mode == "home_pool"
-    ):
+    if block_roles is not None:
         role_digest = stats.get(BLOCK_ROLE_SHA256_FIELD)
         if (block_roles.closure_mode == "home_pool" or role_digest is not None) and role_digest != block_roles.sha256:
             raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
-        if block_roles.orcid_home_role:
-            orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
-            if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
-                raise ValueError(f"The EPS reference contains an ORCID outside its home role: {dataset}")
+        orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
+        if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
+            raise ValueError(f"The EPS reference contains an ORCID outside its home role: {dataset}")
     if policy == REFERENCE_POLICY:
         reference = set(pd.read_parquet(reference_path, columns=["signature_id"])["signature_id"].astype(str))
         if overlap := reference & test_identities(snapshot_root, dataset, query_sources):

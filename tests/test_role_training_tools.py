@@ -79,3 +79,77 @@ def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None
     assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == 6
     assert (rows["signature_id_1"] < rows["signature_id_2"]).all()
     np.testing.assert_allclose(rows["inclusion_probability"], 6 / (32 * 31 / 2))
+
+
+def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
+    from scripts.eps_sweep.orcid_b3 import score_block_role
+
+    block = "a ross"
+    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
+    roles_path = tmp_path / "roles.json"
+    roles_path.write_text(
+        json.dumps(
+            assign_block_roles(
+                [BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME}))],
+                {"dev_test": 1},
+            )
+        ),
+        encoding="utf-8",
+    )
+    with ArrowDataset.open(spec["arrow_dir"]) as arrow:
+        with pytest.raises(ValueError, match="Incomplete ORCID reference coverage.*missing 6"):
+            score_block_role(
+                arrow,
+                tmp_path,
+                block,
+                roles_path=roles_path,
+                role="dev_test",
+                assignments={"q_full": "merged"},
+                eps=0.38,
+            )
+
+
+@pytest.mark.parametrize("check", ["sampling_frame", "manifest"])
+def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str) -> None:
+    from s2and._sha256 import sha256_file
+    from scripts.production.data.mine_pairwise_pairs import mine_pairs
+
+    block = "a ross"
+    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
+    roles_path = tmp_path / "roles.json"
+    roles_path.write_text(
+        json.dumps(
+            assign_block_roles(
+                [
+                    BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME})),
+                    BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
+                ],
+                {"pairwise_train": 1, "final_test_a": 1},
+                pinned_roles={block: "pairwise_train", "sealed": "final_test_a"},
+                closure_mode="home_pool",
+            )
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "pairs.csv"
+    mined = mine_pairs(roles_path, {block: Path(spec["arrow_dir"])}, output, per_block=500, seed=42)
+    if check == "sampling_frame":
+        assert mined == 435
+        rows = pd.read_csv(output)
+        assert not set(rows["signature_id_1"]) & {"q_outside_home", "s03"}
+        assert not set(rows["signature_id_2"]) & {"q_outside_home", "s03"}
+        assert rows["inclusion_probability"].eq(1.0).all()
+        small = tmp_path / "sample.csv"
+        assert mine_pairs(roles_path, {block: Path(spec["arrow_dir"])}, small, per_block=6, seed=42) == 6
+        np.testing.assert_allclose(pd.read_csv(small)["inclusion_probability"], 6 / 435)
+    else:
+        manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+        assert manifest["seed"] == 42
+        assert manifest["block_role_assignments_sha256"] == sha256_file(roles_path)
+        assert manifest["output_sha256"] == sha256_file(output)
+        assert manifest["blocks"][block] == {
+            "eligible_signatures": 30,
+            "excluded_non_home_signatures": 2,
+            "eligible_pairs": 435,
+            "sampled_pairs": 435,
+        }

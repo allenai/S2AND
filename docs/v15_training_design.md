@@ -36,7 +36,7 @@ Feature contract 2 applies this rule to pairwise and linker inference. Loaded co
 1.4, keep the original feature and retrieval behavior. Finalizing a pairwise bundle preserves its contract.
 Rebuild frozen linker windows when the recorded distance policy or package version differs. The manual EPS
 curve reader also requires the current distance policy.
-Rebuild feature tables and EPS distance caches created before this policy. EPS records distance policy 14.
+Rebuild feature tables and EPS distance caches created before this policy. EPS records distance policy 15.
 The Arrow schema, feature names, and model bundle formats are unchanged.
 
 Pass `--blocks` a JSON list or Parquet table with `block_key`, `signature_count`, `orcids` and `split`.
@@ -55,7 +55,6 @@ by stratum when the available blocks and targets permit. Free `dev_test` blocks 
 Supply every scoring ORCID in the block intake. A scoring ORCID missing from its frozen block raises an error.
 Use `orcid_mention_counts` or one list entry per mention for count-based home selection. With unique lists
 alone, each known ORCID contributes one mention per block. Evaluation roles take priority.
-Pass the prior `assignments.json` as `--pinned-roles-json` to preserve its blocks and ORCID homes.
 
 In `home_pool`, the ORCID lists must cover every valid deposited or verified gold identity that can appear in the
 block. A shared ORCID scores only in its manifest home role. Keep other mentions as context in Arrow.
@@ -64,7 +63,7 @@ The join keeps verified unscored and non-home identities with `scored=False`. Th
 that column and uses ineligible identities for seed purity and whole-author exclusion.
 Pass the same file to `sweep_eps_on_linking_gold.py --score-mode orcid-b3 --allow-all-reference-identities`
 and `apply_reviewed_eps.py`. EPS verifies the manifest digest, the zero scored overlap, and the scored identities
-in the saved reference. A nonzero raw overlap is expected when `home_pool` assigns a shared identity.
+in the saved reference against frozen block membership. A nonzero raw overlap is expected when `home_pool` assigns a shared identity.
 
 ### Build linker tasks
 
@@ -84,19 +83,15 @@ same `--block-role-assignments` file. The trainer checks table hashes and comput
 Native retrieval can return fewer than 25 candidates. Keep those windows and record their counts.
 Use all known seed identities for whole-author exclusion and leave mixed or unresolved targets unscored.
 It fits the ranker and gate on their respective tables and leaves the sealed block halves outside those inputs.
-For the gate-only arm, pass `--fixed-ranker-bundle` and `--expected-ranker-sha256`. The trainer checks
-the supplied hash against the source manifest and preserves the booster bytes. To replay M1's source
-calibration rows, pass `--use-legacy-gate-calibration` with the fixed-ranker options and omit the frozen inputs.
-
-A gate-only run verifies the complete source bundle and copies the specified booster byte for byte.
-Use `--use-legacy-gate-calibration` when supplying a fixed ranker without frozen task inputs.
-The 1.4 ranker keeps its linker feature contract in calibration, evaluation, and publication.
-Use the legacy calibration inputs with that ranker because frozen linker windows use contract 2.
+For the gate-only arm, pass `--fixed-ranker-bundle` and `--expected-ranker-sha256`. The trainer verifies
+the complete source bundle and preserves the booster bytes. Pass `--use-legacy-gate-calibration` when running
+without frozen task inputs. The 1.4 ranker keeps its linker feature contract in calibration, evaluation, and
+publication. Use the legacy calibration inputs with that ranker because frozen linker windows use contract 2.
 Gate-only reports retain test metrics and omit ranker training row counts.
 
 ## First 1.5 experiment order
 
-1. **Experiment 1:** Keep 1.4's pairwise heads and 53-feature candidate ranker fixed for the gate-only experiment. Refit the 240-feature gate on `gate_fit` and inspect the `gate_thresh` report for link count, gold precision on scored links, and gold recall against known safe seed components before retrieval. Blind-judge the links each weight adds and removes. The report includes the configured weight and keeps it in production unless `classic.promoted_stratified_gate.false_abstain_weight` explicitly sets a new one. Measure cross-subblock recovery on unseen >15k blocks and non-ORCID precision. Across 14 blocks above 15k in Batches 1–6, 1.4 changed pooled F1 by −0.145 points [−0.609, +0.311] versus 1.3.2. The across-sub-block component was −0.456 points.
+1. **Experiment 1:** Keep 1.4's pairwise heads and 53-feature candidate ranker fixed for the gate-only experiment. Replay M1 gate calibration with the 1.4 ranker. For a contract-2 ranker, refit the gate on `gate_fit` and inspect the `gate_thresh` report for link count, gold precision on scored links, and gold recall against known safe seed components before retrieval. Blind-judge the links each weight adds and removes. The report includes the configured weight and keeps it in production unless `classic.promoted_stratified_gate.false_abstain_weight` explicitly sets a new one. Measure cross-subblock recovery on unseen >15k blocks and non-ORCID precision. Across 14 blocks above 15k in Batches 1–6, 1.4 changed pooled F1 by −0.145 points [−0.609, +0.311] versus 1.3.2. The across-sub-block component was −0.456 points.
 2. **Experiment 2:** Evaluate compact asymmetric middle & career-year gate features (`query_mid_x_cand_no_mid_x_size`, `query_mid_overlap_frac`, `query_mid_conflict_any`, `year_predates_log`) and retrieval re-tuning only after Experiment 1 establishes the clean baseline.
 3. **Experiment 3 (conditional):** Lift `YEAR_DIFF_CAP=50` only if backed by targeted `>45yr` historical labeled pairs (`≥5,000` pairs so splits exceed `min_child_samples`).
 
@@ -138,8 +133,11 @@ decided verdicts. The agreement measure that includes abstentions counts decided
 
 Run `uv run python -m scripts.eps_sweep.orcid_b3` with `--block-role-assignments`, `--role`, `--block`,
 `--arrow-dir`, `--snapshot-root`, `--assignments-json` and `--eps`. Pass verified labels with
-`--external-labels` when available. The report gives reference coverage and B3 with and without singletons.
+`--external-labels` when available. The scorer requires assignments for every reference signature and
+reports B3 with and without singletons.
 
 Run `uv run python -m scripts.production.data.mine_pairwise_pairs` with `--block-role-assignments`,
 `--blocks-json`, `--pairs-per-block` and `--output`. Map block keys to Arrow directories in the input JSON.
-The miner samples uniformly within `pairwise_train` blocks and writes signature ID pairs and inclusion probabilities.
+The miner excludes mentions whose Arrow ORCID has a frozen home outside `pairwise_train`.
+It samples uniformly from the remaining signatures and writes pairs and inclusion probabilities.
+The adjacent `<output>.manifest.json` records the role manifest digest, seed, output digest, and sampling counts.

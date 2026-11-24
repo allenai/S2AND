@@ -103,7 +103,9 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 - Removed the Python subblocker from `s2and.subblocking`: `make_subblocks`,
   `make_subblocks_with_telemetry`, `cluster_with_specter`,
   `cluster_with_graph_fallback`, `subdivide_helper`,
-  `DatasetGraphSubblockingFallback` and `no_middle_dead_end_buckets`.
+  `DatasetGraphSubblockingFallback`, `no_middle_dead_end_buckets`,
+  `make_dataset_graph_subblocking_cluster_fn` and
+  `signature_affiliation_feature_keys`.
   Subblocking runs in Rust inside `Clusterer.predict_from_arrow`.
 - Removed unused evaluation helpers `claims_eval`, `facet_eval`,
   `FacetEvalResult` and `min_pair_edit` from `s2and.eval`, and `equal_initial`
@@ -569,6 +571,9 @@ both timings were recorded.
 | `s_gupta` | Within 2% | 3.7 → 3.3 |
 | `a_silva` | Within 2% | n/a |
 
+**Update at v1.3 release:** Release-grade v1.3 memory and throughput gates
+remain pending.
+
 ### Status
 
 - **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles
@@ -584,9 +589,6 @@ both timings were recorded.
   the next update cycle without historical correction archives.
 
 ## 0.51.2
-
-**Update at v1.3 release:** Release-grade v1.3 memory and throughput gates
-remain pending.
 
 - Added `fingerprint_source` to the Arrow batch-index writers. Setting it to
   `False` skipped the full-file FNV hash and recorded a size-only index for

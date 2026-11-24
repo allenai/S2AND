@@ -888,18 +888,36 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
         assert report["artifact_summary"]["gate_config"]["training_summary"]["calibration_queries"] == 2
 
 
-def test_fixed_ranker_publication_rechecks_booster_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("corrupt", ["digest", "staged_copy"])
+def test_fixed_ranker_publication_rechecks_booster_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corrupt: str
+) -> None:
+    import shutil
+
+    from s2and.incremental_linking import artifact as artifact_module
     from s2and.incremental_linking.artifact import save_incremental_linking_artifact
     from tests.promoted_linking_helpers import tiny_logistic_gate_config
 
     _, fixed, digest = _fixed_ranker_fixture(tmp_path)
     source = fixed / "incremental_linker" / "booster.lgb"
     output = tmp_path / "new-artifact"
+    if corrupt == "digest":
+        digest = digest[::-1]
+    else:
+        # Keep the source digest valid and alter only the staged copy, so a check that hashes the source passes.
+        real_copyfile = shutil.copyfile
+
+        def copy_then_alter(src: Path, dst: Path) -> None:
+            real_copyfile(src, dst)
+            with Path(dst).open("ab") as staged:
+                staged.write(b"x")
+
+        monkeypatch.setattr(artifact_module.shutil, "copyfile", copy_then_alter)
     with pytest.raises(ValueError, match="SHA-256 changed before publication"):
         save_incremental_linking_artifact(
             None,
             output,
-            fixed_booster=(source, digest[::-1]),
+            fixed_booster=(source, digest),
             gate_config=tiny_logistic_gate_config(),
             target_spec={},
             pairwise_bundle_binding={"source": "fixture"},

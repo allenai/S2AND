@@ -11,8 +11,6 @@ Run the production training process on the published `1.3` data to approximate t
 
 In a source checkout, run `git checkout <release-tag>` and set up the environment with the [install guide](install.md#repo-checkout).
 
-> **Update at v1.3 release:** Replace `<release-tag>` with the verified release tag.
-
 ## Sync the 1.3.1 index and reference model
 
 ```bash

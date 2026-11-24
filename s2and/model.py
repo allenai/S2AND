@@ -771,10 +771,6 @@ def _join_arrow_subblock_clusters(
     )
 
 
-def _has_incremental_seed_source(dataset: Any) -> bool:
-    return bool(getattr(dataset, "cluster_seeds_require", {}) or {})
-
-
 def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -> dict[str, int | str]:
     """Return the seed map with the same string policy used by Arrow sidecars."""
 

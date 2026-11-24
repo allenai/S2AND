@@ -24,7 +24,6 @@ s2and/data/orcid_prefix_counts_v1_4/*
 !s2and/data/orcid_prefix_counts_v1_4/first_k_letter_counts_from_orcid.manifest.json
 !s2and/data/s2and_name_tuples_canonical.txt
 !s2and/data/s2and_surname_variants_canonical.txt
-!s2and/data/s2and_name_tuples_filtered.txt
 !s2and/data/s2and_unnormalized_filtered_name_tuples.txt
 s2and/data-backup/
 

@@ -46,7 +46,6 @@ Use [the data guide](../docs/data.md) to download them.
 | `extract_big_block_dataset.py` | Stream a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, `specter.pickle`, `cluster_seeds.json`, `altered_cluster_signatures.txt`, and `meta.json`; supports both pretty-printed and minified JSON exports |
 | `convert_to_arrow.py` | Convert service JSON, benchmarks, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch indexes; validate name counts/datasets and write checksum-bound collection manifests |
 | `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on a giant Arrow block and write preservation metrics, plots, and tables. Runs the native subblocker that `Clusterer.predict_from_arrow` uses, with the packaged ORCID prefix counts. |
-| `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 
 ### Evaluation and verification
 
@@ -76,9 +75,3 @@ Use [the data guide](../docs/data.md) to download them.
 | `sync_version.py` | Sync `VERSION` into Python/Rust manifests and lockfiles |
 | `run_bounded.py` | Run one long model job with RAM, deadline, `--threads`, `--min-free-gib`, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
 | `sync_feature_schema.py` | Regenerate the Rust feature-column constants from `s2and/feature_schema.py`; CI runs it with `--check` |
-
-### Retired historical scripts
-
-The `archive/` folder held provenance records for the name-tuple curation, the augmented training data,
-the claims datasets, the mini datasets, and the post-paper SOTA runs.
-Read the records at commit `f31301f`; they do not run against current APIs.

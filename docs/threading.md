@@ -52,8 +52,6 @@ for this work.
 
 `build_training_anddata_from_arrow` skips Python paper preprocessing and uses
 Rust Rayon. See [Build a Rust-backed training dataset](training.md#build-a-rust-backed-training-dataset).
-Use [`scripts/bench_preprocess_phases.py`](../scripts/bench_preprocess_phases.py)
-to benchmark the Python phases separately.
 
 ## Recommended run setup
 

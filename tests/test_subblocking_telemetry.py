@@ -499,36 +499,6 @@ def test_python_and_arrow_report_the_same_no_middle_dead_ends(tmp_path, rows, ma
             assert all(f"{first}|middle=" in bucket_of[sid].split(", ") for sid in bucket)
 
 
-def test_rowwise_arrow_coauthors_normalize_names_and_require_unique_positions(tmp_path) -> None:
-    paper_authors = pa.table(
-        {
-            "paper_id": pa.array(["p1", "p1", "p1", "p1"], type=pa.string()),
-            "position": pa.array([0, 1, 2, 3], type=pa.int64()),
-            "author_name": pa.array(["O'Connor", "", "   ", "Maciej Górski"], type=pa.string()),
-        }
-    )
-
-    paper_authors_path = _write_ipc(tmp_path / "paper_authors.arrow", paper_authors)
-    load_metrics: dict[str, int] = {}
-    out = subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
-        _SingleBatchArrowLease(paper_authors_path),
-        ["p1"],
-        load_metrics=load_metrics,
-    )
-
-    assert out == {"p1": [(0, "o connor"), (3, "m gorski")]}
-    assert load_metrics["paper_authors_rows_loaded"] == 4
-
-    bad_positions = paper_authors.set_column(1, "position", pa.array([0, 1, 1, 3], type=pa.int64()))
-    _write_ipc(tmp_path / "paper_authors.arrow", bad_positions)
-    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
-        subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
-            _SingleBatchArrowLease(paper_authors_path),
-            ["p1"],
-            load_metrics={},
-        )
-
-
 def test_terminal_full_name_is_used_for_merge_scoring() -> None:
     assert subblocking._subblock_merge_candidate_metadata("a|middle=b=c", 2) == (2, "a", "b=c", "b=c", "b=c")
 

@@ -35,8 +35,6 @@ See [the inference contract](production_inference.md#complete-model-bundles).
 
 ## Download
 
-> **Update at v1.3 release:** Add the release Git ref.
-
 Sync the bundles into `s2and/data/`, the default data folder of a source checkout.
 The commands use the AWS CLI and need no AWS account.
 

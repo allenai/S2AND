@@ -522,7 +522,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   remains available for training and full-block Python prediction.
 - The `S2AND_BACKEND` environment variable is removed. Direct
   `s2and.runtime.build_runtime_context(...)` calls without `backend` now
-  select Python. `scripts/bench_preprocess_phases.py` drops `--backend`.
+  select Python.
 - `ArrowDataset.name_counts_manifest`, `ValidatedNameCountsManifest`, and
   `NameCountsBinding` are removed. Use `ArrowDataset.name_counts_index`,
   `NameCountsIndex.path`, and `NameCountsIndex.manifest_sha256`.
@@ -578,12 +578,9 @@ both timings were recorded.
 | `s_gupta` | Within 2% | 3.7 → 3.3 |
 | `a_silva` | Within 2% | n/a |
 
-**Update at v1.3 release:** Release-grade v1.3 memory and throughput gates
-remain pending.
-
 ### Status
 
-- **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles
+- The `inference`, `dataset`, and `source` bundles
   are on S3. The current production model is `1.3.2` at
   `s3://ai2-s2-research-public/s2and/1.3.2/inference/`. Use the `1.3.1`
   dataset bundle to evaluate it. Model `1.3.1` remains available under

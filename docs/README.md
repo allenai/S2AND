@@ -46,7 +46,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 
 ## Historical notes
 
-Dated notes in the [archive](archive/) and [release evidence](release_evidence/) record prior profiling runs, experiments, and release checks.
+See the [archived name-count study](archive/name_count_experiment_20261009_results.md) and [release evidence](release_evidence/) for earlier experiments and release checks.
 The original paper process belongs to the [paper branch](../README.md#reproducibility).
 
 ## Glossary

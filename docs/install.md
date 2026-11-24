@@ -35,9 +35,6 @@ cargo --version
 
 ## Package install
 
-> **Update at v1.3 release:** PyPI holds only `0.51.2`, which cannot read `1.3` models or data.
-> Use the checkout flow below until `1.0.0` is published.
-
 Runtime install:
 
 ```bash

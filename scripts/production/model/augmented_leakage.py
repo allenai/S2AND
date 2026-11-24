@@ -2,54 +2,6 @@
 
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping
-from pathlib import Path
-
-
-def split_members_from_sources(name: str, files: Mapping[str, Path], *, random_seed: int) -> tuple[set[str], set[str]]:
-    """Resolve the actual fit and validation populations without access to held-out inputs.
-
-    Args:
-        name: Benchmark dataset name.
-        files: Model files with clusters or fixed train and validation pairs.
-        random_seed: Seed used by the production pairwise trainer.
-
-    Returns:
-        Signature IDs in the fit population and in the validation population.
-    """
-
-    import pandas as pd
-
-    from s2and.data import ANDData, _map_fixed_pair_labels
-
-    if "train_pairs" in files:
-        members: list[set[str]] = []
-        for role in ("train_pairs", "val_pairs"):
-            if role not in files:
-                members.append(set())
-                continue
-            pairs = _map_fixed_pair_labels(pd.read_csv(files[role]), f"{name} {role}")
-            members.append(
-                {str(value) for pair in pairs.iloc[:, :2].itertuples(index=False, name=None) for value in pair}
-            )
-        return members[0], members[1]
-
-    dataset = ANDData(
-        signatures=str(files["signatures"]),
-        papers=str(files["papers"]),
-        clusters=str(files["clusters"]),
-        name=name,
-        mode="train",
-        preprocess=False,
-        random_seed=random_seed,
-        name_counts_index=None,
-        name_tuples=frozenset(),
-        n_jobs=1,
-    )
-    train, validation, _ = dataset.split_cluster_signatures()
-    return (
-        {signature_id for members in train.values() for signature_id in members},
-        {signature_id for members in validation.values() for signature_id in members},
-    )
 
 
 def source_members(pairs: Iterable[tuple[str, str]]) -> dict[str, set[str]]:

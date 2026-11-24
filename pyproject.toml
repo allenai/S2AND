@@ -93,7 +93,7 @@ include = [
   { path = "s2and_rust/vendor/cld2/**/*", format = "sdist" },
   { path = "s2and_rust/vendor/cld2-sys/**/*", format = "sdist" },
 ]
-exclude = ["s2and/data/s2and_name_tuples_filtered.txt", "s2and/data/s2and_unnormalized_filtered_name_tuples.txt"]
+exclude = ["s2and/data/s2and_unnormalized_filtered_name_tuples.txt"]
 
 [tool.uv]
 cache-keys = [

@@ -381,8 +381,33 @@ def test_production_assignments_take_cached_clusters_for_the_bulk_step() -> None
             block_dict={"b": ["1", "2", "3"]},
             cluster_blocks=cluster_blocks,
             arrow_dataset=cast(Any, None),
-            args=args,
+            # Keep the block above the threshold so the subblocked production path runs.
+            args=argparse.Namespace(batching_threshold=2, total_ram_bytes=1),
         )
+
+
+def test_production_assignments_use_cached_clusters_for_blocks_production_does_not_subblock() -> None:
+    cluster_blocks = {
+        "b": sweep_eps_on_linking_gold.CachedBlockClusters("b", ["1", "2", "3"], {0.5: [4, 4, 7]}),
+    }
+
+    class Model:
+        cluster_model = SimpleNamespace(set_params=lambda **params: None)
+
+        def _predict_from_arrow_request(self, block_dict, arrow_dataset, **options):
+            # Production rejects a bulk_clusters hook for a block it does not subblock.
+            raise AssertionError("A block at or below the threshold must not reach production subblocking")
+
+    assignments = sweep_eps_on_linking_gold._production_assignments_for_eps(  # noqa: SLF001
+        eps=0.5,
+        clusterer=Model(),
+        block_dict={"b": ["1", "2", "3"]},
+        cluster_blocks=cluster_blocks,
+        arrow_dataset=cast(Any, None),
+        args=argparse.Namespace(batching_threshold=3, total_ram_bytes=1),
+    )
+
+    assert assignments == {"1": "b_4", "2": "b_4", "3": "b_7"}
 
 
 def test_distance_cache_key_reuses_pairwise_across_linker_and_eps_variants(tmp_path) -> None:

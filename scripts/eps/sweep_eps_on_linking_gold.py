@@ -1013,15 +1013,20 @@ def _production_assignments_for_eps(
                 clusters[f"{subblock_key}_{label}"].append(signature_id)
         return dict(clusters)
 
-    # Residual clustering inside attachment passes uses the model's own EPS.
-    clusterer.cluster_model.set_params(eps=eps)
-    clusters, _ = clusterer._predict_from_arrow_request(
-        {str(key): [str(signature_id) for signature_id in members] for key, members in block_dict.items()},
-        arrow_dataset,
-        batching_threshold=int(args.batching_threshold),
-        total_ram_bytes=int(args.total_ram_bytes),
-        bulk_clusters=bulk_clusters,
-    )
+    request = {str(key): [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
+    if all(len(members) <= int(args.batching_threshold) for members in request.values()):
+        # Production does not subblock these blocks, so its output is the cached bulk clustering.
+        clusters = bulk_clusters(request)
+    else:
+        # Residual clustering inside attachment passes uses the model's own EPS.
+        clusterer.cluster_model.set_params(eps=eps)
+        clusters, _ = clusterer._predict_from_arrow_request(
+            request,
+            arrow_dataset,
+            batching_threshold=int(args.batching_threshold),
+            total_ram_bytes=int(args.total_ram_bytes),
+            bulk_clusters=bulk_clusters,
+        )
     assignments: dict[str, str] = {}
     for cluster_id, members in clusters.items():
         for signature_id in members:

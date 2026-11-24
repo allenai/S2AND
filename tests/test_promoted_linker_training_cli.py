@@ -836,13 +836,17 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
         with pytest.raises(ValueError, match="format_version"):
             promoted_train._load_fixed_ranker(fixed, digest)
     elif check == "contract":
-        try:
+        path = pairwise / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**manifest, "feature_contract_version": 2}), encoding="utf-8")
+        with pytest.raises(ValueError, match="Fixed ranker pairwise binding"):
             promoted_train.run(args)
-        finally:
-            metadata_path = output / pairwise.name / "incremental_linker" / "metadata.json"
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            assert metadata["feature_contract_version"] == 1
+        assert not output.exists()
     else:
+        target_path = Path(args.target_json)
+        target = json.loads(target_path.read_text(encoding="utf-8"))
+        target["params"]["n_estimators"] = 999
+        target_path.write_text(json.dumps(target), encoding="utf-8")
         pairwise_year_diffs: list[float] = []
         query_years: list[int] = []
         linker_year_gaps: list[float] = []
@@ -880,6 +884,8 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
         assert training_tables == {"classic_gate_source_path", "s2and_eval_path"}
         complete = Path(report["complete_model_path"])
         assert report["evaluation_summary"]["training_summary"]["ranker_refit"] is False
+        fixed_booster, _, _ = promoted_train._load_fixed_ranker(fixed, digest)
+        assert report["n_estimators"] == report["model_params"]["n_estimators"] == fixed_booster.num_trees()
         assert "training_rows" not in report["observed_metrics"]
         assert report["observed_metrics"]["stratified_test_queries"] == 1
         assert report["query_predictions"]["rows"] == 1

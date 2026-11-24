@@ -37,6 +37,7 @@ from s2and.incremental_linking.artifact import (  # noqa: E402
     LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
     save_incremental_linking_artifact,
 )
+from s2and.incremental_linking.contracts import canonical_json_digest  # noqa: E402
 from s2and.incremental_linking.feature_block import (  # noqa: E402
     read_cluster_seed_disallows_arrow,
     read_cluster_seeds_arrow,
@@ -1908,11 +1909,17 @@ def _assert_output_paths_outside_inputs(
         raise SystemExit("complete model output must not replace the calibrated pairwise input")
 
 
-def _load_fixed_ranker(bundle_dir: Path, expected_sha256: str) -> tuple[Booster, Path, int]:
+def _load_fixed_ranker(
+    bundle_dir: Path, expected_sha256: str, *, requested_pairwise_binding: Mapping[str, Any] | None = None
+) -> tuple[Booster, Path, int]:
     source = load_production_model(bundle_dir, n_jobs=1)
     artifact = source.incremental_linker_artifact
     if artifact is None:
         raise ValueError(f"Fixed ranker bundle is missing its linker artifact: {bundle_dir}")
+    if requested_pairwise_binding is not None and artifact.pairwise_bundle_binding_digest != canonical_json_digest(
+        dict(requested_pairwise_binding)
+    ):
+        raise ValueError(f"Fixed ranker pairwise binding does not match the requested heads and contract: {bundle_dir}")
     path = bundle_dir / COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != expected_sha256:
@@ -2091,11 +2098,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--use-legacy-gate-calibration requires a fixed ranker and excludes frozen task inputs")
     if fixed_ranker_bundle is not None and frozen_manifest is None and not use_legacy_gate_calibration:
         raise ValueError("Fixed ranker without frozen task inputs requires --use-legacy-gate-calibration")
+    pairwise_binding = pairwise_bundle_binding(Path(args.pairwise_model_path), expected_artifact_hashes=artifact_hashes)
     fixed_ranker = fixed_booster = None
     linker_feature_contract = INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
     if fixed_ranker_bundle is not None and expected_ranker_sha256 is not None:
         fixed_ranker, ranker_path, linker_feature_contract = _load_fixed_ranker(
-            fixed_ranker_bundle, expected_ranker_sha256
+            fixed_ranker_bundle, expected_ranker_sha256, requested_pairwise_binding=pairwise_binding
         )
         fixed_booster = (ranker_path, expected_ranker_sha256)
     linker_legacy_paper_years = linker_feature_contract == LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
@@ -2146,12 +2154,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 arrow_dataset,
                 context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}",
             )
-        pairwise_binding = dict(
-            pairwise_bundle_binding(
-                Path(args.pairwise_model_path),
-                expected_artifact_hashes=artifact_hashes,
-            )
-        )
         output_dir.mkdir(parents=True)
         work = tempfile.TemporaryDirectory(prefix=".linker-release-", dir=output_dir)
         work_dir = Path(work.name)
@@ -2207,7 +2209,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 fit_kwargs["pre_materialization_holdout_summary"] = train_summary["label_filtering"]["train_holdout"]
 
         started = time.perf_counter()
-        active_params = dict(feature_bundle.models["classic"]["best_params"])
+        active_params = (
+            {"n_estimators": fixed_ranker.num_trees()}
+            if fixed_ranker is not None
+            else dict(feature_bundle.models["classic"]["best_params"])
+        )
 
         calibrated = fit_linker(
             feature_bundle,

@@ -93,6 +93,8 @@ def read_sweep_curve(
         raise ValueError(f"The completed sweep does not match its plan: {dataset}")
     if plan.get("dataset") != dataset:
         raise ValueError(f"The EPS sweep for {dataset!r} records dataset={plan.get('dataset')!r}")
+    if plan.get("distance_policy_version") != DISTANCE_POLICY_VERSION:
+        raise ValueError(f"The EPS sweep for {dataset!r} uses another distance policy")
     score_path = dataset_root / ("eps_b3.tsv" if score_mode == "orcid-b3" else "eps_overall.tsv")
     if summary["score_sha256"] != sha256_file(score_path):
         raise ValueError(f"The EPS scores change after completion: {dataset}")

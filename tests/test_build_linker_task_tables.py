@@ -9,10 +9,12 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from s2and import __version__
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
+from scripts.eps_sweep.common import DISTANCE_POLICY_VERSION
 from scripts.eps_sweep.orcid_b3 import read_external_reference_identity_evidence
 from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
 from scripts.production.data.block_roles import load_block_roles
@@ -134,6 +136,8 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")
     inputs_path.write_text(json.dumps(inputs), encoding="utf-8")
     manifest = build_linker_task_tables(roles_path, inputs_path, output, holdout_fraction=1)
+    assert manifest["distance_policy_version"] == DISTANCE_POLICY_VERSION
+    assert manifest["s2and_version"] == __version__
     assert set(manifest["tables"]) == set(TASK_ROLES)
     assert manifest["tables"]["gate_fit"]["blocks"]["b ross"]["counts"]["full_windows"] == 2
     for role in ("linker_train", "gate_fit"):
@@ -177,6 +181,23 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
         np.testing.assert_array_equal(rows["retrieval_rank"], frozen_rows["retrieval_rank"])
         np.testing.assert_allclose(rows["retrieval_score"], frozen_rows["retrieval_score"])
         assert set(promoted_linker_feature_columns()) <= set(rows)
+    manifest_path = output / TASK_MANIFEST
+    original_manifest = manifest_path.read_bytes()
+    manifest_path.write_text(
+        json.dumps({**manifest, "distance_policy_version": DISTANCE_POLICY_VERSION - 1}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="different distance policy"):
+        _materialize_frozen_linker_tasks(
+            manifest_path,
+            roles,
+            target_features=(),
+            name_tuples=frozenset(),
+            clusterer=clusterer,
+            n_jobs=1,
+            total_ram_bytes=1_000_000_000,
+            max_query_groups=None,
+        )
+    manifest_path.write_bytes(original_manifest)
     (output / "linker_train.parquet").write_bytes(b"changed")
     with pytest.raises(ValueError, match="Frozen linker table changed"):
         _materialize_frozen_linker_tasks(

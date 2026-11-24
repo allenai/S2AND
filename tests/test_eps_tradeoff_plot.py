@@ -8,6 +8,7 @@ import pytest
 
 from s2and._sha256 import sha256_file
 from scripts.eps_sweep import plot_q_class_eps_sweeps as tradeoff
+from scripts.eps_sweep.common import DISTANCE_POLICY_VERSION
 
 
 def _write_curve(root: Path) -> Path:
@@ -19,6 +20,7 @@ def _write_curve(root: Path) -> Path:
             {
                 "dataset": "j_smith",
                 "score_mode": "safe-action-proxy",
+                "distance_policy_version": DISTANCE_POLICY_VERSION,
                 "eps_values": [0.55, 0.65],
                 "model_manifest_sha256": "a" * 64,
                 "limited_run": False,

@@ -2397,6 +2397,8 @@ class Clusterer:
         if chunk.block_signature_indices is not None and chunk.pair_ids is None:
             try:
                 rust_featurizer = _get_rust_feature_data(dataset)
+                if self.featurizer_info.legacy_paper_years:
+                    rust_featurizer = rust_featurizer.with_legacy_paper_years()
                 selected_indices = _selected_feature_indices(self.featurizer_info)
                 nameless_selected_indices = (
                     _selected_feature_indices(self.nameless_featurizer_info)
@@ -3181,6 +3183,8 @@ class Clusterer:
         overrides and remain active when default constraints are disabled.
         """
 
+        if dists is None and self.featurizer_info.legacy_paper_years:
+            rust_featurizer = cast(Any, rust_featurizer).with_legacy_paper_years()
         partial_supervision = normalize_partial_supervision(partial_supervision)
         if (
             partial_supervision
@@ -3936,6 +3940,8 @@ class Clusterer:
                 cluster_seeds_path=cluster_seeds_path,
                 cluster_seed_disallows_path=cluster_seed_disallows_path,
             )
+        if self.featurizer_info.legacy_paper_years:
+            rust_featurizer = cast(Any, rust_featurizer).with_legacy_paper_years()
         arrow_featurizer_seconds = time.perf_counter() - featurizer_start
         predict_start = time.perf_counter()
         if needs_subblocking:

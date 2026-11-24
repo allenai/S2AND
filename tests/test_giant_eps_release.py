@@ -1042,3 +1042,11 @@ def test_eps_resolves_hash_bound_replay_data_in_combined_snapshot(tmp_path: Path
     replay.write_bytes(replay.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="SHA-256|checksum|sha256"):
         arrow_dataset_dir(tmp_path, "giant")
+
+
+def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Path) -> None:
+    dataset = _curve(tmp_path)
+    plan = json.loads((dataset / "plan.json").read_bytes())
+    _update_curve_plan(dataset, plan | {"distance_policy_version": DISTANCE_POLICY_VERSION - 1})
+    with pytest.raises(ValueError, match="another distance policy"):
+        read_sweep_curve(tmp_path, "unit", "orcid-b3")

@@ -30,6 +30,7 @@ from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
     CLOSE_PAIR_FIELDS,
     COMPLETE_BUNDLE_KIND,
+    LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_ONLY_BUNDLE_KIND,
     PAIRWISE_ONLY_MANIFEST_FILES,
@@ -223,6 +224,7 @@ def write_production_manifest(
     release_version: str,
     bundle_kind: BundleKind,
     eps_calibration: EpsCalibration,
+    feature_contract_version: int = PAIRWISE_FEATURE_CONTRACT_VERSION,
 ) -> ProductionBundleSummary:
     """Write the bundle manifest for either pairwise-only or complete bundles."""
 
@@ -248,7 +250,7 @@ def write_production_manifest(
     }
     manifest = {
         "eps_calibration": eps_calibration,
-        "feature_contract_version": PAIRWISE_FEATURE_CONTRACT_VERSION,
+        "feature_contract_version": feature_contract_version,
         "feature_names": feature_names,
         "format_version": PRODUCTION_MODEL_FORMAT_VERSION,
         "kind": PRODUCTION_MODEL_KIND,
@@ -326,6 +328,11 @@ def _write_pairwise_production_bundle_stage(
         release_version=release_version,
         bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
         eps_calibration=eps_calibration,
+        feature_contract_version=(
+            LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION
+            if clusterer.featurizer_info.legacy_paper_years
+            else PAIRWISE_FEATURE_CONTRACT_VERSION
+        ),
     )
 
 
@@ -425,6 +432,7 @@ def finalize_pairwise_eps(
             release_version=manifest["release_version"],
             bundle_kind=PAIRWISE_ONLY_BUNDLE_KIND,
             eps_calibration=CALIBRATED_EPS_CALIBRATION,
+            feature_contract_version=manifest["feature_contract_version"],
         )
         source_files = {
             path.relative_to(source_bundle_dir).as_posix(): path
@@ -558,6 +566,7 @@ def finalize_production_bundle(
             release_version=release_version,
             bundle_kind=COMPLETE_BUNDLE_KIND,
             eps_calibration=CALIBRATED_EPS_CALIBRATION,
+            feature_contract_version=pairwise_manifest["feature_contract_version"],
         )
         load_production_model(
             staging_dir,

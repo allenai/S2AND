@@ -30,6 +30,7 @@ pub(crate) fn build_raw_arrow_feature(
     affiliation_stopwords: &HashSet<String>,
     unidecode_char_map: &HashMap<char, String>,
     orcid_enabled: bool,
+    legacy_paper_years: bool,
 ) -> RawArrowFeature {
     // Signature author-name fields are canonical_v2; paper titles, venues,
     // affiliations, and authors-as-text keep the legacy normalize_text_compat
@@ -81,7 +82,11 @@ pub(crate) fn build_raw_arrow_feature(
         (
             term_set_from_normalized_text(&normalized_venue),
             term_set_from_normalized_text(&normalized_title),
-            normalize_paper_year(paper_data.year),
+            if legacy_paper_years {
+                paper_data.year.filter(|year| *year > 0)
+            } else {
+                normalize_paper_year(paper_data.year)
+            },
         )
     } else {
         (HashSet::default(), HashSet::default(), None)
@@ -714,6 +719,7 @@ mod tests {
             &HashSet::default(),
             &HashMap::default(),
             false,
+            false,
         );
 
         assert_eq!(feature.query_author, "b smith phd");
@@ -762,6 +768,7 @@ mod tests {
             &HashSet::default(),
             &HashMap::default(),
             false,
+            false,
         );
         let author_signals = author_index.author_signals(&signature).expect("indexed");
 
@@ -809,6 +816,7 @@ mod tests {
                 &HashSet::default(),
                 &HashSet::default(),
                 &HashMap::default(),
+                false,
                 false,
             );
 

@@ -248,7 +248,10 @@ def test_load_rejects_wrong_kind_before_booster_io(tmp_path: Path) -> None:
         load_incremental_linking_artifact(artifact_dir)
 
 
-@pytest.mark.parametrize(("field", "value"), [("format_version", True), ("feature_contract_version", 2)])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("format_version", True), ("feature_contract_version", INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION + 1)],
+)
 def test_load_rejects_unsupported_contract_before_booster_io(tmp_path: Path, field: str, value: object) -> None:
     artifact_dir = _write_fake_artifact(tmp_path / "artifact")
     metadata_path = artifact_dir / METADATA_FILENAME
@@ -257,7 +260,7 @@ def test_load_rejects_unsupported_contract_before_booster_io(tmp_path: Path, fie
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
     (artifact_dir / BOOSTER_FILENAME).unlink()
 
-    with pytest.raises(ValueError, match=f"{field} must equal supported version"):
+    with pytest.raises(ValueError, match=field):
         load_incremental_linking_artifact(artifact_dir)
 
 

@@ -21,12 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from s2and import feature_port  # noqa: E402
+from s2and import __version__, feature_port  # noqa: E402
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K  # noqa: E402
 from s2and.incremental_linking.feature_block_arrow import temporary_cluster_seed_sidecars  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
+from scripts.eps_sweep.common import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.eps_sweep.orcid_b3 import read_external_reference_identity_evidence  # noqa: E402
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
 from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
@@ -287,6 +288,8 @@ def build_linker_task_tables(
         tables[role] = {"path": role_path.name, "sha256": sha256_file(role_path), "blocks": blocks}
     manifest = {
         "block_role_assignments_sha256": roles.sha256,
+        "distance_policy_version": DISTANCE_POLICY_VERSION,
+        "s2and_version": __version__,
         "retrieval_top_k": DEFAULT_RETRIEVAL_TOP_K,
         "seed": seed,
         "holdout_fraction": holdout_fraction,

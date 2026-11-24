@@ -636,10 +636,10 @@ def test_pairwise_manifest_enforces_identity_and_lifecycle(
 
     # Reject version changes before opening any booster.
     (bundle_dir / "pairwise" / "main.lgb").unlink()
-    for field, value in (("format_version", True), ("feature_contract_version", 2)):
+    for field, value in (("format_version", True), ("feature_contract_version", 3)):
         manifest = {**original_manifest, field: value}
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        with pytest.raises(ValueError, match=f"{field} must equal supported version"):
+        with pytest.raises(ValueError, match=field):
             _load_pairwise_staging_model(bundle_dir)
 
 
@@ -1385,3 +1385,84 @@ def test_rebinding_the_name_count_index_changes_only_the_bound_metadata(
             release_version="9.10",
         )
     assert not (source / "rebound").exists()
+
+
+@pytest.mark.parametrize("version, expected", [(1, 50.0), (2, np.nan)])
+def test_loaded_pairwise_contract_replays_stamped_year(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    tmp_path: Path,
+    version: int,
+    expected: float,
+) -> None:
+    from s2and.featurizer import many_pairs_featurize
+    from s2and.runtime import build_runtime_context
+    from tests.helpers import build_arrow_training_dataset
+    from tests.raw_arrow_helpers import base_arrow_paths, open_arrow_dataset
+    from tests.test_feature_port_parity import _load_dataset_from_dir
+
+    bundle_dir, _ = synthetic_pairwise_bundle
+    manifest_path = bundle_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if version == 1:
+        manifest["release_version"] = "1.4"
+        manifest["feature_contract_version"] = 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["feature_contract_version"] == version
+    linker_dir = tmp_path / "linker"
+    target = _write_synthetic_linker(bundle_dir, linker_dir)
+    metadata_path = linker_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if version == 1:
+        metadata["feature_contract_version"] = 1
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    else:
+        assert metadata["feature_contract_version"] == 2
+    complete_dir = tmp_path / "complete"
+    finalize_production_bundle(
+        pairwise_bundle_dir=bundle_dir,
+        output_bundle_dir=complete_dir,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target,
+    )
+    clusterer = load_production_model(complete_dir)
+    assert clusterer.incremental_linker_artifact is not None
+    legacy = clusterer.incremental_linker_artifact.legacy_paper_years
+    assert legacy is (version == 1)
+    paths = base_arrow_paths(tmp_path / "stamped_retrieval", years=[1800, 2015, 2010])
+    with open_arrow_dataset(paths) as arrow:
+        from s2and.runtime import load_s2and_rust_extension
+
+        planner = load_s2and_rust_extension().RawBlockQueryCandidatePlanner.from_auto_queries(
+            arrow.native,
+            paths["cluster_seeds"],
+            top_k=2,
+            orcid_enabled=False,
+            num_threads=1,
+            legacy_paper_years=legacy,
+        )
+        try:
+            plan = planner.plan(["q1"])
+        finally:
+            planner.release()
+    assert plan["row_count"] > 0
+    assert set(plan["row_query_year_missing"]) == {int(version == 2)}
+    if legacy:
+        assert set(plan["row_query_years"]) == {1800}
+    dataset = _load_dataset_from_dir(str(Path(__file__).parent / "dummy"), "stamped")
+    left, right = "0", "2"
+    for signature, year in ((left, 1800), (right, 2010)):
+        paper_id = str(dataset.signatures[signature].paper_id)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
+    assert clusterer.nameless_featurizer_info is not None
+    info = clusterer.nameless_featurizer_info
+    for backend in ("python", "rust"):
+        runtime = build_runtime_context("stamped", backend=backend)
+        source = dataset if backend == "python" else build_arrow_training_dataset(dataset, tmp_path / "stamped_arrow")
+        features, _, _ = many_pairs_featurize(
+            [(left, right, 1)],
+            source,
+            info,
+            n_jobs=1,
+            runtime_context=runtime,
+        )
+        np.testing.assert_equal(features[0, 0], expected)

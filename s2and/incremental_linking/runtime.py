@@ -1241,6 +1241,7 @@ def _featureize_linker_candidates_with_telemetry(
     nan_value: float = _PAIRWISE_AGGREGATE_NAN_VALUE,
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
+    legacy_paper_years: bool = False,
 ) -> tuple[LinkerFeatureMatrix, dict[str, int]]:
     """Private featureizer from compact production-shaped candidate inputs."""
 
@@ -1270,6 +1271,7 @@ def _featureize_linker_candidates_with_telemetry(
     row_features, row_feature_telemetry = build_promoted_non_pairwise_row_features_with_telemetry(
         candidate_batch,
         row_signals,
+        legacy_paper_years=legacy_paper_years,
     )
     return (
         assemble_linker_feature_matrix(
@@ -1628,6 +1630,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
         nan_value=nan_value,
         runtime_context=runtime_context,
         featurizer=featurizer,
+        legacy_paper_years=getattr(artifact, "legacy_paper_years", False),
     )
     scorer_plan = memory_budget.compute_native_scorer_chunk_plan(
         row_count=candidate_batch.row_count,

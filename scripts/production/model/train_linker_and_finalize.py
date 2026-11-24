@@ -29,7 +29,7 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
 
-from s2and import feature_port  # noqa: E402
+from s2and import __version__, feature_port  # noqa: E402
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
@@ -88,6 +88,7 @@ from s2and.production_training_contract import (  # noqa: E402
 )
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
+from scripts.eps_sweep.common import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.production.data.block_roles import BlockRoles, load_block_roles  # noqa: E402
 from scripts.production.data.build_linker_task_tables import TASK_ROLES, read_seed_components  # noqa: E402
 from scripts.production.model.initial_query_sources import (  # noqa: E402
@@ -1008,6 +1009,8 @@ def _materialize_arrow_rust_dataset_rows(
     dataset_featurizer, signature_id_to_index = _dataset_featurizer(
         context, signature_ids, name_tuples=name_tuples, n_jobs=n_jobs
     )
+    if getattr(clusterer.featurizer_info, "legacy_paper_years", False):
+        dataset_featurizer = dataset_featurizer.with_legacy_paper_years()
     request_seeds = dict(context.cluster_seeds_require)
     request_seeds.update(
         {query: request_seeds[origin] for query, origin in query_origins.items() if origin in request_seeds}
@@ -1962,6 +1965,11 @@ def _materialize_frozen_linker_tasks(
 ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
     """Verify frozen inputs and attach model features without changing candidate windows."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        manifest.get("distance_policy_version") != DISTANCE_POLICY_VERSION
+        or manifest.get("s2and_version") != __version__
+    ):
+        raise ValueError("Frozen linker tasks use a different distance policy or package version. Rebuild the tasks.")
     if manifest["block_role_assignments_sha256"] != roles.sha256:
         raise ValueError("The linker task tables must use the same frozen block roles")
     if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
@@ -2063,7 +2071,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if use_legacy_gate_calibration and (fixed_ranker_bundle is None or frozen_manifest is not None):
         raise ValueError("--use-legacy-gate-calibration requires a fixed ranker and excludes frozen task inputs")
     fixed_ranker = fixed_booster = None
-    if fixed_ranker_bundle is not None:
+    if fixed_ranker_bundle is not None and expected_ranker_sha256 is not None:
         fixed_ranker, ranker_path = _load_fixed_ranker(fixed_ranker_bundle, expected_ranker_sha256)
         fixed_booster = (ranker_path, expected_ranker_sha256)
         if fixed_ranker.num_feature() != len(target["features"]):

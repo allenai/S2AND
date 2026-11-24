@@ -326,12 +326,15 @@ fn linker_year_gap_features(
     candidate_year_max: &[f32],
     candidate_year_range_missing: &[f32],
     year_compatibility: &mut [f32],
+    legacy_paper_years: bool,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut gap = vec![0.0f32; query_year.len()];
     let mut signed_gap = vec![0.0f32; query_year.len()];
     let mut span = vec![0.0f32; query_year.len()];
     for index in 0..query_year.len() {
-        let is_placeholder = |year| PLACEHOLDER_YEARS.iter().any(|&stamp| year == stamp as f32);
+        let is_placeholder = |year| {
+            !legacy_paper_years && PLACEHOLDER_YEARS.iter().any(|&stamp| year == stamp as f32)
+        };
         let placeholder_query = is_placeholder(query_year[index]);
         let placeholder_range =
             is_placeholder(candidate_year_min[index]) || is_placeholder(candidate_year_max[index]);
@@ -376,9 +379,11 @@ fn linker_set_f32_array<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (signals, *, legacy_paper_years = false))]
 fn promoted_linker_non_pairwise_features<'py>(
     py: Python<'py>,
     signals: &Bound<'py, PyDict>,
+    legacy_paper_years: bool,
 ) -> PyResult<Py<PyDict>> {
     let row_query_signature_indices_obj = linker_dict_item(signals, "row_query_signature_indices")?;
     let row_query_signature_indices =
@@ -493,6 +498,7 @@ fn promoted_linker_non_pairwise_features<'py>(
             &candidate_year_max,
             &candidate_year_range_missing,
             &mut year_compatibility,
+            legacy_paper_years,
         );
 
     let mut affiliation_contradiction_severity = vec![0.0f32; row_count];

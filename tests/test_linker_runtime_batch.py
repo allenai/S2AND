@@ -117,8 +117,8 @@ def test_promoted_row_features_reject_missing_rust_feature(monkeypatch: pytest.M
     row_signals["retrieval_rank"] = np.asarray([1.0], dtype=np.float32)
     original = s2and_rust.promoted_linker_non_pairwise_features
 
-    def stale_result(payload):
-        result = dict(original(payload))
+    def stale_result(payload, **kwargs):
+        result = dict(original(payload, **kwargs))
         del result["min_distance"]
         return result
 
@@ -143,8 +143,8 @@ def test_promoted_row_features_reject_incomplete_rust_telemetry(monkeypatch: pyt
     row_signals["retrieval_rank"] = np.asarray([1.0], dtype=np.float32)
     original = s2and_rust.promoted_linker_non_pairwise_features
 
-    def stale_result(payload):
-        result = dict(original(payload))
+    def stale_result(payload, **kwargs):
+        result = dict(original(payload, **kwargs))
         result["telemetry"] = {"generated_family_id_count": 0}
         return result
 

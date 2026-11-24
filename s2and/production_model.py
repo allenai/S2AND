@@ -36,6 +36,7 @@ from s2and.production_bundle_contract import (
     CLOSE_PAIR_FIELDS,
     COMPLETE_BUNDLE_KIND,
     COMPLETE_MANIFEST_FILES,
+    LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_ONLY_BUNDLE_KIND,
     PAIRWISE_ONLY_MANIFEST_FILES,
@@ -309,12 +310,16 @@ def _validate_manifest(
     release_version = manifest["release_version"]
     if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
         raise ValueError("Production model bundle release_version must be a nonempty trimmed string")
-    for field, expected in (
-        ("format_version", PRODUCTION_MODEL_FORMAT_VERSION),
-        ("feature_contract_version", PAIRWISE_FEATURE_CONTRACT_VERSION),
-    ):
-        if type(manifest[field]) is not int or manifest[field] != expected:
-            raise ValueError(f"Production model bundle {field} must equal supported version {expected}")
+    if type(manifest["format_version"]) is not int or manifest["format_version"] != PRODUCTION_MODEL_FORMAT_VERSION:
+        raise ValueError(
+            f"Production model bundle format_version must equal supported version {PRODUCTION_MODEL_FORMAT_VERSION}"
+        )
+    feature_version = manifest["feature_contract_version"]
+    if type(feature_version) is not int or feature_version not in {
+        LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION,
+        PAIRWISE_FEATURE_CONTRACT_VERSION,
+    }:
+        raise ValueError(f"Unsupported production model bundle feature_contract_version: {feature_version!r}")
 
     expected_hashes = manifest["sha256"]
     if not isinstance(expected_hashes, dict):
@@ -733,6 +738,9 @@ def _load_bundle_clusterer(
         suppress_orcid=bool(clusterer_config["suppress_orcid"]),
     )
     clusterer.feature_contract = dict(feature_contract)
+    legacy_paper_years = manifest["feature_contract_version"] == LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION
+    featurizer_info.legacy_paper_years = legacy_paper_years
+    nameless_featurizer_info.legacy_paper_years = legacy_paper_years
     clusterer.best_params = (
         {
             "eps": effective_eps,

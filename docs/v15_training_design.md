@@ -32,6 +32,10 @@ Treat 1601 and 1800 as missing publication years when mining, labeling, or scori
 Pairwise year distance is missing if either paper has a placeholder. Retrieval omits placeholders from
 candidate dates and year filters. Linker and gate year features use the existing missing-value behavior.
 The source Arrow year stays available for provenance and the year-gap split's historical placement rule.
+Feature contract 2 applies this rule to pairwise and linker inference. Loaded contract 1 bundles, including
+1.4, keep the original feature and retrieval behavior. Finalizing a pairwise bundle preserves its contract.
+Rebuild frozen linker windows when the recorded distance policy or package version differs. The manual EPS
+curve reader also requires the current distance policy.
 Rebuild feature tables and EPS distance caches created before this policy. EPS records distance policy 14.
 The Arrow schema, feature names, and model bundle formats are unchanged.
 

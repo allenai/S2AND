@@ -1,10 +1,9 @@
-"""Sweep FastCluster EPS values against linker-derived pair gold or ORCID-masked B3.
+"""Sweep FastCluster EPS values against an ORCID-masked identity B3 reference.
 
-This runner consumes Arrow linker-replay datasets, plans target-bearing blocks
-from Arrow signature metadata, computes pairwise distances through the
-Arrow/Rust featurizer path, and sweeps FastCluster EPS values. Production code
-clusters each subblock at every EPS from one linkage. ``--score-mode orcid-b3`` scores ORCID-masked
-identity B3; the release EPS review uses that mode.
+Load Arrow linker-replay datasets, plan target-bearing blocks, and compute
+pairwise distances through the native Arrow featurizer. Reuse each subblock
+linkage across the EPS grid.
+
 """
 
 # ruff: noqa: E402
@@ -40,10 +39,8 @@ import pyarrow.ipc as ipc
 from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.block_corrections import arrow_small_block_signatures, year_gap_split_enabled
-from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
     CLUSTERING_SOURCE,
-    DEFAULT_GOLD_ROOT,
     DEFAULT_OUTPUT_ROOT,
     DISTANCE_POLICY_VERSION,
     SINGLETON_INCLUSIVE_CURVE,
@@ -52,13 +49,6 @@ from scripts.eps_sweep.common import (
     write_json,
 )
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
-
-WEIGHT_COLUMNS = [
-    "weight_pair",
-    "weight_query_balanced",
-    "weight_query_label_balanced",
-    "weight_query_class_balanced",
-]
 
 
 @dataclass(frozen=True)
@@ -73,26 +63,20 @@ class CachedBlockClusters:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Cache Arrow/Rust pairwise distances, sweep EPS, and score linker-derived pair gold "
-            "or ORCID-masked identity B3 (--score-mode orcid-b3, the release mode)."
-        )
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--arrow-root", type=Path, required=True)
     parser.add_argument(
         "--replay-bundle", default=None, help="Select a declared replay catalog from a combined snapshot."
     )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
-    parser.add_argument("--gold-path", type=Path, default=None)
-    parser.add_argument("--score-mode", choices=["safe-action-proxy", "orcid-b3"], default="safe-action-proxy")
+    parser.add_argument("--score-mode", choices=["orcid-b3"], default="orcid-b3")
     parser.add_argument("--block-role-assignments", type=Path, help="Apply frozen eps_cal ORCID home roles.")
     parser.add_argument(
         "--reference-labels",
         type=Path,
         default=None,
-        help="Optional external parquet (signature_id, orcid) for --score-mode orcid-b3.",
+        help="Optional external parquet (signature_id, orcid) for the ORCID B3 reference.",
     )
     parser.add_argument(
         "--allow-all-reference-identities",
@@ -108,18 +92,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--total-ram-bytes", type=int, default=48 * 1024**3)
     parser.add_argument("--batching-threshold", type=int, required=True, help="Maximum size of a subblock.")
     parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
-    parser.add_argument(
-        "--use-orcid-subblocking",
-        action="store_true",
-        help="Use ORCID values during subblock merging. Defaults off for EPS selection.",
-    )
-    parser.add_argument(
-        "--use-orcid-constraints",
-        dest="suppress_orcid_constraints",
-        action="store_false",
-        default=True,
-        help="Enable same-ORCID hard-link distance constraints for old-artifact parity checks.",
-    )
+    parser.set_defaults(use_orcid_subblocking=False, suppress_orcid_constraints=True)
     parser.add_argument("--eps-start", type=float, default=0.40)
     parser.add_argument("--eps-stop", type=float, default=0.80)
     parser.add_argument("--eps-step", type=float, default=0.05)
@@ -214,27 +187,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-subblocks must be > 0 when set")
     if args.compute_missing_dists and args.max_subblocks is None and not args.allow_full_run:
         raise ValueError("--compute-missing-dists requires --max-subblocks or explicit --allow-full-run")
-    if args.score_mode == "orcid-b3" and (args.use_orcid_subblocking or not args.suppress_orcid_constraints):
+    if args.use_orcid_subblocking or not args.suppress_orcid_constraints:
         raise ValueError("ORCID-B3 requires hidden ORCID constraints and hidden ORCID subblocking")
-    if getattr(args, "block_role_assignments", None) is not None and (
-        args.score_mode != "orcid-b3" or not args.allow_all_reference_identities
-    ):
-        raise ValueError("--block-role-assignments requires ORCID B3 and --allow-all-reference-identities")
-    if args.score_mode != "orcid-b3" and (args.reference_labels is not None or args.allow_all_reference_identities):
-        raise ValueError("--reference-labels and --allow-all-reference-identities require --score-mode orcid-b3")
+    if getattr(args, "block_role_assignments", None) is not None and not args.allow_all_reference_identities:
+        raise ValueError("--block-role-assignments requires --allow-all-reference-identities")
     if args.route == "production" and args.max_subblocks is not None:
         raise ValueError("--route production clusters whole blocks; use --route bulk with --max-subblocks")
-    if args.route == "production" and args.use_orcid_subblocking == args.suppress_orcid_constraints:
-        # Production repairs subblocks by ORCID whenever ORCIDs are visible, so the cached plan must too.
-        raise ValueError("--route production needs --use-orcid-subblocking exactly with --use-orcid-constraints")
-
-
-def _gold_path(args: argparse.Namespace) -> Path:
-    """Return the gold constraints path."""
-
-    if args.gold_path is not None:
-        return args.gold_path
-    return DEFAULT_GOLD_ROOT / f"{args.dataset}_pair_constraints.parquet"
 
 
 def _output_dir(args: argparse.Namespace) -> Path:
@@ -243,52 +201,6 @@ def _output_dir(args: argparse.Namespace) -> Path:
     if args.output_dir is not None:
         return args.output_dir
     return DEFAULT_OUTPUT_ROOT / args.dataset
-
-
-def _load_gold(path: Path) -> pd.DataFrame:
-    """Load and validate pair gold constraints."""
-
-    if not path.exists():
-        raise FileNotFoundError(path)
-    gold = pd.read_parquet(path)
-    required = {
-        "dataset",
-        "table_name",
-        "split",
-        "source_key",
-        "supervision_type",
-        "query_signature_id",
-        "member_signature_id",
-        "label",
-        *WEIGHT_COLUMNS,
-    }
-    missing = sorted(required - set(gold.columns))
-    if missing:
-        raise ValueError(f"Gold file is missing required columns: {missing}")
-    for column in [
-        "dataset",
-        "table_name",
-        "split",
-        "source_key",
-        "supervision_type",
-        "query_signature_id",
-        "member_signature_id",
-        "query_view",
-    ]:
-        if column in gold.columns:
-            gold[column] = gold[column].astype(str)
-    gold["label"] = pd.to_numeric(gold["label"], errors="raise").astype("int8")
-    for column in WEIGHT_COLUMNS:
-        gold[column] = pd.to_numeric(gold[column], errors="raise").astype(float)
-    gold, filter_summary = _drop_unlabeled_singleton_orcid_rows(gold, context=f"eps_gold:{path.name}")
-    if filter_summary["rows_removed"]:
-        logging.info(
-            "dropped unlabeled_singleton_orcid rows from gold path=%s rows_removed=%d rows_after=%d",
-            path,
-            filter_summary["rows_removed"],
-            filter_summary["rows_after"],
-        )
-    return gold
 
 
 def _optional_str(value: Any) -> str | None:
@@ -1119,144 +1031,6 @@ def _production_assignments_for_eps(
     return assignments
 
 
-def _signature_to_subblock(selected_subblocks: dict[str, list[str]]) -> dict[str, str]:
-    """Return signature id to selected subblock key."""
-
-    return {
-        str(signature_id): str(block_key)
-        for block_key, signature_ids in selected_subblocks.items()
-        for signature_id in signature_ids
-    }
-
-
-def _score_one_scope(
-    scored: pd.DataFrame,
-    weight_column: str,
-    scope_type: str,
-    scope_value: str,
-    eps: float,
-) -> dict[str, Any]:
-    """Score one grouped scope for a single weighting scheme."""
-
-    weights = scored[weight_column].astype(float)
-    assigned = scored["_assigned"].astype(bool)
-    positives = scored["label"].astype(int) == 1
-    negatives = scored["label"].astype(int) == 0
-    same = scored["_same_cluster"].astype(bool)
-    total_weight = float(weights[assigned].sum())
-    pos_weight = float(weights[assigned & positives].sum())
-    neg_weight = float(weights[assigned & negatives].sum())
-    pos_same_weight = float(weights[assigned & positives & same].sum())
-    neg_separate_weight = float(weights[assigned & negatives & ~same].sum())
-    correct_weight = pos_same_weight + neg_separate_weight
-    return {
-        "eps": eps,
-        "scope_type": scope_type,
-        "scope_value": scope_value,
-        "weight": weight_column,
-        "rows": int(len(scored)),
-        "assigned_rows": int(assigned.sum()),
-        "missing_assignment_rows": int((~assigned).sum()),
-        "positive_rows": int((assigned & positives).sum()),
-        "negative_rows": int((assigned & negatives).sum()),
-        "total_weight": total_weight,
-        "positive_weight": pos_weight,
-        "negative_weight": neg_weight,
-        "accuracy": correct_weight / total_weight if total_weight else None,
-        "positive_recall": pos_same_weight / pos_weight if pos_weight else None,
-        "false_split_rate": 1.0 - (pos_same_weight / pos_weight) if pos_weight else None,
-        "negative_separation": neg_separate_weight / neg_weight if neg_weight else None,
-        "false_merge_rate": 1.0 - (neg_separate_weight / neg_weight) if neg_weight else None,
-    }
-
-
-def _score_assignments(
-    gold: pd.DataFrame,
-    assignments: dict[str, str],
-    signature_to_subblock: dict[str, str],
-    eps: float,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Score pair constraints against predicted cluster assignments."""
-
-    scored = gold.copy()
-    scored["_query_cluster"] = scored["query_signature_id"].map(assignments)
-    scored["_member_cluster"] = scored["member_signature_id"].map(assignments)
-    scored["_query_subblock"] = scored["query_signature_id"].map(signature_to_subblock)
-    scored["_member_subblock"] = scored["member_signature_id"].map(signature_to_subblock)
-    scored["_assigned"] = (
-        scored["_query_cluster"].notna()
-        & scored["_member_cluster"].notna()
-        & scored["_query_subblock"].notna()
-        & scored["_member_subblock"].notna()
-    )
-    scored["_same_subblock"] = scored["_assigned"] & (scored["_query_subblock"] == scored["_member_subblock"])
-    scored["_same_cluster"] = scored["_assigned"] & (scored["_query_cluster"] == scored["_member_cluster"])
-    scoreable = scored[scored["_same_subblock"]].copy()
-    rows: list[dict[str, Any]] = []
-    scope_specs = [
-        ("overall", None),
-        ("split", "split"),
-        ("table_name", "table_name"),
-        ("source_key", "source_key"),
-        ("supervision_type", "supervision_type"),
-        ("query_view", "query_view"),
-    ]
-    for weight_column in WEIGHT_COLUMNS:
-        for scope_type, column in scope_specs:
-            if column is None:
-                rows.append(_score_one_scope(scoreable, weight_column, scope_type, "all", eps))
-                continue
-            if column not in scoreable.columns:
-                continue
-            for value, group in scoreable.groupby(column, sort=True):
-                rows.append(_score_one_scope(group, weight_column, scope_type, str(value), eps))
-
-    boundary = scored[scored["_assigned"] & ~scored["_same_subblock"]].copy()
-    boundary_rows = []
-    for weight_column in WEIGHT_COLUMNS:
-        weights = boundary[weight_column].astype(float)
-        positives = boundary["label"].astype(int) == 1
-        negatives = boundary["label"].astype(int) == 0
-        boundary_rows.append(
-            {
-                "eps": eps,
-                "weight": weight_column,
-                "boundary_rows": int(len(boundary)),
-                "boundary_positive_rows": int(positives.sum()),
-                "boundary_negative_rows": int(negatives.sum()),
-                "boundary_weight": float(weights.sum()),
-                "boundary_positive_weight": float(weights[positives].sum()),
-                "boundary_negative_weight": float(weights[negatives].sum()),
-            }
-        )
-    return pd.DataFrame(rows), pd.DataFrame(boundary_rows)
-
-
-def _format_float_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    """Format float metrics for TSV outputs."""
-
-    output = frame.copy()
-    for column in [
-        "accuracy",
-        "positive_recall",
-        "false_split_rate",
-        "negative_separation",
-        "false_merge_rate",
-        "total_weight",
-        "positive_weight",
-        "negative_weight",
-    ]:
-        if column in output.columns:
-            output[column] = output[column].map(lambda value: "" if pd.isna(value) else f"{float(value):.8f}")
-    return output
-
-
-def _loggable_metric(value: Any) -> float:
-    """Return a numeric metric value for logging."""
-
-    return float("nan") if pd.isna(value) else float(value)
-
-
 def _configure_runtime_environment(args: argparse.Namespace) -> None:
     """Configure thread environment variables."""
 
@@ -1270,6 +1044,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _validate_args(args)
     _configure_runtime_environment(args)
     output_dir = _output_dir(args).resolve()
+    # Protect completed sweeps written before the proxy mode was retired.
     if any((output_dir / name).exists() for name in ("eps_b3.tsv", "eps_overall.tsv", "summary.json")):
         raise FileExistsError("Use a fresh sweep output; reuse --distance-cache-dir for unchanged distances")
     snapshot_root = args.arrow_root.resolve()
@@ -1288,19 +1063,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         require_name_counts_index=True,
     ) as arrow_dataset:
         query_sources.validate_arrow_dataset(args.dataset, arrow_dataset)
-        gold = None
-        gold_selection: dict[str, Any] = {}
-        if args.score_mode == "safe-action-proxy":
-            gold = _load_gold(_gold_path(args))
-            gold = gold[gold["dataset"].astype(str) == str(args.dataset)].copy()
-            if gold.empty:
-                raise ValueError(f"No gold rows for dataset={args.dataset}")
-            gold_summary_path = _gold_path(args).parent / "summary.json"
-            if gold_summary_path.is_file():
-                gold_selection = json.loads(gold_summary_path.read_text(encoding="utf-8"))
-        if MAP_SHA256_FIELD in gold_selection and gold_selection[MAP_SHA256_FIELD] != query_sources.sha256:
-            raise ValueError("The EPS gold uses a different initial-query source map")
-
         output_dir.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(
             level=logging.INFO,
@@ -1318,69 +1080,63 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(best_params, Mapping) and "eps" in best_params:
             model_eps = float(best_params["eps"])
 
-        identity_reference = None
-        diagnostic_reference = None
-        reference_stats: dict[str, Any] = {}
-        if args.score_mode == "orcid-b3":
-            from scripts.eps_sweep.orcid_b3 import (
-                ORCID_ERROR_RECORDS,
-                final_test_query_identities,
-                load_external_reference_labels,
-                planning_targets,
-                read_reference,
-                reviewed_error_records,
-            )
-            from scripts.production.data.block_roles import load_block_roles
+        from scripts.eps_sweep.orcid_b3 import (
+            ORCID_ERROR_RECORDS,
+            final_test_query_identities,
+            load_external_reference_labels,
+            planning_targets,
+            read_reference,
+            reviewed_error_records,
+            score_assignments,
+        )
+        from scripts.production.data.block_roles import load_block_roles
 
-            allow_all = bool(getattr(args, "allow_all_reference_identities", False))
-            roles_path = getattr(args, "block_role_assignments", None)
-            block_roles = load_block_roles(roles_path) if roles_path is not None else None
-            if block_roles is not None and block_roles.role_for(args.dataset) != "eps_cal":
-                raise ValueError(f"Dataset {args.dataset!r} is not in the frozen eps_cal pool")
-            external_path = getattr(args, "reference_labels", None)
-            external_labels = (
-                load_external_reference_labels(external_path, dataset=args.dataset)
-                if external_path is not None
-                else None
-            )
-            test_identities = (
-                frozenset() if allow_all else final_test_query_identities(snapshot_root, args.dataset, query_sources)
-            )
-            error_records = (
-                reviewed_error_records(snapshot_root, args.dataset)
-                if (snapshot_root / ORCID_ERROR_RECORDS).is_file() or not allow_all
-                else frozenset()
-            )
-            reference = read_reference(
-                arrow_dataset,
-                snapshot_root,
-                args.dataset,
-                test_identities=test_identities,
-                error_records=error_records,
-                query_sources=query_sources,
-                external_labels=external_labels,
-                allow_all_identities=allow_all,
-                block_roles=block_roles,
-            )
-            identity_reference = reference.repeated
-            diagnostic_reference = reference.with_singletons
-            reference_stats = dict(reference.stats)
-            if external_path is not None:
-                reference_stats["reference_labels_path"] = str(external_path.resolve())
-                reference_stats["reference_labels_sha256"] = _hash_file(external_path)
-            args._excluded_signature_ids = reference.excluded_copies
-            # The singleton-inclusive reference contains the repeated one, so one plan covers both curves.
-            gold = planning_targets(args.dataset, diagnostic_reference)
-            reference_path = output_dir / "orcid_reference.parquet"
-            pd.DataFrame(
-                {
-                    "signature_id": list(diagnostic_reference),
-                    "orcid": list(diagnostic_reference.values()),
-                    "repeated": [signature in identity_reference for signature in diagnostic_reference],
-                }
-            ).to_parquet(reference_path, index=False)
-            reference_stats["sha256"] = _hash_file(reference_path)
-        assert gold is not None
+        allow_all = bool(getattr(args, "allow_all_reference_identities", False))
+        roles_path = getattr(args, "block_role_assignments", None)
+        block_roles = load_block_roles(roles_path) if roles_path is not None else None
+        if block_roles is not None and block_roles.role_for(args.dataset) != "eps_cal":
+            raise ValueError(f"Dataset {args.dataset!r} is not in the frozen eps_cal pool")
+        external_path = getattr(args, "reference_labels", None)
+        external_labels = (
+            load_external_reference_labels(external_path, dataset=args.dataset) if external_path is not None else None
+        )
+        test_identities = (
+            frozenset() if allow_all else final_test_query_identities(snapshot_root, args.dataset, query_sources)
+        )
+        error_records = (
+            reviewed_error_records(snapshot_root, args.dataset)
+            if (snapshot_root / ORCID_ERROR_RECORDS).is_file() or not allow_all
+            else frozenset()
+        )
+        reference = read_reference(
+            arrow_dataset,
+            snapshot_root,
+            args.dataset,
+            test_identities=test_identities,
+            error_records=error_records,
+            query_sources=query_sources,
+            external_labels=external_labels,
+            allow_all_identities=allow_all,
+            block_roles=block_roles,
+        )
+        identity_reference = reference.repeated
+        diagnostic_reference = reference.with_singletons
+        reference_stats = dict(reference.stats)
+        if external_path is not None:
+            reference_stats["reference_labels_path"] = str(external_path.resolve())
+            reference_stats["reference_labels_sha256"] = _hash_file(external_path)
+        args._excluded_signature_ids = reference.excluded_copies
+        # The singleton-inclusive reference contains the repeated one, so one plan covers both curves.
+        gold = planning_targets(args.dataset, diagnostic_reference)
+        reference_path = output_dir / "orcid_reference.parquet"
+        pd.DataFrame(
+            {
+                "signature_id": list(diagnostic_reference),
+                "orcid": list(diagnostic_reference.values()),
+                "repeated": [signature in identity_reference for signature in diagnostic_reference],
+            }
+        ).to_parquet(reference_path, index=False)
+        reference_stats["sha256"] = _hash_file(reference_path)
         target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(
             gold["member_signature_id"].astype(str)
         )
@@ -1391,18 +1147,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["score_mode"] = args.score_mode
         plan["reference"] = reference_stats
         plan[MAP_SHA256_FIELD] = query_sources.sha256
-        plan["limited_run"] = (
-            args.max_subblocks is not None or gold_selection.get("max_queries_per_dataset") is not None
-        )
-        plan["gold_selection"] = {
-            key: gold_selection.get(key) for key in ("task_splits", "max_queries_per_dataset", "target_kind")
-        }
+        plan["limited_run"] = args.max_subblocks is not None
+        plan["gold_selection"] = dict.fromkeys(("task_splits", "max_queries_per_dataset", "target_kind"))
         plan["use_orcid_subblocking"] = bool(args.use_orcid_subblocking)
         plan["suppress_orcid_constraints"] = bool(args.suppress_orcid_constraints)
         plan["total_ram_bytes"] = int(args.total_ram_bytes)
         plan["eps_values"] = _eps_values(args, model_eps)
-        plan["gold_path"] = str(_gold_path(args).resolve()) if identity_reference is None else None
-        plan["gold_sha256"] = _hash_file(_gold_path(args)) if identity_reference is None else None
+        plan["gold_path"] = None
+        plan["gold_sha256"] = None
         plan["model_path"] = str(args.model_path.resolve())
         plan["arrow_root"] = str(args.arrow_root.resolve())
         plan["arrow_manifest"] = str(dataset_root / "manifest.json")
@@ -1433,17 +1185,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     pd.DataFrame(linkage_rows).to_csv(output_dir / "linkage_builds.tsv", sep="\t", index=False)
     selected_cluster_blocks = {key: cluster_blocks[key] for key in selected_subblocks}
-    production_root = None
-    if args.route == "production":
-        production_root = (
-            _write_orcid_free_dataset(dataset_root, output_dir / "orcid_free_arrow")
-            if args.suppress_orcid_constraints
-            else dataset_root
-        )
+    production_root = (
+        _write_orcid_free_dataset(dataset_root, output_dir / "orcid_free_arrow") if args.route == "production" else None
+    )
 
-    signature_to_subblock = _signature_to_subblock(selected_subblocks)
-    score_frames: list[pd.DataFrame] = []
-    boundary_frames: list[pd.DataFrame] = []
     b3_rows: list[dict[str, Any]] = []
     bulk_b3_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
@@ -1459,7 +1204,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         )
         for eps in _eps_values(args, model_eps):
-            scores = None
             started = time.perf_counter()
             bulk_assignments = _cluster_assignments_for_eps(
                 eps=eps,
@@ -1478,97 +1222,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             seconds = time.perf_counter() - started
-            if identity_reference is not None:
-                from scripts.eps_sweep.orcid_b3 import score_assignments
-
-                b3_row = score_assignments(identity_reference, assignments, eps)
-                b3_row["cluster_seconds"] = round(seconds, 6)
-                b3_rows.append(b3_row)
-                assert diagnostic_reference is not None
-                diagnostic_rows.append(score_assignments(diagnostic_reference, assignments, eps))
-                if production_dataset is not None:
-                    bulk_b3_rows.append(score_assignments(identity_reference, bulk_assignments, eps))
-                logging.info("eps=%s orcid_b3=%s coverage=%s", eps, b3_row["f1"], b3_row["reference_coverage"])
-            else:
-                scores, boundary_scores = _score_assignments(gold, assignments, signature_to_subblock, eps)
-                scores["cluster_seconds"] = round(seconds, 6)
-                boundary_scores["cluster_seconds"] = round(seconds, 6)
-                score_frames.append(scores)
-                boundary_frames.append(boundary_scores)
+            b3_row = score_assignments(identity_reference, assignments, eps)
+            b3_row["cluster_seconds"] = round(seconds, 6)
+            b3_rows.append(b3_row)
+            diagnostic_rows.append(score_assignments(diagnostic_reference, assignments, eps))
+            if production_dataset is not None:
+                bulk_b3_rows.append(score_assignments(identity_reference, bulk_assignments, eps))
+            logging.info("eps=%s orcid_b3=%s coverage=%s", eps, b3_row["f1"], b3_row["reference_coverage"])
             if args.write_assignments:
                 assignment_path = assignment_dir / f"assignments_eps_{str(eps).replace('.', 'p')}.parquet"
                 pd.DataFrame(
                     {"signature_id": list(assignments.keys()), "cluster_id": list(assignments.values())}
                 ).to_parquet(assignment_path, index=False)
-            if identity_reference is not None:
-                continue
-            assert scores is not None
-            overall = scores[
-                (scores["scope_type"] == "overall")
-                & (scores["scope_value"] == "all")
-                & (scores["weight"] == "weight_query_class_balanced")
-            ].iloc[0]
-            logging.info(
-                "eps=%s rows=%d pos_recall=%.6f neg_sep=%.6f false_merge=%.6f seconds=%.3f",
-                eps,
-                int(overall["assigned_rows"]),
-                _loggable_metric(overall["positive_recall"]),
-                _loggable_metric(overall["negative_separation"]),
-                _loggable_metric(overall["false_merge_rate"]),
-                seconds,
-            )
 
-    if identity_reference is not None:
-        b3 = pd.DataFrame(b3_rows)
-        b3.to_csv(output_dir / "eps_b3.tsv", sep="\t", index=False)
-        pd.DataFrame(diagnostic_rows).to_csv(output_dir / SINGLETON_INCLUSIVE_CURVE, sep="\t", index=False)
-        outputs = {
-            "plan": str(output_dir / "plan.json"),
-            "eps_b3": str(output_dir / "eps_b3.tsv"),
-            "eps_b3_with_singletons": str(output_dir / SINGLETON_INCLUSIVE_CURVE),
-        }
-        if bulk_b3_rows:
-            # Bulk clustering alone, before the linker steps; a diagnostic, not the selection curve.
-            pd.DataFrame(bulk_b3_rows).to_csv(output_dir / BULK_ONLY_CURVE, sep="\t", index=False)
-            outputs["eps_b3_bulk_only"] = str(output_dir / BULK_ONLY_CURVE)
-        summary = {
-            "plan": plan,
-            "distance_cache_rows": cache_rows,
-            "linkage_rows": linkage_rows,
-            "outputs": outputs,
-        }
-        summary["plan_sha256"] = _hash_file(output_dir / "plan.json")
-        summary["score_sha256"] = _hash_file(output_dir / "eps_b3.tsv")
-        summary["singleton_inclusive_score_sha256"] = _hash_file(output_dir / SINGLETON_INCLUSIVE_CURVE)
-        write_json(output_dir / "summary.json", summary)
-        return summary
-
-    scores_all = pd.concat(score_frames, ignore_index=True)
-    boundary_all = pd.concat(boundary_frames, ignore_index=True)
-    overall = scores_all[(scores_all["scope_type"] == "overall") & (scores_all["scope_value"] == "all")].copy()
-    scores_all.to_parquet(output_dir / "eps_scores.parquet", index=False)
-    boundary_all.to_parquet(output_dir / "eps_boundary_pairs.parquet", index=False)
-    overall.to_parquet(output_dir / "eps_overall.parquet", index=False)
-    _format_float_columns(scores_all).to_csv(output_dir / "eps_scores.tsv", sep="\t", index=False)
-    _format_float_columns(boundary_all).to_csv(output_dir / "eps_boundary_pairs.tsv", sep="\t", index=False)
-    _format_float_columns(overall).to_csv(output_dir / "eps_overall.tsv", sep="\t", index=False)
-
+    b3 = pd.DataFrame(b3_rows)
+    b3.to_csv(output_dir / "eps_b3.tsv", sep="\t", index=False)
+    pd.DataFrame(diagnostic_rows).to_csv(output_dir / SINGLETON_INCLUSIVE_CURVE, sep="\t", index=False)
+    outputs = {
+        "plan": str(output_dir / "plan.json"),
+        "eps_b3": str(output_dir / "eps_b3.tsv"),
+        "eps_b3_with_singletons": str(output_dir / SINGLETON_INCLUSIVE_CURVE),
+    }
+    if bulk_b3_rows:
+        # Bulk clustering alone, before the linker steps; a diagnostic, not the selection curve.
+        pd.DataFrame(bulk_b3_rows).to_csv(output_dir / BULK_ONLY_CURVE, sep="\t", index=False)
+        outputs["eps_b3_bulk_only"] = str(output_dir / BULK_ONLY_CURVE)
     summary = {
         "plan": plan,
         "distance_cache_rows": cache_rows,
         "linkage_rows": linkage_rows,
-        "outputs": {
-            "plan": str(output_dir / "plan.json"),
-            "target_subblocks": str(output_dir / "target_subblocks.tsv"),
-            "distance_caches": str(output_dir / "distance_caches.tsv"),
-            "linkage_builds": str(output_dir / "linkage_builds.tsv"),
-            "eps_scores": str(output_dir / "eps_scores.tsv"),
-            "eps_boundary_pairs": str(output_dir / "eps_boundary_pairs.tsv"),
-            "eps_overall": str(output_dir / "eps_overall.tsv"),
-        },
+        "outputs": outputs,
     }
     summary["plan_sha256"] = _hash_file(output_dir / "plan.json")
-    summary["score_sha256"] = _hash_file(output_dir / "eps_overall.tsv")
+    summary["score_sha256"] = _hash_file(output_dir / "eps_b3.tsv")
+    summary["singleton_inclusive_score_sha256"] = _hash_file(output_dir / SINGLETON_INCLUSIVE_CURVE)
     write_json(output_dir / "summary.json", summary)
     return summary
 

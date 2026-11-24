@@ -15,7 +15,6 @@ from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import read_arrow_collection_root
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_GOLD_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_gold"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_sweeps_arrow"
 # Diagnostic B3 curve that keeps one-record ORCID groups and their merge penalties.
 SINGLETON_INCLUSIVE_CURVE = "eps_b3_with_singletons.tsv"
@@ -81,34 +80,29 @@ def arrow_dataset_dir(arrow_root: Path, dataset: str, replay_bundle: str | None 
 def read_sweep_curve(
     root: Path,
     dataset: str,
-    score_mode: str,
-    *,
-    weight: str = "weight_query_class_balanced",
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     """Bind each review curve to its dataset and completed plan."""
     dataset_root = root / dataset
     plan_path = dataset_root / "plan.json"
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     summary = json.loads((dataset_root / "summary.json").read_text(encoding="utf-8"))
-    if summary["plan_sha256"] != sha256_file(plan_path) or plan["score_mode"] != score_mode:
+    if summary["plan_sha256"] != sha256_file(plan_path):
         raise ValueError(f"The completed sweep does not match its plan: {dataset}")
+    if plan.get("score_mode") != "orcid-b3":
+        raise ValueError(f"The EPS sweep for {dataset!r} must use ORCID B3")
     if plan.get("dataset") != dataset:
         raise ValueError(f"The EPS sweep for {dataset!r} records dataset={plan.get('dataset')!r}")
     if plan.get("distance_policy_version") != DISTANCE_POLICY_VERSION:
         raise ValueError(f"The EPS sweep for {dataset!r} uses another distance policy")
-    score_path = dataset_root / ("eps_b3.tsv" if score_mode == "orcid-b3" else "eps_overall.tsv")
+    score_path = dataset_root / "eps_b3.tsv"
     if summary["score_sha256"] != sha256_file(score_path):
         raise ValueError(f"The EPS scores change after completion: {dataset}")
     curve = pd.read_csv(score_path, sep="\t")
-    if score_mode == "safe-action-proxy":
-        curve = curve[
-            curve["weight"].eq(weight) & curve["scope_type"].eq("overall") & curve["scope_value"].eq("all")
-        ].copy()
     if curve["eps"].duplicated().any() or set(curve["eps"].round(10)) != {
         round(value, 10) for value in plan["eps_values"]
     }:
         raise ValueError(f"Incomplete EPS curve: {dataset}")
-    metrics = ["precision", "recall", "f1"] if score_mode == "orcid-b3" else ["positive_recall", "negative_separation"]
+    metrics = ["precision", "recall", "f1"]
     if not curve[metrics].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
         raise ValueError(f"Invalid EPS metrics: {dataset}")
     return plan, curve

@@ -35,54 +35,16 @@ def _cli(*extra: str, include_batching_threshold: bool = True) -> list[str]:
     ]
 
 
-def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
-    gold_path = tmp_path / "gold.parquet"
-    pd.DataFrame(
-        [
-            {
-                "dataset": "unit",
-                "table_name": "train.parquet",
-                "split": "train",
-                "source_key": "train",
-                "supervision_type": "unlabeled_singleton_orcid",
-                "query_signature_id": "q1",
-                "member_signature_id": "m1",
-                "query_view": "full",
-                "label": 0,
-                "weight_pair": 1.0,
-                "weight_query_balanced": 1.0,
-                "weight_query_label_balanced": 1.0,
-                "weight_query_class_balanced": 1.0,
-            },
-            {
-                "dataset": "unit",
-                "table_name": "train.parquet",
-                "split": "train",
-                "source_key": "train",
-                "supervision_type": "positive_repeat_orcid",
-                "query_signature_id": "q2",
-                "member_signature_id": "m2",
-                "query_view": "full",
-                "label": 1,
-                "weight_pair": 1.0,
-                "weight_query_balanced": 1.0,
-                "weight_query_label_balanced": 1.0,
-                "weight_query_class_balanced": 1.0,
-            },
-        ]
-    ).to_parquet(gold_path, index=False)
-
-    loaded = sweep_eps_on_linking_gold._load_gold(gold_path)
-
-    assert loaded["query_signature_id"].tolist() == ["q2"]
-    assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
-
-
 def test_eps_sweep_requires_and_records_the_subblock_limit(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         sweep_eps_on_linking_gold.parse_args(_cli(include_batching_threshold=False))
     assert exc.value.code == 2
     assert "--batching-threshold" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        sweep_eps_on_linking_gold.parse_args(_cli("--score-mode", "safe-action-proxy"))
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
     args = sweep_eps_on_linking_gold.parse_args(_cli())
     gold = pd.DataFrame({"query_signature_id": ["q"], "member_signature_id": ["m"], "label": [1]})
@@ -278,13 +240,12 @@ def test_cli_enforces_production_route_and_compute_bounds(monkeypatch: pytest.Mo
         validate("--compute-missing-dists")
     with pytest.raises(ValueError, match="--route bulk"):
         validate("--max-subblocks", "1")
-    with pytest.raises(ValueError, match="--use-orcid-subblocking exactly"):
-        validate("--use-orcid-subblocking")
 
     validate("--compute-missing-dists", "--max-subblocks", "1", "--route", "bulk")
     assert validate("--compute-missing-dists", "--allow-full-run").suppress_orcid_constraints is True
-    args = validate("--use-orcid-subblocking", "--use-orcid-constraints", "--n-jobs", "2")
-    assert args.suppress_orcid_constraints is False
+    args = validate("--n-jobs", "2")
+    assert args.score_mode == "orcid-b3"
+    assert not args.use_orcid_subblocking
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     monkeypatch.setenv("RAYON_NUM_THREADS", "1")
     sweep_eps_on_linking_gold._configure_runtime_environment(args)

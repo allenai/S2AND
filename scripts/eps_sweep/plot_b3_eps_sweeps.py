@@ -31,7 +31,7 @@ def plot(root: Path, datasets: Sequence[str], output: Path, reference_eps: float
     model_hashes: set[str] = set()
     limited = False
     for dataset in dict.fromkeys(datasets):
-        plan, frame = read_sweep_curve(root, dataset, "orcid-b3")
+        plan, frame = read_sweep_curve(root, dataset)
         model_hashes.add(plan["model_manifest_sha256"])
         limited = limited or plan["limited_run"]
         if frame.empty or frame[["eps", "precision", "recall", "f1"]].isna().any().any():

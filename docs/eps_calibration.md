@@ -66,11 +66,7 @@ Those steps run on `orcid_free_arrow/` in the output directory, a dataset copy w
 Use it for `--max-subblocks` smoke runs; it does not select EPS.
 ORCID references do not establish complete or error-free identity gold.
 
-The diagnostic view uses active `calibration_fit` and `calibration_check` task assignments.
-It excludes test assignments, unknown singleton supervision, self-pairs, and each initial query's source record.
-Conflicting pair labels remain in a separate output for review.
-An abstention can mean insufficient evidence rather than different authors.
-Read the negative-separation curve as a safe-action diagnostic, not universal identity precision.
+See [evaluation traps](negative_results.md#evaluation-traps) for pitfalls with proxy labels.
 
 ## Rehearse and measure the workload
 
@@ -123,34 +119,11 @@ foreach ($Dataset in $Giants) {
   if ($LASTEXITCODE -ne 0) { throw "B3 sweep fails for $Dataset" }
 }
 
-uv run --no-sync python scripts/eps_sweep/build_linking_eps_gold.py `
-  --bundle-root $Snapshot --datasets $Giants --output-dir "$EpsRun/proxy-gold"
-
-foreach ($Dataset in $Giants) {
-  uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
-    --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
-    --gold-path "$EpsRun/proxy-gold/${Dataset}_pair_constraints.parquet" `
-    --output-dir "$EpsRun/proxy/$Dataset" `
-    --batching-threshold $BatchingThreshold `
-    --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472 `
-    --compute-missing-dists --allow-full-run
-  if ($LASTEXITCODE -ne 0) { throw "Diagnostic sweep fails for $Dataset" }
-}
-
 uv run --no-sync python scripts/eps_sweep/plot_b3_eps_sweeps.py `
   --root "$EpsRun/b3" --datasets $Giants --output "$EpsRun/b3.png" --reference-eps 0.57
-uv run --no-sync python scripts/eps_sweep/plot_q_class_eps_sweeps.py `
-  --root "$EpsRun/proxy" --datasets $Giants --output "$EpsRun/proxy.png" `
-  --weight weight_query_label_balanced --reference-eps 0.57
 ```
 
 Set `--reference-eps` to the actual initial EPS for another release.
-The diagnostic plot uses query/label weights to match the original recall/separation plot.
-Each star marks the highest tested diagnostic accuracy for its source.
-Stars do not select release EPS or maximize B3.
-The diagnostic plot excludes pairs from separate subblocks.
-Inspect their counts in `eps_boundary_pairs.tsv`.
-Use `--weight weight_query_class_balanced` for the previous equal-query view.
 Keep completed output directories immutable.
 Use a new output directory and the same verified distance-cache directory for a refined grid.
 Each cache binds the model, Arrow generation, signature order, and ORCID policy.
@@ -161,7 +134,6 @@ Plots reject missing datasets, incomplete grids, and mixed models.
 
 Review B3 precision, recall, and F1 for every giant.
 Compare the repeated curves (solid) with the singleton-inclusive curves (dashed).
-Review the diagnostic plot and its subblock-boundary counts.
 Check full reference coverage and the matched benchmark validation curve.
 Verify booster hashes before reuse of a benchmark validation report.
 Set `$ReviewedEps` to the value you select.

@@ -167,10 +167,7 @@ def _validated_sweep_plans(
     query_sources: InitialQuerySources | None = None
     for dataset in datasets:
         plan_path = sweep_root / dataset / "plan.json"
-        raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan, curve = read_sweep_curve(sweep_root, dataset, raw_plan["score_mode"])
-        if plan["score_mode"] != "orcid-b3":
-            raise ValueError("Release EPS requires identity B3 curves; safe-action curves are diagnostic")
+        plan, curve = read_sweep_curve(sweep_root, dataset)
         if plan["model_manifest_sha256"] != source_hash:
             raise ValueError(f"The EPS sweep uses a different model: {dataset}")
         if plan["limited_run"]:
@@ -193,19 +190,9 @@ def _validated_sweep_plans(
             raise ValueError(f"EPS reference labels must remain hidden from prediction: {dataset}")
         if not any(math.isclose(eps, float(value), abs_tol=1e-10, rel_tol=0) for value in plan["eps_values"]):
             raise ValueError(f"The selected EPS is absent from the sweep: {dataset}")
-        score_path = sweep_root / dataset / ("eps_b3.tsv" if plan["score_mode"] == "orcid-b3" else "eps_overall.tsv")
-        if not score_path.is_file():
-            raise FileNotFoundError(score_path)
-        if plan["score_mode"] == "orcid-b3":
-            metric_columns = ["precision", "recall", "f1"]
-            if not curve["reference_coverage"].eq(1).all():
-                raise ValueError(f"Incomplete ORCID reference coverage: {dataset}")
-        elif plan["score_mode"] == "safe-action-proxy":
-            metric_columns = ["positive_recall", "negative_separation"]
-        else:
-            raise ValueError(f"Unknown EPS score mode: {dataset}")
-        if not curve[metric_columns].map(lambda value: math.isfinite(value) and 0 <= value <= 1).all().all():
-            raise ValueError(f"Invalid EPS metrics: {dataset}")
+        score_path = sweep_root / dataset / "eps_b3.tsv"
+        if not curve["reference_coverage"].eq(1).all():
+            raise ValueError(f"Incomplete ORCID reference coverage: {dataset}")
         plan_snapshot = Path(plan["arrow_root"]).resolve()
         if query_sources is None:
             snapshot_root = plan_snapshot
@@ -260,7 +247,7 @@ def _pooled_curve(sweep_root: Path, datasets: Sequence[str]) -> pd.DataFrame:
     weights: dict[str, int] = {}
     curves: dict[str, pd.DataFrame] = {}
     for dataset in datasets:
-        _, curve = read_sweep_curve(sweep_root, dataset, "orcid-b3")
+        _, curve = read_sweep_curve(sweep_root, dataset)
         curves[dataset] = curve.assign(eps=curve["eps"].round(10)).set_index("eps")
         # The identity curve scores the repeated references; the file also lists one-record groups.
         reference = pd.read_parquet(sweep_root / dataset / "orcid_reference.parquet", columns=["repeated"])

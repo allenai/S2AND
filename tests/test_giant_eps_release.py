@@ -17,9 +17,8 @@ from s2and.production_bundle import finalize_production_bundle
 from s2and.production_model import canonical_artifact_hashes, load_production_model
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust
 from scripts.eps_sweep import apply_reviewed_eps as apply_reviewed_eps_module
-from scripts.eps_sweep import build_linking_eps_gold, orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
+from scripts.eps_sweep import orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
 from scripts.eps_sweep.apply_reviewed_eps import apply_reviewed_eps
-from scripts.eps_sweep.build_linking_eps_gold import _build_dataset_constraints, parse_args
 from scripts.eps_sweep.common import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
@@ -105,7 +104,6 @@ def _curve(
     root: Path,
     model_hash: str = "a" * 64,
     limited: bool = False,
-    mode: str = "orcid-b3",
     *,
     with_source_map: bool = False,
     test_signature: str = "q1",
@@ -124,7 +122,7 @@ def _curve(
     plan = {
         "dataset": "unit",
         "model_manifest_sha256": model_hash,
-        "score_mode": mode,
+        "score_mode": "orcid-b3",
         "limited_run": limited,
         "clustering_source": CLUSTERING_SOURCE,
         "route": RELEASE_ROUTE,
@@ -146,29 +144,16 @@ def _curve(
     pd.DataFrame(
         {"eps": [0.55, 0.65], "precision": [0.9, 0.7], "recall": [0.8, 1], "f1": [0.85, 0.82], "reference_coverage": 1}
     ).to_csv(diagnostic, sep="\t", index=False)
-    if mode == "orcid-b3":
-        scores = dataset / "eps_b3.tsv"
-        pd.DataFrame(
-            {
-                "eps": [0.55, 0.65],
-                "precision": [1, 0.8],
-                "recall": [0.8, 1],
-                "f1": [8 / 9, 8 / 9],
-                "reference_coverage": [1, 1],
-            }
-        ).to_csv(scores, sep="\t", index=False)
-    else:
-        scores = dataset / "eps_overall.tsv"
-        pd.DataFrame(
-            {
-                "eps": [0.55, 0.65],
-                "weight": "weight_query_class_balanced",
-                "scope_type": "overall",
-                "scope_value": "all",
-                "positive_recall": [0.8, 1],
-                "negative_separation": [1, 0.8],
-            }
-        ).to_csv(scores, sep="\t", index=False)
+    scores = dataset / "eps_b3.tsv"
+    pd.DataFrame(
+        {
+            "eps": [0.55, 0.65],
+            "precision": [1, 0.8],
+            "recall": [0.8, 1],
+            "f1": [8 / 9, 8 / 9],
+            "reference_coverage": [1, 1],
+        }
+    ).to_csv(scores, sep="\t", index=False)
     write_json(
         dataset / "summary.json",
         {
@@ -365,13 +350,13 @@ def test_completed_curve_rejects_stale_or_incomplete_files(tmp_path: Path) -> No
     plan_bytes = plan.read_bytes()
     plan.write_bytes(plan_bytes + b"\n")
     with pytest.raises(ValueError, match="plan"):
-        read_sweep_curve(tmp_path, "unit", "orcid-b3")
+        read_sweep_curve(tmp_path, "unit")
     plan.write_bytes(plan_bytes)
 
     scores = dataset / "eps_b3.tsv"
     pd.read_csv(scores, sep="\t").iloc[:1].to_csv(scores, sep="\t", index=False)
     with pytest.raises(ValueError, match="scores change"):
-        read_sweep_curve(tmp_path, "unit", "orcid-b3")
+        read_sweep_curve(tmp_path, "unit")
 
     summary = dataset / "summary.json"
     completed = json.loads(summary.read_bytes())
@@ -380,7 +365,7 @@ def test_completed_curve_rejects_stale_or_incomplete_files(tmp_path: Path) -> No
         plot_b3_eps_sweeps.plot(tmp_path, ["unit"], tmp_path / "plot.png")
 
 
-def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path) -> None:
+def test_review_rejects_proxy_or_bounded_curves(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     manifest = source / "manifest.json"
@@ -389,10 +374,9 @@ def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bounded smoke"):
         _apply(tmp_path, source)
 
-    # Validate a complete diagnostic curve before rejecting it for release.
-    shutil.rmtree(dataset)
-    _curve(tmp_path / "curves", sha256_file(manifest), mode="safe-action-proxy")
-    with pytest.raises(ValueError, match="diagnostic"):
+    plan = json.loads((dataset / "plan.json").read_bytes())
+    _update_curve_plan(dataset, {**plan, "score_mode": "safe-action-proxy"})
+    with pytest.raises(ValueError, match="must use ORCID B3"):
         _apply(tmp_path, source)
 
 
@@ -518,10 +502,8 @@ def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_pa
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize(("command", "with_source_map"), [("sweep", False), ("gold", True)])
-def test_eps_commands_reject_an_unmatched_expected_source_map(
-    tmp_path: Path, command: str, with_source_map: bool
-) -> None:
+@pytest.mark.parametrize("with_source_map", [False, True])
+def test_eps_sweep_rejects_an_unmatched_expected_source_map(tmp_path: Path, with_source_map: bool) -> None:
     _source_snapshot(tmp_path, with_clone=with_source_map)
     args = [
         "--output-dir",
@@ -530,23 +512,20 @@ def test_eps_commands_reject_an_unmatched_expected_source_map(
         "0" * 64,
     ]
     with pytest.raises(ValueError, match="SHA-256 differs"):
-        if command == "sweep":
-            parsed = sweep_eps_on_linking_gold.parse_args(
-                [
-                    "--dataset",
-                    "unit",
-                    "--arrow-root",
-                    str(tmp_path),
-                    "--model-path",
-                    str(tmp_path / "model"),
-                    "--batching-threshold",
-                    "15000",
-                    *args,
-                ]
-            )
-            sweep_eps_on_linking_gold.run(parsed)
-        else:
-            build_linking_eps_gold.main(["--bundle-root", str(tmp_path), "--datasets", "unit", *args])
+        parsed = sweep_eps_on_linking_gold.parse_args(
+            [
+                "--dataset",
+                "unit",
+                "--arrow-root",
+                str(tmp_path),
+                "--model-path",
+                str(tmp_path / "model"),
+                "--batching-threshold",
+                "15000",
+                *args,
+            ]
+        )
+        sweep_eps_on_linking_gold.run(parsed)
     assert not (tmp_path / "output").exists()
 
 
@@ -938,56 +917,6 @@ def test_review_requires_sweep_root_and_datasets_together(tmp_path: Path) -> Non
     assert not (tmp_path / "output").exists()
 
 
-def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path) -> None:
-    components = tmp_path / "components"
-    components.mkdir()
-    pd.DataFrame(
-        {
-            "dataset": ["unit", "unit"],
-            "candidate_component_key": ["profile", "profile"],
-            "member_index": [0, 1],
-            "signature_id": ["origin", "other"],
-        }
-    ).to_parquet(components / "unit_members.parquet", index=False)
-    map_path = _source_snapshot(tmp_path, source="origin", with_clone=True)
-    clone = derived_query_id("visibleq:", "origin", "source-paper")
-    labels = pd.DataFrame(
-        [
-            {
-                "dataset": "unit",
-                "table_name": "dev.parquet",
-                "split": "calibration_fit",
-                "source_key": "dev",
-                "source_kind": "manual",
-                "supervision_type": "manual",
-                "query_group_id": "query",
-                "query_signature_id": clone,
-                "query_view": "initial_only",
-                "candidate_component_key": "profile",
-                "label": 1,
-            }
-        ]
-    )
-    pairs, conflicts, summary = _build_dataset_constraints(tmp_path, "unit", labels)
-    assert pairs["member_signature_id"].tolist() == ["other"]
-    assert conflicts.empty
-    assert summary["excluded_initial_origin_rows"] == 1
-    assert summary[MAP_SHA256_FIELD] == sha256_file(map_path)
-
-    map_path.write_text(
-        json.dumps({"dataset": "unit", "source_query_signature_id": "absent", "initial_query_signature_id": clone})
-        + "\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="records are absent"):
-        _build_dataset_constraints(tmp_path, "unit", labels)
-
-
-def test_proxy_builder_cli_rejects_test_assignment() -> None:
-    with pytest.raises(SystemExit):
-        parse_args(["--bundle-root", "data", "--output-dir", "out", "--datasets", "unit", "--task-splits", "test"])
-
-
 def test_completed_output_cannot_be_rebound_by_dry_run(tmp_path: Path) -> None:
     dataset = _curve(tmp_path)
     before = (dataset / "plan.json").read_bytes()
@@ -1049,7 +978,7 @@ def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Pa
     plan = json.loads((dataset / "plan.json").read_bytes())
     _update_curve_plan(dataset, plan | {"distance_policy_version": DISTANCE_POLICY_VERSION - 1})
     with pytest.raises(ValueError, match="another distance policy"):
-        read_sweep_curve(tmp_path, "unit", "orcid-b3")
+        read_sweep_curve(tmp_path, "unit")
 
 
 @pytest.mark.parametrize("mode", ["strict", "home_pool"])

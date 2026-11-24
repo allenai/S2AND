@@ -15,8 +15,8 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from scripts.common.block_roles import load_block_roles
-from scripts.eps.common import DISTANCE_POLICY_VERSION
-from scripts.eps.orcid_b3 import read_external_reference_identity_evidence
+from scripts.common.distance_policy import DISTANCE_POLICY_VERSION
+from scripts.common.orcid_references import read_external_reference_identity_evidence
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from scripts.intake.prepare_identity_labels import prepare_identity_labels
 from scripts.linker.build_linker_task_tables import (

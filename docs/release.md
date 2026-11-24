@@ -90,7 +90,7 @@ Regenerate a common asset only when its source data or semantics change.
 Regenerate A after a canonical name-rule change, even when the raw Athena export stays unchanged.
 Only AI2 staff can run the Athena export and rebuild A. Expect this for every future refresh.
 Recompute pairwise and linker features after a count-authority change.
-Exclude the 19 mixed-identity ORCID groups listed in `EXCLUDED_ORCID_GROUPS`.
+Exclude the 19 mixed-identity ORCID groups listed in `EXCLUDED_ORCID_GROUPS` (`scripts/common/orcid_references.py`).
 Keep the rule requiring matching, nonempty canonical surnames.
 Run the focused producer checks before a bounded rebuild.
 See [the count commands](../scripts/release/README.md#count-artifacts).

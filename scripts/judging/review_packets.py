@@ -28,7 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
-from scripts.intake.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
 from scripts.intake.hash_release_emails import _find_plaintext_emails, scrub_text_emails  # noqa: E402
 
 ORCID_REDACTED_TOKEN = "[ORCID_REDACTED]"

@@ -27,7 +27,7 @@ from scripts.common.initial_query_sources import (
     InitialQuerySources,
     load_initial_query_sources,
 )
-from scripts.intake.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 
 # Selection references exclude final-test identities and reviewed ORCID errors.
 REFERENCE_POLICY = "final_test_orcid_groups_and_reviewed_error_records_excluded"
@@ -43,42 +43,6 @@ def load_external_reference_labels(path: Path, *, dataset: str | None = None) ->
     that dataset (preventing signature-ID collisions across multi-block label files).
     """
     return read_external_reference_identity_evidence(path, dataset=dataset, include_unscored=False)[1]
-
-
-def read_external_reference_identity_evidence(
-    path: Path, *, dataset: str | None = None, include_unscored: bool = True, require_scored: bool = False
-) -> tuple[dict[str, str], dict[str, str]]:
-    """Read all known identities and the subset eligible to score."""
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    frame = pd.read_parquet(path)
-    required = {"signature_id", "orcid"}
-    if require_scored:
-        required.add("scored")
-    missing = sorted(required - set(frame.columns))
-    if missing:
-        raise ValueError(f"External reference labels missing required columns: {missing}")
-    if dataset is not None and "dataset" in frame.columns:
-        frame = frame[frame["dataset"].astype(str).eq(str(dataset))]
-    eligible = frame["scored"].eq(True).fillna(False) if "scored" in frame else [True] * len(frame)
-    identities: dict[str, str] = {}
-    labels: dict[str, str] = {}
-    for signature_id, raw_orcid, scored in zip(frame["signature_id"], frame["orcid"], eligible, strict=True):
-        if not scored and not include_unscored:
-            continue
-        if signature_id is None or raw_orcid is None or pd.isna(signature_id) or pd.isna(raw_orcid):
-            continue
-        sid = str(signature_id)
-        orcid = normalize_orcid(str(raw_orcid))
-        if not sid or not orcid:
-            continue
-        existing = identities.get(sid)
-        if existing is not None and existing != orcid:
-            raise ValueError(f"Conflicting external ORCID labels for signature_id={sid!r}: {existing} vs {orcid}")
-        identities[sid] = orcid
-        if scored:
-            labels[sid] = orcid
-    return identities, labels
 
 
 @dataclass(frozen=True)

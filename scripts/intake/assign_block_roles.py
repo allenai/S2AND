@@ -38,7 +38,7 @@ from scripts.common.block_roles import (  # noqa: E402
     load_block_roles,
     normalize_block_key,
 )
-from scripts.intake.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
 
 PERMANENT_EXCLUDED_BLOCKS = frozenset({"f matsen"})
 LEGACY_DEV_TEST_BLOCKS = frozenset(

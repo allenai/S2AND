@@ -31,6 +31,7 @@ from s2and.text import (
     normalize_orcid,
     same_prefix_tokens,
 )
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
 
 from ._run_support import (
     emit_jsonl,
@@ -44,32 +45,6 @@ MIN_ORCID_COUNT = 10
 MIN_ALIAS_COUNT = 2
 DEFAULT_MAX_NAMES_PER_ORCID = 100
 PROGRESS_EVERY = 100_000
-# The September 25 review identifies mixed identities under these ORCIDs.
-# Exclude whole groups because the review does not establish each row's owner.
-EXCLUDED_ORCID_GROUPS = frozenset(
-    {
-        "0000-0000-0000-0001",
-        "0000-0001-2345-6789",
-        "0000-0001-7511-2910",
-        "0000-0002-1028-8971",
-        "0000-0002-1825-0097",
-        "0000-0002-3752-9683",
-        "0000-0002-4011-3590",
-        "0000-0002-5024-6186",
-        "0000-0002-5571-8349",
-        "0000-0002-5982-8983",
-        "0000-0003-1855-6181",
-        "0000-0003-3393-8460",
-        "0000-0003-3895-7409",
-        "0009-0004-4499-3929",
-        # The November 20 review identifies five more mixed-identity groups.
-        "0000-0001-5373-2326",
-        "0000-0001-8915-3377",
-        "0000-0002-0786-7307",
-        "0009-0005-6326-4470",
-        "0009-0009-5657-3485",
-    }
-)
 GUARDRAIL_FIELDS = frozenset(
     {
         "max_source_rows",
@@ -321,8 +296,8 @@ def _publication_payloads(
 ) -> dict[str, bytes]:
     """Serialize the trusted runtime data and its tuple dependency."""
 
-    # orjson is the optional orcid-counts extra. Importing it here keeps this module, and the
-    # EPS review scripts that share EXCLUDED_ORCID_GROUPS, importable after a plain `uv sync`.
+    # orjson is the optional orcid-counts extra. Importing it here keeps this module
+    # importable after a plain `uv sync`.
     import orjson
 
     validate_orcid_prefix_counts(counts, context="counts")

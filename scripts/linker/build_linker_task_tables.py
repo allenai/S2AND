@@ -28,9 +28,11 @@ from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K  # noqa:
 from s2and.incremental_linking.feature_block_arrow import temporary_cluster_seed_sidecars  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
-from scripts.eps.common import DISTANCE_POLICY_VERSION  # noqa: E402
-from scripts.eps.orcid_b3 import read_external_reference_identity_evidence  # noqa: E402
-from scripts.intake.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
+from scripts.common.orcid_references import (  # noqa: E402
+    EXCLUDED_ORCID_GROUPS,
+    read_external_reference_identity_evidence,
+)
 
 TASK_ROLES = ("linker_train", "gate_fit", "gate_thresh")
 TASK_MANIFEST = "linker_tasks.json"

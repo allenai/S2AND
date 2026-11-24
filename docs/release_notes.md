@@ -100,6 +100,14 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 ### Breaking changes
 
+- Removed the Python subblocker from `s2and.subblocking`: `make_subblocks`,
+  `make_subblocks_with_telemetry`, `cluster_with_specter`,
+  `cluster_with_graph_fallback`, `subdivide_helper`,
+  `DatasetGraphSubblockingFallback` and `no_middle_dead_end_buckets`.
+  Subblocking runs in Rust inside `Clusterer.predict_from_arrow`.
+- Removed unused evaluation helpers `claims_eval`, `facet_eval`,
+  `FacetEvalResult` and `min_pair_edit` from `s2and.eval`, and `equal_initial`
+  from `s2and.text`. They have no replacement.
 - Releases publish three Amazon Simple Storage Service (S3) bundles:
   `inference` (model and count index), `dataset` (Arrow training and evaluation
   data), and `source` (editable records).
@@ -448,8 +456,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   preserve name conflicts and explicit disallows.
 - JSON seed `require` pairs form connected components. Explicit `disallow`
   pairs retain precedence. Incremental altered-profile splitting honors the
-  ignore-seeds flag through postprocessing. Arrow-backed facet evaluation
-  computes deferred canonical names before comparing them.
+  ignore-seeds flag through postprocessing.
 - Subblocked prediction keeps original input blocks independent. Initial-only
   groups attach within their block, and an active required component exceeding
   `batching_threshold` within a block raises `ValueError`. Mixed initial and
@@ -564,7 +571,7 @@ both timings were recorded.
 
 ### Status
 
-- The `inference`, `dataset`, and `source` bundles
+- **Update at v1.3 release:** The `inference`, `dataset`, and `source` bundles
   are on S3. The current production model is `1.3.2` at
   `s3://ai2-s2-research-public/s2and/1.3.2/inference/`. Use the `1.3.1`
   dataset bundle to evaluate it. Model `1.3.1` remains available under
@@ -577,6 +584,9 @@ both timings were recorded.
   the next update cycle without historical correction archives.
 
 ## 0.51.2
+
+**Update at v1.3 release:** Release-grade v1.3 memory and throughput gates
+remain pending.
 
 - Added `fingerprint_source` to the Arrow batch-index writers. Setting it to
   `False` skipped the full-file FNV hash and recorded a size-only index for

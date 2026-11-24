@@ -35,6 +35,9 @@ cargo --version
 
 ## Package install
 
+> **Update at v1.3 release:** Runtime `1.0.0` is not on PyPI yet.
+> Install the latest `1.0.0` beta with `uv pip install --pre s2and`, or use the checkout flow below.
+
 Runtime install:
 
 ```bash

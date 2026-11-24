@@ -3,7 +3,7 @@
 Use this procedure before final release evaluation.
 Benchmark validation supplies the initial EPS.
 Giant-block curves supply the final operating-point review.
-The release owner chooses EPS after review of both views and benchmark validation.
+The release owner chooses EPS after reviewing the giant-block curves and benchmark validation.
 The scripts do not choose EPS automatically.
 
 ## Inputs
@@ -103,7 +103,7 @@ Reuse requires matching package, distance policy, and pairwise bundle feature co
 The production route caches every subblock of each target block and runs the linker steps once per EPS value.
 Time one EPS value on the largest giant before choosing the grid.
 
-## Produce both views
+## Run the B3 sweep
 
 Run each giant sequentially within the approved resource budget:
 
@@ -157,7 +157,7 @@ The `--datasets` list must match the resulting datasets. The command reports and
 The plans must all point to the same snapshot. Apply and the plotters check each plan's recorded
 dataset name. Apply requires both completed curves for every requested dataset.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
-It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
+It requires identity B3 curves.
 It writes a fresh complete model and preserves every trained artifact byte.
 
 When internal exports supply the review, omit `--sweep-root` and the dataset and threshold options.

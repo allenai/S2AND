@@ -5,6 +5,9 @@ The model predicts author clusters from paper and author records.
 
 This branch prepares Python/Rust runtime `1.0.0`, model release `1.4`, and data release `1.4`.
 
+> **Update at v1.3 release:** Runtime `1.0.0` is not on PyPI yet, and the release tag does not exist yet.
+> Use the `canonical-v2-migration` branch or the `1.0.0b14` beta. The `1.4` model and the `1.4` data are published on S3.
+
 Use [the release process](docs/release.md) for current preparation, fit, evaluation, and publication steps.
 
 ## Choose a workflow

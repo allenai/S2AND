@@ -271,4 +271,5 @@ Run one public step from the [reproduction guide](reproduce.md) on that root.
 Record the package, model, research snapshot, and format versions in the release notes.
 Record the common Git ref, asset paths, S3 prefix, manifest hashes, and evaluation decision.
 Replace unpublished placeholders only with verified download locations.
+Resolve every `Update at v1.3 release` note (`git grep -n "Update at v1.3 release"`).
 Tag the exact reviewed source commit.

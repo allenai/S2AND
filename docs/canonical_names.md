@@ -5,6 +5,9 @@ author names, builds name-count keys, and compares canonical names.
 
 ## Access the current rules and artifacts
 
+> **Update at v1.3 release:** Runtime `1.0.0` remains unpublished.
+> Use PR 80's `canonical-v2-migration` branch and its local Rust build for the current rules.
+
 Clone the branch and build the environment:
 
 ```bash

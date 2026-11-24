@@ -1,5 +1,8 @@
 # Corrected research snapshot
 
+This page covers the release snapshot (`scripts/release/`) and pairwise input commands (`scripts/pairwise/`).
+The intake scripts are listed in the [script catalog](../README.md).
+
 Use the final output of all accepted additions and corrections as the master dataset.
 The next correction cycle starts from that output.
 Old review archives and pre-correction records are not required inputs.

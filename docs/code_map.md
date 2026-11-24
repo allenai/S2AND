@@ -8,10 +8,11 @@
 | Load the bundle and bind the name-count index | [`production_model.py`](../s2and/production_model.py) |
 | Bulk · Split oversized blocks | [`subblocking.py`](../s2and/subblocking.py) |
 | Bulk · Score pairs and cluster by average linkage | [`model.py`](../s2and/model.py) |
+| Bulk · Apply enabled cluster corrections inside each block | [`block_corrections.py`](../s2and/block_corrections.py) |
+| Bulk · Reunite no-middle-name pieces across subblocks | [`model.py`](../s2and/model.py) (`_reunite_no_middle_dead_ends`) |
 | Bulk · Attach initial-only groups | [`model.py`](../s2and/model.py) |
-| Bulk · Apply enabled cluster corrections | [`block_corrections.py`](../s2and/block_corrections.py) |
-| Bulk · Reunite compatible cross-subblock clusters by ORCID | [`orcid_join.py`](../s2and/orcid_join.py) |
-| Incremental · Set up required seed memberships and disallows | [`incremental_linking/production.py`](../s2and/incremental_linking/production.py) |
+| Bulk · Join clusters across subblocks by ORCID | [`orcid_join.py`](../s2and/orcid_join.py) |
+| Incremental · Set up required seed memberships and disallows | [`model.py`](../s2and/model.py) (`Clusterer.predict_incremental_from_arrow`), [`seed_merging.py`](../s2and/seed_merging.py), then [`incremental_linking/production.py`](../s2and/incremental_linking/production.py) |
 | Incremental · Retrieve candidate seed profiles | [`raw_candidate_planner.rs`](../s2and_rust/src/raw_candidate_planner.rs) |
 | Incremental · Score and rank candidates | [`incremental_linking/runtime.py`](../s2and/incremental_linking/runtime.py) |
 | Incremental · Gate the best link or abstain | [`incremental_linking/logistic_gate.py`](../s2and/incremental_linking/logistic_gate.py) |
@@ -26,7 +27,7 @@
 | Pairwise | [`prepare_pairwise_inputs.py`](../scripts/pairwise/prepare_pairwise_inputs.py), [`package_pairwise_inputs.py`](../scripts/pairwise/package_pairwise_inputs.py), [`train_pairwise.py`](../scripts/pairwise/train_pairwise.py), [`release_pairwise.py`](../scripts/pairwise/release_pairwise.py) | Portable pairwise inputs, both boosters, benchmark EPS, and held-out scores |
 | Linker | [`build_linker_task_tables.py`](../scripts/linker/build_linker_task_tables.py), [`linker_source_bundle.py`](../scripts/linker/linker_source_bundle.py), [`train_linker_and_finalize.py`](../scripts/linker/train_linker_and_finalize.py) | Frozen task tables, a complete model, and linker evaluation |
 | Clustering threshold (EPS) | [`sweep_eps_on_linking_gold.py`](../scripts/eps/sweep_eps_on_linking_gold.py), [`plot_b3_eps_sweeps.py`](../scripts/eps/plot_b3_eps_sweeps.py), [`apply_reviewed_eps.py`](../scripts/eps/apply_reviewed_eps.py) | ORCID B-cubed curves and a complete bundle with the reviewed threshold |
-| Release | [`package_corrected_datasets.py`](../scripts/release/package_corrected_datasets.py), [`write_release_bundles.py`](../scripts/release/write_release_bundles.py) | A corrected snapshot and the published `inference`, `dataset`, and optional `source` bundles |
+| Release (runs before pairwise training; see release Stage 2 in [`release.md`](release.md)) | [`package_corrected_datasets.py`](../scripts/release/package_corrected_datasets.py), [`write_release_bundles.py`](../scripts/release/write_release_bundles.py) | A corrected snapshot and the published `inference`, `dataset`, and optional `source` bundles |
 
 ## Where is it?
 

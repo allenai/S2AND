@@ -71,65 +71,64 @@ Use [the data guide](../docs/data.md) to download them.
 
 ## Moved files
 
-Paths start at the repository's `scripts/` directory. Join the former folder with the file name to look up an old path.
-A dot means the file was directly in `scripts/`.
+Look up a former path to find its current location.
 
-| File | Former folder | Current location |
-| --- | --- | --- |
-| `analyze_giant_block_subblocking.py` | `.` | [release/verification/analyze_giant_block_subblocking.py](release/verification/analyze_giant_block_subblocking.py) |
-| `arrow_conversion_helpers.py` | `.` | [common/arrow_conversion_helpers.py](common/arrow_conversion_helpers.py) |
-| `convert_to_arrow.py` | `.` | [intake/convert_to_arrow.py](intake/convert_to_arrow.py) |
-| `__init__.py` | `eps_sweep` | [eps/__init__.py](eps/__init__.py) |
-| `apply_reviewed_eps.py` | `eps_sweep` | [eps/apply_reviewed_eps.py](eps/apply_reviewed_eps.py) |
-| `common.py` | `eps_sweep` | [eps/common.py](eps/common.py) |
-| `orcid_b3.py` | `eps_sweep` | [eps/orcid_b3.py](eps/orcid_b3.py) |
-| `plot_b3_eps_sweeps.py` | `eps_sweep` | [eps/plot_b3_eps_sweeps.py](eps/plot_b3_eps_sweeps.py) |
-| `sweep_eps_on_linking_gold.py` | `eps_sweep` | [eps/sweep_eps_on_linking_gold.py](eps/sweep_eps_on_linking_gold.py) |
-| `README.md` | `production` | [release/README.md](release/README.md) |
-| `__init__.py` | `production` | [common/__init__.py](common/__init__.py) |
-| `README.md` | `production/counts` | [intake/counts/README.md](intake/counts/README.md) |
-| `__init__.py` | `production/counts` | [intake/counts/__init__.py](intake/counts/__init__.py) |
-| `_run_support.py` | `production/counts` | [intake/counts/_run_support.py](intake/counts/_run_support.py) |
-| `generate_author_counts_from_athena.py` | `production/counts` | [intake/counts/generate_author_counts_from_athena.py](intake/counts/generate_author_counts_from_athena.py) |
-| `generate_name_counts_from_parquet.py` | `production/counts` | [intake/counts/generate_name_counts_from_parquet.py](intake/counts/generate_name_counts_from_parquet.py) |
-| `generate_orcid_name_prefix_counts.py` | `production/counts` | [intake/counts/generate_orcid_name_prefix_counts.py](intake/counts/generate_orcid_name_prefix_counts.py) |
-| `README.md` | `production/data` | [intake/README.md](intake/README.md) |
-| `_pairwise_augmentation.py` | `production/data` | [pairwise/_pairwise_augmentation.py](pairwise/_pairwise_augmentation.py) |
-| `_pairwise_embeddings.py` | `production/data` | [pairwise/_pairwise_embeddings.py](pairwise/_pairwise_embeddings.py) |
-| `assign_block_roles.py` | `production/data` | [intake/assign_block_roles.py](intake/assign_block_roles.py) |
-| `block_roles.py` | `production/data` | [common/block_roles.py](common/block_roles.py) |
-| `build_linker_task_tables.py` | `production/data` | [linker/build_linker_task_tables.py](linker/build_linker_task_tables.py) |
-| `check_v14_training_overlap.py` | `production/data` | [intake/check_v14_training_overlap.py](intake/check_v14_training_overlap.py) |
-| `gate_public_snapshot.py` | `production/data` | [intake/gate_public_snapshot.py](intake/gate_public_snapshot.py) |
-| `hash_release_emails.py` | `production/data` | [intake/hash_release_emails.py](intake/hash_release_emails.py) |
-| `mine_pairwise_pairs.py` | `production/data` | [pairwise/mine_pairwise_pairs.py](pairwise/mine_pairwise_pairs.py) |
-| `package_corrected_datasets.py` | `production/data` | [release/package_corrected_datasets.py](release/package_corrected_datasets.py) |
-| `package_pairwise_inputs.py` | `production/data` | [pairwise/package_pairwise_inputs.py](pairwise/package_pairwise_inputs.py) |
-| `prepare_identity_labels.py` | `production/data` | [intake/prepare_identity_labels.py](intake/prepare_identity_labels.py) |
-| `prepare_pairwise_inputs.py` | `production/data` | [pairwise/prepare_pairwise_inputs.py](pairwise/prepare_pairwise_inputs.py) |
-| `review_packets.py` | `production/data` | [judging/review_packets.py](judging/review_packets.py) |
-| `write_release_bundles.py` | `production/data` | [release/write_release_bundles.py](release/write_release_bundles.py) |
-| `generate_canonical_name_tuples.py` | `production` | [intake/generate_canonical_name_tuples.py](intake/generate_canonical_name_tuples.py) |
-| `__init__.py` | `production/model` | [pairwise/__init__.py](pairwise/__init__.py) |
-| `augmented_leakage.py` | `production/model` | [pairwise/augmented_leakage.py](pairwise/augmented_leakage.py) |
-| `initial_query_sources.py` | `production/model` | [common/initial_query_sources.py](common/initial_query_sources.py) |
-| `linker_source_bundle.py` | `production/model` | [linker/linker_source_bundle.py](linker/linker_source_bundle.py) |
-| `pairwise_incumbent_h13.json` | `production/model` | [pairwise/pairwise_incumbent_h13.json](pairwise/pairwise_incumbent_h13.json) |
-| `plan_datasets.py` | `production/model` | [common/plan_datasets.py](common/plan_datasets.py) |
-| `rebind_name_counts_index.py` | `production/model` | [release/rebind_name_counts_index.py](release/rebind_name_counts_index.py) |
-| `release_pairwise.py` | `production/model` | [pairwise/release_pairwise.py](pairwise/release_pairwise.py) |
-| `train_linker_and_finalize.py` | `production/model` | [linker/train_linker_and_finalize.py](linker/train_linker_and_finalize.py) |
-| `train_pairwise.py` | `production/model` | [pairwise/train_pairwise.py](pairwise/train_pairwise.py) |
-| `unknown_signatures.py` | `production/model` | [common/unknown_signatures.py](common/unknown_signatures.py) |
-| `run_bounded.py` | `.` | [dev/run_bounded.py](dev/run_bounded.py) |
-| `run_ci_locally.py` | `.` | [dev/run_ci_locally.py](dev/run_ci_locally.py) |
-| `sync_feature_schema.py` | `.` | [dev/sync_feature_schema.py](dev/sync_feature_schema.py) |
-| `sync_version.py` | `.` | [dev/sync_version.py](dev/sync_version.py) |
-| `compare_full_predict_arrow_parity.py` | `verification` | [release/verification/compare_full_predict_arrow_parity.py](release/verification/compare_full_predict_arrow_parity.py) |
-| `evaluate_incremental_gold.py` | `verification` | [release/verification/evaluate_incremental_gold.py](release/verification/evaluate_incremental_gold.py) |
-| `profile_promoted_incremental_arrow.py` | `verification` | [release/verification/profile_promoted_incremental_arrow.py](release/verification/profile_promoted_incremental_arrow.py) |
-| `smoke_installed_incremental_arrow.py` | `verification` | [release/verification/smoke_installed_incremental_arrow.py](release/verification/smoke_installed_incremental_arrow.py) |
-| `smoke_installed_rust_api.py` | `verification` | [release/verification/smoke_installed_rust_api.py](release/verification/smoke_installed_rust_api.py) |
-| `validate_local_arrow_release.py` | `verification` | [release/verification/validate_local_arrow_release.py](release/verification/validate_local_arrow_release.py) |
-| `verify_production_model_distributions.py` | `verification` | [release/verification/verify_production_model_distributions.py](release/verification/verify_production_model_distributions.py) |
-| `verify_rust_distribution_licenses.py` | `verification` | [release/verification/verify_rust_distribution_licenses.py](release/verification/verify_rust_distribution_licenses.py) |
+| Former path | Current location |
+| --- | --- |
+| `scripts/analyze_giant_block_subblocking.py` | [release/verification/analyze_giant_block_subblocking.py](release/verification/analyze_giant_block_subblocking.py) |
+| `scripts/arrow_conversion_helpers.py` | [common/arrow_conversion_helpers.py](common/arrow_conversion_helpers.py) |
+| `scripts/convert_to_arrow.py` | [intake/convert_to_arrow.py](intake/convert_to_arrow.py) |
+| `scripts/eps_sweep/__init__.py` | [eps/__init__.py](eps/__init__.py) |
+| `scripts/eps_sweep/apply_reviewed_eps.py` | [eps/apply_reviewed_eps.py](eps/apply_reviewed_eps.py) |
+| `scripts/eps_sweep/common.py` | [eps/common.py](eps/common.py) |
+| `scripts/eps_sweep/orcid_b3.py` | [eps/orcid_b3.py](eps/orcid_b3.py) |
+| `scripts/eps_sweep/plot_b3_eps_sweeps.py` | [eps/plot_b3_eps_sweeps.py](eps/plot_b3_eps_sweeps.py) |
+| `scripts/eps_sweep/sweep_eps_on_linking_gold.py` | [eps/sweep_eps_on_linking_gold.py](eps/sweep_eps_on_linking_gold.py) |
+| `scripts/production/README.md` | [release/README.md](release/README.md) |
+| `scripts/production/__init__.py` | [common/__init__.py](common/__init__.py) |
+| `scripts/production/counts/README.md` | [intake/counts/README.md](intake/counts/README.md) |
+| `scripts/production/counts/__init__.py` | [intake/counts/__init__.py](intake/counts/__init__.py) |
+| `scripts/production/counts/_run_support.py` | [intake/counts/_run_support.py](intake/counts/_run_support.py) |
+| `scripts/production/counts/generate_author_counts_from_athena.py` | [intake/counts/generate_author_counts_from_athena.py](intake/counts/generate_author_counts_from_athena.py) |
+| `scripts/production/counts/generate_name_counts_from_parquet.py` | [intake/counts/generate_name_counts_from_parquet.py](intake/counts/generate_name_counts_from_parquet.py) |
+| `scripts/production/counts/generate_orcid_name_prefix_counts.py` | [intake/counts/generate_orcid_name_prefix_counts.py](intake/counts/generate_orcid_name_prefix_counts.py) |
+| `scripts/production/data/README.md` | [intake/README.md](intake/README.md) |
+| `scripts/production/data/_pairwise_augmentation.py` | [pairwise/_pairwise_augmentation.py](pairwise/_pairwise_augmentation.py) |
+| `scripts/production/data/_pairwise_embeddings.py` | [pairwise/_pairwise_embeddings.py](pairwise/_pairwise_embeddings.py) |
+| `scripts/production/data/assign_block_roles.py` | [intake/assign_block_roles.py](intake/assign_block_roles.py) |
+| `scripts/production/data/block_roles.py` | [common/block_roles.py](common/block_roles.py) |
+| `scripts/production/data/build_linker_task_tables.py` | [linker/build_linker_task_tables.py](linker/build_linker_task_tables.py) |
+| `scripts/production/data/check_v14_training_overlap.py` | [intake/check_v14_training_overlap.py](intake/check_v14_training_overlap.py) |
+| `scripts/production/data/gate_public_snapshot.py` | [intake/gate_public_snapshot.py](intake/gate_public_snapshot.py) |
+| `scripts/production/data/hash_release_emails.py` | [intake/hash_release_emails.py](intake/hash_release_emails.py) |
+| `scripts/production/data/mine_pairwise_pairs.py` | [pairwise/mine_pairwise_pairs.py](pairwise/mine_pairwise_pairs.py) |
+| `scripts/production/data/package_corrected_datasets.py` | [release/package_corrected_datasets.py](release/package_corrected_datasets.py) |
+| `scripts/production/data/package_pairwise_inputs.py` | [pairwise/package_pairwise_inputs.py](pairwise/package_pairwise_inputs.py) |
+| `scripts/production/data/prepare_identity_labels.py` | [intake/prepare_identity_labels.py](intake/prepare_identity_labels.py) |
+| `scripts/production/data/prepare_pairwise_inputs.py` | [pairwise/prepare_pairwise_inputs.py](pairwise/prepare_pairwise_inputs.py) |
+| `scripts/production/data/review_packets.py` | [judging/review_packets.py](judging/review_packets.py) |
+| `scripts/production/data/write_release_bundles.py` | [release/write_release_bundles.py](release/write_release_bundles.py) |
+| `scripts/production/generate_canonical_name_tuples.py` | [intake/generate_canonical_name_tuples.py](intake/generate_canonical_name_tuples.py) |
+| `scripts/production/model/__init__.py` | [pairwise/__init__.py](pairwise/__init__.py) |
+| `scripts/production/model/augmented_leakage.py` | [pairwise/augmented_leakage.py](pairwise/augmented_leakage.py) |
+| `scripts/production/model/initial_query_sources.py` | [common/initial_query_sources.py](common/initial_query_sources.py) |
+| `scripts/production/model/linker_source_bundle.py` | [linker/linker_source_bundle.py](linker/linker_source_bundle.py) |
+| `scripts/production/model/pairwise_incumbent_h13.json` | [pairwise/pairwise_incumbent_h13.json](pairwise/pairwise_incumbent_h13.json) |
+| `scripts/production/model/plan_datasets.py` | [common/plan_datasets.py](common/plan_datasets.py) |
+| `scripts/production/model/rebind_name_counts_index.py` | [release/rebind_name_counts_index.py](release/rebind_name_counts_index.py) |
+| `scripts/production/model/release_pairwise.py` | [pairwise/release_pairwise.py](pairwise/release_pairwise.py) |
+| `scripts/production/model/train_linker_and_finalize.py` | [linker/train_linker_and_finalize.py](linker/train_linker_and_finalize.py) |
+| `scripts/production/model/train_pairwise.py` | [pairwise/train_pairwise.py](pairwise/train_pairwise.py) |
+| `scripts/production/model/unknown_signatures.py` | [common/unknown_signatures.py](common/unknown_signatures.py) |
+| `scripts/run_bounded.py` | [dev/run_bounded.py](dev/run_bounded.py) |
+| `scripts/run_ci_locally.py` | [dev/run_ci_locally.py](dev/run_ci_locally.py) |
+| `scripts/sync_feature_schema.py` | [dev/sync_feature_schema.py](dev/sync_feature_schema.py) |
+| `scripts/sync_version.py` | [dev/sync_version.py](dev/sync_version.py) |
+| `scripts/verification/compare_full_predict_arrow_parity.py` | [release/verification/compare_full_predict_arrow_parity.py](release/verification/compare_full_predict_arrow_parity.py) |
+| `scripts/verification/evaluate_incremental_gold.py` | [release/verification/evaluate_incremental_gold.py](release/verification/evaluate_incremental_gold.py) |
+| `scripts/verification/profile_promoted_incremental_arrow.py` | [release/verification/profile_promoted_incremental_arrow.py](release/verification/profile_promoted_incremental_arrow.py) |
+| `scripts/verification/smoke_installed_incremental_arrow.py` | [release/verification/smoke_installed_incremental_arrow.py](release/verification/smoke_installed_incremental_arrow.py) |
+| `scripts/verification/smoke_installed_rust_api.py` | [release/verification/smoke_installed_rust_api.py](release/verification/smoke_installed_rust_api.py) |
+| `scripts/verification/validate_local_arrow_release.py` | [release/verification/validate_local_arrow_release.py](release/verification/validate_local_arrow_release.py) |
+| `scripts/verification/verify_production_model_distributions.py` | [release/verification/verify_production_model_distributions.py](release/verification/verify_production_model_distributions.py) |
+| `scripts/verification/verify_rust_distribution_licenses.py` | [release/verification/verify_rust_distribution_licenses.py](release/verification/verify_rust_distribution_licenses.py) |

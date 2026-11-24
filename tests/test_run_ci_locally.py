@@ -109,3 +109,14 @@ def test_sync_deps_installs_the_rust_extension(monkeypatch, lock_present: bool, 
     run_ci.sync_deps(lock_present=lock_present)
 
     assert calls == [["sync", "--extra", "dev", *frozen]]
+
+
+def test_ty_covers_every_script_stage_folder() -> None:
+    # A new stage folder missing from the hand list would skip type checking silently.
+    repo = Path(run_ci.__file__).resolve().parents[2]
+    stage_dirs = {
+        f"scripts/{path.name}"
+        for path in (repo / "scripts").iterdir()
+        if path.is_dir() and any(path.rglob("*.py")) and path.name != "__pycache__"
+    }
+    assert stage_dirs == set(run_ci.ACTIVE_NESTED_SCRIPT_DIRS)

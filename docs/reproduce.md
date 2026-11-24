@@ -13,6 +13,9 @@ In a source checkout, run `git checkout <release-tag>` and set up the environmen
 
 > **Update at v1.3 release:** Replace `<release-tag>` with the verified release tag.
 
+Commands use the script folders of this checkout. Release `1.4` and earlier kept scripts under
+`scripts/production/`, `scripts/eps_sweep/` and `scripts/verification/`; see [moved files](../scripts/README.md#moved-files).
+
 ## Sync the 1.3.1 index and reference model
 
 ```bash

@@ -100,6 +100,10 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 ### Breaking changes
 
+- Scripts moved into one folder per pipeline stage under `scripts/`: `intake`,
+  `judging`, `pairwise`, `linker`, `eps`, `release` and `dev`, with shared
+  modules in `common`. Commands from earlier releases need the new paths. See
+  [moved files](../scripts/README.md#moved-files).
 - Removed the Python subblocker from `s2and.subblocking`: `make_subblocks`,
   `make_subblocks_with_telemetry`, `cluster_with_specter`,
   `cluster_with_graph_fallback`, `subdivide_helper`,
@@ -527,9 +531,9 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   removed. The raw Arrow planner accepts caller-declared query IDs through
   `from_query_signatures` and can derive queries with `from_auto_queries`.
 - Legacy migration tools and release dispatchers are retired. Use
-  [the performance profiler](../scripts/verification/profile_promoted_incremental_arrow.py),
-  [the full-block parity check](../scripts/verification/compare_full_predict_arrow_parity.py),
-  and [the native subblocking quality check](../scripts/production/README.md#subblocking-quality).
+  [the performance profiler](../scripts/release/verification/profile_promoted_incremental_arrow.py),
+  [the full-block parity check](../scripts/release/verification/compare_full_predict_arrow_parity.py),
+  and [the native subblocking quality check](../scripts/release/README.md#subblocking-quality).
 - `RustFeaturizer.update_cluster_seeds`, `signature_rule_metadata`, and
   `update_signature_name_counts` are removed. Apply seed overlays with
   `with_cluster_seeds`.

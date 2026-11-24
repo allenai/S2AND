@@ -277,9 +277,10 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
         assert judge["by_stratum"]["giant"]["false_same_minus_false_different"] == skew
         assert judge["by_stratum"]["giant"]["missing"] == missing
     agreement = summary["cross_family_agreement"][0]
-    assert agreement["both_decided_share"] == 0.8
-    assert agreement["agreement"] == 0.5
-    assert agreement["cohen_kappa"] == 0.2
+    assert agreement["both_decided_share"] == pytest.approx(2 / 3)
+    assert agreement["agreement"] == 1
+    assert agreement["cohen_kappa"] == 1
+    assert agreement["by_task"]["pair"]["giant"]["paired_verdicts"] == 2
 
 
 def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path) -> None:
@@ -313,3 +314,54 @@ def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path) -> None:
     assert score_judges(judges)["cross_family_agreement"][0]["agreement"] == 1.0
     with pytest.raises(ValueError, match="distinct judge families"):
         score_judges([judges[0], judges[0]])
+
+
+def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Path) -> None:
+    judges = []
+    slots = {f"S{i}": f"c{i}" for i in range(25)}
+    for family in ("sol", "claude"):
+        key_path = tmp_path / f"{family}.json"
+        verdict_path = tmp_path / f"{family}.jsonl"
+        control = {
+            "item_id": "control",
+            "source_id": "control",
+            "block_key": "a ross",
+            "shard": "s",
+            "is_control": True,
+            "metadata": {"gold_candidate_keys": ["c0"], "stratum": "giant"},
+            "slot_to_candidate_key": slots,
+        }
+        natural = {
+            **control,
+            "item_id": "natural",
+            "source_id": "natural",
+            "is_control": False,
+            "metadata": {"stratum": "giant"},
+            "slot_to_candidate_key": {"S0": "c0", "S1": "c1"},
+        }
+        key_path.write_text(json.dumps({"packet_type": "linker", "shards": ["s"], "items": [control, natural]}))
+        verdicts = [
+            {"item_id": "control", "candidate_verdicts": dict.fromkeys(slots, "different")},
+            {
+                "item_id": "natural",
+                "candidate_verdicts": {
+                    "S0": "different" if family == "sol" else "cannot_tell",
+                    "S1": "cannot_tell",
+                },
+            },
+        ]
+        verdict_path.write_text("\n".join(json.dumps(row) for row in verdicts), encoding="utf-8")
+        judges.append((family, verdict_path, key_path))
+
+    report = score_judges(judges)
+    metrics = report["judges"][0]["by_stratum"]["giant"]
+    assert metrics["control_accuracy"] == 0.96
+    assert metrics["control_request_accuracy"] == 0
+    assert metrics["same_control_accuracy"] == 0
+    assert metrics["different_control_accuracy"] == 1
+    agreement = report["cross_family_agreement"][0]["by_task"]["linker"]["giant"]
+    assert agreement["overlap"] == 2
+    assert agreement["both_decided"] == 0
+    assert agreement["cohen_kappa"] is None
+    assert agreement["decided_vs_abstain"] == 1
+    assert agreement["agreement_including_abstentions"] == 0.5

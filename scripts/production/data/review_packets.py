@@ -624,7 +624,7 @@ def _fraction(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
-def _judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict[str, Any]:
+def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_requests: Sequence[bool]) -> dict[str, Any]:
     decided = sum(verdict in _DECIDED for verdict, _ in rows)
     controls = [(verdict, truth) for verdict, truth in rows if truth is not None]
     same = sum(truth == "same" for _, truth in controls)
@@ -640,7 +640,13 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict[str, A
         "decided_share": _fraction(decided, len(rows)),
         "controls": len(controls),
         "control_accuracy": _fraction(sum(verdict == truth for verdict, truth in controls), len(controls)),
+        "control_requests": len(control_requests),
+        "control_request_accuracy": _fraction(sum(control_requests), len(control_requests)),
         "same_controls": same,
+        "same_control_accuracy": _fraction(sum(verdict == truth == "same" for verdict, truth in controls), same),
+        "different_control_accuracy": _fraction(
+            sum(verdict == truth == "different" for verdict, truth in controls), different
+        ),
         "different_controls": different,
         "false_same": false_same,
         "false_different": false_different,
@@ -656,7 +662,7 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict[str, A
 
 def _read_judge_verdicts(
     verdicts_path: Path, answer_key: Path
-) -> tuple[dict[str, Any], dict[tuple[str, str, str], str | None]]:
+) -> tuple[dict[str, Any], dict[tuple[str, str, str, str], tuple[str, str | None, bool]]]:
     key = json.loads(answer_key.read_text(encoding="utf-8"))
     by_item = {row["item_id"]: row for row in key["items"]}
     if len(by_item) != len(key["items"]):
@@ -674,7 +680,9 @@ def _read_judge_verdicts(
 
     by_shard: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
     by_stratum: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
-    aligned: dict[tuple[str, str, str], str | None] = {}
+    shard_controls: dict[str, list[bool]] = defaultdict(list)
+    stratum_controls: dict[str, list[bool]] = defaultdict(list)
+    aligned: dict[tuple[str, str, str, str], tuple[str, str | None, bool]] = {}
     for item_id, item in by_item.items():
         record = verdicts.get(item_id, {})
         metadata = item.get("metadata", {})
@@ -701,19 +709,48 @@ def _read_judge_verdicts(
             raise ValueError(f"Unknown packet type in {answer_key}")
         if set(item_verdicts) - set(slots) or any(value not in _VERDICTS for value in item_verdicts.values()):
             raise ValueError(f"Invalid verdict or slot for {item_id!r} in {verdicts_path}")
+        control_success = bool(slots)
         for slot, candidate in slots.items():
-            identity = (normalize_block_key(item["block_key"]), item["source_id"], candidate)
+            identity = (key["packet_type"], normalize_block_key(item["block_key"]), item["source_id"], candidate)
             if identity in aligned:
                 raise ValueError(f"Duplicate source and candidate {identity!r} in {answer_key}")
             verdict = item_verdicts.get(slot)
             truth = ("same" if candidate in gold_keys else "different") if item["is_control"] else None
-            aligned[identity] = verdict
+            aligned[identity] = (stratum, verdict, item["is_control"])
+            control_success &= verdict == truth
             by_shard[shard].append((verdict, truth))
             by_stratum[stratum].append((verdict, truth))
+        if item["is_control"]:
+            shard_controls[shard].append(control_success)
+            stratum_controls[stratum].append(control_success)
     return {
-        "by_shard": {shard: _judge_metrics(rows) for shard, rows in sorted(by_shard.items())},
-        "by_stratum": {stratum: _judge_metrics(rows) for stratum, rows in sorted(by_stratum.items())},
+        "by_shard": {shard: _judge_metrics(rows, shard_controls[shard]) for shard, rows in sorted(by_shard.items())},
+        "by_stratum": {
+            stratum: _judge_metrics(rows, stratum_controls[stratum]) for stratum, rows in sorted(by_stratum.items())
+        },
     }, aligned
+
+
+def _paired_judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict[str, Any]:
+    present = [(a, b) for a, b in rows if a is not None and b is not None]
+    decided = [(a, b) for a, b in present if a in _DECIDED and b in _DECIDED]
+    left_counts = Counter(a for a, _ in decided)
+    right_counts = Counter(b for _, b in decided)
+    n = len(decided)
+    matches = sum(a == b for a, b in decided)
+    expected = sum(left_counts[value] * right_counts[value] for value in _DECIDED)
+    both_abstain = sum(a not in _DECIDED and b not in _DECIDED for a, b in present)
+    return {
+        "overlap": len(rows),
+        "paired_verdicts": len(present),
+        "paired_verdict_share": _fraction(len(present), len(rows)),
+        "both_decided": n,
+        "both_decided_share": _fraction(n, len(rows)),
+        "agreement": _fraction(matches, n),
+        "cohen_kappa": _fraction(matches * n - expected, n * n - expected),
+        "decided_vs_abstain": len(present) - n - both_abstain,
+        "agreement_including_abstentions": _fraction(matches + both_abstain, len(present)),
+    }
 
 
 def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
@@ -741,22 +778,26 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
         if families[i] == families[j]:
             continue
         left, right = verdicts[i], verdicts[j]
-        overlap = left.keys() & right.keys()
-        paired = [(left[key], right[key]) for key in overlap if left[key] in _DECIDED and right[key] in _DECIDED]
-        left_counts = Counter(a for a, _ in paired)
-        right_counts = Counter(b for _, b in paired)
-        n = len(paired)
-        matches = sum(a == b for a, b in paired)
-        expected = sum(left_counts[decision] * right_counts[decision] for decision in _DECIDED)
+        by_task: dict[str, dict[str, list[tuple[str | None, str | None]]]] = defaultdict(lambda: defaultdict(list))
+        for key in left.keys() & right.keys():
+            stratum, a, control_a = left[key]
+            right_stratum, b, control_b = right[key]
+            if control_a or control_b:
+                continue
+            if stratum != right_stratum:
+                raise ValueError(f"Mismatched strata for jointly judged item {key!r}")
+            by_task[key[0]][stratum].append((a, b))
         agreement.append(
             {
                 "judges": [i, j],
                 "families": [families[i], families[j]],
-                "overlap": len(overlap),
-                "both_decided": n,
-                "both_decided_share": _fraction(n, len(overlap)),
-                "agreement": _fraction(matches, n),
-                "cohen_kappa": _fraction(matches * n - expected, n * n - expected),
+                **_paired_judge_metrics(
+                    [row for strata in by_task.values() for rows in strata.values() for row in rows]
+                ),
+                "by_task": {
+                    task: {stratum: _paired_judge_metrics(rows) for stratum, rows in sorted(strata.items())}
+                    for task, strata in sorted(by_task.items())
+                },
             }
         )
     return {"judges": reports, "cross_family_agreement": agreement}

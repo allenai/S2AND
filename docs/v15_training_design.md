@@ -110,5 +110,7 @@ or `metadata.gold_candidate_keys` for linker packets. Keep each answer key priva
 Run `review_packets.py score --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json`.
 Each verdict row contains `item_id` and a pair `verdict` or a linker `candidate_verdicts` mapping from packet
 slot to verdict. Use `same`, `different`, or `insufficient_evidence`. The scorer aligns independent packet orders
-by private source and candidate IDs and computes control accuracy and decided share per shard, cross-family
-agreement, and directional error rates per stratum. Control accuracy uses all assigned controls as its denominator.
+by private source and candidate IDs. A linker control request succeeds when every candidate verdict is correct.
+Report request accuracy, same and different control accuracy, and directional error rates by shard and stratum.
+Report paired coverage, agreement, and Cohen’s κ by task and stratum on natural items. Kappa uses jointly
+decided verdicts. The agreement measure that includes abstentions counts decided versus abstain as disagreement.

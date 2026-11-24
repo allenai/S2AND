@@ -3340,6 +3340,7 @@ fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
 /// A signature's features depend only on its own rows, so one value serves
 /// every plan of a dataset. `load` reads and featurizes only new signatures.
 struct LabeledPlanInputs {
+    legacy_paper_years: bool,
     signatures: HashMap<String, RawArrowSignature>,
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
@@ -3368,9 +3369,10 @@ struct LabeledLoadTelemetry {
 }
 
 impl LabeledPlanInputs {
-    fn new(py: Python<'_>) -> PyResult<Self> {
+    fn new(py: Python<'_>, legacy_paper_years: bool) -> PyResult<Self> {
         let text_module = py.import("s2and.text")?;
         Ok(Self {
+            legacy_paper_years,
             signatures: HashMap::default(),
             papers: HashMap::default(),
             paper_authors: HashMap::default(),
@@ -3446,6 +3448,7 @@ impl LabeledPlanInputs {
         let raw_name_counts = dataset.name_counts();
         let feature_start = Instant::now();
         let Self {
+            legacy_paper_years,
             papers,
             paper_authors,
             specter_by_paper_id,
@@ -3493,7 +3496,7 @@ impl LabeledPlanInputs {
                                     affiliation_stopwords,
                                     unidecode_char_map,
                                     orcid_enabled,
-                                    false,
+                                    *legacy_paper_years,
                                 ),
                             ))
                         })
@@ -3735,7 +3738,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         }
     }
 
-    let mut inputs = LabeledPlanInputs::new(py)?;
+    let mut inputs = LabeledPlanInputs::new(py, false)?;
     let load = inputs.load(
         py,
         &dataset,
@@ -3790,7 +3793,7 @@ pub(crate) struct RawArrowLabeledCandidatePlanner {
 #[pymethods]
 impl RawArrowLabeledCandidatePlanner {
     #[new]
-    #[pyo3(signature = (dataset, component_members, orcid_enabled = false, num_threads = None, max_exemplars = 4))]
+    #[pyo3(signature = (dataset, component_members, orcid_enabled = false, num_threads = None, max_exemplars = 4, *, legacy_paper_years = false))]
     fn new(
         py: Python<'_>,
         dataset: PyRef<'_, ArrowDataset>,
@@ -3798,6 +3801,7 @@ impl RawArrowLabeledCandidatePlanner {
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
+        legacy_paper_years: bool,
     ) -> PyResult<Self> {
         let dataset = dataset.shared();
         let (component_order, raw_members_by_component) =
@@ -3811,7 +3815,7 @@ impl RawArrowLabeledCandidatePlanner {
                 }
             }
         }
-        let mut inputs = LabeledPlanInputs::new(py)?;
+        let mut inputs = LabeledPlanInputs::new(py, legacy_paper_years)?;
         inputs.load(py, &dataset, &members, orcid_enabled, num_threads)?;
         let components = build_labeled_components(
             py,

@@ -1643,3 +1643,18 @@ def test_index_verification_rejects_out_of_bounds_record_and_runtime_open_stays_
         NameCountsIndex.open(paths["name_counts_index"], verify=True)
     # Runtime opens skip the record walk; lookups bounds-check every name range, so this still builds.
     assert _native_featurizer(paths, ["q1", "s1", "s2"], set()) is not None
+
+
+def test_labeled_planner_preserves_contract_one_years(tmp_path: Path) -> None:
+    from s2and.runtime import load_s2and_rust_extension
+
+    paths = base_arrow_paths(tmp_path, years=[1800, 2015, 2010])
+    with open_arrow_dataset(paths) as arrow:
+        planner_type = load_s2and_rust_extension().RawArrowLabeledCandidatePlanner
+        legacy = planner_type(arrow.native, {"component": ("s1",)}, num_threads=1, legacy_paper_years=True)
+        modern = planner_type(arrow.native, {"component": ("s1",)}, num_threads=1)
+        legacy_plan = legacy.plan(["q1"], ["full"], ["group"], ["component"], [1])
+        modern_plan = modern.plan(["q1"], ["full"], ["group"], ["component"], [1])
+    assert list(legacy_plan["row_query_year_missing"]) == [0]
+    assert list(legacy_plan["row_query_years"]) == [1800]
+    assert list(modern_plan["row_query_year_missing"]) == [1]

@@ -197,6 +197,7 @@ def save_incremental_linking_artifact(
     target_spec: Mapping[str, Any],
     pairwise_bundle_binding: Mapping[str, Any],
     fixed_booster: tuple[Path, str] | None = None,
+    feature_contract_version: int = INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
 ) -> dict[str, Any]:
     """Write `booster.lgb` and the minimal current runtime metadata."""
 
@@ -218,7 +219,7 @@ def save_incremental_linking_artifact(
                 raise ValueError("Fixed ranker SHA-256 changed before publication")
         metadata: dict[str, Any] = {
             "booster_sha256": _sha256_file(booster_path),
-            "feature_contract_version": INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+            "feature_contract_version": feature_contract_version,
             "feature_names": list(promoted_linker_feature_columns()),
             "format_version": INCREMENTAL_LINKER_FORMAT_VERSION,
             "gate_config": dict(gate_config),

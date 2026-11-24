@@ -187,8 +187,12 @@ def build_promoted_non_pairwise_row_features_with_telemetry(
 def build_promoted_non_pairwise_row_features(
     candidate_batch: LinkerCandidateBatch,
     row_signals: Mapping[str, Any],
+    *,
+    legacy_paper_years: bool = False,
 ) -> dict[str, np.ndarray]:
     """Build promoted non-`pw_*` linker features with the Rust row-formula kernel."""
 
-    features, _telemetry = build_promoted_non_pairwise_row_features_with_telemetry(candidate_batch, row_signals)
+    features, _telemetry = build_promoted_non_pairwise_row_features_with_telemetry(
+        candidate_batch, row_signals, legacy_paper_years=legacy_paper_years
+    )
     return features

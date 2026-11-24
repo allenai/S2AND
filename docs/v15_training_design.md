@@ -88,6 +88,12 @@ For the gate-only arm, pass `--fixed-ranker-bundle` and `--expected-ranker-sha25
 the supplied hash against the source manifest and preserves the booster bytes. To replay M1's source
 calibration rows, pass `--use-legacy-gate-calibration` with the fixed-ranker options and omit the frozen inputs.
 
+A gate-only run verifies the complete source bundle and copies the specified booster byte for byte.
+Use `--use-legacy-gate-calibration` when supplying a fixed ranker without frozen task inputs.
+The 1.4 ranker keeps its linker feature contract in calibration, evaluation, and publication.
+Use the legacy calibration inputs with that ranker because frozen linker windows use contract 2.
+Gate-only reports retain test metrics and omit ranker training row counts.
+
 ## First 1.5 experiment order
 
 1. **Experiment 1:** Keep 1.4's pairwise heads and 53-feature candidate ranker fixed for the gate-only experiment. Refit the 240-feature gate on `gate_fit` and inspect the `gate_thresh` report for link count, gold precision on scored links, and gold recall against known safe seed components before retrieval. Blind-judge the links each weight adds and removes. The report includes the configured weight and keeps it in production unless `classic.promoted_stratified_gate.false_abstain_weight` explicitly sets a new one. Measure cross-subblock recovery on unseen >15k blocks and non-ORCID precision. Across 14 blocks above 15k in Batches 1–6, 1.4 changed pooled F1 by −0.145 points [−0.609, +0.311] versus 1.3.2. The across-sub-block component was −0.456 points.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -595,9 +596,9 @@ def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch.setattr(promoted_train, "load_production_model", load_complete)
     validate_observed_metrics = promoted_train._validate_observed_official_metrics  # noqa: SLF001
 
-    def validate_metrics(metrics: dict[str, Any]) -> None:
+    def validate_metrics(metrics: dict[str, Any], *, ranker_refit: bool) -> None:
         order.append("validate")
-        validate_observed_metrics(metrics)
+        validate_observed_metrics(metrics, ranker_refit=ranker_refit)
 
     monkeypatch.setattr(promoted_train, "_validate_observed_official_metrics", validate_metrics)
     monkeypatch.setattr(
@@ -653,3 +654,141 @@ def test_release_serializes_complete_bundle_before_evaluation(
     }
     written_report = json.loads((output_dir / "linker_evaluation_report.json").read_text(encoding="utf-8"))
     assert written_report == result
+
+
+def _fixed_ranker_fixture(tmp_path: Path, *, counts_hash: str | None = None) -> tuple[Path, Path, str]:
+    from s2and._sha256 import sha256_file
+    from s2and.incremental_linking.artifact import save_incremental_linking_artifact
+    from s2and.production_bundle import finalize_production_bundle
+    from s2and.production_model import canonical_artifact_hashes, pairwise_bundle_binding
+    from tests.promoted_linking_helpers import (
+        build_tiny_promoted_booster,
+        tiny_logistic_gate_config,
+        write_synthetic_pairwise_bundle,
+    )
+
+    pairwise = tmp_path / "pairwise"
+    hashes = canonical_artifact_hashes()
+    if counts_hash is not None:
+        hashes["name_counts_manifest_sha256"] = counts_hash
+    write_synthetic_pairwise_bundle(pairwise, artifact_hashes=hashes, release_version="1.4")
+    manifest_path = pairwise / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_path.write_text(json.dumps({**manifest, "feature_contract_version": 1}), encoding="utf-8")
+    target = tmp_path / "target.json"
+    target_payload = {
+        "features": list(promoted_train.promoted_linker_feature_columns()),
+        "feature_count": len(promoted_train.promoted_linker_feature_columns()),
+        "params": {"n_estimators": 6},
+        "metrics": {},
+    }
+    target.write_text(json.dumps(target_payload), encoding="utf-8")
+    booster, _ = build_tiny_promoted_booster()
+    artifact = tmp_path / "artifact"
+    save_incremental_linking_artifact(
+        booster,
+        artifact,
+        gate_config=tiny_logistic_gate_config(),
+        target_spec=target_payload,
+        pairwise_bundle_binding=pairwise_bundle_binding(pairwise),
+    )
+    metadata_path = artifact / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata_path.write_text(json.dumps({**metadata, "feature_contract_version": 1}), encoding="utf-8")
+    complete = tmp_path / "fixed"
+    finalize_production_bundle(
+        pairwise_bundle_dir=pairwise,
+        output_bundle_dir=complete,
+        incremental_linker_artifact_dir=artifact,
+        target_json=target,
+    )
+    return pairwise, complete, sha256_file(complete / "incremental_linker" / "booster.lgb")
+
+
+def _fixed_ranker_source_fixture(tmp_path: Path) -> Path:
+    from tests.test_build_linker_task_tables import _ORCIDS, _block_inputs
+
+    source = tmp_path / "source"
+    _write_linker_inputs(source, leak=False)
+    dataset = "replay_demo"
+    block = _block_inputs(tmp_path / "replay", "a ross", _ORCIDS[0])
+    shutil.copytree(block["arrow_dir"], source / "datasets" / dataset)
+    components = source / "components" / f"{dataset}_members.parquet"
+    pd.read_parquet(components).assign(signature_id="s00").to_parquet(components, index=False)
+    for name, sid, label in [
+        ("train", "q_full", 1),
+        ("calibration", "q_initial", 1),
+        ("s2and_eval", "q_full", 0),
+        ("hwang_eval", "q_outside_home", 0),
+    ]:
+        path = source / "labels" / f"{name}.parquet"
+        pd.read_parquet(path).assign(query_signature_id=sid, label=label, first_name_bucket="full").to_parquet(
+            path, index=False
+        )
+    map_path = source / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
+    map_path.parent.mkdir()
+    map_path.write_bytes(b"")
+    return source
+
+
+@pytest.mark.parametrize("check", ["run", "contract", "opt_in", "source_manifest"])
+def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(tmp_path: Path, check: str) -> None:
+    from s2and._sha256 import sha256_file
+    from s2and.production_model import load_production_model
+
+    source = _fixed_ranker_source_fixture(tmp_path)
+    counts = source / "datasets" / "replay_demo" / "name_counts_index" / "name_counts_index"
+    pairwise, fixed, digest = _fixed_ranker_fixture(tmp_path, counts_hash=sha256_file(counts / "manifest.json"))
+    output = tmp_path / "out"
+    args = promoted_train.build_parser().parse_args(
+        [
+            "--source-bundle-root",
+            str(source),
+            "--output-dir",
+            str(output),
+            "--pairwise-model-path",
+            str(pairwise),
+            "--target-json",
+            str(tmp_path / "target.json"),
+            "--name-counts-index-root",
+            str(counts),
+            "--fixed-ranker-bundle",
+            str(fixed),
+            "--expected-ranker-sha256",
+            digest,
+            "--n-jobs",
+            "1",
+            *([] if check == "opt_in" else ["--use-legacy-gate-calibration"]),
+        ]
+    )
+    if check == "opt_in":
+        try:
+            with pytest.raises(ValueError, match="requires --use-legacy-gate-calibration"):
+                promoted_train.run(args)
+        finally:
+            assert not output.exists()
+    elif check == "source_manifest":
+        path = fixed / "manifest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**payload, "format_version": 999}), encoding="utf-8")
+        with pytest.raises(ValueError, match="format_version"):
+            promoted_train._load_fixed_ranker(fixed, digest)
+    elif check == "contract":
+        try:
+            promoted_train.run(args)
+        finally:
+            metadata_path = output / pairwise.name / "incremental_linker" / "metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert metadata["feature_contract_version"] == 1
+    else:
+        report = promoted_train.run(args)
+        complete = Path(report["complete_model_path"])
+        assert report["evaluation_summary"]["training_summary"]["ranker_refit"] is False
+        assert "training_rows" not in report["observed_metrics"]
+        assert report["observed_metrics"]["stratified_test_queries"] == 1
+        assert report["query_predictions"]["rows"] == 1
+        booster = Path("incremental_linker/booster.lgb")
+        assert (complete / booster).read_bytes() == (fixed / booster).read_bytes()
+        reloaded = load_production_model(complete).incremental_linker_artifact
+        assert reloaded is not None and reloaded.feature_contract_version == 1
+        assert report["artifact_summary"]["gate_config"]["training_summary"]["calibration_queries"] == 2

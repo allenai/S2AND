@@ -33,7 +33,11 @@ from s2and import __version__, feature_port  # noqa: E402
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
-from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
+from s2and.incremental_linking.artifact import (  # noqa: E402
+    INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+    LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+    save_incremental_linking_artifact,
+)
 from s2and.incremental_linking.feature_block import (  # noqa: E402
     read_cluster_seed_disallows_arrow,
     read_cluster_seeds_arrow,
@@ -121,6 +125,7 @@ class ArrowRustDatasetContext:
     cluster_seeds_disallow: frozenset[tuple[str, str]]
     max_block_component_size: int
     initial_query_sources: dict[str, str] = field(default_factory=dict)
+    linker_legacy_paper_years: bool = False
     # Every shard of the dataset plans against the same components; these are
     # built at the first shard and reused, instead of rereading and refeaturizing
     # every member per shard.
@@ -577,6 +582,7 @@ def _dataset_labeled_planner(context: ArrowRustDatasetContext, *, n_jobs: int, m
             orcid_enabled=not PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
             num_threads=max(1, int(n_jobs)),
             max_exemplars=int(max_exemplars),
+            **({"legacy_paper_years": True} if context.linker_legacy_paper_years else {}),
         )
     return context.labeled_planner
 
@@ -1074,7 +1080,9 @@ def _materialize_arrow_rust_dataset_rows(
     non_pairwise_started = time.perf_counter()
     non_pairwise_features = {
         str(column): np.asarray(values, dtype=np.float32)
-        for column, values in build_promoted_non_pairwise_row_features(batch, row_signals).items()
+        for column, values in build_promoted_non_pairwise_row_features(
+            batch, row_signals, **({"legacy_paper_years": True} if context.linker_legacy_paper_years else {})
+        ).items()
     }
     non_pairwise_seconds = float(time.perf_counter() - non_pairwise_started)
     feature_values = _assemble_promoted_feature_values(
@@ -1408,6 +1416,7 @@ def _materialize_arrow_rust_feature_bundle(
     arrow_datasets: Mapping[str, ArrowDataset],
     query_sources: InitialQuerySources | None = None,
     max_query_groups_per_table: int | None = None,
+    linker_legacy_paper_years: bool = False,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     if query_sources is None:
         query_sources = load_initial_query_sources(source_bundle.root, arrow_datasets=arrow_datasets)
@@ -1678,6 +1687,7 @@ def _materialize_arrow_rust_feature_bundle(
             arrow_dataset=arrow_datasets[dataset_name],
             query_sources=query_sources,
         )
+        context.linker_legacy_paper_years = linker_legacy_paper_years
         context.shard_query_signature_ids = frozenset(
             str(signature_id) for shard in shards for signature_id in shard.rows["query_signature_id"]
         )
@@ -1781,8 +1791,11 @@ def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
         else 0.0
     )
     return {
-        "training_rows": int(train["rows"]),
-        "training_positive_rows": int(train["positive_rows"]),
+        **(
+            {"training_rows": int(train["rows"]), "training_positive_rows": int(train["positive_rows"])}
+            if train.get("ranker_refit", True)
+            else {}
+        ),
         "stratified_test_queries": n_queries,
         "stratified_test_accuracy": float(stratified_test["accuracy"]),
         "stratified_test_balanced_accuracy": float(stratified_test["balanced_accuracy"]),
@@ -1799,18 +1812,21 @@ def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_observed_official_metrics(metrics: Mapping[str, Any]) -> None:
+def _validate_observed_official_metrics(metrics: Mapping[str, Any], *, ranker_refit: bool = True) -> None:
     """Validate the official linker metrics before publishing the report."""
 
+    expected_keys = SUPPORTED_OFFICIAL_METRIC_KEYS
+    if not ranker_refit:
+        expected_keys = expected_keys - {"training_rows", "training_positive_rows"}
     observed_keys = set(metrics) if isinstance(metrics, Mapping) else set()
-    if not isinstance(metrics, Mapping) or observed_keys != SUPPORTED_OFFICIAL_METRIC_KEYS:
+    if not isinstance(metrics, Mapping) or observed_keys != expected_keys:
         raise ValueError(
             "Linker evaluation observed_metrics must contain the complete official metric set: "
-            f"missing={sorted(SUPPORTED_OFFICIAL_METRIC_KEYS - observed_keys)} "
-            f"extra={sorted(observed_keys - SUPPORTED_OFFICIAL_METRIC_KEYS)}"
+            f"missing={sorted(expected_keys - observed_keys)} "
+            f"extra={sorted(observed_keys - expected_keys)}"
         )
 
-    for key in INTEGER_OFFICIAL_METRIC_KEYS:
+    for key in INTEGER_OFFICIAL_METRIC_KEYS & expected_keys:
         value = metrics[key]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"Linker evaluation observed metric {key!r} must be a nonnegative integer")
@@ -1821,11 +1837,9 @@ def _validate_observed_official_metrics(metrics: Mapping[str, Any]) -> None:
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"Linker evaluation observed metric {key!r} must be in [0, 1]")
 
-    training_rows = metrics["training_rows"]
-    training_positive_rows = metrics["training_positive_rows"]
-    queries = metrics["stratified_test_queries"]
-    if training_rows <= 0 or training_positive_rows > training_rows:
+    if ranker_refit and (metrics["training_rows"] <= 0 or metrics["training_positive_rows"] > metrics["training_rows"]):
         raise ValueError("Linker evaluation observed training counts are inconsistent")
+    queries = metrics["stratified_test_queries"]
     if queries <= 0 or any(
         metrics[key] > queries
         for key in (
@@ -1891,14 +1905,16 @@ def _assert_output_paths_outside_inputs(
         raise SystemExit("complete model output must not replace the calibrated pairwise input")
 
 
-def _load_fixed_ranker(bundle_dir: Path, expected_sha256: str) -> tuple[Booster, Path]:
-    relative = COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
-    manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-    path = bundle_dir / relative
+def _load_fixed_ranker(bundle_dir: Path, expected_sha256: str) -> tuple[Booster, Path, int]:
+    source = load_production_model(bundle_dir, n_jobs=1)
+    artifact = source.incremental_linker_artifact
+    if artifact is None:
+        raise ValueError(f"Fixed ranker bundle is missing its linker artifact: {bundle_dir}")
+    path = bundle_dir / COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
     data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != expected_sha256 or manifest["sha256"].get(relative) != expected_sha256:
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
         raise ValueError(f"Fixed ranker SHA-256 mismatch: {path}")
-    return Booster(model_str=data.decode("utf-8")), path
+    return Booster(model_str=data.decode("utf-8")), path, artifact.feature_contract_version
 
 
 def _release_table_plan(
@@ -2070,12 +2086,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--fixed-ranker-bundle and --expected-ranker-sha256 must be used together")
     if use_legacy_gate_calibration and (fixed_ranker_bundle is None or frozen_manifest is not None):
         raise ValueError("--use-legacy-gate-calibration requires a fixed ranker and excludes frozen task inputs")
+    if fixed_ranker_bundle is not None and frozen_manifest is None and not use_legacy_gate_calibration:
+        raise ValueError("Fixed ranker without frozen task inputs requires --use-legacy-gate-calibration")
     fixed_ranker = fixed_booster = None
+    linker_feature_contract = INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
     if fixed_ranker_bundle is not None and expected_ranker_sha256 is not None:
-        fixed_ranker, ranker_path = _load_fixed_ranker(fixed_ranker_bundle, expected_ranker_sha256)
+        fixed_ranker, ranker_path, linker_feature_contract = _load_fixed_ranker(
+            fixed_ranker_bundle, expected_ranker_sha256
+        )
         fixed_booster = (ranker_path, expected_ranker_sha256)
         if fixed_ranker.num_feature() != len(target["features"]):
             raise ValueError("Fixed ranker feature count does not match the target")
+    linker_legacy_paper_years = linker_feature_contract == LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
+    if linker_legacy_paper_years and frozen_manifest is not None:
+        raise ValueError("Contract-1 fixed ranker requires legacy calibration; frozen task windows use contract 2")
     if frozen_manifest is None:
         training_table_keys, calibration_query_ids, evaluation_table_keys = _release_table_plan(source_bundle)
         if fixed_ranker is not None:
@@ -2173,6 +2197,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 arrow_datasets=arrow_datasets,
                 query_sources=query_sources,
                 max_query_groups_per_table=max_query_groups,
+                linker_legacy_paper_years=linker_legacy_paper_years,
             )
             if fixed_ranker is None:
                 train_summary = next(
@@ -2197,7 +2222,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             gate_config=calibrated.gate_config,
             target_spec=target,
             pairwise_bundle_binding=pairwise_binding,
-            **({"fixed_booster": fixed_booster} if fixed_booster is not None else {}),
+            **(
+                {"fixed_booster": fixed_booster, "feature_contract_version": linker_feature_contract}
+                if fixed_booster is not None
+                else {}
+            ),
         )
         finalized = finalize_production_bundle(
             pairwise_bundle_dir=Path(args.pairwise_model_path),
@@ -2235,6 +2264,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             arrow_datasets=arrow_datasets,
             query_sources=query_sources,
             max_query_groups_per_table=max_query_groups,
+            linker_legacy_paper_years=linker_legacy_paper_years,
         )
     evaluation = evaluate_classic(
         evaluation_feature_bundle,
@@ -2244,7 +2274,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     summary = evaluation.summary
     observed = _observed_official_metrics(summary)
-    _validate_observed_official_metrics(observed)
+    _validate_observed_official_metrics(observed, ranker_refit=fixed_ranker is None)
     artifact_summary = dict(artifact_metadata)
     result = {
         "mode": "arrow-rust",

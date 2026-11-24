@@ -350,25 +350,20 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
 
 
 def test_fixed_ranker_load_checks_bundle_and_requested_hash(tmp_path: Path) -> None:
-    from s2and._sha256 import sha256_file
     from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
-    from tests.test_production_model import build_tiny_promoted_booster
+    from tests.test_promoted_linker_training_cli import _fixed_ranker_fixture
 
-    relative = COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
-    path = tmp_path / relative
-    path.parent.mkdir()
-    booster, _ = build_tiny_promoted_booster()
-    booster.save_model(str(path))
-    digest = sha256_file(path)
-    (tmp_path / "manifest.json").write_text(json.dumps({"sha256": {relative: digest}}), encoding="utf-8")
-    loaded, source = promoted_train._load_fixed_ranker(tmp_path, digest)
+    _, bundle, digest = _fixed_ranker_fixture(tmp_path)
+    path = bundle / COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
+    loaded, source, contract = promoted_train._load_fixed_ranker(bundle, digest)
     assert source == path
-    assert loaded.num_feature() == booster.num_feature()
+    assert loaded.num_feature() == len(promoted_train.promoted_linker_feature_columns())
+    assert contract == 1
     with pytest.raises(ValueError, match="ranker.*SHA-256"):
-        promoted_train._load_fixed_ranker(tmp_path, "0" * 64)
+        promoted_train._load_fixed_ranker(bundle, "0" * 64)
     path.write_text("changed", encoding="utf-8")
-    with pytest.raises(ValueError, match="ranker.*SHA-256"):
-        promoted_train._load_fixed_ranker(tmp_path, digest)
+    with pytest.raises(ValueError, match="checksum mismatch.*booster"):
+        promoted_train._load_fixed_ranker(bundle, digest)
 
 
 def test_fixed_ranker_accepts_legacy_calibration_splits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -68,6 +68,9 @@ same `--block-role-assignments` file. The trainer checks table hashes and comput
 Native retrieval can return fewer than 25 candidates. Keep those windows and record their counts.
 Use all known seed identities for whole-author exclusion and leave mixed or unresolved targets unscored.
 It fits the ranker and gate on their respective tables and leaves the sealed block halves outside those inputs.
+For the gate-only arm, pass `--fixed-ranker-bundle` and `--expected-ranker-sha256`. The trainer checks
+the supplied hash against the source manifest and preserves the booster bytes. To replay M1's source
+calibration rows, pass `--use-legacy-gate-calibration` with the fixed-ranker options and omit the frozen inputs.
 
 ## First 1.5 experiment order
 

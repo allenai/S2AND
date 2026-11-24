@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
+from lightgbm import Booster
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
@@ -76,6 +77,7 @@ from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa
     validate_source_bundle_support_files,
 )
 from s2and.production_bundle import finalize_production_bundle  # noqa: E402
+from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES  # noqa: E402
 from s2and.production_model import load_production_model, pairwise_bundle_binding  # noqa: E402
 from s2and.production_training_contract import (  # noqa: E402
     FLOAT_OFFICIAL_METRIC_KEYS,
@@ -1865,6 +1867,7 @@ def _assert_output_paths_outside_inputs(
     complete_model_dir: Path,
     source_bundle_root: Path,
     pairwise_model_path: Path,
+    fixed_ranker_bundle: Path | None = None,
 ) -> None:
     """Reject any write target nested beneath an immutable input bundle."""
 
@@ -1872,6 +1875,8 @@ def _assert_output_paths_outside_inputs(
         "--source-bundle-root": source_bundle_root.resolve(),
         "--pairwise-model-path": pairwise_model_path.resolve(),
     }
+    if fixed_ranker_bundle is not None:
+        input_roots["--fixed-ranker-bundle"] = fixed_ranker_bundle.resolve()
     collisions = [
         f"--output-dir={output_dir.resolve()} under {input_option}={input_root}"
         for input_option, input_root in input_roots.items()
@@ -1881,6 +1886,16 @@ def _assert_output_paths_outside_inputs(
         raise SystemExit("linker outputs must be outside immutable input bundles: " + "; ".join(collisions))
     if complete_model_dir == pairwise_model_path.resolve():
         raise SystemExit("complete model output must not replace the calibrated pairwise input")
+
+
+def _load_fixed_ranker(bundle_dir: Path, expected_sha256: str) -> tuple[Booster, Path]:
+    relative = COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
+    manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+    path = bundle_dir / relative
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected_sha256 or manifest["sha256"].get(relative) != expected_sha256:
+        raise ValueError(f"Fixed ranker SHA-256 mismatch: {path}")
+    return Booster(model_str=data.decode("utf-8")), path
 
 
 def _release_table_plan(
@@ -2040,8 +2055,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if (frozen_manifest is None) != (roles_path is None):
         raise ValueError("--linker-task-manifest and --block-role-assignments must be used together")
     block_roles = load_block_roles(roles_path) if roles_path is not None else None
+    fixed_ranker_bundle = getattr(args, "fixed_ranker_bundle", None)
+    expected_ranker_sha256 = getattr(args, "expected_ranker_sha256", None)
+    use_legacy_gate_calibration = getattr(args, "use_legacy_gate_calibration", False)
+    if (fixed_ranker_bundle is None) != (expected_ranker_sha256 is None):
+        raise ValueError("--fixed-ranker-bundle and --expected-ranker-sha256 must be used together")
+    if use_legacy_gate_calibration and (fixed_ranker_bundle is None or frozen_manifest is not None):
+        raise ValueError("--use-legacy-gate-calibration requires a fixed ranker and excludes frozen task inputs")
+    fixed_ranker = fixed_booster = None
+    if fixed_ranker_bundle is not None:
+        fixed_ranker, ranker_path = _load_fixed_ranker(fixed_ranker_bundle, expected_ranker_sha256)
+        fixed_booster = (ranker_path, expected_ranker_sha256)
+        if fixed_ranker.num_feature() != len(target["features"]):
+            raise ValueError("Fixed ranker feature count does not match the target")
     if frozen_manifest is None:
         training_table_keys, calibration_query_ids, evaluation_table_keys = _release_table_plan(source_bundle)
+        if fixed_ranker is not None:
+            training_table_keys = tuple(key for key in training_table_keys if key != "train_path")
     else:
         training_table_keys, calibration_query_ids = (), {}
         evaluation_table_keys = tuple(
@@ -2054,6 +2084,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         complete_model_dir=complete_model_dir,
         source_bundle_root=source_bundle.root,
         pairwise_model_path=Path(args.pairwise_model_path),
+        fixed_ranker_bundle=fixed_ranker_bundle,
     )
     validate_source_bundle_support_files(source_bundle)
     holdout_identities = read_classic_holdout_identities(source_bundle)
@@ -2135,10 +2166,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 query_sources=query_sources,
                 max_query_groups_per_table=max_query_groups,
             )
-            train_summary = next(
-                summary for summary in featureization_summaries if summary["table_key"] == "train_path"
-            )
-            fit_kwargs["pre_materialization_holdout_summary"] = train_summary["label_filtering"]["train_holdout"]
+            if fixed_ranker is None:
+                train_summary = next(
+                    summary for summary in featureization_summaries if summary["table_key"] == "train_path"
+                )
+                fit_kwargs["pre_materialization_holdout_summary"] = train_summary["label_filtering"]["train_holdout"]
 
         started = time.perf_counter()
         active_params = dict(feature_bundle.models["classic"]["best_params"])
@@ -2147,6 +2179,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             feature_bundle,
             n_jobs=int(args.n_jobs),
             holdout_identities=holdout_identities,
+            **({"fixed_ranker": fixed_ranker} if fixed_ranker is not None else {}),
             **fit_kwargs,
         )
         artifact_metadata = save_incremental_linking_artifact(
@@ -2156,6 +2189,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             gate_config=calibrated.gate_config,
             target_spec=target,
             pairwise_bundle_binding=pairwise_binding,
+            **({"fixed_booster": fixed_booster} if fixed_booster is not None else {}),
         )
         finalized = finalize_production_bundle(
             pairwise_bundle_dir=Path(args.pairwise_model_path),
@@ -2230,6 +2264,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "smoke_mode": max_query_groups is not None,
         "max_query_groups_per_table": max_query_groups,
     }
+    if fixed_booster is not None:
+        result["fixed_ranker_sha256"] = fixed_booster[1]
+        result["fixed_ranker_bundle"] = str(fixed_ranker_bundle)
     if block_roles is not None and frozen_manifest is not None:
         result["block_role_assignments_sha256"] = block_roles.sha256
         result["linker_task_manifest_sha256"] = sha256_file(frozen_manifest)
@@ -2247,6 +2284,11 @@ def _positive_int(value: str) -> int:
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-bundle-root", type=Path, required=True)
+    parser.add_argument("--fixed-ranker-bundle", type=Path, help="Reuse the ranker from this production bundle.")
+    parser.add_argument("--expected-ranker-sha256", help="Required SHA-256 for the fixed source ranker.")
+    parser.add_argument(
+        "--use-legacy-gate-calibration", action="store_true", help="Fit with the source M1 calibration rows."
+    )
     parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen linker_train, gate_fit and gate_thresh.")
     parser.add_argument("--block-role-assignments", type=Path, help="Role manifest used to build the linker tables.")
     parser.add_argument(

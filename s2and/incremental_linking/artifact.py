@@ -184,6 +184,7 @@ def save_incremental_linking_artifact(
     gate_config: Mapping[str, Any],
     target_spec: Mapping[str, Any],
     pairwise_bundle_binding: Mapping[str, Any],
+    fixed_booster: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Write `booster.lgb` and the minimal current runtime metadata."""
 
@@ -195,9 +196,14 @@ def save_incremental_linking_artifact(
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{artifact_dir.name}.staging-", dir=artifact_dir.parent))
     try:
-        booster = lightgbm_booster(model)
         booster_path = staging_dir / BOOSTER_FILENAME
-        booster.save_model(str(booster_path))
+        if fixed_booster is None:
+            lightgbm_booster(model).save_model(str(booster_path))
+        else:
+            source, expected_sha256 = fixed_booster
+            shutil.copyfile(source, booster_path)
+            if _sha256_file(booster_path) != expected_sha256:
+                raise ValueError("Fixed ranker SHA-256 changed before publication")
         metadata: dict[str, Any] = {
             "booster_sha256": _sha256_file(booster_path),
             "feature_contract_version": INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,

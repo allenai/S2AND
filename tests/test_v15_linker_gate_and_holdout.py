@@ -176,9 +176,9 @@ def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> N
         report_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
 
 
-@pytest.mark.parametrize("configured_weight", [None, 0.34])
+@pytest.mark.parametrize("configured_weight, fixed", [(None, False), (0.34, False), (None, True)])
 def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured_weight: float | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured_weight: float | None, fixed: bool
 ) -> None:
     rows, _, probabilities = _synthetic_gate_data()
     rows = rows.assign(feature=probabilities, candidate_gold_scored=True)
@@ -212,13 +212,23 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
             }
         },
     )
+    fixed_ranker = Ranker() if fixed else None
+    ranker_args = {"fixed_ranker": fixed_ranker} if fixed else {}
     result = classic_training.fit_classic(
         bundle,
         n_jobs=1,
         holdout_identities=classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
-        frozen_task_rows={"linker_train": linker_train, "gate_fit": gate_fit, "gate_thresh": gate_thresh},
+        frozen_task_rows={
+            "gate_fit": gate_fit,
+            "gate_thresh": gate_thresh,
+            **({} if fixed else {"linker_train": linker_train}),
+        },
+        **ranker_args,
     )
-    assert fitted_rows == [78]
+    assert fitted_rows == ([] if fixed else [78])
+    if fixed:
+        assert result.model is fixed_ranker
+        assert result.training_summary["ranker_refit"] is False
     assert result.gate_config["training_summary"]["fit_queries"] == 39
     assert result.gate_config["training_summary"]["validation_queries"] == 20
     assert result.gate_config["error_weights"]["false_abstain"] == (configured_weight or 0.25)
@@ -336,3 +346,69 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
             None,  # type: ignore[arg-type]
             verified_eps_cal_blocks=None,
         )
+
+
+def test_fixed_ranker_load_checks_bundle_and_requested_hash(tmp_path: Path) -> None:
+    from s2and._sha256 import sha256_file
+    from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
+    from tests.test_production_model import build_tiny_promoted_booster
+
+    relative = COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
+    path = tmp_path / relative
+    path.parent.mkdir()
+    booster, _ = build_tiny_promoted_booster()
+    booster.save_model(str(path))
+    digest = sha256_file(path)
+    (tmp_path / "manifest.json").write_text(json.dumps({"sha256": {relative: digest}}), encoding="utf-8")
+    loaded, source = promoted_train._load_fixed_ranker(tmp_path, digest)
+    assert source == path
+    assert loaded.num_feature() == booster.num_feature()
+    with pytest.raises(ValueError, match="ranker.*SHA-256"):
+        promoted_train._load_fixed_ranker(tmp_path, "0" * 64)
+    path.write_text("changed", encoding="utf-8")
+    with pytest.raises(ValueError, match="ranker.*SHA-256"):
+        promoted_train._load_fixed_ranker(tmp_path, digest)
+
+
+def test_fixed_ranker_accepts_legacy_calibration_splits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows, choices, probabilities = _synthetic_gate_data()
+
+    def score_source(_bundle, _spec, _split_spec, predict, columns, **options):
+        assert options["include_calibration_source"] is True
+        assert options["splits"] == ("calibration_fit", "calibration_check")
+        assert columns == ("feature",)
+        np.testing.assert_array_equal(predict(probabilities[:, None]), probabilities)
+        return classic_training.ClassicStratifiedEvalScores(rows, probabilities, choices, pd.DataFrame())
+
+    class Ranker:
+        def predict_proba(self, features: np.ndarray) -> np.ndarray:
+            positive = np.asarray(features)[:, 0]
+            return np.column_stack((1 - positive, positive))
+
+    def no_fit(*_args, **_kwargs):
+        pytest.fail("The legacy calibration arm tried fitting a new ranker")
+
+    monkeypatch.setattr(classic_training, "_score_classic_stratified_rows", score_source)
+    monkeypatch.setattr(classic_training, "_classic_internal_eval", lambda *_args: {})
+    monkeypatch.setattr(classic_training, "_build_classic_classifier", no_fit)
+    bundle = classic_training.OfficialBundle(
+        root=tmp_path,
+        bundle_name="fixture",
+        assets={},
+        expected_metrics={},
+        models={
+            "classic": {
+                "feature_columns": ["feature"],
+                "promoted_stratified_gate": {
+                    "fit_splits": ["calibration_fit"],
+                    "validation_splits": ["calibration_check"],
+                },
+                "stratified_eval_test_split": {},
+            },
+        },
+    )
+    ranker = Ranker()
+    result = classic_training.fit_classic(bundle, n_jobs=1, fixed_ranker=ranker)
+    assert result.model is ranker
+    assert result.gate_config["training_summary"]["fit_queries"] == 40
+    assert result.gate_config["training_summary"]["validation_queries"] == 20

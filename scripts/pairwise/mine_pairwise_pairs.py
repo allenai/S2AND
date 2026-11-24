@@ -1,4 +1,4 @@
-"""Sample pairs from frozen pairwise_train blocks."""
+"""Mine 1.4 errors and random controls from frozen pairwise training blocks."""
 
 from __future__ import annotations
 
@@ -7,19 +7,38 @@ import csv
 import json
 import math
 import random
-from collections.abc import Mapping
+from bisect import bisect_right
+from collections import Counter
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from functools import partial
+from itertools import chain, groupby
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
+import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
+from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import load_block_roles, normalize_block_key
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
+
+Pair = tuple[str, str]
 
 
-def _real_signatures(root: Path, block: str, orcid_home_roles: Mapping[str, str]) -> tuple[list[str], int]:
+@dataclass(frozen=True)
+class BlockInput:
+    arrow_dir: Path
+    labels: Path
+    assignments: Path
+
+
+def _mention_orcids(root: Path, block: str) -> dict[str, str | None]:
+    signatures: dict[str, str | None] = {}
     with (
         ArrowDataset.open(root) as dataset,
         dataset.use() as lease,
@@ -30,74 +49,203 @@ def _real_signatures(root: Path, block: str, orcid_home_roles: Mapping[str, str]
         columns = ["signature_id", "author_block"]
         if "author_orcid" in reader.schema.names:
             columns.append("author_orcid")
-        signatures: list[str] = []
-        seen: set[str] = set()
-        excluded = 0
         for batch_index in range(reader.num_record_batches):
             for row in reader.get_batch(batch_index).select(columns).to_pylist():
                 signature = row["signature_id"]
-                if not signature or normalize_block_key(row["author_block"]) != block or signature in seen:
-                    raise ValueError(f"Expected unique signatures from block {block!r} in {root}")
-                seen.add(signature)
+                if not signature or normalize_block_key(row["author_block"]) != block:
+                    raise ValueError(f"Expected real signatures from block {block!r} in {root}")
                 if signature.startswith("visibleq:"):
                     continue
-                orcid = normalize_orcid(row.get("author_orcid") or "")
-                if orcid and orcid_home_roles.get(orcid, "pairwise_train") != "pairwise_train":
-                    excluded += 1
-                else:
-                    signatures.append(signature)
-    return sorted(signatures), excluded
+                if signature in signatures:
+                    raise ValueError(f"Duplicate signature {signature!r} in {root}")
+                signatures[signature] = normalize_orcid(row.get("author_orcid") or "")
+    return signatures
+
+
+def _eligible_mentions(
+    spec: BlockInput, block: str, frozen_orcids: frozenset[str], homes: Mapping[str, str]
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
+    deposited = _mention_orcids(spec.arrow_dir, block)
+    identities, scored = read_external_reference_identity_evidence(spec.labels, require_scored=True)
+    if unknown := identities.keys() - deposited.keys():
+        raise ValueError(f"Joined labels contain signatures outside {block!r}: {sorted(unknown)[:5]}")
+    if frozen_orcids and frozen_orcids.isdisjoint(chain(identities.values(), deposited.values())):
+        raise ValueError(f"Neither label nor Arrow input names a frozen ORCID in {block!r}")
+    eligible = {}
+    for sid, orcid in deposited.items():
+        gold = identities.get(sid)
+        if any(homes.get(oid, "pairwise_train") != "pairwise_train" for oid in (gold, orcid) if oid):
+            continue
+        eligible[sid] = gold or orcid or f"signature:{sid}"
+    labels = {sid: oid for sid, oid in scored.items() if sid in eligible and oid not in EXCLUDED_ORCID_GROUPS}
+    table = pq.read_table(spec.assignments, columns=["signature_id", "cluster_id"])
+    components: dict[str, str] = {}
+    for sid, cid in zip(table["signature_id"].to_pylist(), table["cluster_id"].to_pylist(), strict=True):
+        if sid not in deposited or sid in components or type(cid) not in {str, int} or cid == "":
+            raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {spec.assignments}")
+        components[sid] = str(cid)
+    if components.keys() != deposited.keys():
+        raise ValueError(f"Expected 1.4 assignments for every real signature in {block!r}")
+    return eligible, labels, components, len(deposited) - len(eligible)
+
+
+@dataclass
+class PairFrame:
+    """Index a grouped pair population with one prefix count per mention."""
+
+    signatures: list[str]
+    spans: list[tuple[int, int]]
+    ends: list[int]
+
+    @property
+    def size(self) -> int:
+        return self.ends[-1] if self.ends else 0
+
+    def pair(self, index: int) -> Pair:
+        span = bisect_right(self.ends, index)
+        right, start = self.spans[span]
+        base = self.ends[span - 1] if span else 0
+        return self.signatures[start + index - base], self.signatures[right]
+
+
+def _grouped_frame(
+    signatures: list[str], major: Mapping[str, str], minor: Mapping[str, str], *, include_unlabeled: bool = False
+) -> PairFrame:
+    ordered = sorted(signatures, key=lambda sid: (major[sid], sid not in minor, minor.get(sid, ""), sid))
+    frame = PairFrame(ordered, [], [])
+    for _, group in groupby(enumerate(ordered), key=lambda item: major[item[1]]):
+        start = 0
+        previous_minor = None
+        minor_start = 0
+        for right, sid in group:
+            key = minor.get(sid)
+            if key != previous_minor or include_unlabeled:
+                minor_start = right
+                previous_minor = key
+            if right == 0 or major[ordered[right - 1]] != major[sid]:
+                start = right
+                minor_start = right
+            count = (
+                right - start
+                if include_unlabeled and key is None
+                else (0 if include_unlabeled else minor_start - start)
+            )
+            if count:
+                frame.spans.append((right, start))
+                frame.ends.append(frame.size + count)
+    return frame
+
+
+def _random_pair(signatures: list[str], index: int) -> Pair:
+    right = (1 + math.isqrt(1 + 8 * index)) // 2
+    return signatures[index - math.comb(right, 2)], signatures[right]
+
+
+def _sample_frame(
+    pair_at: Callable[[int], Pair],
+    population: int,
+    identities: Mapping[str, str],
+    excluded_pairs: set[Pair],
+    *,
+    per_block: int,
+    per_identity: int,
+    frame_seed: str,
+    rng: random.Random,
+) -> tuple[list[Pair], int]:
+    # Freeze a bounded candidate frame before sampling, so probabilities account for identity caps.
+    frame: list[Pair] = []
+    counts: Counter[str] = Counter()
+    frame_size = per_block * 4
+    proposals = random.Random(frame_seed).sample(range(population), min(population, max(1024, frame_size * 16)))
+    for index in proposals:
+        a, b = pair_at(index)
+        pair = (a, b) if a < b else (b, a)
+        keys = {identities[a], identities[b]}
+        if pair in excluded_pairs or any(counts[key] >= per_identity for key in keys):
+            continue
+        counts.update(keys)
+        frame.append(pair)
+        if len(frame) >= frame_size:
+            break
+    return rng.sample(frame, min(per_block, len(frame))), len(frame)
 
 
 def mine_pairs(
     roles_path: Path,
-    blocks: Mapping[str, Path],
+    blocks: Mapping[str, BlockInput],
     output_path: Path,
     *,
     per_block: int,
+    per_identity: int = 25,
     seed: int = 20261123,
 ) -> int:
-    """Write a bounded uniform sample with per-block inclusion probabilities."""
-    if per_block <= 0:
-        raise ValueError("per_block must be positive")
+    """Write deduplicated pairs sampled within each capped stratum frame."""
+    if min(per_block, per_identity) <= 0:
+        raise ValueError("Pair caps must be positive")
     roles = load_block_roles(roles_path)
-    normalized = {normalize_block_key(block): root for block, root in blocks.items()}
+    normalized = {normalize_block_key(block): spec for block, spec in blocks.items()}
     if not normalized or len(normalized) != len(blocks):
         raise ValueError("Expected at least one block and no duplicate normalized keys")
     for block in normalized:
         if roles.role_for(block) != "pairwise_train":
             raise ValueError(f"Block {block!r} is outside pairwise_train")
+    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+    if manifest_path.exists() or output_path.exists():
+        raise FileExistsError(output_path)
 
     homes = {
-        orcid: roles.orcid_home_role.get(orcid, roles.block_to_role[block])
-        for block, orcids in roles.block_orcids.items()
-        for orcid in orcids
+        orcid: roles.orcid_home_role.get(orcid, role)
+        for key, role in roles.block_to_role.items()
+        for orcid in roles.block_orcids[key]
     }
-    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
-    if manifest_path.exists():
-        raise FileExistsError(manifest_path)
     rng = random.Random(seed)
-    counts = {}
-    rows: list[tuple[str, str, str, float]] = []
-    for block, root in sorted(normalized.items()):
-        signatures, excluded = _real_signatures(root, block, homes)
-        population = math.comb(len(signatures), 2)
-        count = min(population, per_block)
+    counts: dict[str, Any] = {}
+    rows: list[tuple[str, str, str, str, float]] = []
+    for block, spec in sorted(normalized.items()):
+        identities, gold, clusters, excluded = _eligible_mentions(spec, block, roles.block_orcids[block], homes)
+        signatures = sorted(identities)
+        labeled = sorted(gold)
+        false_merges = _grouped_frame(labeled, clusters, gold)
+        missed_links = _grouped_frame(labeled, gold, clusters)
+        merged_unlabeled = _grouped_frame(signatures, clusters, gold, include_unlabeled=True)
+        stratum_counts = {}
+        seen_pairs: set[Pair] = set()
+        for stratum, population, pair_at in (
+            ("false_merge", false_merges.size, false_merges.pair),
+            ("missed_link", missed_links.size, missed_links.pair),
+            ("merged_unlabeled", merged_unlabeled.size, merged_unlabeled.pair),
+            ("random", math.comb(len(signatures), 2), partial(_random_pair, signatures)),
+        ):
+            sample, frame_size = _sample_frame(
+                pair_at,
+                population,
+                identities,
+                seen_pairs,
+                per_block=per_block,
+                per_identity=per_identity,
+                frame_seed=f"{block}:{stratum}",
+                rng=rng,
+            )
+            inclusion = len(sample) / frame_size if frame_size else 0.0
+            stratum_counts[stratum] = {
+                "eligible_pairs": population,
+                "frame_pairs": frame_size,
+                "sampled_pairs": len(sample),
+                "inclusion_probability": inclusion,
+            }
+            seen_pairs.update(sample)
+            rows.extend((block, left, right, stratum, inclusion) for left, right in sorted(sample))
         counts[block] = {
             "eligible_signatures": len(signatures),
             "excluded_non_home_signatures": excluded,
-            "eligible_pairs": population,
-            "sampled_pairs": count,
+            "labels_sha256": sha256_file(spec.labels),
+            "assignments_sha256": sha256_file(spec.assignments),
+            "strata": stratum_counts,
         }
-        for index in sorted(rng.sample(range(population), count)):
-            # Invert the triangular index without enumerating the pair population.
-            right = (1 + math.isqrt(1 + 8 * index)) // 2
-            left = index - math.comb(right, 2)
-            rows.append((block, signatures[left], signatures[right], count / population))
-
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["block_key", "signature_id_1", "signature_id_2", "inclusion_probability"])
+        writer.writerow(["block_key", "signature_id_1", "signature_id_2", "stratum", "inclusion_probability"])
         writer.writerows(rows)
     with manifest_path.open("x", encoding="utf-8", newline="\n") as handle:
         json.dump(
@@ -105,7 +253,9 @@ def mine_pairs(
                 "block_role_assignments_sha256": roles.sha256,
                 "seed": seed,
                 "role": "pairwise_train",
-                "pairs_per_block": per_block,
+                "pairs_per_block_per_stratum": per_block,
+                "pairs_per_identity_per_stratum": per_identity,
+                "probability_scope": "within_capped_stratum_frame",
                 "output_sha256": sha256_file(output_path),
                 "blocks": counts,
             },
@@ -118,19 +268,32 @@ def mine_pairs(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Sample frozen pairwise training blocks from Arrow."""
+    """Sample pairs from frozen training blocks and their stored 1.4 assignments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
-    parser.add_argument("--blocks-json", type=Path, required=True, help="Map block keys to Arrow directories.")
-    parser.add_argument("--pairs-per-block", type=int, required=True)
+    parser.add_argument(
+        "--blocks-json", type=Path, required=True, help="Map block keys to arrow_dir, labels and assignments."
+    )
+    parser.add_argument("--pairs-per-block", type=int, required=True, help="Maximum per stratum and block.")
+    parser.add_argument("--pairs-per-identity", type=int, default=25, help="Maximum per stratum and identity.")
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    raw = json.loads(args.blocks_json.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or any(not isinstance(path, str) or not path for path in raw.values()):
-        raise ValueError("Expected a JSON object mapping block keys to Arrow directories")
-    blocks = {block: args.blocks_json.parent / path for block, path in raw.items()}
-    count = mine_pairs(args.block_role_assignments, blocks, args.output, per_block=args.pairs_per_block, seed=args.seed)
+    raw = read_json_object(args.blocks_json)
+    blocks = {
+        block: BlockInput(
+            **{field: args.blocks_json.parent / spec[field] for field in ("arrow_dir", "labels", "assignments")}
+        )
+        for block, spec in raw.items()
+    }
+    count = mine_pairs(
+        args.block_role_assignments,
+        blocks,
+        args.output,
+        per_block=args.pairs_per_block,
+        per_identity=args.pairs_per_identity,
+        seed=args.seed,
+    )
     print(json.dumps({"blocks": len(blocks), "pairs": count}))
     return 0
 

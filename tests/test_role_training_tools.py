@@ -7,7 +7,6 @@ import sys
 import sysconfig
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -61,11 +60,27 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
             )
 
 
+def _mining_input(tmp_path: Path, block: str, *, deposited_orcids: bool = True):
+    from scripts.pairwise.mine_pairwise_pairs import BlockInput
+
+    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0], deposited_orcids=deposited_orcids)
+    assignments = tmp_path / "assignments.parquet"
+    signatures = ["q_initial", "q_full", "q_outside_home", *(f"s{i:02}" for i in range(29))]
+    clusters = ["mixed", "split", "mixed", "mixed", "mixed", "mixed", "mixed", "mixed", *signatures[8:]]
+    pd.DataFrame({"signature_id": signatures, "cluster_id": clusters}).to_parquet(assignments)
+    labels = Path(spec["labels"])
+    frame = pd.read_parquet(labels)
+    frame.loc[frame["signature_id"].isin(["q_outside_home", "s03"]), "scored"] = False
+    frame.loc[frame["signature_id"].eq("s01"), "orcid"] = _ORCIDS[1]
+    frame.to_parquet(labels, index=False)
+    return BlockInput(Path(spec["arrow_dir"]), labels, assignments)
+
+
 def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None:
     from scripts.pairwise import mine_pairwise_pairs
 
     block = "a ross"
-    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
+    spec = _mining_input(tmp_path, block)
     roles_path = tmp_path / "roles.json"
     frozen = assign_block_roles(
         [BlockSpec(block, 32), BlockSpec("sealed", 5)],
@@ -75,9 +90,7 @@ def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")
     output = tmp_path / "pairs.csv"
     with pytest.raises(ValueError, match="outside pairwise_train"):
-        mine_pairwise_pairs.mine_pairs(
-            roles_path, {block: Path(spec["arrow_dir"]), "sealed": tmp_path}, output, per_block=6
-        )
+        mine_pairwise_pairs.mine_pairs(roles_path, {block: spec, "sealed": spec}, output, per_block=6)
     assert not output.exists()
 
 
@@ -85,12 +98,14 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
     from scripts.pairwise.mine_pairwise_pairs import main
 
     block = "a ross"
-    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
-    roles_path, blocks_path, output = (tmp_path / name for name in ("roles.json", "blocks.json", "pairs.csv"))
-    roles = assign_block_roles([BlockSpec(block, 32)], {"pairwise_train": 1})
+    spec = _mining_input(tmp_path, block)
+    roles_path, blocks_path, output = (tmp_path / name for name in ("roles.json", "blocks.json", "nested/pairs.csv"))
+    roles = assign_block_roles([BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME}))], {"pairwise_train": 1})
     roles_path.write_text(json.dumps(roles), encoding="utf-8")
-    arrow_dir = Path(spec["arrow_dir"]).relative_to(tmp_path)
-    blocks_path.write_text(json.dumps({block: arrow_dir.as_posix()}), encoding="utf-8")
+    relative = {
+        field: getattr(spec, field).relative_to(tmp_path).as_posix() for field in ("arrow_dir", "labels", "assignments")
+    }
+    blocks_path.write_text(json.dumps({block: relative}), encoding="utf-8")
     assert (
         main(
             [
@@ -106,12 +121,14 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out) == {"blocks": 1, "pairs": 6}
     rows = pd.read_csv(output)
+    assert json.loads(capsys.readouterr().out) == {"blocks": 1, "pairs": len(rows)}
+    assert set(rows["stratum"]) == {"false_merge", "missed_link", "merged_unlabeled", "random"}
     assert list(rows["block_key"].unique()) == [block]
-    assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == 6
+    assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == len(rows)
     assert (rows["signature_id_1"] < rows["signature_id_2"]).all()
-    np.testing.assert_allclose(rows["inclusion_probability"], 6 / (32 * 31 / 2))
+    assert rows.groupby("stratum").size().le(6).all()
+    assert rows["inclusion_probability"].between(0, 1, inclusive="right").all()
 
 
 def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
@@ -153,19 +170,19 @@ def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
             )
 
 
-@pytest.mark.parametrize("check", ["sampling_frame", "manifest"])
-def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str) -> None:
+@pytest.mark.parametrize("deposited_orcids", [True, False])
+def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_orcids: bool) -> None:
     from s2and._sha256 import sha256_file
     from scripts.pairwise.mine_pairwise_pairs import mine_pairs
 
     block = "a ross"
-    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
+    spec = _mining_input(tmp_path, block, deposited_orcids=deposited_orcids)
     roles_path = tmp_path / "roles.json"
     roles_path.write_text(
         json.dumps(
             assign_block_roles(
                 [
-                    BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME})),
+                    BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME})),
                     BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
                 ],
                 {"pairwise_train": 1, "final_test_a": 1},
@@ -176,27 +193,22 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str
         encoding="utf-8",
     )
     output = tmp_path / "pairs.csv"
-    mined = mine_pairs(roles_path, {block: Path(spec["arrow_dir"])}, output, per_block=500, seed=42)
-    if check == "sampling_frame":
-        assert mined == 435
-        rows = pd.read_csv(output)
-        assert not set(rows["signature_id_1"]) & {"q_outside_home", "s03"}
-        assert not set(rows["signature_id_2"]) & {"q_outside_home", "s03"}
-        assert rows["inclusion_probability"].eq(1.0).all()
-        small = tmp_path / "sample.csv"
-        assert mine_pairs(roles_path, {block: Path(spec["arrow_dir"])}, small, per_block=6, seed=42) == 6
-        np.testing.assert_allclose(pd.read_csv(small)["inclusion_probability"], 6 / 435)
-    else:
-        manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
-        assert manifest["seed"] == 42
-        assert manifest["block_role_assignments_sha256"] == sha256_file(roles_path)
-        assert manifest["output_sha256"] == sha256_file(output)
-        assert manifest["blocks"][block] == {
-            "eligible_signatures": 30,
-            "excluded_non_home_signatures": 2,
-            "eligible_pairs": 435,
-            "sampled_pairs": 435,
-        }
+    mined = mine_pairs(roles_path, {block: spec}, output, per_block=500, per_identity=2, seed=42)
+    rows = pd.read_csv(output)
+    assert mined == len(rows)
+    assert not set(rows["signature_id_1"]) & {"q_outside_home", "s03"}
+    assert not set(rows["signature_id_2"]) & {"q_outside_home", "s03"}
+    manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+    info = manifest["blocks"][block]
+    assert manifest["block_role_assignments_sha256"] == sha256_file(roles_path)
+    assert manifest["output_sha256"] == sha256_file(output)
+    assert info["labels_sha256"] == sha256_file(spec.labels)
+    assert info["assignments_sha256"] == sha256_file(spec.assignments)
+    assert info["eligible_signatures"] == 30
+    assert info["excluded_non_home_signatures"] == 2
+    random = rows.loc[rows["stratum"].eq("random")]
+    author = {"q_full", "q_initial", "s00"}
+    assert (random["signature_id_1"].isin(author) | random["signature_id_2"].isin(author)).sum() <= 2
 
 
 def test_role_b3_scores_singleton_only_reference(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

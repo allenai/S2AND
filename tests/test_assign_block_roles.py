@@ -190,7 +190,7 @@ def test_assign_roles_parquet_strata_and_required_source_split(tmp_path: Path) -
     records[-1]["split"] = None
     pq.write_table(pa.Table.from_pylist(records), blocks)
     with pytest.raises(ValueError, match="missing or invalid source_split"):
-        main([*args, "--overwrite"])
+        main([*args, "--overwrite", "--pinned-roles-json", str(tmp_path / "out" / "assignments.json")])
 
 
 def test_free_development_role_cannot_consume_holdout() -> None:
@@ -250,6 +250,36 @@ def test_home_role_uses_mention_counts_within_same_priority() -> None:
     assert result["orcid_home_role"] == {orcid: "pairwise_train"}
 
 
+def test_examined_orcid_scores_outside_the_sealed_half() -> None:
+    identity = "0000-0002-1694-233X"
+    result = assign_block_roles(
+        [
+            BlockSpec("examined", 1, frozenset({identity}), orcid_mention_counts={identity: 1}),
+            BlockSpec("sealed", 100, frozenset({identity}), orcid_mention_counts={identity: 100}),
+        ],
+        {"dev_test": 1, "final_test_a": 1},
+        closure_mode="home_pool",
+        pinned_roles={"examined": "dev_test", "sealed": "final_test_a"},
+        pinned_home_roles={identity: "final_test_a"},
+    )
+    assert result["orcid_home_role"] == {identity: "dev_test"}
+
+
+def test_load_blocks_accepts_parquet_map_mention_counts(tmp_path: Path) -> None:
+    path = tmp_path / "blocks.parquet"
+    identity = "0000-0002-1694-233X"
+    table = pa.table(
+        {
+            "block_key": ["a ross"],
+            "signature_count": [2],
+            "orcids": [[identity]],
+            "orcid_mention_counts": pa.array([[(identity, 2)]], type=pa.map_(pa.string(), pa.int64())),
+        }
+    )
+    pq.write_table(table, path)
+    assert load_blocks(path)[0].orcid_mention_counts == {identity: 2}
+
+
 def test_frozen_block_roles_reject_unlisted_orcid(tmp_path: Path) -> None:
     orcid = "0000-0002-1694-233X"
     path = tmp_path / "roles.json"
@@ -266,7 +296,7 @@ def test_frozen_block_roles_reject_unlisted_orcid(tmp_path: Path) -> None:
             roles.scores(block, identity)
 
 
-@pytest.mark.parametrize("check", ["implicit_home", "exclusion", "missing_pin"])
+@pytest.mark.parametrize("check", ["implicit_home", "exclusion", "missing_pin", "extra_pin", "plain_pin"])
 def test_refreeze_preserves_homes_and_exclusions(tmp_path: Path, check: str) -> None:
     implicit, shared = "0000-0002-1694-233X", "0000-0002-9079-593X"
     records = [
@@ -298,7 +328,8 @@ def test_refreeze_preserves_homes_and_exclusions(tmp_path: Path, check: str) -> 
         )
         return tmp_path / output / "assignments.json"
 
-    first = freeze("first", {"pairwise_train": 1, "final_test_a": 1}, "--exclude-blocks", "excluded")
+    first = freeze("first", {"pairwise_train": 1, "final_test_a": 1}, "--exclude-blocks", "excluded", "absent")
+    assert set(json.loads(first.read_text(encoding="utf-8"))["excluded_blocks"]) == {"excluded", "absent"}
     prior = load_block_roles(first)
     assert prior.orcid_home_role == {shared: "final_test_a"}
     records.append({"block_key": "new holdout", "orcids": [implicit, shared], "split": "holdout"})
@@ -309,6 +340,16 @@ def test_refreeze_preserves_homes_and_exclusions(tmp_path: Path, check: str) -> 
             freeze("second", {"pairwise_train": 2, "final_test_b": 1}, *args)
         return
 
+    if check == "plain_pin":
+        pins = tmp_path / "pins.json"
+        pins.write_text(json.dumps(prior.block_to_role), encoding="utf-8")
+        with pytest.raises(ValueError, match="Use prior assignments.json"):
+            freeze("second", {"pairwise_train": 2, "final_test_b": 1}, "--pinned-roles-json", str(pins))
+        return
+    if check == "extra_pin":
+        pins = tmp_path / "pins.json"
+        pins.write_text(json.dumps({"new_holdout": "final_test_b"}), encoding="utf-8")
+        args += ("--extra-pins-json", str(pins))
     second = freeze("second", {"pairwise_train": 2, "final_test_b": 1}, *args)
     current = load_block_roles(second)
     if check == "implicit_home":
@@ -317,7 +358,7 @@ def test_refreeze_preserves_homes_and_exclusions(tmp_path: Path, check: str) -> 
         assert not current.scores("new holdout", implicit)
         assert not current.scores("new holdout", shared)
     else:
-        assert json.loads(second.read_text(encoding="utf-8"))["excluded_blocks"] == ["excluded"]
+        assert json.loads(second.read_text(encoding="utf-8"))["excluded_blocks"] == ["absent", "excluded"]
         assert "excluded" not in current.block_to_role
     assert all(current.role_for(block) == role for block, role in prior.block_to_role.items())
 
@@ -334,6 +375,16 @@ def test_small_development_roles_reserve_giants(giants: int) -> None:
     assert all(len(result["roles"][role]) == 10 for role in roles)
     assert sum(counts[role]["giant"] > 0 for role in roles) == min(giants, len(roles))
     assert result["stratum_shortfalls"] == {role: ["giant"] for role in roles if not counts[role]["giant"]}
+
+
+def test_single_block_strata_fit_one_half_each() -> None:
+    blocks = [
+        BlockSpec("small", 100, stratum="small", source_split="holdout"),
+        BlockSpec("giant", 20_000, stratum="giant", source_split="holdout"),
+    ]
+    result = assign_block_roles(blocks, {"final_test": 2}, enforce_source_splits=True)
+    assert set(result["roles"]["final_test_a"] + result["roles"]["final_test_b"]) == {"small", "giant"}
+    assert all(len(result["stratum_shortfalls"][role]) == 1 for role in ("final_test_a", "final_test_b"))
 
 
 def test_sealed_target_must_cover_each_stratum() -> None:

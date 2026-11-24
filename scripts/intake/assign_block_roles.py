@@ -22,10 +22,10 @@ import hashlib
 import json
 import sys
 from collections import Counter, defaultdict, deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -340,7 +340,11 @@ def _allocate_sealed_pairs(
     for stratum in sorted(strata, key=lambda value: (sizes[value], value)):
         queue = strata[stratum]
         missing = [role for role in FINAL_TEST_ROLES if not counts[role, stratum]]
-        if len(queue) >= len(missing) and all(
+        if len(queue) == 1 and len(missing) == 2:
+            role = max(missing, key=remaining.__getitem__)
+            if len(queue[0]) <= remaining[role]:
+                take(role, queue)
+        elif len(queue) >= len(missing) and all(
             len(component) <= remaining[role] for role, component in zip(missing, queue, strict=False)
         ):
             for role in missing:
@@ -453,7 +457,6 @@ def assign_block_roles(
             (
                 {normalize_block_key(k) for k in (pinned_roles or {})}
                 | {normalize_block_key(k) for k in extra_dev_test_blocks}
-                | {normalize_block_key(k) for k in excluded_blocks}
             )
             - seen_keys
         )
@@ -464,7 +467,7 @@ def assign_block_roles(
         raise ValueError(f"Cannot exclude pinned blocks: {sorted(conflicting)}")
 
     active_blocks = [block for block in norm_blocks if block.block_key not in excluded_set]
-    present_excluded = sorted(block.block_key for block in norm_blocks if block.block_key in excluded_set)
+    recorded_exclusions = sorted((seen_keys & excluded_set) | {normalize_block_key(k) for k in excluded_blocks})
     by_key = {block.block_key: block for block in active_blocks}
 
     if closure_mode == "strict":
@@ -509,16 +512,29 @@ def assign_block_roles(
         role: {
             block.stratum
             for block in active_blocks
-            if not enforce_source_splits
-            or block.source_split == ("holdout" if role in FINAL_TEST_ROLES else "development")
-            or block_to_role.get(block.block_key) == role
+            if block_to_role.get(block.block_key) == role
+            or (
+                (role not in FINAL_TEST_ROLES or block.block_key not in block_to_role)
+                and (
+                    not enforce_source_splits
+                    or block.source_split == ("holdout" if role in FINAL_TEST_ROLES else "development")
+                )
+            )
         }
         for role in target_order
     }
-    if all(role in role_targets for role in FINAL_TEST_ROLES) and any(
-        role_targets[role] < len(strata_by_role[role]) for role in FINAL_TEST_ROLES
-    ):
-        raise ValueError("Sealed targets must allow at least one block per stratum in each half")
+    if all(role in role_targets for role in FINAL_TEST_ROLES):
+        sealed_counts = Counter(
+            block.stratum
+            for block in active_blocks
+            if block_to_role.get(block.block_key) in FINAL_TEST_ROLES
+            or (block.block_key not in block_to_role and (not enforce_source_splits or block.source_split == "holdout"))
+        )
+        for role in FINAL_TEST_ROLES:
+            pinned_strata = {by_key[key].stratum for key, assigned in block_to_role.items() if assigned == role}
+            required = pinned_strata | {stratum for stratum in strata_by_role[role] if sealed_counts[stratum] > 1}
+            if role_targets[role] < len(required):
+                raise ValueError("Sealed targets must allow at least one block per stratum in each half")
 
     free_components = _allocate_sealed_pairs(
         free_components, by_key, remaining, block_to_role, seed=seed, enforce_source_splits=enforce_source_splits
@@ -578,10 +594,12 @@ def assign_block_roles(
                 orcid_role_mentions[orcid][role] += count
         role_priority = {role: idx for idx, role in enumerate(ASSIGNABLE_ROLES)}
         for orcid, home in pinned_homes.items():
-            if home not in orcid_role_mentions.get(orcid, {}):
+            if orcid not in EXCLUDED_ORCID_GROUPS and home not in orcid_role_mentions.get(orcid, {}):
                 raise ValueError(f"Pinned ORCID {orcid!r} is missing from its home role {home!r}")
         for orcid, role_map in sorted(orcid_role_mentions.items()):
             home = pinned_homes.get(orcid)
+            if "dev_test" in role_map and any(role in role_map for role in FINAL_TEST_ROLES):
+                home = "dev_test"
             if closure_mode == "home_pool" and len(role_map) > 1:
                 orcid_home_role[orcid] = home or max(
                     role_map, key=lambda role: (role in evaluation_roles, role_map[role], -role_priority[role])
@@ -615,11 +633,12 @@ def assign_block_roles(
         "seed": int(seed),
         "closure_mode": closure_mode,
         "enforce_source_splits": bool(enforce_source_splits),
-        "excluded_blocks": present_excluded,
+        "excluded_blocks": recorded_exclusions,
         "role_targets": {role: int(role_targets[role]) for role in target_order},
         "roles": roles,
         "block_to_role": dict(sorted(block_to_role.items())),
         "block_orcids": {key: sorted(by_key[key].orcids) for key in sorted(block_to_role)},
+        "block_signature_counts": {key: by_key[key].signature_count for key in sorted(block_to_role)},
         "unassigned": sorted(by_key.keys() - block_to_role.keys()),
         "shortfalls": shortfalls,
         "stratum_shortfalls": stratum_shortfalls,
@@ -637,16 +656,38 @@ def assign_block_roles(
 
 def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockSpec]:
     """Load block metadata from JSON or Parquet."""
+    rows: Iterable[dict[str, Any]]
     if path.suffix.casefold() == ".parquet":
         import pyarrow.parquet as pq
 
-        raw = pq.read_table(path).to_pylist()
+        parquet = pq.ParquetFile(path)
+        fields = {
+            "block_key",
+            "cluster_block_key",
+            "signature_count",
+            "orcids",
+            "orcid_mention_counts",
+            "size_band",
+            "stratum",
+            "script_region",
+            "script",
+            "region",
+            "source_split",
+            "split",
+        }
+        columns = sorted(fields & set(parquet.schema_arrow.names))
+        rows = (
+            dict(zip(columns, values, strict=True))
+            for batch in parquet.iter_batches(columns=columns)
+            for values in zip(*(batch.column(name).to_pylist() for name in columns), strict=True)
+        )
     else:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        raise ValueError(f"Expected a list of block specs in {path}")
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            raise ValueError(f"Expected a list of block specs in {path}")
+        rows = cast(list[dict[str, Any]], raw)
     specs: list[BlockSpec] = []
-    for item in raw:
+    for item in rows:
         key = item.get("block_key") or item.get("cluster_block_key")
         if not isinstance(key, str) or not key.strip():
             raise ValueError(f"Missing block_key in {path}")
@@ -656,9 +697,10 @@ def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockS
         mention_counts = item.get("orcid_mention_counts")
         if mention_counts is None:
             mention_counts = Counter(orcid for raw in orcids if (orcid := normalize_orcid(str(raw))))
-        elif isinstance(mention_counts, dict):
+        elif isinstance(mention_counts, (dict, list)):
             normalized_counts: dict[str, int] = {}
-            for raw_orcid, mentions in mention_counts.items():
+            entries = mention_counts.items() if isinstance(mention_counts, dict) else mention_counts
+            for raw_orcid, mentions in entries:
                 orcid = normalize_orcid(str(raw_orcid))
                 if not orcid or orcid in normalized_counts or type(mentions) is not int or mentions < 1:
                     raise ValueError(f"Invalid or duplicate ORCID mention count for {raw_orcid!r} in block {key!r}")
@@ -705,8 +747,9 @@ def main(argv: list[str] | None = None) -> int:
         "--pinned-roles-json",
         type=Path,
         default=None,
-        help="Optional JSON mapping {block_key: role} or prior assignments.json to preserve.",
+        help="Prior assignments.json to preserve. Strict mode also accepts a pin map.",
     )
+    parser.add_argument("--extra-pins-json", type=Path, help="New block-role pins, for a first freeze or re-freeze.")
     parser.add_argument("--dev-test-blocks", nargs="*", default=())
     parser.add_argument("--exclude-blocks", nargs="*", default=())
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting an existing assignments.json.")
@@ -734,9 +777,29 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"Expected an excluded block list in {args.pinned_roles_json}")
             excluded_blocks.extend(prior_exclusions)
         elif isinstance(raw_pins, dict):
-            pinned_roles = {str(k): str(v) for k, v in raw_pins.items()}
+            if args.closure_mode == "home_pool":
+                raise ValueError(
+                    "Use prior assignments.json for --pinned-roles-json under home_pool. "
+                    "Add pins with --extra-pins-json."
+                )
+            pinned_roles = raw_pins
         else:
             raise ValueError(f"Expected JSON mapping in {args.pinned_roles_json}")
+
+    if args.closure_mode == "home_pool" and out_json.exists() and pinned_home_roles is None:
+        raise ValueError("Pass the prior assignments.json when re-freezing home_pool")
+    if args.extra_pins_json is not None:
+        raw_extra = json.loads(args.extra_pins_json.read_text(encoding="utf-8"))
+        if not isinstance(raw_extra, dict):
+            raise ValueError(f"Expected JSON mapping in {args.extra_pins_json}")
+        extra = {normalize_block_key(key): role for key, role in raw_extra.items()}
+        if len(extra) != len(raw_extra):
+            raise ValueError("Duplicate normalized keys in --extra-pins-json")
+        pinned_roles = dict(pinned_roles or {})
+        for key, role in extra.items():
+            if key in pinned_roles and pinned_roles[key] != role:
+                raise ValueError(f"New pin conflicts with the frozen role for {key!r}")
+            pinned_roles[key] = role
 
     blocks = load_blocks(args.blocks, require_orcid_lists=True)
     targets = json.loads(args.targets_json.read_text(encoding="utf-8"))
@@ -750,7 +813,7 @@ def main(argv: list[str] | None = None) -> int:
         excluded_blocks=excluded_blocks,
         closure_mode=args.closure_mode,
         enforce_source_splits=args.enforce_source_splits,
-        require_pinned_present=args.pinned_roles_json is not None,
+        require_pinned_present=pinned_roles is not None,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
@@ -759,7 +822,11 @@ def main(argv: list[str] | None = None) -> int:
         writer.writerow(["block_key", "role"])
         for key, role in result["block_to_role"].items():
             writer.writerow([key, role])
-    print(json.dumps(result["verification"], indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {**result["verification"], "stratum_shortfalls": result["stratum_shortfalls"]}, indent=2, sort_keys=True
+        )
+    )
     return 0
 
 

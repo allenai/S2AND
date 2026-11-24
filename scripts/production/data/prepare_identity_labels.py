@@ -162,7 +162,6 @@ def prepare_identity_labels(
     of rows (e.g. the 74M-row ``orcid-blocks-v2/labels.parquet``) run in seconds with bounded RAM.
 
     Enforces:
-    - ``scored is True`` when a ``scored`` column is present (rejects ``None``/``NaN``/``False``)
     - ``split == expected_split`` when ``expected_split`` is specified
     - normalized valid ORCID outside ``EXCLUDED_ORCID_GROUPS``
     - exact non-negative integer ``position``
@@ -170,7 +169,9 @@ def prepare_identity_labels(
     - ``cluster_block_key`` match when present in gold
     - canonical name compatibility when gold author name columns are present
     - exclusion of any reviewed wrong-ORCID ``error_signature_ids``
-    - ORCID home roles when frozen block assignments are supplied
+
+    Keep verified identity evidence in every output row. Set ``scored`` to false for Gold
+    rows without explicit eligibility (when Gold has a ``scored`` column) or outside their frozen home.
     """
     arrow_dir = arrow_dataset_dir.resolve()
     gold_path = gold_parquet_path.resolve()
@@ -266,8 +267,8 @@ def prepare_identity_labels(
         "verification_mode": "position_block_and_name" if name_columns_present else "position_and_block_only",
         "gold_rows_scanned": 0,
         "dropped_wrong_split": 0,
-        "dropped_unscored": 0,
-        "dropped_non_home_role": 0,
+        "gold_unscored_verified_rows": 0,
+        "non_home_verified_rows": 0,
         "block_role_assignments_sha256": block_roles.sha256 if block_roles is not None else None,
         "dropped_invalid_or_missing_orcid": 0,
         "dropped_excluded_orcid_group": 0,
@@ -280,6 +281,7 @@ def prepare_identity_labels(
         "dropped_reviewed_error_signature": 0,
         "dropped_conflicting_gold_rows": 0,
         "verified_rows": 0,
+        "scored_rows": 0,
         "unique_orcids": 0,
         "repeated_orcids": 0,
         "repeated_orcid_signatures": 0,
@@ -295,9 +297,6 @@ def prepare_identity_labels(
             row_split = _optional_str(cols[split_col][i]) if split_col is not None else None
             if expected_split is not None and row_split != expected_split:
                 audit["dropped_wrong_split"] += 1
-                continue
-            if scored_col is not None and cols[scored_col][i] is not True:
-                audit["dropped_unscored"] += 1
                 continue
             raw_orcid = _optional_str(cols[orcid_col][i])
             orcid = normalize_orcid(raw_orcid) if raw_orcid else None
@@ -354,6 +353,7 @@ def prepare_identity_labels(
                 "author_block": str(sig_row["author_block"]),
                 "dataset": dataset,
                 "name_verified": name_columns_present,
+                "scored": scored_col is None or cols[scored_col][i] is True,
             }
             if split_col is not None:
                 entry["split"] = row_split
@@ -366,22 +366,25 @@ def prepare_identity_labels(
         if len(distinct_orcids) > 1:
             audit["dropped_conflicting_gold_rows"] += len(entries)
             continue
-        if block_roles is not None and not block_roles.scores(entries[0]["author_block"], entries[0]["orcid"]):
-            audit["dropped_non_home_role"] += len(entries)
-            continue
-        verified.append(entries[0])
+        entry = entries[0]
+        gold_scored = any(row["scored"] for row in entries)
+        home = block_roles is None or block_roles.scores(entry["author_block"], entry["orcid"])
+        audit["gold_unscored_verified_rows"] += not gold_scored
+        audit["non_home_verified_rows"] += not home
+        verified.append({**entry, "scored": gold_scored and home})
 
-    out_cols = ["signature_id", "orcid", "paper_id", "position", "author_block", "dataset", "name_verified"]
+    out_cols = ["signature_id", "orcid", "paper_id", "position", "author_block", "dataset", "name_verified", "scored"]
     if split_col is not None:
         out_cols.append("split")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_frame = pd.DataFrame(verified, columns=pd.Index(out_cols))
-    out_frame.to_parquet(out_path, index=False)
+    out_frame.astype({"scored": bool}).to_parquet(out_path, index=False)
 
-    orcid_counts = Counter(row["orcid"] for row in verified)
+    orcid_counts = Counter(row["orcid"] for row in verified if row["scored"])
     repeated = {oid: cnt for oid, cnt in orcid_counts.items() if cnt >= 2}
     matched_or_ambig = len(verified) + audit["dropped_ambiguous_paper_block"]
     audit["verified_rows"] = int(len(verified))
+    audit["scored_rows"] = orcid_counts.total()
     audit["unique_orcids"] = int(len(orcid_counts))
     audit["repeated_orcids"] = int(len(repeated))
     audit["repeated_orcid_signatures"] = int(sum(repeated.values()))

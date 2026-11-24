@@ -46,13 +46,15 @@ def load_external_reference_labels(path: Path, *, dataset: str | None = None) ->
 
 
 def read_external_reference_identity_evidence(
-    path: Path, *, dataset: str | None = None, include_unscored: bool = True
+    path: Path, *, dataset: str | None = None, include_unscored: bool = True, require_scored: bool = False
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Read all known identities and the subset eligible to score."""
     if not path.is_file():
         raise FileNotFoundError(path)
     frame = pd.read_parquet(path)
     required = {"signature_id", "orcid"}
+    if require_scored:
+        required.add("scored")
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"External reference labels missing required columns: {missing}")

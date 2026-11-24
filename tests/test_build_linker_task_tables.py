@@ -25,6 +25,7 @@ from scripts.production.data.build_linker_task_tables import (
     build_linker_task_tables,
     read_seed_components,
 )
+from scripts.production.data.prepare_identity_labels import prepare_identity_labels
 from scripts.production.model.train_linker_and_finalize import _materialize_frozen_linker_tasks
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 
@@ -37,7 +38,9 @@ class _Pairwise:
         return np.full(len(features), 0.8)
 
 
-def _block_inputs(root: Path, block: str, orcid: str, *, recent_seeds: int = 29) -> dict[str, str]:
+def _block_inputs(
+    root: Path, block: str, orcid: str, *, recent_seeds: int = 29, deposited_orcids: bool = True
+) -> dict[str, str]:
     root.mkdir()
     arrow_dir = root / "arrow"
     n_seeds = 29
@@ -59,16 +62,21 @@ def _block_inputs(root: Path, block: str, orcid: str, *, recent_seeds: int = 29)
                 "author_position": pa.array([0] * size, type=pa.int64()),
                 "author_block": [block] * size,
                 "author_affiliations": pa.array([["Lab"]] * size, type=pa.list_(pa.string())),
-                "author_orcid": [
-                    orcid,
-                    orcid,
-                    _OUTSIDE_HOME,
-                    orcid,
-                    orcid,
-                    orcid,
-                    _OUTSIDE_HOME,
-                    *([None] * (size - 7)),
-                ],
+                "author_orcid": pa.array(
+                    [
+                        orcid,
+                        orcid,
+                        _OUTSIDE_HOME,
+                        orcid,
+                        orcid,
+                        orcid,
+                        _OUTSIDE_HOME,
+                        *([None] * (size - 7)),
+                    ]
+                    if deposited_orcids
+                    else [None] * size,
+                    type=pa.string(),
+                ),
             }
         ),
         "papers": pa.table(
@@ -109,6 +117,7 @@ def _block_inputs(root: Path, block: str, orcid: str, *, recent_seeds: int = 29)
         {
             "signature_id": query_ids + ["s00", "s01", "s03"],
             "orcid": [orcid, orcid, _OUTSIDE_HOME, orcid, orcid, _OUTSIDE_HOME],
+            "scored": True,
         }
     ).to_parquet(labels_path)
     query_path.write_text(json.dumps(query_ids), encoding="utf-8")
@@ -270,3 +279,57 @@ def _freeze_fixture(
             seed=42,
             n_jobs=1,
         )
+
+
+@pytest.mark.parametrize("check", ["mixed_seed", "heldout_fragment", "missing_scored"])
+def test_joined_identity_evidence_reaches_task_builder(tmp_path: Path, check: str) -> None:
+    blocks = dict(zip(TASK_ROLES, ("a ross", "b ross", "c ross"), strict=True))
+    orcids = dict(zip(TASK_ROLES, _ORCIDS, strict=True))
+    inputs = {
+        block: _block_inputs(tmp_path / role, block, orcids[role], deposited_orcids=False)
+        for role, block in blocks.items()
+    }
+    frozen = assign_block_roles(
+        [
+            *[BlockSpec(block, 32, frozenset({orcids[role], _OUTSIDE_HOME})) for role, block in blocks.items()],
+            BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
+        ],
+        dict.fromkeys(TASK_ROLES, 1),
+        pinned_roles={**{block: role for role, block in blocks.items()}, "sealed": "final_test_a"},
+        closure_mode="home_pool",
+    )
+    roles_path, inputs_path = tmp_path / "roles.json", tmp_path / "inputs.json"
+    roles_path.write_text(json.dumps(frozen), encoding="utf-8")
+    inputs_path.write_text(json.dumps(inputs), encoding="utf-8")
+    roles = load_block_roles(roles_path)
+    for role, block in blocks.items():
+        spec = inputs[block]
+        label_path = Path(spec["labels"])
+        gold = pd.read_parquet(label_path).rename(columns={"signature_id": "paper_id"}).assign(position=0)
+        gold.loc[len(gold)] = ["s04", orcids[role], False, 0]
+        gold_path = label_path.with_name("gold.parquet")
+        gold.to_parquet(gold_path, index=False)
+        prepare_identity_labels(Path(spec["arrow_dir"]), gold_path, label_path, block_roles=roles)
+
+    spec = inputs[blocks["gate_thresh"]]
+    seeds = pd.read_parquet(spec["seeds"])
+    seeds.loc[seeds["signature_id"].eq("s03"), "component_key"] = "c00"
+    seeds.to_parquet(spec["seeds"], index=False)
+    output = tmp_path / "tasks"
+    if check == "missing_scored":
+        label_path = Path(inputs[blocks["linker_train"]]["labels"])
+        pd.read_parquet(label_path).drop(columns="scored", errors="ignore").to_parquet(label_path, index=False)
+        with pytest.raises(ValueError, match="missing required columns.*scored"):
+            build_linker_task_tables(roles_path, inputs_path, output, holdout_fraction=1)
+        return
+    build_linker_task_tables(roles_path, inputs_path, output, holdout_fraction=1)
+    if check == "mixed_seed":
+        natural = pd.read_parquet(output / "gate_thresh.parquet")
+        mixed = natural.loc[natural["candidate_component_key"].eq("c00")]
+        assert len(mixed) > 0
+        assert not mixed["candidate_gold_scored"].any()
+        assert not mixed["label"].any()
+    else:
+        heldout = pd.read_parquet(output / "gate_fit.parquet")
+        assert heldout["whole_author_holdout"].all()
+        assert not set(heldout["candidate_component_key"]) & {"c00", "c01", "c04"}

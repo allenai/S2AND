@@ -254,7 +254,7 @@ def build_linker_task_tables(
                     not isinstance(query, str) or not query for query in query_ids
                 ):
                     raise ValueError(f"Expected real request signature IDs in {query_path}")
-                identities, labels = read_external_reference_identity_evidence(label_path)
+                identities, labels = read_external_reference_identity_evidence(label_path, require_scored=True)
                 with ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow:
                     frame, counts = _freeze_block_rows(
                         arrow,

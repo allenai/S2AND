@@ -25,7 +25,7 @@ def _write_signatures_arrow(directory: Path, rows: list[dict]) -> Path:
     return path
 
 
-def test_identity_label_join_keeps_shared_orcid_only_in_home_role(tmp_path: Path) -> None:
+def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Path) -> None:
     shared = "0000-0002-1694-233X"
     assignments = assign_block_roles(
         [BlockSpec("a ross", 1, frozenset({shared})), BlockSpec("b ross", 1, frozenset({shared}))],
@@ -62,8 +62,10 @@ def test_identity_label_join_keeps_shared_orcid_only_in_home_role(tmp_path: Path
         )
         output = directory / "labels.parquet"
         audit = prepare_identity_labels(directory, gold, output, block_roles=roles)
-        assert audit["dropped_non_home_role"] == (1 if idx == 1 else 0)
-        assert pd.read_parquet(output)["signature_id"].tolist() == ([] if idx == 1 else ["s2"])
+        assert audit["non_home_verified_rows"] == (1 if idx == 1 else 0)
+        labels = pd.read_parquet(output)
+        assert labels["signature_id"].tolist() == [f"s{idx}"]
+        assert labels["scored"].tolist() == [idx == 2]
         assert pa.ipc.open_file(str(arrow_path)).read_all()["author_orcid"].to_pylist() == [shared]
 
 
@@ -240,7 +242,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Null scored must be rejected (not admitted via bool(nan) == True).
+            # Retain the identity and leave a null scored flag ineligible.
             {
                 "corpus_paper_id": 1031,
                 "position": 0.0,
@@ -358,11 +360,17 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     )
 
     verified = pd.read_parquet(out_parquet)
-    assert verified["signature_id"].tolist() == ["s_ok1", "s_ok2"]
+    assert verified.set_index("signature_id")["scored"].to_dict() == {
+        "s_ok1": True,
+        "s_ok2": True,
+        "s_unscored": False,
+        "s_null_scored": False,
+    }
+    verified = verified.loc[verified["scored"]]
     assert verified["orcid"].tolist() == [valid_orcid, valid_orcid]
     assert verified["split"].tolist() == ["development", "development"]
     assert audit["dropped_wrong_split"] == 1
-    assert audit["dropped_unscored"] == 2
+    assert audit["gold_unscored_verified_rows"] == 2
     assert audit["dropped_invalid_position"] == 1
     # s_wrong_block ('b_jones') is excluded at the Parquet block-key pushdown level before scanning!
     assert "s_wrong_block" not in set(verified["signature_id"])
@@ -372,7 +380,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     assert audit["dropped_excluded_orcid_group"] == 1
     assert audit["dropped_reviewed_error_signature"] == 1
     assert audit["dropped_conflicting_gold_rows"] == 2
-    assert audit["verified_rows"] == 2
+    assert audit["scored_rows"] == 2
     assert audit["repeated_orcids"] == 1
     assert audit["verification_mode"] == "position_block_and_name"
-    assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 2
+    assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 4

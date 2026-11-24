@@ -45,6 +45,11 @@ An explicit `stratum` overrides those fields. Otherwise, size defaults to the â‰
 Use `--enforce-source-splits` to require a development or holdout split on every row.
 The allocator samples each eligible stratum proportionally using the seeded SHA-256 order, then distributes the
 sample among roles. An aggregate `final_test` target produces two balanced halves. Explicit half targets also work.
+Give each sealed half room for every eligible stratum. The freeze reserves stratum coverage for
+each role before proportional allocation and reports missing strata in `stratum_shortfalls`.
+Pass the prior `assignments.json` to `--pinned-roles-json` when re-freezing. This preserves prior
+block roles, scored ORCID homes, and exclusions. Keep pinned blocks in the metadata. When supplying
+`orcid_mention_counts`, provide a positive count for each listed eligible ORCID.
 Review per-role stratum counts and shortfalls in `assignments.json`. The sealed halves draw in pairs
 by stratum when the available blocks and targets permit. Free `dev_test` blocks come from development.
 Supply every scoring ORCID in the block intake. A scoring ORCID missing from its frozen block raises an error.
@@ -55,6 +60,8 @@ Pass the prior `assignments.json` as `--pinned-roles-json` to preserve its block
 In `home_pool`, the ORCID lists must cover every valid deposited or verified gold identity that can appear in the
 block. A shared ORCID scores only in its manifest home role. Keep other mentions as context in Arrow.
 Pass `--block-role-assignments` to `prepare_identity_labels.py` before using joined labels for scoring or training.
+The join keeps verified unscored and non-home identities with `scored=False`. The linker task builder requires
+that column and uses ineligible identities for seed purity and whole-author exclusion.
 Pass the same file to `sweep_eps_on_linking_gold.py --score-mode orcid-b3 --allow-all-reference-identities`
 and `apply_reviewed_eps.py`. EPS verifies the manifest digest, the zero scored overlap, and the scored identities
 in the saved reference. A nonzero raw overlap is expected when `home_pool` assigns a shared identity.

@@ -163,3 +163,293 @@ def source_sha256(files: dict[str, Path]) -> dict[str, str]:
     """Return the digests of the plan roles that bind an Arrow conversion."""
 
     return {role: sha256_file(files[role]) for role in ARROW_SOURCE_ROLES}
+
+
+def write_prepared_pairwise_root(tmp_path: Path) -> Path:
+    """Write a prepared pairwise input tree with release/evaluation Arrow tables and augmented splits."""
+    import shutil
+
+    root = tmp_path / "prepared"
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    _, index, _ = write_pairwise_artifacts(artifacts)
+    shutil.copytree(index, root / "name_counts_global" / "name_counts_index")
+    model = root / "populations" / "model_source"
+    evaluation = root / "populations" / "evaluation_source"
+    write_pairwise_dataset(model)
+    shutil.copytree(model / "qian", evaluation / "qian")
+    sidecar = "restored_unknown_signature_ids_20261009.json"
+    for source in (model / "qian", evaluation / "qian"):
+        (source / sidecar).write_text("[]", encoding="utf-8")
+    for filename in ("test_pairs.json", "test_blocks.json"):
+        (evaluation / "qian" / filename).write_text("{}", encoding="utf-8")
+    write_pairwise_dataset(root, "augmented")
+    for folder, source in (("release", model), ("evaluation", evaluation)):
+        arrow = root / "arrow" / folder
+        convert_release_arrow(source, "qian", arrow, index)
+        convert_release_arrow(root, "augmented", arrow, index)
+    for filename, first, second in (("train_pairs.csv", "0-0", "0-1"), ("val_pairs.csv", "0-2", "0-3")):
+        (root / "augmented" / filename).write_text(
+            f"signature_id_1,signature_id_2,label\nsignature-{first},signature-{second},1\n",
+            encoding="utf-8",
+        )
+    (root / "augmented" / "test_pairs.json").write_text(
+        json.dumps([{"signature_id_1": "signature-1-0", "signature_id_2": "signature-1-1", "label": 1}]),
+        encoding="utf-8",
+    )
+    return root
+
+
+def write_linker_arrow_collection_root(
+    root: Path,
+    *,
+    dataset: str,
+    replay: bool,
+    name_counts_source: Path | None = None,
+) -> None:
+    """Write a tiny generic Arrow collection root (benchmark or replay layout) with batch lookup indexes."""
+    import shutil
+
+    import pyarrow as pa
+
+    from s2and.arrow_inputs import ARROW_COLLECTION_KIND, build_arrow_artifact_manifest, write_arrow_artifact_manifest
+    from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
+    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
+    from tests.helpers import tiny_name_counts_tuple
+
+    root.mkdir(parents=True)
+    (root / "LICENSE.txt").write_text("fixture license\n", encoding="utf-8")
+    if name_counts_source is None:
+        write_name_counts_index(root, tiny_name_counts_tuple())
+    else:
+        shutil.copytree(name_counts_source, root / "name_counts_index")
+    dataset_root = root / "datasets" / dataset if replay else root / dataset
+
+    table_specs = {
+        "signatures": (
+            pa.table(
+                {
+                    "signature_id": pa.array(["s1"], type=pa.string()),
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "author_first": pa.array(["Ada"], type=pa.string()),
+                    "author_middle": pa.array([""], type=pa.string()),
+                    "author_last": pa.array(["Lovelace"], type=pa.string()),
+                    "author_suffix": pa.array([""], type=pa.string()),
+                    "author_affiliations": pa.array([[]], type=pa.list_(pa.string())),
+                    "author_position": pa.array([0], type=pa.int64()),
+                }
+            ),
+            "signature_id",
+        ),
+        "papers": (
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "title": pa.array(["Notes"], type=pa.string()),
+                    "venue": pa.array([""], type=pa.string()),
+                    "journal_name": pa.array([""], type=pa.string()),
+                }
+            ),
+            "paper_id",
+        ),
+        "paper_authors": (
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "position": pa.array([0], type=pa.int64()),
+                    "author_name": pa.array(["Ada Lovelace"], type=pa.string()),
+                }
+            ),
+            "paper_id",
+        ),
+        "specter": (
+            pa.table(
+                {
+                    "paper_id": pa.array(["p1"], type=pa.string()),
+                    "embedding": pa.FixedSizeListArray.from_arrays(
+                        pa.array([1.0, 0.0], type=pa.float32()),
+                        2,
+                    ),
+                }
+            ),
+            "paper_id",
+        ),
+    }
+    paths: dict[str, str] = {}
+    index_keys = {
+        "signatures": "signatures_batch_index",
+        "papers": "papers_batch_index",
+        "paper_authors": "paper_authors_batch_index",
+        "specter": "specter_batch_index",
+    }
+    for table_name, (table, key_column) in table_specs.items():
+        filename = "specter2.arrow" if table_name == "specter" else f"{table_name}.arrow"
+        table_path = dataset_root / filename
+        paths[table_name] = write_arrow_ipc_table(table, table_path)
+        index_key = index_keys[table_name]
+        index_path = dataset_root / f"{table_name}.{index_key}.bin"
+        paths[index_key], _metrics = write_arrow_batch_lookup_index(
+            table_path,
+            index_path,
+            key_column=key_column,
+            table_name=table_name,
+        )
+    paths["name_counts_index"] = str(root / "name_counts_index")
+    dataset_manifest = build_arrow_artifact_manifest(paths, dataset_root)
+    manifest_path = write_arrow_artifact_manifest(dataset_manifest, dataset_root)
+    relative_manifest = manifest_path.relative_to(root).as_posix()
+    root_manifest = {
+        "kind": ARROW_COLLECTION_KIND,
+        "format_version": PUBLIC_DATA_FORMAT_VERSION,
+        "dataset_manifests": {
+            dataset: {
+                "path": relative_manifest,
+                "sha256": sha256_file(manifest_path),
+            }
+        },
+    }
+    (root / "manifest.json").write_text(json.dumps(root_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_linker_replay_inputs(root: Path, *, leak: bool, dataset: str = "replay_demo") -> None:
+    """Write featureless Parquet label tables, candidate members, split assignments, and ``bundle.json``."""
+    import pandas as pd
+
+    label_paths = {
+        "train_path": "labels/train.parquet",
+        "classic_gate_source_path": "labels/calibration.parquet",
+        "s2and_eval_path": "labels/s2and_eval.parquet",
+        "hwang_eval_path": "labels/hwang_eval.parquet",
+    }
+    row_ids = {
+        "train_path": ("train:q1", "train:b1"),
+        "classic_gate_source_path": ("cal:q1", "cal:b1"),
+        "s2and_eval_path": ("s2and:q1", "s2and:b1"),
+        "hwang_eval_path": ("hwang:q1", "cal:b1" if leak else "hwang:b1"),
+    }
+    for key, relative_path in label_paths.items():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        query_group_id, base_group_id = row_ids[key]
+        pd.DataFrame(
+            {
+                "query_group_id": [query_group_id],
+                "base_group_id": [base_group_id],
+                "dataset": [dataset],
+                "query_view": ["full"],
+                "candidate_component_key": ["component-1"],
+                "retrieval_rank": [1],
+                "label": [1],
+            }
+        ).to_parquet(path, index=False)
+
+    candidate_path = root / "components" / f"{dataset}_members.parquet"
+    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "candidate_component_key": ["component-1"],
+            "member_index": [0],
+            "signature_id": ["s1"],
+        }
+    ).to_parquet(candidate_path, index=False)
+
+    assignments = pd.DataFrame(
+        {
+            "query_group_id": ["cal:q1", "s2and:q1", "hwang:q1"],
+            "source_key": ["s2and_eval", "s2and_eval", "hwang_eval"],
+            "split": ["calibration_fit", "calibration_fit", "test"],
+            "base_group_id": ["cal:b1", "s2and:b1", "cal:b1" if leak else "hwang:b1"],
+        }
+    )
+    assignments_path = root / "splits" / "assignments.csv"
+    assignments_path.parent.mkdir(parents=True, exist_ok=True)
+    assignments.to_csv(assignments_path, index=False)
+    (root / "splits" / "summary.json").write_text('{\n  "row_count": 3\n}\n', encoding="utf-8")
+    pd.DataFrame({"base_group_id": ["cal:b1"]}).to_csv(root / "splits" / "internal_eval.csv", index=False)
+
+    bundle = {
+        "schema": "s2and_linker_replay_arrow_bundle_v1",
+        "bundle_name": "mini-linker-source",
+        "assets": {
+            "candidate_members": {
+                "root": "components",
+                "datasets": {dataset: f"components/{dataset}_members.parquet"},
+            },
+            "featureless_rows": {"root": "labels", "files": label_paths},
+            "splits": {
+                "root": "splits",
+                "assignments_path": "splits/assignments.csv",
+                "summary_path": "splits/summary.json",
+            },
+        },
+        "models": {
+            "classic": {
+                "classic_gate_source_path": label_paths["classic_gate_source_path"],
+                "s2and_eval_path": label_paths["s2and_eval_path"],
+                "hwang_eval_path": label_paths["hwang_eval_path"],
+                "classic_gate_internal_eval_base_groups_path": "splits/internal_eval.csv",
+                "stratified_eval_test_split": {
+                    "assignments_path": "splits/assignments.csv",
+                    "summary_path": "splits/summary.json",
+                    "calibration_fit_split": "calibration_fit",
+                    "test_split": "test",
+                },
+                "promoted_stratified_gate": {
+                    "calibration_splits": ["calibration_fit"],
+                    "test_split": "test",
+                },
+            }
+        },
+        "expected_metrics": {},
+    }
+    (root / "bundle.json").write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_singleton_orcid_views(
+    source_root: Path, *, view_count: int, positive_view_count: int = 0, candidates_per_view: int = 1
+) -> None:
+    """Populate ``labels/s2and_eval.parquet`` with synthetic singleton-ORCID review views."""
+    import pandas as pd
+
+    path = source_root / "labels" / "s2and_eval.parquet"
+    template = pd.read_parquet(path).assign(supervision_type="negative_singleton_orcid")
+    rows = pd.concat(
+        [
+            template,
+            *(
+                template.assign(query_group_id=f"singleton:{index}", base_group_id=f"singleton:{index}")
+                for index in range(1, view_count)
+            ),
+        ],
+        ignore_index=True,
+    )
+    rows["label"] = [1] * positive_view_count + [0] * (view_count - positive_view_count - 1) + [None]
+    if candidates_per_view > 1:
+        rows = pd.concat(
+            [
+                rows,
+                *(
+                    rows.assign(candidate_component_key=f"candidate-{rank}", retrieval_rank=rank, label=0)
+                    for rank in range(2, candidates_per_view + 1)
+                ),
+            ],
+            ignore_index=True,
+        )
+    rows.to_parquet(path, index=False)
+
+
+def link_directory_or_junction(path: Path, target: Path) -> None:
+    """Create a Windows directory junction (privilege-free) or POSIX directory symlink."""
+    import os
+
+    import pytest
+
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(path))
+    else:
+        try:
+            path.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"Directory symlink is unavailable: {exc}")

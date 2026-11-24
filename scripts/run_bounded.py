@@ -27,6 +27,7 @@ else:
     from signal import SIGKILL
 
 POLL_SECONDS = 0.1
+PROGRESS_INTERVAL_SECONDS = 1.0
 RECORD_NAMES = (
     "run.json",
     "run.json.tmp",
@@ -555,7 +556,7 @@ def supervise(args: argparse.Namespace) -> int:
                     rss = tree_rss(child.pid, _WINDOWS_JOB)
                     result["rss_samples"] += 1
                     result["peak_tree_rss_bytes"] = max(result["peak_tree_rss_bytes"], rss)
-                    if elapsed - last_event >= 1:
+                    if elapsed - last_event >= PROGRESS_INTERVAL_SECONDS:
                         telemetry.event("progress", elapsed_seconds=elapsed, tree_rss_bytes=rss)
                         last_event = elapsed
                     if rss > result["max_rss_bytes"]:

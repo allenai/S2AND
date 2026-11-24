@@ -220,6 +220,7 @@ def run_typecheck_and_test_job(*, lock_present: bool, pytest_workers: str) -> No
             "tests/",
             "-n",
             pytest_workers,
+            *(["--dist", "loadfile"] if pytest_workers != "0" else []),
             *(["--maxprocesses", "8"] if pytest_workers in {"auto", "logical"} else []),
             "--cov=s2and",
             "--cov-report=term-missing",

@@ -11,7 +11,7 @@ The [local CI wrapper](#local-ci-mirror) prepares the test environment.
 Use the [static-check fast path](#static-check-fast-path) for lint and type checks.
 
 ```bash
-uv run pytest -q -n auto
+uv run pytest -q -n auto --dist loadfile
 uv run ruff check .
 uv run ruff format .
 uv run ty check s2and

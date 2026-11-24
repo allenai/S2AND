@@ -10,7 +10,7 @@ from s2and.arrow_tables import write_name_counts_index
 from tests.helpers import write_arrow_tables_bundle
 
 pytestmark = pytest.mark.tooling
-GOLD = "0000-0002-1825-0097"
+GOLD = "0000-0002-1694-233X"
 DEPOSITED = "0000-0001-5109-3700"
 
 
@@ -111,3 +111,23 @@ def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Pa
     partition.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="digest mismatch"):
         ledger.read_block("a lovelace")
+
+
+def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "freeze-evidence"
+    build_identity_evidence(snapshot, gold, evidence)
+    source = tmp_path / "blocks.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["holdout", "development"]}), source
+    )
+    output = tmp_path / "freeze-input.parquet"
+    build_freeze_input(evidence / "manifest.json", source, output, strata={"a_lovelace": "tiny"})
+    first, second = pq.read_table(output).to_pylist()
+    assert first["signature_count"] == 4
+    assert first["stratum"] == "tiny"
+    assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 2, GOLD: 2}
+    assert second["source_split"] == "holdout"

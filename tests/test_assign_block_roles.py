@@ -15,6 +15,7 @@ from scripts.production.data.assign_block_roles import (
     main,
     verify_role_assignments,
 )
+from scripts.production.data.block_roles import load_block_roles
 
 
 def _sample_blocks() -> list[BlockSpec]:
@@ -144,7 +145,9 @@ def test_stratified_holdout_reserves_rare_giants_across_both_halves() -> None:
     ]
     result = assign_block_roles(blocks, {"final_test": 20}, enforce_source_splits=True)
     counts = result["verification"]["role_block_counts_by_stratum"]
-    assert sum(counts[role]["z_giant"] for role in ("final_test_a", "final_test_b")) == 1
+    for role in ("final_test_a", "final_test_b"):
+        assert counts[role]["z_giant"] >= 1
+        assert counts[role]["a_small"] >= 1
     assert [len(result["roles"][role]) for role in ("final_test_a", "final_test_b")] == [10, 10]
     assert len(result["unassigned"]) == 1020
 
@@ -185,3 +188,76 @@ def test_assign_roles_parquet_strata_and_required_source_split(tmp_path: Path) -
     pq.write_table(pa.Table.from_pylist(records), blocks)
     with pytest.raises(ValueError, match="missing or invalid source_split"):
         main([*args, "--overwrite"])
+
+
+def test_free_development_role_cannot_consume_holdout() -> None:
+    result = assign_block_roles(
+        [BlockSpec(key, 20, source_split="holdout") for key in ("red", "blue", "green")],
+        {"final_test": 2, "dev_test": 1},
+        enforce_source_splits=True,
+        closure_mode="home_pool",
+    )
+    assert result["roles"]["dev_test"] == []
+    assert result["shortfalls"] == {"dev_test": 1}
+
+
+def test_home_role_prefers_evaluation_and_preserves_pinned_homes(tmp_path: Path) -> None:
+    shared, tie = "0000-0002-1694-233X", "0000-0002-9079-593X"
+    blocks = [
+        BlockSpec("t giant", 30000, frozenset({shared})),
+        BlockSpec("p one", 50, frozenset({shared})),
+        BlockSpec("p two", 50, frozenset({shared})),
+        BlockSpec("d fresh", 9000, frozenset({tie})),
+        BlockSpec("p three", 50, frozenset({tie})),
+    ]
+    pins = {
+        "t giant": "final_test_a",
+        "p one": "pairwise_train",
+        "p two": "pairwise_train",
+        "d fresh": "dev_test",
+        "p three": "pairwise_train",
+    }
+    first = assign_block_roles(blocks, {"pairwise_train": 3}, pinned_roles=pins, closure_mode="home_pool")
+    assert first["orcid_home_role"] == {shared: "final_test_a", tie: "dev_test"}
+    # A new evaluation role would win by count without the prior home pin.
+    blocks.extend(BlockSpec(key, 50, frozenset({shared})) for key in ("b one", "b two"))
+    result = assign_block_roles(
+        blocks,
+        {"final_test_b": 2},
+        pinned_roles={**pins, "b one": "final_test_b", "b two": "final_test_b"},
+        pinned_home_roles=first["orcid_home_role"],
+        closure_mode="home_pool",
+    )
+    assert result["orcid_home_role"] == first["orcid_home_role"]
+
+
+def test_home_role_uses_mention_counts_within_same_priority() -> None:
+    orcid = "0000-0002-1694-233X"
+    blocks = [
+        BlockSpec("one", 20, frozenset({orcid}), orcid_mention_counts={orcid: 3}),
+        BlockSpec("two", 20, frozenset({orcid})),
+        BlockSpec("three", 20, frozenset({orcid})),
+    ]
+    result = assign_block_roles(
+        blocks,
+        {"pairwise_train": 1, "eps_cal": 2},
+        pinned_roles={"one": "pairwise_train", "two": "eps_cal", "three": "eps_cal"},
+        closure_mode="home_pool",
+    )
+    assert result["orcid_home_role"] == {orcid: "pairwise_train"}
+
+
+def test_frozen_block_roles_reject_unlisted_orcid(tmp_path: Path) -> None:
+    orcid = "0000-0002-1694-233X"
+    path = tmp_path / "roles.json"
+    result = assign_block_roles(
+        [BlockSpec("one", 20, frozenset({orcid})), BlockSpec("two", 20)],
+        {"final_test_a": 1, "pairwise_train": 1},
+        pinned_roles={"one": "final_test_a", "two": "pairwise_train"},
+    )
+    path.write_text(json.dumps(result), encoding="utf-8")
+    roles = load_block_roles(path)
+    assert roles.scores("one", orcid)
+    for block, identity in (("one", "0000-0001-5000-0007"), ("two", orcid)):
+        with pytest.raises(ValueError, match="ORCID .* absent .* block"):
+            roles.scores(block, identity)

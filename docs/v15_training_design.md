@@ -41,7 +41,12 @@ An explicit `stratum` overrides those fields. Otherwise, size defaults to the â‰
 Use `--enforce-source-splits` to require a development or holdout split on every row.
 The allocator samples each eligible stratum proportionally using the seeded SHA-256 order, then distributes the
 sample among roles. An aggregate `final_test` target produces two balanced halves. Explicit half targets also work.
-Review per-role stratum counts and shortfalls in `assignments.json`.
+Review per-role stratum counts and shortfalls in `assignments.json`. The sealed halves draw in pairs
+by stratum when the available blocks and targets permit. Free `dev_test` blocks come from development.
+Supply every scoring ORCID in the block intake. A scoring ORCID missing from its frozen block raises an error.
+Use `orcid_mention_counts` or one list entry per mention for count-based home selection. With unique lists
+alone, each known ORCID contributes one mention per block. Evaluation roles take priority.
+Pass the prior `assignments.json` as `--pinned-roles-json` to preserve its blocks and ORCID homes.
 
 In `home_pool`, the ORCID lists must cover every valid deposited or verified gold identity that can appear in the
 block. A shared ORCID scores only in its manifest home role. Keep other mentions as context in Arrow.
@@ -96,7 +101,8 @@ Use ORCID Gold v2 and classic benchmarks for bulk pairwise training, ranker trai
 - **No "any abstain drops query" rule:** Never discard an entire 25-candidate query when a secondary candidate receives `abstain`.
 - **Automatic ORCID selection-bias logging:** Every gate/EPS evaluation logs linked Gold-ORCID share and linked median publication year alongside B3 metrics.
 
-Build controls with `review_packets.py build --block-role-assignments assignments.json` and include the scoring
+Build controls with `review_packets.py build --block-role-assignments assignments.json --allowed-role gate_thresh`
+for a gate threshold packet. The allowed roles apply to regular items and controls. Include the scoring
 ORCIDs and any source `scored` flags on the private paper inputs. Controls require home-role evidence.
 Set `metadata.stratum` in every item and set control truth with `metadata.gold_label` (0/1) for pairs
 or `metadata.gold_candidate_keys` for linker packets. Keep each answer key private.

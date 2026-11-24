@@ -200,17 +200,26 @@ def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_pat
         {**item, "source_id": "outside_home"},
         {**item, "source_id": "inside_home", "paper_a": gold_paper, "metadata": {"gold_label": 1}},
         {**item, "source_id": "unscored", "paper_a": {**gold_paper, "scored": False}},
+        {**item, "source_id": "sealed", "block_key": "b smith", "paper_b": shared_paper},
     ]
     result = build_blind_pair_packets(
         items=[item],
         control_items=controls,
         output_dir=tmp_path / "packets",
         block_roles=roles,
+        allowed_roles={"gate_thresh"},
         control_fraction=0.5,
     )
     key = json.loads(Path(result["answer_key_path"]).read_text(encoding="utf-8"))
-    assert result["excluded_controls"] == 2
+    assert result["excluded_controls"] == 3
     assert {row["source_id"] for row in key["items"]} == {"natural", "inside_home"}
+    with pytest.raises(ValueError, match="allowed packet roles"):
+        build_blind_pair_packets(
+            items=[{**item, "block_key": "b smith"}],
+            output_dir=tmp_path / "rejected",
+            block_roles=roles,
+            allowed_roles={"gate_thresh"},
+        )
 
 
 def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Path) -> None:

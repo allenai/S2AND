@@ -23,7 +23,7 @@ import json
 import sys
 from collections import Counter, defaultdict, deque
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -73,6 +73,7 @@ class BlockSpec:
     orcids: frozenset[str] = frozenset()
     stratum: str = "default"
     source_split: str | None = None  # Optional Gold split: "development" or "holdout"
+    orcid_mention_counts: Mapping[str, int] = field(default_factory=dict)
 
 
 class _UnionFind:
@@ -239,9 +240,7 @@ def _allocate_strata(
     for role, target in remaining.items():
         allowed = "holdout" if role in FINAL_TEST_ROLES else "development"
         eligible = {
-            group
-            for group, size in sizes.items()
-            if size and (not enforce_source_splits or group[1] == allowed or role == "dev_test")
+            group for group, size in sizes.items() if size and (not enforce_source_splits or group[1] == allowed)
         }
         total = sum(sizes[group] for group in eligible)
         target = min(target, total)
@@ -262,6 +261,69 @@ def _allocate_strata(
         remaining[role] = max(0, remaining[role] - assigned)
 
 
+def _allocate_sealed_pairs(
+    components: Sequence[tuple[str, ...]],
+    by_key: Mapping[str, BlockSpec],
+    remaining: dict[str, int],
+    assignments: dict[str, str],
+    *,
+    seed: int,
+    enforce_source_splits: bool,
+) -> list[tuple[str, ...]]:
+    left, right = FINAL_TEST_ROLES
+    if left not in remaining or right not in remaining:
+        return list(components)
+    strata: dict[str, deque[tuple[str, ...]]] = defaultdict(deque)
+    for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
+        if enforce_source_splits and any(by_key[key].source_split != "holdout" for key in component):
+            continue
+        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
+        strata[by_key[primary].stratum].append(component)
+    counts = Counter((role, by_key[key].stratum) for key, role in assignments.items())
+    sizes = {stratum: sum(map(len, queue)) for stratum, queue in strata.items()}
+    total = sum(sizes.values())
+    pair_target = min(remaining[left], remaining[right])
+    assigned: set[str] = set()
+
+    def take(role: str, queue: deque[tuple[str, ...]]) -> None:
+        component = queue.popleft()
+        assigned.add(component[0])
+        remaining[role] -= len(component)
+        for key in component:
+            assignments[key] = role
+            counts[role, by_key[key].stratum] += 1
+
+    # Cover feasible rare strata before spending proportional quotas.
+    for stratum in sorted(strata, key=lambda value: (sizes[value], value)):
+        queue = strata[stratum]
+        missing = [role for role in FINAL_TEST_ROLES if not counts[role, stratum]]
+        if len(queue) >= len(missing) and all(
+            len(component) <= remaining[role] for role, component in zip(missing, queue, strict=False)
+        ):
+            for role in missing:
+                take(role, queue)
+
+    # Fill both halves together so rounding cannot send the rare stratum to one half.
+    deficits = {
+        stratum: pair_target * size - total * max(counts[left, stratum], counts[right, stratum])
+        for stratum, size in sizes.items()
+    }
+    while remaining[left] and remaining[right]:
+        eligible = [
+            stratum
+            for stratum, queue in strata.items()
+            if len(queue) >= 2 and len(queue[0]) <= remaining[left] and len(queue[1]) <= remaining[right]
+        ]
+        if not eligible:
+            break
+        stratum = max(eligible, key=lambda value: (deficits[value], value))
+        queue = strata[stratum]
+        deficits[stratum] -= total * max(len(queue[0]), len(queue[1]))
+        take(left, queue)
+        take(right, queue)
+    return [component for component in components if component[0] not in assigned]
+
+
 def assign_block_roles(
     blocks: Sequence[BlockSpec],
     role_targets: Mapping[str, int],
@@ -269,6 +331,7 @@ def assign_block_roles(
     seed: int = 20261123,
     extra_dev_test_blocks: Collection[str] = (),
     pinned_roles: Mapping[str, str] | None = None,
+    pinned_home_roles: Mapping[str, str] | None = None,
     excluded_blocks: Collection[str] = (),
     closure_mode: Literal["strict", "home_pool"] = "strict",
     enforce_source_splits: bool = False,
@@ -283,6 +346,7 @@ def assign_block_roles(
         seed: Seed for stable SHA-256 component ranking.
         extra_dev_test_blocks: Additional reviewed blocks (e.g. 1.4 Batches 1-6) pinned to ``dev_test``.
         pinned_roles: Optional explicit ``{block_key: role}`` pins (e.g. prior frozen assignments).
+        pinned_home_roles: Previously frozen homes to preserve for shared ORCIDs.
         excluded_blocks: Extra blocks to exclude alongside ``PERMANENT_EXCLUDED_BLOCKS``.
         closure_mode: ``"strict"`` enforces zero cross-role ORCID overlap via union-find closure;
             ``"home_pool"`` avoids mega-component percolation and outputs ``orcid_home_role``
@@ -326,6 +390,7 @@ def assign_block_roles(
                 orcids=_clean_orcids(block.orcids),
                 stratum=block.stratum,
                 source_split=block.source_split,
+                orcid_mention_counts=block.orcid_mention_counts,
             )
         )
 
@@ -374,6 +439,13 @@ def assign_block_roles(
         if component_pins:
             role = next(iter(component_pins))
             for key in component:
+                if (
+                    enforce_source_splits
+                    and role == "dev_test"
+                    and by_key[key].source_split == "holdout"
+                    and key not in pins
+                ):
+                    raise ValueError(f"Unpinned holdout block {key!r} cannot follow an ORCID component into dev_test")
                 block_to_role[key] = role
         else:
             free_components.append(component)
@@ -387,6 +459,9 @@ def assign_block_roles(
         for role in target_order
     }
 
+    free_components = _allocate_sealed_pairs(
+        free_components, by_key, remaining, block_to_role, seed=seed, enforce_source_splits=enforce_source_splits
+    )
     if enforce_source_splits:
         cohorts = {
             FINAL_TEST_ROLES[0]: FINAL_TEST_ROLES,
@@ -424,19 +499,27 @@ def assign_block_roles(
         )
         remaining.update(targets)
 
-    # For home_pool mode, assign every multi-pool ORCID a deterministic home role (largest mention count,
-    # preferring dev_test/final_test over training pools so held-out identities stay clean).
+    # Keep scored identities in evaluation when an author crosses into a development pool.
     orcid_home_role: dict[str, str] = {}
     if closure_mode == "home_pool":
-        orcid_role_blocks: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        orcid_role_mentions: dict[str, Counter[str]] = defaultdict(Counter)
+        evaluation_roles = {*FINAL_TEST_ROLES, "dev_test"}
+        pinned_homes = pinned_home_roles or {}
         for key, role in block_to_role.items():
             for orcid in by_key[key].orcids:
-                orcid_role_blocks[orcid][role] += 1
+                count = by_key[key].orcid_mention_counts.get(orcid, 1)
+                if type(count) is not int or count < 1:
+                    raise ValueError(f"Invalid ORCID mention count in block {key!r}: {count!r}")
+                orcid_role_mentions[orcid][role] += count
         role_priority = {role: idx for idx, role in enumerate(ASSIGNABLE_ROLES)}
-        for orcid, role_map in sorted(orcid_role_blocks.items()):
+        for orcid, role_map in sorted(orcid_role_mentions.items()):
+            home = pinned_homes.get(orcid)
+            if home is not None and home not in role_map:
+                raise ValueError(f"Pinned ORCID {orcid!r} is missing from its home role {home!r}")
             if len(role_map) > 1:
-                home = max(role_map, key=lambda r: (role_map[r], -role_priority.get(r, 99)))
-                orcid_home_role[orcid] = home
+                orcid_home_role[orcid] = home or max(
+                    role_map, key=lambda role: (role in evaluation_roles, role_map[role], -role_priority[role])
+                )
 
     verification = verify_role_assignments(
         active_blocks,
@@ -462,6 +545,7 @@ def assign_block_roles(
         "role_targets": {role: int(role_targets[role]) for role in target_order},
         "roles": roles,
         "block_to_role": dict(sorted(block_to_role.items())),
+        "block_orcids": {key: sorted(by_key[key].orcids) for key in sorted(block_to_role)},
         "unassigned": sorted(by_key.keys() - block_to_role.keys()),
         "shortfalls": shortfalls,
         "cross_block_components": multi_block_components,
@@ -494,6 +578,11 @@ def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockS
         orcids = item.get("orcids", None if require_orcid_lists else [])
         if not isinstance(orcids, list):
             raise ValueError(f"Expected an ORCID list for {key!r} in {path}")
+        mention_counts = item.get("orcid_mention_counts")
+        if mention_counts is None:
+            mention_counts = Counter(orcid for raw in orcids if (orcid := normalize_orcid(str(raw))))
+        if not isinstance(mention_counts, dict):
+            raise ValueError(f"Expected ORCID mention counts for {key!r} in {path}")
         count = int(item["signature_count"])
         size = item.get("size_band") or ("<=1000" if count <= 1000 else "1001-15000" if count <= 15000 else ">15000")
         region = item.get("script_region") or "/".join(
@@ -507,6 +596,7 @@ def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockS
                 orcids=frozenset(str(orcid) for orcid in orcids if orcid),
                 stratum=str(stratum),
                 source_split=item.get("source_split") or item.get("split"),
+                orcid_mention_counts=mention_counts,
             )
         )
     return specs
@@ -542,16 +632,20 @@ def main(argv: list[str] | None = None) -> int:
         raise FileExistsError(f"Refusing to overwrite existing {out_json}; pass --overwrite or use a fresh directory")
 
     pinned_roles: dict[str, str] | None = None
+    pinned_home_roles: dict[str, str] | None = None
     if args.pinned_roles_json is not None:
         raw_pins = json.loads(args.pinned_roles_json.read_text(encoding="utf-8"))
         if isinstance(raw_pins, dict) and isinstance(raw_pins.get("block_to_role"), dict):
             pinned_roles = {str(k): str(v) for k, v in raw_pins["block_to_role"].items()}
+            pinned_home_roles = raw_pins.get("orcid_home_role", {})
+            if not isinstance(pinned_home_roles, dict):
+                raise ValueError(f"Expected an ORCID home mapping in {args.pinned_roles_json}")
         elif isinstance(raw_pins, dict):
             pinned_roles = {str(k): str(v) for k, v in raw_pins.items()}
         else:
             raise ValueError(f"Expected JSON mapping in {args.pinned_roles_json}")
 
-    blocks = load_blocks(args.blocks, require_orcid_lists=args.closure_mode == "home_pool")
+    blocks = load_blocks(args.blocks, require_orcid_lists=True)
     targets = json.loads(args.targets_json.read_text(encoding="utf-8"))
     result = assign_block_roles(
         blocks,
@@ -559,6 +653,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         extra_dev_test_blocks=args.dev_test_blocks,
         pinned_roles=pinned_roles,
+        pinned_home_roles=pinned_home_roles,
         excluded_blocks=args.exclude_blocks,
         closure_mode=args.closure_mode,
         enforce_source_splits=args.enforce_source_splits,

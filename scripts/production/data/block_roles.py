@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ class BlockRoles:
     orcid_home_role: dict[str, str]
     sha256: str
     closure_mode: str
+    block_orcids: dict[str, frozenset[str]]
 
     def role_for(self, block_key: str) -> str:
         """Return the assigned role or reject an unassigned block."""
@@ -43,7 +45,10 @@ class BlockRoles:
 
     def scores(self, block_key: str, orcid: str) -> bool:
         """Return whether a normalized ORCID can score in the assigned block."""
-        return in_orcid_home_role(orcid, self.role_for(block_key), self.orcid_home_role)
+        role = self.role_for(block_key)
+        if orcid not in self.block_orcids[normalize_block_key(block_key)]:
+            raise ValueError(f"ORCID {orcid!r} is absent from frozen block {block_key!r}")
+        return in_orcid_home_role(orcid, role, self.orcid_home_role)
 
 
 def load_block_roles(path: Path) -> BlockRoles:
@@ -75,6 +80,25 @@ def load_block_roles(path: Path) -> BlockRoles:
         normalize_orcid(orcid) != orcid or role not in assigned_roles for orcid, role in homes.items()
     ):
         raise ValueError(f"Invalid orcid_home_role in {path}")
-    if mode == "home_pool" and verification.get("raw_cross_role_orcid_overlap") != len(homes):
-        raise ValueError(f"ORCID home roles do not cover the verified raw overlap in {path}")
-    return BlockRoles(by_block, homes, sha256_file(path), mode)
+    raw_orcids = payload.get("block_orcids")
+    if not isinstance(raw_orcids, dict) or set(raw_orcids) != by_block.keys():
+        raise ValueError(f"Expected block_orcids for every assigned block in {path}. Re-freeze the role assignments.")
+    block_orcids: dict[str, frozenset[str]] = {}
+    roles_by_orcid: dict[str, set[str]] = defaultdict(set)
+    for block, orcids in raw_orcids.items():
+        if not isinstance(orcids, list) or any(
+            not isinstance(orcid, str) or not orcid or normalize_orcid(orcid) != orcid for orcid in orcids
+        ):
+            raise ValueError(f"Invalid frozen ORCID list for {block!r} in {path}")
+        block_orcids[block] = frozenset(str(orcid) for orcid in orcids)
+        for orcid in orcids:
+            roles_by_orcid[orcid].add(by_block[block])
+    overlap = {orcid: roles for orcid, roles in roles_by_orcid.items() if len(roles) > 1}
+    if (
+        mode == "strict"
+        and overlap
+        or homes.keys() != overlap.keys()
+        or any(home not in overlap[orcid] for orcid, home in homes.items())
+    ):
+        raise ValueError(f"ORCID home roles do not match frozen block ORCIDs in {path}")
+    return BlockRoles(by_block, homes, sha256_file(path), mode, block_orcids)

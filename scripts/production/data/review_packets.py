@@ -16,7 +16,7 @@ import random
 import re
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -279,15 +279,32 @@ def _select_controls(
     return rng.sample(list(control_items), target)
 
 
+def _validate_packet_roles(
+    items: Sequence[Mapping[str, Any]], block_roles: BlockRoles | None, allowed_roles: Collection[str]
+) -> None:
+    if (block_roles is None) == bool(allowed_roles):
+        raise ValueError("Supply a role manifest and at least one allowed packet role together")
+    if block_roles is not None:
+        for item in items:
+            block = str(item["block_key"])
+            if block_roles.role_for(block) not in allowed_roles:
+                raise ValueError(f"Block {block!r} is outside the allowed packet roles")
+
+
 def _scored_controls(
-    items: Sequence[Mapping[str, Any]], block_roles: BlockRoles | None, *, packet_type: str
+    items: Sequence[Mapping[str, Any]],
+    block_roles: BlockRoles | None,
+    *,
+    packet_type: str,
+    allowed_roles: Collection[str],
 ) -> list[Mapping[str, Any]]:
     if block_roles is None:
         return list(items)
     result = []
     for item in items:
         block = str(item["block_key"])
-        block_roles.role_for(block)
+        if block_roles.role_for(block) not in allowed_roles:
+            continue
         if packet_type == "pair":
             papers = [item["paper_a"], item["paper_b"]]
         else:
@@ -372,6 +389,7 @@ def build_blind_pair_packets(
     max_bytes_per_shard: int = 180_000,
     max_abstract_chars: int = 1200,
     block_roles: BlockRoles | None = None,
+    allowed_roles: Collection[str] = (),
 ) -> dict[str, Any]:
     """Build leak-checked, order-randomized blind pair packets plus a separate private answer key.
 
@@ -388,7 +406,8 @@ def build_blind_pair_packets(
     key_path = _resolve_answer_key_path(output_dir, answer_key_path)
 
     effective_control_seed = seed if control_seed is None else control_seed
-    eligible_controls = _scored_controls(control_items, block_roles, packet_type="pair")
+    _validate_packet_roles(items, block_roles, allowed_roles)
+    eligible_controls = _scored_controls(control_items, block_roles, packet_type="pair", allowed_roles=allowed_roles)
     chosen_controls = _select_controls(
         len(items), eligible_controls, control_fraction=control_fraction, control_seed=effective_control_seed
     )
@@ -486,6 +505,7 @@ def build_blind_linker_packets(
     max_bytes_per_shard: int = 180_000,
     max_abstract_chars: int = 900,
     block_roles: BlockRoles | None = None,
+    allowed_roles: Collection[str] = (),
 ) -> dict[str, Any]:
     """Build leak-checked blind linker candidate packets with shuffled neutral candidate slots."""
     if not 0.0 <= control_fraction <= 0.5:
@@ -496,7 +516,10 @@ def build_blind_linker_packets(
     key_path = _resolve_answer_key_path(output_dir, answer_key_path)
 
     effective_control_seed = seed if control_seed is None else control_seed
-    eligible_controls = _scored_controls(control_queries, block_roles, packet_type="linker")
+    _validate_packet_roles(queries, block_roles, allowed_roles)
+    eligible_controls = _scored_controls(
+        control_queries, block_roles, packet_type="linker", allowed_roles=allowed_roles
+    )
     chosen_controls = _select_controls(
         len(queries), eligible_controls, control_fraction=control_fraction, control_seed=effective_control_seed
     )
@@ -752,6 +775,7 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--items-json", type=Path, required=True)
     build_p.add_argument("--controls-json", type=Path, default=None)
     build_p.add_argument("--block-role-assignments", type=Path)
+    build_p.add_argument("--allowed-role", action="append", default=[])
     build_p.add_argument("--output-dir", type=Path, required=True)
     build_p.add_argument("--answer-key-path", type=Path, default=None)
     build_p.add_argument("--seed", type=int, default=20261123)
@@ -798,6 +822,7 @@ def main(argv: list[str] | None = None) -> int:
             control_fraction=args.control_fraction,
             max_items_per_shard=args.max_items_per_shard,
             block_roles=block_roles,
+            allowed_roles=args.allowed_role,
         )
     else:
         report = build_blind_linker_packets(
@@ -810,6 +835,7 @@ def main(argv: list[str] | None = None) -> int:
             control_fraction=args.control_fraction,
             max_items_per_shard=args.max_items_per_shard,
             block_roles=block_roles,
+            allowed_roles=args.allowed_role,
         )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

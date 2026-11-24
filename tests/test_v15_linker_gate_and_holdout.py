@@ -329,6 +329,7 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
             {
                 "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test": ["c_park"]},
                 "verification": {"cross_role_orcid_overlap": 0},
+                "block_orcids": {"a smith": [], "b lee": [], "c park": []},
             }
         ),
         encoding="utf-8",

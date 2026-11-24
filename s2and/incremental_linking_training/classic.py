@@ -1324,17 +1324,6 @@ def report_logistic_gate_error_weights(
     }
 
 
-_STALE_POST_RETRIEVAL_FEATURE_PREFIXES = ("pw_",)
-_STALE_POST_RETRIEVAL_FEATURE_COLUMNS = frozenset(
-    {
-        "retrieval_reciprocal_rank",
-        "same_dominant_first_as_best_top5",
-        "same_family_as_heuristic_choice",
-        "sparse_relative_winner_score",
-    }
-)
-
-
 def _apply_promoted_logistic_gate_to_candidate_rows(
     candidate_rows: pd.DataFrame,
     choices: pd.DataFrame,

@@ -102,28 +102,6 @@ def block_membership_sha256(blocks: Mapping[str, Sequence[str]]) -> str:
     return digest.hexdigest()
 
 
-def frozen_test_blocks(blocks: Mapping[str, list[str]], record: Mapping[str, Any]) -> dict[str, list[str]]:
-    """Select recorded held-out blocks after verifying the complete population."""
-    if not isinstance(record, Mapping) or set(record) != {"block_membership_sha256", "test_block_ids"}:
-        raise ValueError("Invalid recorded cluster test split")
-    expected_digest = record["block_membership_sha256"]
-    if not is_lowercase_sha256(expected_digest):
-        raise ValueError("Recorded cluster test split requires a lowercase block_membership_sha256")
-    block_ids = record["test_block_ids"]
-    if (
-        not isinstance(block_ids, list)
-        or not block_ids
-        or any(not isinstance(block_id, str) for block_id in block_ids)
-        or len(set(block_ids)) != len(block_ids)
-    ):
-        raise ValueError("Recorded cluster test split requires unique test_block_ids")
-    if block_membership_sha256(blocks) != expected_digest:
-        raise ValueError("Evaluation block membership differs from the recorded training population")
-    if any(block_id not in blocks for block_id in block_ids):
-        raise ValueError("Recorded test block is absent from the evaluation population")
-    return {block_id: blocks[block_id] for block_id in block_ids}
-
-
 def require_recorded_population(record: Any, blocks: Mapping[str, Sequence[str]], *, name: str) -> None:
     """Reject development blocks that differ from a model's recorded training population.
 

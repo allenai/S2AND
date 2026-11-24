@@ -1,5 +1,4 @@
 from collections.abc import Sequence
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,23 +16,6 @@ from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 from tests.raw_arrow_helpers import write_ipc as _write_ipc
-
-
-class _SingleBatchArrowLease:
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self.native = self
-
-    def batch_indices(self, _table_key: str, _values: list[str]) -> list[int]:
-        return [0]
-
-    def has(self, _table_key: str) -> bool:
-        return True
-
-    @contextmanager
-    def open_file(self, _table_key: str):
-        with Path(self.path).open("rb") as source:
-            yield source
 
 
 def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(tmp_path) -> None:

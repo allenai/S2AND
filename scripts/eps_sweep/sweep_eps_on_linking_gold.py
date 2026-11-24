@@ -92,6 +92,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--total-ram-bytes", type=int, default=48 * 1024**3)
     parser.add_argument("--batching-threshold", type=int, required=True, help="Maximum size of a subblock.")
     parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
+    # ORCID B3 needs hidden ORCIDs, so both settings are fixed. They stay in
+    # plans and cache keys so plan readers can reject other settings.
     parser.set_defaults(use_orcid_subblocking=False, suppress_orcid_constraints=True)
     parser.add_argument("--eps-start", type=float, default=0.40)
     parser.add_argument("--eps-stop", type=float, default=0.80)

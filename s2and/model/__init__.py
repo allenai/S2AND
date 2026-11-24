@@ -138,6 +138,15 @@ from s2and.text import normalize_orcid as normalize_orcid
 from s2and.text import normalize_orcid_compact as normalize_orcid_compact
 from s2and.thread_config import resolve_n_jobs as resolve_n_jobs
 
+from ._shared import _ARROW_ATTACH_BLOCK_STATE as _ARROW_ATTACH_BLOCK_STATE
+from ._shared import _ARROW_ATTACH_NAME_CHECK_EXEMPT as _ARROW_ATTACH_NAME_CHECK_EXEMPT
+from ._shared import _ARROW_BULK_DISTANCE_OVERRIDES as _ARROW_BULK_DISTANCE_OVERRIDES
+from ._shared import _P as _P
+from ._shared import _R as _R
+from ._shared import _clusterer_with_prediction_params as _clusterer_with_prediction_params
+from ._shared import _gc_paused as _gc_paused
+from ._shared import _prediction_cluster_model_params as _prediction_cluster_model_params
+from ._shared import logger as logger
 from .bulk import _allocate_subblock_key as _allocate_subblock_key
 from .bulk import _combine_subblocked_predictions as _combine_subblocked_predictions
 from .bulk import _group_subblocking_firsts as _group_subblocking_firsts
@@ -203,12 +212,7 @@ from .distances import _selected_feature_indices as _selected_feature_indices
 from .distances import _upper_triangle_indices_for_range as _upper_triangle_indices_for_range
 from .incremental import _ALTERED_PRESPLIT_CACHE_INIT_LOCK as _ALTERED_PRESPLIT_CACHE_INIT_LOCK
 from .incremental import _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES as _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES
-from .incremental import _ARROW_ATTACH_BLOCK_STATE as _ARROW_ATTACH_BLOCK_STATE
-from .incremental import _ARROW_ATTACH_NAME_CHECK_EXEMPT as _ARROW_ATTACH_NAME_CHECK_EXEMPT
-from .incremental import _ARROW_BULK_DISTANCE_OVERRIDES as _ARROW_BULK_DISTANCE_OVERRIDES
 from .incremental import _NO_ORCID_SIGNATURE_INFO as _NO_ORCID_SIGNATURE_INFO
-from .incremental import _P as _P
-from .incremental import _R as _R
 from .incremental import _altered_cluster_signatures_from_values as _altered_cluster_signatures_from_values
 from .incremental import _altered_presplit_cache_key as _altered_presplit_cache_key
 from .incremental import _altered_presplit_cache_state as _altered_presplit_cache_state
@@ -218,10 +222,8 @@ from .incremental import _AttachmentBlockState as _AttachmentBlockState
 from .incremental import _cacheable_value as _cacheable_value
 from .incremental import _can_skip_orcid_homogeneous_altered_presplit as _can_skip_orcid_homogeneous_altered_presplit
 from .incremental import _cluster_seeds_require_inverse as _cluster_seeds_require_inverse
-from .incremental import _clusterer_with_prediction_params as _clusterer_with_prediction_params
 from .incremental import _dataset_altered_cluster_signatures as _dataset_altered_cluster_signatures
 from .incremental import _estimator_cache_fingerprint as _estimator_cache_fingerprint
-from .incremental import _gc_paused as _gc_paused
 from .incremental import _get_altered_presplit_cache_entry as _get_altered_presplit_cache_entry
 from .incremental import _has_in_profile_pair as _has_in_profile_pair
 from .incremental import _IncrementalSeedSetup as _IncrementalSeedSetup
@@ -231,12 +233,10 @@ from .incremental import _model_presplit_cache_fingerprint as _model_presplit_ca
 from .incremental import _normalized_orcid_for_presplit_skip as _normalized_orcid_for_presplit_skip
 from .incremental import _optional_arrow_string as _optional_arrow_string
 from .incremental import _partial_supervision_cache_fingerprint as _partial_supervision_cache_fingerprint
-from .incremental import _prediction_cluster_model_params as _prediction_cluster_model_params
 from .incremental import _put_altered_presplit_cache_entry as _put_altered_presplit_cache_entry
 from .incremental import _required_incremental_linker_artifact as _required_incremental_linker_artifact
 from .incremental import _seed_cluster_count_from_seed_map as _seed_cluster_count_from_seed_map
 from .incremental import _signature_batch_indices_for_request as _signature_batch_indices_for_request
-from .incremental import logger as logger
 
 _ARROW_BULK_DISTANCE_OVERRIDES: ContextVar[bool]
 _ARROW_ATTACH_NAME_CHECK_EXEMPT: ContextVar[frozenset[str] | None]

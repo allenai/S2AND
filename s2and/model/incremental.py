@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import copy
-import gc
 import hashlib
-import logging
 import pickle
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextvars import ContextVar
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import wraps
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from s2and import memory_budget
 from s2and.arrow_inputs import ArrowDataset, arrow_string_array
@@ -35,7 +30,6 @@ from s2and.incremental_linking.production import (
     predict_incremental_promoted_linker_from_arrow,
     start_background_seed_planner,
 )
-from s2and.model_pairwise import clone_cluster_model, intify
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.supervision import (
@@ -46,6 +40,13 @@ from s2and.supervision import (
 from s2and.text import canonicalize_name_parts, normalize_orcid_compact
 from s2and.thread_config import resolve_n_jobs
 
+from ._shared import (
+    _ARROW_ATTACH_BLOCK_STATE,
+    _ARROW_ATTACH_NAME_CHECK_EXEMPT,
+    _ARROW_BULK_DISTANCE_OVERRIDES,
+    _gc_paused,
+    logger,
+)
 from .constraints import (
     _cluster_seed_disallows_for_request,
     _normalize_cluster_seeds_require,
@@ -56,61 +57,10 @@ from .constraints import (
 if TYPE_CHECKING:
     from .clusterer import Clusterer
 
-logger = logging.getLogger("s2and")
-
-
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 
 
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
-
-
-# Carry bulk semantics through public attachment overrides that delegate to
-# super(), without mutating a shared Clusterer or changing public arguments.
-_ARROW_BULK_DISTANCE_OVERRIDES: ContextVar[bool] = ContextVar("s2and_arrow_bulk_distance_overrides", default=False)
-
-
-# Subblocked initial-only attachment sets the caller-required seed members that
-# its name checks skip. None keeps the public incremental behavior unchanged.
-_ARROW_ATTACH_NAME_CHECK_EXEMPT: ContextVar[frozenset[str] | None] = ContextVar(
-    "s2and_arrow_attach_name_check_exempt", default=None
-)
-
-
-# Subblocked attachment passes share native state over the original block: one
-# featurizer that each pass views, and one planner that each pass reloads instead
-# of rebuilding. None builds per pass.
-_ARROW_ATTACH_BLOCK_STATE: ContextVar[_AttachmentBlockState | None] = ContextVar(
-    "s2and_arrow_attach_block_state", default=None
-)
-
-
-_P = ParamSpec("_P")
-
-
-_R = TypeVar("_R")
-
-
-def _gc_paused(method: Callable[_P, _R]) -> Callable[_P, _R]:
-    """Pause Python's cyclic garbage collector while ``method`` runs.
-
-    Predictions allocate millions of short-lived containers, and each full
-    collection walks every live object; that took 1-2% of large requests.
-    Reference counting still frees acyclic objects at once, and the collector
-    resumes afterwards for cycles. A nested call leaves the pause to its caller.
-    """
-
-    @wraps(method)
-    def paused(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-        if not gc.isenabled():
-            return method(*args, **kwargs)
-        gc.disable()
-        try:
-            return method(*args, **kwargs)
-        finally:
-            gc.enable()
-
-    return paused
 
 
 class _AttachmentBlockState:
@@ -573,31 +523,6 @@ def _required_incremental_linker_artifact(clusterer: Any) -> Any:
             "Load a complete production bundle before calling the direct Arrow API."
         )
     return artifact
-
-
-def _clusterer_with_prediction_params(clusterer: Any, params: dict[str, Any] | None) -> Any:
-    """Bind explicit clustering overrides to a shallow, request-owned receiver.
-
-    Pairwise models and native resources remain shared. Nested prediction calls
-    reuse this receiver, while each block still clones its clustering estimator.
-    """
-    if not params or params is getattr(clusterer, "_s2and_prediction_params_source", None):
-        return clusterer
-    if params is getattr(clusterer, "_s2and_prediction_params", None):
-        return clusterer
-    request = copy.copy(clusterer)
-    request.cluster_model = clone_cluster_model(clusterer.cluster_model)
-    effective_params = {key: intify(value) for key, value in params.items()}
-    request.cluster_model.set_params(**effective_params)
-    request._s2and_prediction_params_source = params
-    request._s2and_prediction_params = effective_params
-    request._s2and_prediction_cache_owner = getattr(clusterer, "_s2and_prediction_cache_owner", clusterer)
-    return request
-
-
-def _prediction_cluster_model_params(clusterer: Any, params: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Retain explicit overrides in nested calls, including input ownership."""
-    return params if params is not None else getattr(clusterer, "_s2and_prediction_params", None)
 
 
 def _build_incremental_seed_setup(

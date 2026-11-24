@@ -28,13 +28,13 @@ from s2and.supervision import normalize_partial_supervision, validate_seed_group
 from s2and.thread_config import resolve_n_jobs
 
 from . import bulk, classic, constraints, distances, incremental
+from ._shared import _clusterer_with_prediction_params, _gc_paused, logger
 from .constraints import (
     DEFAULT_ORCID_NAME_WAIVER,
     _cluster_seeds_require_from_rust_featurizer,
     _normalize_cluster_seeds_require,
     _RustFeaturizerPredictDataset,
 )
-from .incremental import _clusterer_with_prediction_params, _gc_paused, logger
 
 if TYPE_CHECKING:
     from hyperopt import Trials

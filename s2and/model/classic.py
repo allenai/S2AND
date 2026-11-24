@@ -31,6 +31,7 @@ from s2and.runtime import RuntimeContext, build_runtime_context, dataset_stage_u
 from s2and.supervision import normalize_partial_supervision, validate_seed_group_separations
 from s2and.thread_config import resolve_n_jobs
 
+from ._shared import _clusterer_with_prediction_params, _prediction_cluster_model_params, logger
 from .constraints import (
     _cluster_seeds_require_from_rust_featurizer,
     _profile_exclusion_kwargs,
@@ -42,12 +43,7 @@ from .distances import (
     _ensure_lightgbm_fitted,
     _guard_predict_block_matrix_allocation,
 )
-from .incremental import (
-    _clusterer_with_prediction_params,
-    _dataset_altered_cluster_signatures,
-    _prediction_cluster_model_params,
-    logger,
-)
+from .incremental import _dataset_altered_cluster_signatures
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer

@@ -67,6 +67,14 @@ from s2and.supervision import effective_dataset_disallows
 from s2and.text import canonicalize_name_parts, normalize_orcid
 from s2and.thread_config import resolve_n_jobs
 
+from ._shared import (
+    _ARROW_ATTACH_BLOCK_STATE,
+    _ARROW_ATTACH_NAME_CHECK_EXEMPT,
+    _ARROW_BULK_DISTANCE_OVERRIDES,
+    _clusterer_with_prediction_params,
+    _prediction_cluster_model_params,
+    logger,
+)
 from .constraints import (
     _build_signature_index_by_id,
     _normalize_cluster_seeds_require,
@@ -76,16 +84,7 @@ from .constraints import (
     _RustFeaturizerPredictDataset,
 )
 from .distances import _CONCURRENT_DISTANCE_BLOCK_MAX_SIZE, _CONCURRENT_DISTANCE_BLOCKS
-from .incremental import (
-    _ARROW_ATTACH_BLOCK_STATE,
-    _ARROW_ATTACH_NAME_CHECK_EXEMPT,
-    _ARROW_BULK_DISTANCE_OVERRIDES,
-    _AttachmentBlockState,
-    _clusterer_with_prediction_params,
-    _prediction_cluster_model_params,
-    _signature_batch_indices_for_request,
-    logger,
-)
+from .incremental import _AttachmentBlockState, _signature_batch_indices_for_request
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer

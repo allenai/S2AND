@@ -38,6 +38,7 @@ from s2and.rust_calls import (
 from s2and.supervision import normalize_partial_supervision
 from s2and.thread_config import resolve_n_jobs
 
+from ._shared import logger
 from .constraints import (
     _accumulate_constraint_telemetry,
     _build_incremental_constraint_backend,
@@ -47,7 +48,6 @@ from .constraints import (
     _orcid_name_waiver_setting,
     _profile_exclusion_kwargs,
 )
-from .incremental import logger
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer

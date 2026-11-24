@@ -150,7 +150,7 @@ def test_arrow_prediction_reads_small_blocks_only_for_the_split(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bonus: float, scans: int
 ) -> None:
     # The year-gap split needs a close-pair bonus; without one, nothing reads the small-block set.
-    import s2and.model as model_module
+    from s2and.model import bulk
 
     dataset = _dataset([("Ada", "", "Smith")] * 4, {})
     prepare_seed_arrow_bundle(dataset, tmp_path)
@@ -159,8 +159,8 @@ def test_arrow_prediction_reads_small_blocks_only_for_the_split(
     model.cluster_model.close_pair_bonus = bonus
     model.cluster_model.close_pair_distance = 0.05 if bonus else 0.0
     calls: list[object] = []
-    original = model_module.arrow_small_block_signatures
-    monkeypatch.setattr(model_module, "arrow_small_block_signatures", lambda *a: calls.append(a) or original(*a))
+    original = bulk.arrow_small_block_signatures
+    monkeypatch.setattr(bulk, "arrow_small_block_signatures", lambda *a: calls.append(a) or original(*a))
     with ArrowDataset.open(tmp_path) as arrow:
         model.predict_from_arrow({"b": list(dataset.signatures)}, arrow, name_tuples=frozenset())
     assert len(calls) == scans

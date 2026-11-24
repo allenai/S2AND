@@ -14,7 +14,7 @@ from s2and import production_training_contract
 from s2and._sha256 import sha256_file
 from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.orcid_prefix_counts import ORCID_PREFIX_DATA_FILENAME
-from scripts.production.model import train_pairwise
+from scripts.pairwise import train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
 

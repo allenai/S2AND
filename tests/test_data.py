@@ -13,6 +13,25 @@ from s2and.data import ANDData
 from tests.helpers import build_dummy_dataset, tiny_name_counts_index
 
 
+def test_time_split_groups_placeholder_years_with_missing_dates() -> None:
+    dataset = build_dummy_dataset("time_split")
+    dataset.unit_of_data_split = "time"
+    ids = list(dataset.signatures)
+    dataset.train_ratio = 1 / len(ids)
+    dataset.val_ratio = 1 / len(ids)
+    dataset.test_ratio = 1 - 2 / len(ids)
+    years = [1800, 1799, None, *([2010] * (len(ids) - 3))]
+    for signature, year in zip(ids, years, strict=True):
+        paper_id = str(dataset.signatures[signature].paper_id)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
+
+    train, val, test = dataset.split_cluster_signatures()
+
+    assert [sid for block in train.values() for sid in block] == [ids[0]]
+    assert [sid for block in val.values() for sid in block] == [ids[2]]
+    assert {sid for block in test.values() for sid in block} == set(ids) - {ids[0], ids[2]}
+
+
 @pytest.mark.parametrize(
     "seeds, expected",
     [
@@ -50,10 +69,8 @@ def test_required_seed_components_preserve_transitive_constraints(seeds, expecte
             assert dataset.get_constraint(left, right) == data_module.CLUSTER_SEEDS_LOOKUP[constraint]
 
 
-def test_unpreprocessed_signatures_skip_coauthor_sets_that_subblocking_recomputes():
+def test_unpreprocessed_signatures_skip_coauthor_sets() -> None:
     """Coauthor sets are quadratic on huge author lists, so only preprocessing builds them."""
-
-    from s2and.subblocking import _signature_coauthor_blocks_for_specter
 
     def load(preprocess: bool) -> ANDData:
         return ANDData(
@@ -68,12 +85,9 @@ def test_unpreprocessed_signatures_skip_coauthor_sets_that_subblocking_recompute
 
     raw, prepared = load(False), load(True)
     assert any(signature.author_info_coauthor_blocks for signature in prepared.signatures.values())
-    for signature_id, signature in raw.signatures.items():
+    for signature in raw.signatures.values():
         assert signature.author_info_coauthors is None
         assert signature.author_info_coauthor_blocks is None
-        # Paper author names are normalized either way, so subblocking evidence is unchanged.
-        expected = prepared.signatures[signature_id].author_info_coauthor_blocks
-        assert set(_signature_coauthor_blocks_for_specter(signature, raw)) == expected - {""}
 
 
 def test_explicit_seed_disallow_survives_connected_require_groups():

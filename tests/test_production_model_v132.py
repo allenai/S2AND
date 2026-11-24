@@ -11,7 +11,7 @@ from s2and.consts import CONFIG
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import write_raw_arrow_batch_lookup_indexes
 from s2and.production_model import load_production_model
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
+from scripts.common.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
 _FIXTURE = Path(__file__).parent / "qian"
 _EXPECTED_SHA256 = "2836e6cf60eb4e4d467d0e81d7139347d9a8db01a97c5dc87f14c60005cfc3b6"

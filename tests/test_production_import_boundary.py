@@ -81,11 +81,11 @@ def test_clean_interpreter_import_boundaries() -> None:
 
         sys.meta_path.insert(0, NoExtras())
         for module_name in (
-            "scripts.production.model.train_pairwise",
-            "scripts.production.model.release_pairwise",
-            "scripts.production.model.train_linker_and_finalize",
-            "scripts.verification.evaluate_incremental_gold",
-            "scripts.eps_sweep.apply_reviewed_eps",
+            "scripts.pairwise.train_pairwise",
+            "scripts.pairwise.release_pairwise",
+            "scripts.linker.train_linker_and_finalize",
+            "scripts.release.verification.evaluate_incremental_gold",
+            "scripts.eps.apply_reviewed_eps",
         ):
             importlib.import_module(module_name)
         """

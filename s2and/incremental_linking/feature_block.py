@@ -5,7 +5,7 @@ Implementation is split across compact contracts and Arrow IO helpers.
 
 from __future__ import annotations
 
-from s2and.incremental_linking.feature_block_arrow import (
+from s2and.arrow_tables import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,

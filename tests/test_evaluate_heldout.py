@@ -23,8 +23,8 @@ from s2and.production_training_contract import (
     load_model_plan,
     load_packaged_artifact_authority,
 )
-from scripts.production.model import release_pairwise
-from scripts.production.model.plan_datasets import load_development_dataset, open_plan_arrow
+from scripts.common.plan_datasets import load_development_dataset, open_plan_arrow
+from scripts.pairwise import release_pairwise
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 from tests.promoted_linking_helpers import (

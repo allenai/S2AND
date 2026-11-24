@@ -22,6 +22,7 @@ from s2and.consts import (
     LARGE_DISTANCE,
     NAME_COUNTS_INDEX_PATH,
     NUMPY_NAN,
+    normalize_paper_year,
 )
 from s2and.mp import UniversalPool
 from s2and.name_counts_index import NameCountsIndex
@@ -1658,11 +1659,7 @@ class ANDData:
             for signature_id, signature in self.signatures.items():
                 # paper_id should be kept as string, so it can be matched to papers.json
                 paper_id = str(signature.paper_id)
-                year = self.papers[paper_id].year
-                if year is None:
-                    signature_to_year[signature_id] = 0
-                else:
-                    signature_to_year[signature_id] = int(year)
+                signature_to_year[signature_id] = normalize_paper_year(self.papers[paper_id].year) or 0
 
             train_size = int(len(signature_to_year) * self.train_ratio)
             val_size = int(len(signature_to_year) * self.val_ratio)

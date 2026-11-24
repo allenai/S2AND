@@ -16,7 +16,7 @@ pytest.importorskip("duckdb", minversion="1.5")
 
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
-from scripts.production.counts import generate_name_counts_from_parquet as producer
+from scripts.intake.counts import generate_name_counts_from_parquet as producer
 from tests.name_count_oracle import build_name_count_dicts
 
 ROWS = [
@@ -81,9 +81,15 @@ def _build(manifest: Path, output: Path, *, resume: bool = False) -> dict:
 def test_count_publication_matches_reference_and_only_resumes_identical_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    normalizer = tmp_path / "text.py"
-    normalizer.write_bytes(Path(producer.text_normalizer.__file__).read_bytes())
-    monkeypatch.setattr(producer.text_normalizer, "__file__", str(normalizer))
+    import shutil
+
+    import s2and.text as text_package
+
+    text_copy = tmp_path / "text"
+    shutil.copytree(Path(text_package.__file__).parent, text_copy, ignore=shutil.ignore_patterns("__pycache__"))
+    monkeypatch.setattr(text_package, "__file__", str(text_copy / "__init__.py"))
+    # Edit a rule module, not the initializer, later in the test.
+    normalizer = text_copy / "canonical_names.py"
     manifest = _source(tmp_path / "source")
     output = tmp_path / "actual"
     assert (
@@ -251,3 +257,19 @@ def test_resume_adopts_an_index_published_before_the_run_record_completed(tmp_pa
     record.write_text(json.dumps({**interrupted, "status": "active", "stages": stages}), encoding="utf-8")
     with pytest.raises(FileExistsError, match="does not match"):
         _build(manifest, output, resume=True)
+
+
+def test_normalizer_hash_covers_every_text_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    import s2and.text as text_package
+    from scripts.intake.counts._run_support import normalizer_sha256
+
+    copy = tmp_path / "text"
+    shutil.copytree(Path(text_package.__file__).parent, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    monkeypatch.setattr(text_package, "__file__", str(copy / "__init__.py"))
+    before = normalizer_sha256()
+    # A rule change outside the package initializer must change the producer identity.
+    with (copy / "canonical_names.py").open("a", encoding="utf-8") as module:
+        module.write("\n# changed rule\n")
+    assert normalizer_sha256() != before

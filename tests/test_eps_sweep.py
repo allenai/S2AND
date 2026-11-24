@@ -17,7 +17,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
-from scripts.eps_sweep import common, sweep_eps_on_linking_gold
+from scripts.eps import common, sweep_eps_on_linking_gold
 from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
 from tests.model_helpers import ConstantDistanceClassifier
 
@@ -35,54 +35,16 @@ def _cli(*extra: str, include_batching_threshold: bool = True) -> list[str]:
     ]
 
 
-def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
-    gold_path = tmp_path / "gold.parquet"
-    pd.DataFrame(
-        [
-            {
-                "dataset": "unit",
-                "table_name": "train.parquet",
-                "split": "train",
-                "source_key": "train",
-                "supervision_type": "unlabeled_singleton_orcid",
-                "query_signature_id": "q1",
-                "member_signature_id": "m1",
-                "query_view": "full",
-                "label": 0,
-                "weight_pair": 1.0,
-                "weight_query_balanced": 1.0,
-                "weight_query_label_balanced": 1.0,
-                "weight_query_class_balanced": 1.0,
-            },
-            {
-                "dataset": "unit",
-                "table_name": "train.parquet",
-                "split": "train",
-                "source_key": "train",
-                "supervision_type": "positive_repeat_orcid",
-                "query_signature_id": "q2",
-                "member_signature_id": "m2",
-                "query_view": "full",
-                "label": 1,
-                "weight_pair": 1.0,
-                "weight_query_balanced": 1.0,
-                "weight_query_label_balanced": 1.0,
-                "weight_query_class_balanced": 1.0,
-            },
-        ]
-    ).to_parquet(gold_path, index=False)
-
-    loaded = sweep_eps_on_linking_gold._load_gold(gold_path)
-
-    assert loaded["query_signature_id"].tolist() == ["q2"]
-    assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
-
-
 def test_eps_sweep_requires_and_records_the_subblock_limit(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         sweep_eps_on_linking_gold.parse_args(_cli(include_batching_threshold=False))
     assert exc.value.code == 2
     assert "--batching-threshold" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        sweep_eps_on_linking_gold.parse_args(_cli("--score-mode", "safe-action-proxy"))
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
     args = sweep_eps_on_linking_gold.parse_args(_cli())
     gold = pd.DataFrame({"query_signature_id": ["q"], "member_signature_id": ["m"], "label": [1]})
@@ -278,13 +240,12 @@ def test_cli_enforces_production_route_and_compute_bounds(monkeypatch: pytest.Mo
         validate("--compute-missing-dists")
     with pytest.raises(ValueError, match="--route bulk"):
         validate("--max-subblocks", "1")
-    with pytest.raises(ValueError, match="--use-orcid-subblocking exactly"):
-        validate("--use-orcid-subblocking")
 
     validate("--compute-missing-dists", "--max-subblocks", "1", "--route", "bulk")
     assert validate("--compute-missing-dists", "--allow-full-run").suppress_orcid_constraints is True
-    args = validate("--use-orcid-subblocking", "--use-orcid-constraints", "--n-jobs", "2")
-    assert args.suppress_orcid_constraints is False
+    args = validate("--n-jobs", "2")
+    assert args.score_mode == "orcid-b3"
+    assert not args.use_orcid_subblocking
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     monkeypatch.setenv("RAYON_NUM_THREADS", "1")
     sweep_eps_on_linking_gold._configure_runtime_environment(args)
@@ -306,11 +267,7 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
         calls.append((signature_ids, kwargs))
         return {"a": ["1", "2"], "b": ["3"]}, {"graph_fallback_native": True}, {}
 
-    def reject_python(*args, **kwargs):
-        raise AssertionError("EPS selection must not use the Python graph fallback")
-
     monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", native)
-    monkeypatch.setattr(subblocking, "make_subblocks_with_telemetry", reject_python)
     blocks, telemetry = sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
         args=argparse.Namespace(batching_threshold=2, use_orcid_subblocking=orcid),
         clusterer=SimpleNamespace(
@@ -486,7 +443,7 @@ def test_distance_cache_key_reuses_pairwise_across_linker_and_eps_variants(tmp_p
 
 
 def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
-    from scripts.eps_sweep import orcid_b3
+    from scripts.eps import orcid_b3
     from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
     from tests.raw_arrow_helpers import base_arrow_paths
 
@@ -549,3 +506,76 @@ def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
                 external_labels=external,
                 allow_all_identities=True,
             )
+
+
+def test_distance_cache_rejects_a_different_pairwise_contract(tmp_path: Path) -> None:
+    from s2and.production_model import canonical_artifact_hashes
+    from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
+
+    bundle = tmp_path / "model"
+    write_synthetic_pairwise_bundle(bundle, artifact_hashes=canonical_artifact_hashes(), release_version="1.4")
+    args = SimpleNamespace(
+        arrow_root=tmp_path / "arrow",
+        batching_threshold=10,
+        dataset="test",
+        model_path=bundle,
+        pair_chunk_size=3,
+        suppress_orcid_constraints=True,
+        use_orcid_subblocking=False,
+    )
+    previous = sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["1", "2"], "generation")
+    cache = tmp_path / "cache.pkl"
+    with cache.open("wb") as outfile:
+        pickle.dump({"metadata": previous, "dist": [0.25]}, outfile)
+
+    path = bundle / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["feature_contract_version"] = 1
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    current = sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["1", "2"], "generation")
+    with pytest.raises(ValueError, match="pairwise_model_sha256"):
+        sweep_eps_on_linking_gold._load_cached_distance(cache, current)
+
+
+def test_eps_sweep_rejects_sealed_dataset_before_reference_collection(tmp_path, monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    from scripts.eps import orcid_b3
+
+    roles = tmp_path / "roles.json"
+    roles.write_text(
+        json.dumps(
+            {
+                "roles": {"final_test_a": ["dummy"]},
+                "block_orcids": {"dummy": []},
+                "verification": {"cross_role_orcid_overlap": 0},
+            }
+        )
+    )
+    args = sweep_eps_on_linking_gold.parse_args(
+        _cli(
+            "--score-mode",
+            "orcid-b3",
+            "--allow-all-reference-identities",
+            "--block-role-assignments",
+            str(roles),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--arrow-root",
+            str(tmp_path),
+            "--n-jobs",
+            "1",
+        )
+    )
+    sources = SimpleNamespace(validate_arrow_dataset=lambda *_: None)
+    monkeypatch.setattr(sweep_eps_on_linking_gold, "load_initial_query_sources", lambda *a, **kw: sources)
+    monkeypatch.setattr(sweep_eps_on_linking_gold, "arrow_dataset_dir", lambda *_: tmp_path)
+    monkeypatch.setattr(ArrowDataset, "open", lambda *a, **kw: nullcontext(object()))
+    monkeypatch.setattr("s2and.production_model.load_production_model", lambda _: SimpleNamespace())
+
+    def reject_read(*args, **kwargs):
+        pytest.fail("sealed identities reached reference collection")
+
+    monkeypatch.setattr(orcid_b3, "read_reference", reject_read)
+    with pytest.raises(ValueError, match="not in the frozen eps_cal pool"):
+        sweep_eps_on_linking_gold.run(args)

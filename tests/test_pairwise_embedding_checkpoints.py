@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.production.data._pairwise_embeddings import CHECKPOINT_ROWS, checkpoint_due
+from scripts.pairwise._pairwise_embeddings import CHECKPOINT_ROWS, checkpoint_due
 
 
 def _saved_rows(batch_size: int, rows: int, completed: int = 0) -> list[int]:

@@ -1948,9 +1948,8 @@ pub(crate) struct SubblockMergeMetadata {
 pub(crate) fn subblock_merge_candidate_metadata(key: &str, size: usize) -> SubblockMergeMetadata {
     let key_parts: Vec<&str> = key.split('|').collect();
     let first_name = key_parts.first().copied().unwrap_or_default().to_string();
-    // Match s2and.subblocking._subblock_merge_candidate_metadata: only emit a
-    // middle_name when the second segment explicitly carries a `key=value`
-    // token, mirroring Python's `"=" in key_parts[1]` guard. Returning
+    // Emit a middle_name only when the second segment carries a `key=value`
+    // token. Returning
     // `Some("")` for an `=`-less segment would silently make the subblock
     // eligible for merge fan-out against other empty-middle subblocks.
     let middle_name = key_parts
@@ -2513,7 +2512,7 @@ pub(crate) fn apply_orcid_subblocking(
         for sig_id in sig_ids {
             // Upstream subblocking must produce a partition; a duplicated
             // signature_id would otherwise bind to an arbitrary subblock here
-            // (last-wins) and silently diverge from the Python implementation.
+            // (last-wins).
             if sig_id_to_subblock_index
                 .insert(sig_id.clone(), subblock_index)
                 .is_some()
@@ -2857,8 +2856,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
 
     // Multiset equality, not set equality: a signature_id duplicated across
     // subblocks would pass a set check but bind to an arbitrary subblock in the
-    // downstream ORCID merge, silently diverging from the Python implementation
-    // (which asserts multiset equality).
+    // downstream ORCID merge.
     let mut input_counts: HashMap<String, usize> = HashMap::default();
     for signature_id in signature_ids.into_iter() {
         *input_counts.entry(signature_id).or_insert(0) += 1;

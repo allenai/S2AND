@@ -14,13 +14,13 @@ import pytest
 from threadpoolctl import threadpool_limits
 
 from s2and._sha256 import sha256_file
-from scripts.production.data._pairwise_augmentation import (
+from scripts.pairwise._pairwise_augmentation import (
     build_augmentation,
     finalize_augmentation,
     make_variant,
     vector_action,
 )
-from scripts.production.data.prepare_pairwise_inputs import (
+from scripts.pairwise.prepare_pairwise_inputs import (
     ModelExclusions,
     dataset_for_split,
     load_model_exclusions,

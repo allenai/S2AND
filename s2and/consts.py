@@ -130,6 +130,8 @@ DEFAULT_CHUNK_SIZE = 100
 LARGE_DISTANCE = 1e4
 # The pair model sees at most this many years between two papers (Rust features.rs year_diff too).
 YEAR_DIFF_CAP = 50
+# The corpus uses these years when the publication date is unknown.
+PLACEHOLDER_YEARS = frozenset({1601, 1800})
 LARGE_INTEGER = 10 * LARGE_DISTANCE
 CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
 # Average linkage dilutes a hard pair below EPS once two clusters exceed about
@@ -137,9 +139,13 @@ CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
 # million signatures, or about 700 thousand with a bonus of 8. No condensed
 # matrix can hold either.
 HARD_LINKAGE_DISTANCE = 1e12
-SPECTER_DIM = 768
 
 # Native scoring has fast plans only for trees with at most this many leaves
 # (`MAX_LOCKSTEP_LEAVES` in s2and_rust/src/lightgbm_booster/fast.rs). Larger trees
 # fall back to slow traversal, so no trained LightGBM model may use them.
 MAX_FAST_PLAN_LEAVES = 256
+
+
+def normalize_paper_year(year: int | None) -> int | None:
+    """Return a known publication year or None for missing dates and corpus stamps."""
+    return year if year is not None and year > 0 and year not in PLACEHOLDER_YEARS else None

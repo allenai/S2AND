@@ -8,7 +8,7 @@ import pytest
 import s2and.model as model_module
 from s2and.feature_port import _get_rust_featurizer
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer, FastCluster
+from s2and.model import Clusterer, FastCluster, distances
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 
@@ -41,9 +41,9 @@ def test_sparse_feature_rows_match_dense_bits(
         nameless_indices=nameless,
         num_threads=2,
     )
-    dense = model_module._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs)
+    dense = distances._build_block_feature_matrices_indexed_rust([3, 0, 2, 1, 4], **kwargs)
     indices = np.asarray(rows, dtype=np.intp)
-    sparse = model_module._build_block_feature_matrices_indexed_rust(
+    sparse = distances._build_block_feature_matrices_indexed_rust(
         [3, 0, 2, 1, 4], **kwargs, scored_rows=indices, compact=compact
     )
     for actual, expected in zip(sparse, dense, strict=True):
@@ -102,20 +102,20 @@ def test_sparse_features_preserve_distances_and_classifier_calls(
     expected_calls = [main.calls[:], nameless.calls[:]]
     main.calls.clear()
     nameless.calls.clear()
-    original = model_module._build_block_feature_matrices_indexed_rust
+    original = distances._build_block_feature_matrices_indexed_rust
 
     def force_dense(*args: Any, **kwargs: Any) -> Any:
         kwargs.pop("scored_rows", None)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(model_module, "_build_block_feature_matrices_indexed_rust", force_dense)
-    original_combine = model_module._predict_and_combine
+    monkeypatch.setattr(distances, "_build_block_feature_matrices_indexed_rust", force_dense)
+    original_combine = distances._predict_and_combine
 
     def combine_dense(*args: Any, **kwargs: Any) -> Any:
         kwargs.pop("compact_rows", None)
         return original_combine(*args, **kwargs)
 
-    monkeypatch.setattr(model_module, "_predict_and_combine", combine_dense)
+    monkeypatch.setattr(distances, "_predict_and_combine", combine_dense)
     dense = clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
     np.testing.assert_array_equal(sparse["block"].view(np.uint8), dense["block"].view(np.uint8))
     for actual, expected in zip((main.calls, nameless.calls), expected_calls, strict=True):
@@ -200,15 +200,13 @@ def test_fused_block_scoring_matches_feature_matrix_path(
     # Small tiles cross tile edges inside the 7-signature block.
     one_pass = []
     for row_band, column_block in ((2, 3), (32, 64)):
-        monkeypatch.setattr(
-            model_module, "_one_pass_tile_overrides", {"row_band": row_band, "column_block": column_block}
-        )
+        monkeypatch.setattr(distances, "_one_pass_tile_overrides", {"row_band": row_band, "column_block": column_block})
         one_pass.append(
             clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
         )
-    monkeypatch.setattr(model_module, "_ONE_PASS_BLOCK_FILL", False)
+    monkeypatch.setattr(distances, "_ONE_PASS_BLOCK_FILL", False)
     fused = clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
-    monkeypatch.setattr(model_module, "_FUSED_BLOCK_SCORING", False)
+    monkeypatch.setattr(distances, "_FUSED_BLOCK_SCORING", False)
     batch = clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
     assert fused["block"].dtype == batch["block"].dtype == np.float64
     np.testing.assert_array_equal(fused["block"].view(np.uint64), batch["block"].view(np.uint64))
@@ -229,7 +227,7 @@ def test_compact_scoring_preserves_batches_and_owned_inputs(
     monkeypatch: pytest.MonkeyPatch, copy_budget: int, rows: list[int], with_nameless: bool
 ) -> None:
     """Check bits, call boundaries, writable owned inputs and mutation isolation."""
-    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
+    monkeypatch.setattr(distances, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
     matrix = np.arange(28, dtype=np.float64).reshape(7, 4)
     matrix[0] = [-0.0, np.nan, np.inf, -np.inf]
     labels = np.full(7, -model_module.LARGE_INTEGER, dtype=np.float64)
@@ -251,7 +249,7 @@ def test_compact_scoring_preserves_batches_and_owned_inputs(
         nameless = MutatingClassifier() if with_nameless else None
         features = matrix[indices].copy() if compact else matrix.copy()
         nl_features = features.copy() if with_nameless else None
-        result, _ = model_module._predict_and_combine(
+        result, _ = distances._predict_and_combine(
             main,
             nameless,
             features,

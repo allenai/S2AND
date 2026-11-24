@@ -7,16 +7,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from s2and.incremental_linking_training import classic as classic_training
+from s2and.incremental_linking_training import fit as fit_module
 from s2and.incremental_linking_training.classic import (
     _fit_promoted_logistic_gate,
     _promoted_stratified_gate_spec,
     _score_query_choices,
-    build_whole_author_holdout_rows,
-    select_logistic_gate_error_weights,
+    report_logistic_gate_error_weights,
 )
-from scripts.eps_sweep import apply_reviewed_eps as apply_eps
-from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
-from scripts.production.model import train_linker_and_finalize as promoted_train
+from scripts.common.block_roles import load_block_roles
+from scripts.eps import apply_reviewed_eps as apply_eps
+from scripts.eps.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
+from scripts.linker import train_linker_and_finalize as promoted_train
 
 
 def _synthetic_gate_data() -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
@@ -110,7 +112,7 @@ def test_promoted_stratified_gate_spec_validates_fit_and_validation_splits() -> 
         )
 
 
-def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa() -> None:
+def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> None:
     rows, choices, probs = _synthetic_gate_data()
     res1 = _fit_promoted_logistic_gate(
         rows,
@@ -147,80 +149,92 @@ def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa(
     # Default grid includes the production 0.25 baseline and rejects empty choices.
     val_qids = set(choices.loc[val_mask, "query_case_id"].astype(str))
     row_val_mask = rows["query_group_id"].astype(str).isin(val_qids).to_numpy()
-    tuned = select_logistic_gate_error_weights(
-        res1["gate_config"],
+    config = {
+        **res1["gate_config"],
+        "weights": [[0.0] * 3] * 4,
+        "bias": np.log([0.10, 0.025, 0.875]).tolist(),
+    }
+    report = report_logistic_gate_error_weights(
+        config,
         rows.loc[row_val_mask].reset_index(drop=True),
         choices.loc[val_mask].reset_index(drop=True),
         probs[row_val_mask],
     )
-    swept_weights = [trial["false_abstain_weight"] for trial in tuned["sweep"]]
-    assert 0.25 in swept_weights
+    assert report["configured_false_abstain_weight"] == 0.25
+    assert "gate_config" not in report
+    assert res1["gate_config"]["error_weights"]["false_abstain"] == 0.25
+    baseline = next(trial for trial in report["sweep"] if trial["false_abstain_weight"] == 0.25)
+    links = baseline["link_count"]
+    assert baseline["gold_precision"] == pytest.approx(baseline["gold_correct_links"] / links)
+    assert baseline["gold_recall"] == pytest.approx(baseline["gold_correct_links"] / report["gold_linkable_queries"])
+    assert any(trial["added_links"] for trial in report["sweep"])
+    assert report["sweep"][0]["removed_links"]
+    for trial in report["sweep"]:
+        links += len(trial["added_links"]) - len(trial["removed_links"])
+        assert trial["link_count"] == links
     with pytest.raises(ValueError, match="non-empty"):
-        select_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
+        report_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
 
 
-def test_build_whole_author_holdout_rows_guards_membership_features_and_labels() -> None:
-    rows = pd.DataFrame(
-        [
-            {"query_group_id": "q1", "candidate_component_key": "c1", "retrieval_rank": "1", "label": 1},
-            {"query_group_id": "q1", "candidate_component_key": "c2", "retrieval_rank": "2", "label": 0},
-            {"query_group_id": "q1", "candidate_component_key": "c3", "retrieval_rank": "10", "label": 1},
-            {"query_group_id": "q1", "candidate_component_key": "c4", "retrieval_rank": "3", "label": 0},
-            {"query_group_id": "q2", "candidate_component_key": "c5", "retrieval_rank": "1", "label": 1},
-            {"query_group_id": "q3", "candidate_component_key": "c6", "retrieval_rank": "1", "label": 1},
-        ]
+@pytest.mark.parametrize("configured_weight, fixed", [(None, False), (0.34, False), (None, True)])
+def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured_weight: float | None, fixed: bool
+) -> None:
+    rows, _, probabilities = _synthetic_gate_data()
+    rows = rows.assign(feature=probabilities, candidate_gold_scored=True)
+    rows.loc[rows["query_group_id"].isin({"q_000", "q_049"}), "candidate_gold_scored"] = False
+    gate_fit = rows.loc[rows["split"].eq("calibration_fit")]
+    gate_thresh = rows.loc[rows["split"].eq("calibration_check")]
+    linker_train = gate_fit.assign(query_group_id=lambda frame: "train_" + frame["query_group_id"])
+    fitted_rows = []
+
+    class Ranker:
+        def fit(self, features: np.ndarray, labels: np.ndarray, *, sample_weight: np.ndarray) -> None:
+            fitted_rows.append(len(features))
+
+        def predict_proba(self, features: np.ndarray) -> np.ndarray:
+            positive = np.asarray(features)[:, 0]
+            return np.column_stack((1 - positive, positive))
+
+    monkeypatch.setattr(fit_module, "_build_classic_classifier", lambda *_args, **_kwargs: Ranker())
+    gate = {"false_abstain_weight": configured_weight} if configured_weight is not None else {}
+    bundle = classic_training.OfficialBundle(
+        root=tmp_path,
+        bundle_name="fixture",
+        assets={},
+        expected_metrics={},
+        models={
+            "classic": {
+                "feature_columns": ["feature"],
+                "best_params": {},
+                "promoted_stratified_gate": gate,
+                "stratified_eval_test_split": {},
+            }
+        },
     )
-    membership = {"c1": {"A1"}, "c2": {"A9"}, "c3": {"A1", "A8"}, "c4": {"A7"}, "c5": {"A2"}, "c6": {"A3"}}
-    out, summary = build_whole_author_holdout_rows(
-        rows,
-        query_to_author={"q1": "A1", "q2": "A2", "q3": "A3"},
-        component_to_authors=membership,
-        holdout_query_ids={"q1", "q2"},
-        retrieval_top_k=5,
+    fixed_ranker = Ranker() if fixed else None
+    ranker_args = {"fixed_ranker": fixed_ranker} if fixed else {}
+    result = classic_training.fit_classic(
+        bundle,
+        n_jobs=1,
+        holdout_identities=classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
+        frozen_task_rows={
+            "gate_fit": gate_fit,
+            "gate_thresh": gate_thresh,
+            **({} if fixed else {"linker_train": linker_train}),
+        },
+        **ranker_args,
     )
-    assert summary == {
-        "holdout_queries_requested": 2,
-        "holdout_queries_retained": 1,
-        "holdout_queries_dropped_empty": 1,
-        "author_rows_removed": 3,
-    }
-    q1 = out[out["query_group_id"] == "q1"]
-    assert q1["candidate_component_key"].tolist() == ["c2", "c4"]
-    assert q1["retrieval_rank"].tolist() == [1, 2]
-    assert q1["label"].tolist() == [0, 0]
-
-    # Rejects missing component_to_authors key (never silently manufactures false negatives!).
-    with pytest.raises(KeyError, match="missing from component_to_authors"):
-        build_whole_author_holdout_rows(
-            rows,
-            query_to_author={"q1": "A1"},
-            component_to_authors={"c2": {"A9"}},
-            holdout_query_ids={"q1"},
-        )
-    # Rejects incomplete membership where a label==1 row survives author removal.
-    with pytest.raises(ValueError, match="still has a label==1"):
-        build_whole_author_holdout_rows(
-            rows,
-            query_to_author={"q1": "A1"},
-            component_to_authors={"c1": set(), "c2": set(), "c3": set(), "c4": set()},
-            holdout_query_ids={"q1"},
-        )
-    # Rejects materialized feature frames.
-    with pytest.raises(ValueError, match="featureless pre-materialization"):
-        build_whole_author_holdout_rows(
-            rows.assign(pw_mean_prob=0.5),
-            query_to_author={"q1": "A1"},
-            component_to_authors=membership,
-            holdout_query_ids={"q1"},
-        )
-    # Rejects missing requested holdout query IDs.
-    with pytest.raises(KeyError, match="absent from candidate_rows"):
-        build_whole_author_holdout_rows(
-            rows,
-            query_to_author={"q_missing": "A9"},
-            component_to_authors=membership,
-            holdout_query_ids={"q_missing"},
-        )
+    assert fitted_rows == ([] if fixed else [78])
+    if fixed:
+        assert result.model is fixed_ranker
+        assert result.training_summary["ranker_refit"] is False
+    assert result.gate_config["training_summary"]["fit_queries"] == 39
+    assert result.gate_config["training_summary"]["validation_queries"] == 20
+    assert result.gate_config["error_weights"]["false_abstain"] == (configured_weight or 0.25)
+    report = result.abstain_rule_summary["promoted_logistic_gate"]["false_abstain_weight_report"]
+    assert report["n_queries"] == 20
+    assert report["configured_false_abstain_weight"] == result.gate_config["error_weights"]["false_abstain"]
 
 
 def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path: Path) -> None:
@@ -251,11 +265,12 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
             {
                 "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test": ["c_park"]},
                 "verification": {"cross_role_orcid_overlap": 0},
+                "block_orcids": {"a smith": [], "b lee": [], "c park": []},
             }
         ),
         encoding="utf-8",
     )
-    eps_cal, _ = apply_eps._load_verified_eps_cal_blocks(role_manifest)  # noqa: SLF001
+    eps_cal = apply_eps._eps_cal_blocks(load_block_roles(role_manifest))  # noqa: SLF001
     assert eps_cal == frozenset({"a smith", "b lee"})
 
     # Rejects block-disjoint policy when no role manifest is provided.
@@ -268,3 +283,64 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
             None,  # type: ignore[arg-type]
             verified_eps_cal_blocks=None,
         )
+
+
+def test_fixed_ranker_load_checks_bundle_and_requested_hash(tmp_path: Path) -> None:
+    from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
+    from tests.test_promoted_linker_training_cli import _fixed_ranker_fixture
+
+    _, bundle, digest = _fixed_ranker_fixture(tmp_path)
+    path = bundle / COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
+    loaded, source, contract = promoted_train._load_fixed_ranker(bundle, digest)
+    assert source == path
+    assert loaded.num_feature() == len(promoted_train.promoted_linker_feature_columns())
+    assert contract == 1
+    with pytest.raises(ValueError, match="ranker.*SHA-256"):
+        promoted_train._load_fixed_ranker(bundle, "0" * 64)
+    path.write_text("changed", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum mismatch.*booster"):
+        promoted_train._load_fixed_ranker(bundle, digest)
+
+
+def test_fixed_ranker_accepts_legacy_calibration_splits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows, choices, probabilities = _synthetic_gate_data()
+
+    def score_source(_bundle, _spec, _split_spec, predict, columns, **options):
+        assert options["include_calibration_source"] is True
+        assert options["splits"] == ("calibration_fit", "calibration_check")
+        assert columns == ("feature",)
+        np.testing.assert_array_equal(predict(probabilities[:, None]), probabilities)
+        return classic_training.ClassicStratifiedEvalScores(rows, probabilities, choices, pd.DataFrame())
+
+    class Ranker:
+        def predict_proba(self, features: np.ndarray) -> np.ndarray:
+            positive = np.asarray(features)[:, 0]
+            return np.column_stack((1 - positive, positive))
+
+    def no_fit(*_args, **_kwargs):
+        pytest.fail("The legacy calibration arm tried fitting a new ranker")
+
+    monkeypatch.setattr(fit_module, "_score_classic_stratified_rows", score_source)
+    monkeypatch.setattr(fit_module, "_classic_internal_eval", lambda *_args: {})
+    monkeypatch.setattr(fit_module, "_build_classic_classifier", no_fit)
+    bundle = classic_training.OfficialBundle(
+        root=tmp_path,
+        bundle_name="fixture",
+        assets={},
+        expected_metrics={},
+        models={
+            "classic": {
+                "feature_columns": ["feature"],
+                "promoted_stratified_gate": {
+                    "fit_splits": ["calibration_fit"],
+                    "validation_splits": ["calibration_check"],
+                },
+                "stratified_eval_test_split": {},
+            },
+        },
+    )
+    ranker = Ranker()
+    result = classic_training.fit_classic(bundle, n_jobs=1, fixed_ranker=ranker)
+    assert result.model is ranker
+    assert result.gate_config["training_summary"]["fit_queries"] == 40
+    assert result.gate_config["training_summary"]["validation_queries"] == 20

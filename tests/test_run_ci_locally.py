@@ -16,11 +16,11 @@ import yaml
 
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.production_bundle import _write_json
-from scripts import run_ci_locally as run_ci
-from scripts import sync_feature_schema, sync_version
-from scripts.eps_sweep.common import write_json
-from scripts.verification.verify_production_model_distributions import verify_production_model_distributions
-from scripts.verification.verify_rust_distribution_licenses import LICENSE_PATHS, verify_archive
+from scripts.dev import run_ci_locally as run_ci
+from scripts.dev import sync_feature_schema, sync_version
+from scripts.eps.common import write_json
+from scripts.release.verification.verify_production_model_distributions import verify_production_model_distributions
+from scripts.release.verification.verify_rust_distribution_licenses import LICENSE_PATHS, verify_archive
 from tests import shell_helpers
 from tests.shell_helpers import run_bash
 
@@ -69,8 +69,8 @@ def test_local_ci_runner_lifecycle_and_gates(
         run_ci.run_lint_job()
         ruff_requirement = run_ci.exact_dev_tool_requirement("ruff")
         assert calls == [
-            ["run", "--no-project", "python", "scripts/sync_version.py", "--check"],
-            ["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"],
+            ["run", "--no-project", "python", "scripts/dev/sync_version.py", "--check"],
+            ["run", "--no-project", "python", "scripts/dev/sync_feature_schema.py", "--check"],
             ["tool", "run", "--isolated", ruff_requirement, "check", "s2and", "scripts", "tests"],
             ["tool", "run", "--isolated", ruff_requirement, "format", "--check", "s2and", "scripts", "tests"],
         ]
@@ -122,7 +122,7 @@ def test_local_ci_runner_lifecycle_and_gates(
                     "run",
                     "--no-sync",
                     "python",
-                    "scripts/verification/smoke_installed_rust_api.py",
+                    "scripts/release/verification/smoke_installed_rust_api.py",
                 ]
                 assert uv_calls[1][0] == [
                     "run",
@@ -237,12 +237,12 @@ run_hook_case() {
         uv() {
             printf '%s\n' "$*" >> commands
             case "$*" in
-                'run python scripts/sync_version.py --print-targets')
+                'run python scripts/dev/sync_version.py --print-targets')
                     printf 'VERSION\r\nfolder with spaces/manifest.toml\r\nuv.lock\r\n' ;;
-                'run python scripts/sync_version.py --check') return "$CHECK_STATUS" ;;
-                'run python scripts/sync_version.py') return "$SYNC_STATUS" ;;
+                'run python scripts/dev/sync_version.py --check') return "$CHECK_STATUS" ;;
+                'run python scripts/dev/sync_version.py') return "$SYNC_STATUS" ;;
                 'sync --extra dev') return 0 ;;
-                'run --active --no-project ruff format scripts/sync_version.py') return 0 ;;
+                'run --active --no-project ruff format scripts/dev/sync_version.py') return 0 ;;
                 *) return 98 ;;
             esac
         }
@@ -269,8 +269,8 @@ run_hook_case c_failed VERSION 1 9 9
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert not (hook_dir / "c_unrelated" / "commands").exists()
     assert (hook_dir / "c_synced" / "commands").read_text().splitlines() == [
-        "run python scripts/sync_version.py --print-targets",
-        "run python scripts/sync_version.py --check",
+        "run python scripts/dev/sync_version.py --print-targets",
+        "run python scripts/dev/sync_version.py --check",
     ]
     assert (hook_dir / "c_updated" / "staged-files").read_text().splitlines() == [
         "<VERSION>",
@@ -556,3 +556,14 @@ def test_distribution_and_license_archive_verifiers(tmp_path: Path, subtests: py
             assert "missing source modules" in str(error.value) and MODULE_PATH in str(error.value)
             if archive_kind == "wheel":
                 assert "must contain 1 native extension" in str(error.value)
+
+
+def test_ty_covers_every_script_stage_folder() -> None:
+    # A new stage folder missing from the hand list would skip type checking silently.
+    repo = Path(run_ci.__file__).resolve().parents[2]
+    stage_dirs = {
+        f"scripts/{path.name}"
+        for path in (repo / "scripts").iterdir()
+        if path.is_dir() and any(path.rglob("*.py")) and path.name != "__pycache__"
+    }
+    assert stage_dirs == set(run_ci.ACTIVE_NESTED_SCRIPT_DIRS)

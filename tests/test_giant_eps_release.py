@@ -16,11 +16,12 @@ from s2and.metrics import b3_precision_recall_fscore
 from s2and.production_bundle import finalize_production_bundle
 from s2and.production_model import canonical_artifact_hashes, load_production_model
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust
-from scripts.eps_sweep import apply_reviewed_eps as apply_reviewed_eps_module
-from scripts.eps_sweep import build_linking_eps_gold, orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
-from scripts.eps_sweep.apply_reviewed_eps import apply_reviewed_eps
-from scripts.eps_sweep.build_linking_eps_gold import _build_dataset_constraints, parse_args
-from scripts.eps_sweep.common import (
+from scripts.common.block_roles import load_block_roles
+from scripts.common.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
+from scripts.eps import apply_reviewed_eps as apply_reviewed_eps_module
+from scripts.eps import orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
+from scripts.eps.apply_reviewed_eps import apply_reviewed_eps
+from scripts.eps.common import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
     RELEASE_ROUTE,
@@ -28,7 +29,7 @@ from scripts.eps_sweep.common import (
     read_sweep_curve,
     write_json,
 )
-from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 from tests.raw_arrow_helpers import base_arrow_paths, write_ipc
@@ -103,7 +104,6 @@ def _curve(
     root: Path,
     model_hash: str = "a" * 64,
     limited: bool = False,
-    mode: str = "orcid-b3",
     *,
     with_source_map: bool = False,
     test_signature: str = "q1",
@@ -122,7 +122,7 @@ def _curve(
     plan = {
         "dataset": "unit",
         "model_manifest_sha256": model_hash,
-        "score_mode": mode,
+        "score_mode": "orcid-b3",
         "limited_run": limited,
         "clustering_source": CLUSTERING_SOURCE,
         "route": RELEASE_ROUTE,
@@ -144,29 +144,16 @@ def _curve(
     pd.DataFrame(
         {"eps": [0.55, 0.65], "precision": [0.9, 0.7], "recall": [0.8, 1], "f1": [0.85, 0.82], "reference_coverage": 1}
     ).to_csv(diagnostic, sep="\t", index=False)
-    if mode == "orcid-b3":
-        scores = dataset / "eps_b3.tsv"
-        pd.DataFrame(
-            {
-                "eps": [0.55, 0.65],
-                "precision": [1, 0.8],
-                "recall": [0.8, 1],
-                "f1": [8 / 9, 8 / 9],
-                "reference_coverage": [1, 1],
-            }
-        ).to_csv(scores, sep="\t", index=False)
-    else:
-        scores = dataset / "eps_overall.tsv"
-        pd.DataFrame(
-            {
-                "eps": [0.55, 0.65],
-                "weight": "weight_query_class_balanced",
-                "scope_type": "overall",
-                "scope_value": "all",
-                "positive_recall": [0.8, 1],
-                "negative_separation": [1, 0.8],
-            }
-        ).to_csv(scores, sep="\t", index=False)
+    scores = dataset / "eps_b3.tsv"
+    pd.DataFrame(
+        {
+            "eps": [0.55, 0.65],
+            "precision": [1, 0.8],
+            "recall": [0.8, 1],
+            "f1": [8 / 9, 8 / 9],
+            "reference_coverage": [1, 1],
+        }
+    ).to_csv(scores, sep="\t", index=False)
     write_json(
         dataset / "summary.json",
         {
@@ -363,13 +350,13 @@ def test_completed_curve_rejects_stale_or_incomplete_files(tmp_path: Path) -> No
     plan_bytes = plan.read_bytes()
     plan.write_bytes(plan_bytes + b"\n")
     with pytest.raises(ValueError, match="plan"):
-        read_sweep_curve(tmp_path, "unit", "orcid-b3")
+        read_sweep_curve(tmp_path, "unit")
     plan.write_bytes(plan_bytes)
 
     scores = dataset / "eps_b3.tsv"
     pd.read_csv(scores, sep="\t").iloc[:1].to_csv(scores, sep="\t", index=False)
     with pytest.raises(ValueError, match="scores change"):
-        read_sweep_curve(tmp_path, "unit", "orcid-b3")
+        read_sweep_curve(tmp_path, "unit")
 
     summary = dataset / "summary.json"
     completed = json.loads(summary.read_bytes())
@@ -378,7 +365,7 @@ def test_completed_curve_rejects_stale_or_incomplete_files(tmp_path: Path) -> No
         plot_b3_eps_sweeps.plot(tmp_path, ["unit"], tmp_path / "plot.png")
 
 
-def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path) -> None:
+def test_review_rejects_proxy_or_bounded_curves(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     manifest = source / "manifest.json"
@@ -387,10 +374,9 @@ def test_review_rejects_diagnostic_or_bounded_curves(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bounded smoke"):
         _apply(tmp_path, source)
 
-    # Validate a complete diagnostic curve before rejecting it for release.
-    shutil.rmtree(dataset)
-    _curve(tmp_path / "curves", sha256_file(manifest), mode="safe-action-proxy")
-    with pytest.raises(ValueError, match="diagnostic"):
+    plan = json.loads((dataset / "plan.json").read_bytes())
+    _update_curve_plan(dataset, {**plan, "score_mode": "safe-action-proxy"})
+    with pytest.raises(ValueError, match="must use ORCID B3"):
         _apply(tmp_path, source)
 
 
@@ -516,10 +502,8 @@ def test_release_review_rejects_changed_source_map_before_test_resolution(tmp_pa
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize(("command", "with_source_map"), [("sweep", False), ("gold", True)])
-def test_eps_commands_reject_an_unmatched_expected_source_map(
-    tmp_path: Path, command: str, with_source_map: bool
-) -> None:
+@pytest.mark.parametrize("with_source_map", [False, True])
+def test_eps_sweep_rejects_an_unmatched_expected_source_map(tmp_path: Path, with_source_map: bool) -> None:
     _source_snapshot(tmp_path, with_clone=with_source_map)
     args = [
         "--output-dir",
@@ -528,23 +512,20 @@ def test_eps_commands_reject_an_unmatched_expected_source_map(
         "0" * 64,
     ]
     with pytest.raises(ValueError, match="SHA-256 differs"):
-        if command == "sweep":
-            parsed = sweep_eps_on_linking_gold.parse_args(
-                [
-                    "--dataset",
-                    "unit",
-                    "--arrow-root",
-                    str(tmp_path),
-                    "--model-path",
-                    str(tmp_path / "model"),
-                    "--batching-threshold",
-                    "15000",
-                    *args,
-                ]
-            )
-            sweep_eps_on_linking_gold.run(parsed)
-        else:
-            build_linking_eps_gold.main(["--bundle-root", str(tmp_path), "--datasets", "unit", *args])
+        parsed = sweep_eps_on_linking_gold.parse_args(
+            [
+                "--dataset",
+                "unit",
+                "--arrow-root",
+                str(tmp_path),
+                "--model-path",
+                str(tmp_path / "model"),
+                "--batching-threshold",
+                "15000",
+                *args,
+            ]
+        )
+        sweep_eps_on_linking_gold.run(parsed)
     assert not (tmp_path / "output").exists()
 
 
@@ -698,6 +679,86 @@ def test_eps_only_update_accepts_an_explicit_dataset_list_and_preserves_artifact
     assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
     assert load_production_model(output).cluster_model.eps == 0.65
     assert load_production_model(source).cluster_model.eps == 0.5
+
+
+def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Path) -> None:
+    shared = "0000-0002-1694-233X"
+    local = "0000-0001-5000-0007"
+    role_path = tmp_path / "assignments.json"
+    result = assign_block_roles(
+        [
+            BlockSpec("unit", 3, frozenset({shared, local}), source_split="development"),
+            BlockSpec("sealed", 2, frozenset({shared}), source_split="holdout"),
+        ],
+        {"eps_cal": 1, "final_test_a": 1},
+        closure_mode="home_pool",
+        enforce_source_splits=True,
+    )
+    write_json(role_path, result)
+    assert result["verification"]["raw_cross_role_orcid_overlap"] == 1
+    assert result["verification"]["cross_role_orcid_overlap"] == 0
+    block_roles = load_block_roles(role_path)
+    source = _complete_model(tmp_path)
+    sweep_root = tmp_path / "curves"
+    sweep = _curve(sweep_root, sha256_file(source / "manifest.json"))
+    plan_path = sweep / "plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    raw = base_arrow_paths(tmp_path / "raw")
+    with pa.OSFile(raw["signatures"], "rb") as handle:
+        table = pa.ipc.open_file(handle).read_all()
+    table = table.set_column(
+        table.schema.get_field_index("author_orcid"), "author_orcid", pa.array([shared, local, local])
+    )
+    table = table.append_column("author_block", pa.array(["unit"] * 3))
+    paths = write_arrow_tables_bundle(tmp_path / "raw", {"signatures": table})
+    write_test_arrow_artifact_manifest(tmp_path / "raw", {**raw, **paths})
+    with ArrowDataset.open(tmp_path / "raw") as arrow:
+        reference = orcid_b3.read_reference(
+            arrow,
+            Path(plan["arrow_root"]),
+            "unit",
+            test_identities=frozenset(),
+            error_records=frozenset(),
+            allow_all_identities=True,
+            block_roles=block_roles,
+        )
+    assert reference.with_singletons == {"s1": local, "s2": local}
+    assert reference.stats["excluded_non_home_role_records"] == 1
+
+    reference_path = sweep / "orcid_reference.parquet"
+    summary_path = sweep / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    def set_sweep(labels: dict[str, str], *, bind_manifest: bool) -> None:
+        pd.DataFrame({"signature_id": list(labels), "orcid": list(labels.values())}).to_parquet(reference_path)
+        plan["reference"] = {**reference.stats, "sha256": sha256_file(reference_path)}
+        if not bind_manifest:
+            del plan["reference"][orcid_b3.BLOCK_ROLE_SHA256_FIELD]
+        write_json(plan_path, plan)
+        write_json(summary_path, {**summary, "plan_sha256": sha256_file(plan_path)})
+
+    def apply() -> dict:
+        return apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            sweep_root,
+            ["unit"],
+            0.65,
+            "Fixture review",
+            tmp_path / "review.json",
+            expected_batching_threshold=15000,
+            block_role_assignments=role_path,
+        )
+
+    set_sweep(reference.with_singletons, bind_manifest=False)
+    with pytest.raises(ValueError, match="same frozen block roles"):
+        apply()
+    set_sweep({**reference.with_singletons, "q1": shared}, bind_manifest=True)
+    with pytest.raises(ValueError, match="outside its home role"):
+        apply()
+    set_sweep(reference.with_singletons, bind_manifest=True)
+    assert apply()["sweep_plans"]["unit"]["reference"][orcid_b3.BLOCK_ROLE_SHA256_FIELD] == block_roles.sha256
+    assert load_production_model(tmp_path / "output").cluster_model.eps == 0.65
 
 
 def test_owner_review_can_set_the_close_pair_bonus_and_release_version(tmp_path: Path) -> None:
@@ -856,56 +917,6 @@ def test_review_requires_sweep_root_and_datasets_together(tmp_path: Path) -> Non
     assert not (tmp_path / "output").exists()
 
 
-def test_proxy_builder_excludes_initial_query_origin(tmp_path: Path) -> None:
-    components = tmp_path / "components"
-    components.mkdir()
-    pd.DataFrame(
-        {
-            "dataset": ["unit", "unit"],
-            "candidate_component_key": ["profile", "profile"],
-            "member_index": [0, 1],
-            "signature_id": ["origin", "other"],
-        }
-    ).to_parquet(components / "unit_members.parquet", index=False)
-    map_path = _source_snapshot(tmp_path, source="origin", with_clone=True)
-    clone = derived_query_id("visibleq:", "origin", "source-paper")
-    labels = pd.DataFrame(
-        [
-            {
-                "dataset": "unit",
-                "table_name": "dev.parquet",
-                "split": "calibration_fit",
-                "source_key": "dev",
-                "source_kind": "manual",
-                "supervision_type": "manual",
-                "query_group_id": "query",
-                "query_signature_id": clone,
-                "query_view": "initial_only",
-                "candidate_component_key": "profile",
-                "label": 1,
-            }
-        ]
-    )
-    pairs, conflicts, summary = _build_dataset_constraints(tmp_path, "unit", labels)
-    assert pairs["member_signature_id"].tolist() == ["other"]
-    assert conflicts.empty
-    assert summary["excluded_initial_origin_rows"] == 1
-    assert summary[MAP_SHA256_FIELD] == sha256_file(map_path)
-
-    map_path.write_text(
-        json.dumps({"dataset": "unit", "source_query_signature_id": "absent", "initial_query_signature_id": clone})
-        + "\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="records are absent"):
-        _build_dataset_constraints(tmp_path, "unit", labels)
-
-
-def test_proxy_builder_cli_rejects_test_assignment() -> None:
-    with pytest.raises(SystemExit):
-        parse_args(["--bundle-root", "data", "--output-dir", "out", "--datasets", "unit", "--task-splits", "test"])
-
-
 def test_completed_output_cannot_be_rebound_by_dry_run(tmp_path: Path) -> None:
     dataset = _curve(tmp_path)
     before = (dataset / "plan.json").read_bytes()
@@ -960,3 +971,64 @@ def test_eps_resolves_hash_bound_replay_data_in_combined_snapshot(tmp_path: Path
     replay.write_bytes(replay.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="SHA-256|checksum|sha256"):
         arrow_dataset_dir(tmp_path, "giant")
+
+
+def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Path) -> None:
+    dataset = _curve(tmp_path)
+    plan = json.loads((dataset / "plan.json").read_bytes())
+    _update_curve_plan(dataset, plan | {"distance_policy_version": DISTANCE_POLICY_VERSION - 1})
+    with pytest.raises(ValueError, match="another distance policy"):
+        read_sweep_curve(tmp_path, "unit")
+
+
+@pytest.mark.parametrize("mode", ["strict", "home_pool"])
+def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mode: str) -> None:
+    from types import SimpleNamespace
+
+    from s2and._sha256 import sha256_file
+    from scripts.common.block_roles import load_block_roles
+    from scripts.common.initial_query_sources import MAP_SHA256_FIELD
+    from scripts.eps.apply_reviewed_eps import _require_test_separated_reference
+    from scripts.eps.orcid_b3 import BLOCK_ROLE_SHA256_FIELD, REFERENCE_POLICY_ALL_IDENTITIES
+    from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
+
+    block = "a ross"
+    home, sealed = "0000-0001-5000-0007", "0000-0002-1694-233X"
+    role_path = tmp_path / "roles.json"
+    role_path.write_text(
+        json.dumps(
+            assign_block_roles(
+                [BlockSpec(block, 2, frozenset({home})), BlockSpec("b ross", 2, frozenset({sealed}))],
+                {"eps_cal": 1, "final_test_a": 1},
+                pinned_roles={block: "eps_cal", "b ross": "final_test_a"},
+                closure_mode=mode,
+            )
+        ),
+        encoding="utf-8",
+    )
+    roles = load_block_roles(role_path)
+    assert not roles.orcid_home_role
+    ref = tmp_path / block / "orcid_reference.parquet"
+    ref.parent.mkdir()
+    pd.DataFrame({"signature_id": ["one", "two"], "orcid": [sealed, sealed]}).to_parquet(ref, index=False)
+    digest = "a" * 64
+    report = {
+        "arrow_root": str(tmp_path),
+        MAP_SHA256_FIELD: digest,
+        "reference": {
+            "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES,
+            "sha256": sha256_file(ref),
+            MAP_SHA256_FIELD: digest,
+            BLOCK_ROLE_SHA256_FIELD: roles.sha256,
+        },
+    }
+    with pytest.raises(ValueError, match="ORCID .* absent .* frozen block"):
+        _require_test_separated_reference(
+            tmp_path,
+            block,
+            report,
+            lambda *_: frozenset(),
+            SimpleNamespace(sha256=digest),
+            verified_eps_cal_blocks=frozenset({block}),
+            block_roles=roles,
+        )

@@ -3,7 +3,7 @@
 Use this procedure before final release evaluation.
 Benchmark validation supplies the initial EPS.
 Giant-block curves supply the final operating-point review.
-The release owner chooses EPS after review of both views and benchmark validation.
+The release owner chooses EPS after reviewing the giant-block curves and benchmark validation.
 The scripts do not choose EPS automatically.
 
 ## Inputs
@@ -66,11 +66,7 @@ Those steps run on `orcid_free_arrow/` in the output directory, a dataset copy w
 Use it for `--max-subblocks` smoke runs; it does not select EPS.
 ORCID references do not establish complete or error-free identity gold.
 
-The diagnostic view uses active `calibration_fit` and `calibration_check` task assignments.
-It excludes test assignments, unknown singleton supervision, self-pairs, and each initial query's source record.
-Conflicting pair labels remain in a separate output for review.
-An abstention can mean insufficient evidence rather than different authors.
-Read the negative-separation curve as a safe-action diagnostic, not universal identity precision.
+See [evaluation traps](negative_results.md#evaluation-traps) for pitfalls with proxy labels.
 
 ## Rehearse and measure the workload
 
@@ -84,7 +80,7 @@ $BatchingThreshold = 15000
 $Giants = @('a_khan', 'h_wang', 'j_smith', 's_gupta', 's_lee', 's_park')
 $Grid = @('0.40', '0.45', '0.50', '0.55', '0.60', '0.62', '0.64', '0.65', '0.66', '0.68', '0.70', '0.75', '0.80')
 
-uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
+uv run --no-sync python scripts/eps/sweep_eps_on_linking_gold.py `
   --dataset j_smith --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
   --score-mode orcid-b3 --output-dir "$EpsRun/smoke/j_smith" --route bulk `
   --batching-threshold $BatchingThreshold `
@@ -103,17 +99,17 @@ Use fresh output paths for plans and measured runs.
 Review the runtime estimate and approved resource limits before the full run.
 Keep stdout, stderr, and a process ID for long jobs.
 Distance caches permit recovery after an interrupted run.
-Reuse requires matching package and distance-policy versions. Use `--overwrite-dists --compute-missing-dists` to rebuild incompatible caches.
+Reuse requires matching package, distance policy, and pairwise bundle feature contract. Use `--overwrite-dists --compute-missing-dists` to rebuild incompatible caches.
 The production route caches every subblock of each target block and runs the linker steps once per EPS value.
 Time one EPS value on the largest giant before choosing the grid.
 
-## Produce both views
+## Run the B3 sweep
 
 Run each giant sequentially within the approved resource budget:
 
 ```powershell
 foreach ($Dataset in $Giants) {
-  uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
+  uv run --no-sync python scripts/eps/sweep_eps_on_linking_gold.py `
     --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
     --score-mode orcid-b3 --output-dir "$EpsRun/b3/$Dataset" `
     --distance-cache-dir "$EpsRun/b3-cache/$Dataset" `
@@ -123,34 +119,11 @@ foreach ($Dataset in $Giants) {
   if ($LASTEXITCODE -ne 0) { throw "B3 sweep fails for $Dataset" }
 }
 
-uv run --no-sync python scripts/eps_sweep/build_linking_eps_gold.py `
-  --bundle-root $Snapshot --datasets $Giants --output-dir "$EpsRun/proxy-gold"
-
-foreach ($Dataset in $Giants) {
-  uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
-    --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
-    --gold-path "$EpsRun/proxy-gold/${Dataset}_pair_constraints.parquet" `
-    --output-dir "$EpsRun/proxy/$Dataset" `
-    --batching-threshold $BatchingThreshold `
-    --eps-values $Grid --n-jobs 12 --total-ram-bytes 137438953472 `
-    --compute-missing-dists --allow-full-run
-  if ($LASTEXITCODE -ne 0) { throw "Diagnostic sweep fails for $Dataset" }
-}
-
-uv run --no-sync python scripts/eps_sweep/plot_b3_eps_sweeps.py `
+uv run --no-sync python scripts/eps/plot_b3_eps_sweeps.py `
   --root "$EpsRun/b3" --datasets $Giants --output "$EpsRun/b3.png" --reference-eps 0.57
-uv run --no-sync python scripts/eps_sweep/plot_q_class_eps_sweeps.py `
-  --root "$EpsRun/proxy" --datasets $Giants --output "$EpsRun/proxy.png" `
-  --weight weight_query_label_balanced --reference-eps 0.57
 ```
 
 Set `--reference-eps` to the actual initial EPS for another release.
-The diagnostic plot uses query/label weights to match the original recall/separation plot.
-Each star marks the highest tested diagnostic accuracy for its source.
-Stars do not select release EPS or maximize B3.
-The diagnostic plot excludes pairs from separate subblocks.
-Inspect their counts in `eps_boundary_pairs.tsv`.
-Use `--weight weight_query_class_balanced` for the previous equal-query view.
 Keep completed output directories immutable.
 Use a new output directory and the same verified distance-cache directory for a refined grid.
 Each cache binds the model, Arrow generation, signature order, and ORCID policy.
@@ -161,7 +134,6 @@ Plots reject missing datasets, incomplete grids, and mixed models.
 
 Review B3 precision, recall, and F1 for every giant.
 Compare the repeated curves (solid) with the singleton-inclusive curves (dashed).
-Review the diagnostic plot and its subblock-boundary counts.
 Check full reference coverage and the matched benchmark validation curve.
 Verify booster hashes before reuse of a benchmark validation report.
 Set `$ReviewedEps` to the value you select.
@@ -170,7 +142,7 @@ Record the reason for that choice.
 ```powershell
 $PrecisionF1Tolerance = (Get-Content -Raw "$Snapshot/pairwise/model_plan.json" | ConvertFrom-Json).eps.precision_f1_tolerance
 if ($null -eq $PrecisionF1Tolerance) { $PrecisionF1Tolerance = 0 }
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
+uv run --no-sync python scripts/eps/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `
   --expected-batching-threshold $BatchingThreshold --precision-f1-tolerance $PrecisionF1Tolerance `
@@ -185,7 +157,7 @@ The `--datasets` list must match the resulting datasets. The command reports and
 The plans must all point to the same snapshot. Apply and the plotters check each plan's recorded
 dataset name. Apply requires both completed curves for every requested dataset.
 It reads the final-test assignments again and rejects a reference that contains a final-test record.
-It requires identity B3 curves; the safe-action plot remains diagnostic evidence.
+It requires identity B3 curves.
 It writes a fresh complete model and preserves every trained artifact byte.
 
 When internal exports supply the review, omit `--sweep-root` and the dataset and threshold options.
@@ -194,7 +166,7 @@ It still checks the EPS range, the fresh output paths, the model load, and the u
 Release `1.3` used this form:
 
 ```powershell
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
+uv run --no-sync python scripts/eps/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3" `
   --eps 0.53 --review-note '<decision, tradeoff, and internal evidence location>' `
   --output-report "$EpsRun/eps_review.json"

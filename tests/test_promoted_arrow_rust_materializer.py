@@ -15,8 +15,8 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training.classic import OfficialBundle
-from scripts.production.model import train_linker_and_finalize as promoted_train
-from scripts.production.model.train_linker_and_finalize import (
+from scripts.linker import train_linker_and_finalize as promoted_train
+from scripts.linker.train_linker_and_finalize import (
     _arrow_row_seed_bypass_mask,
     _clean_arrow_rust_structural_rows,
     _load_target,

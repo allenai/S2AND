@@ -15,6 +15,7 @@ pub(crate) struct RustFeaturizer {
     cluster_seeds_require: HashMap<String, ClusterId>,
     cluster_seed_require_value: f64,
     cluster_seed_disallow_value: f64,
+    legacy_paper_years: bool,
     name_counts_manifest_sha256: Option<String>,
     cluster_seeds_disallow_index: OnceLock<HashMap<String, HashSet<String>>>,
 }
@@ -168,6 +169,7 @@ mod constraint_key_tests {
             cluster_seeds_require,
             cluster_seed_require_value: -1.0,
             cluster_seed_disallow_value: 1e6,
+            legacy_paper_years: false,
             name_counts_manifest_sha256: None,
             cluster_seeds_disallow_index: OnceLock::new(),
         }
@@ -841,7 +843,7 @@ impl RustFeaturizer {
 
         feats[columns::VENUE_OVERLAP] =
             counter_jaccard_data(&p1.venue_ngrams, &p2.venue_ngrams, f64::INFINITY);
-        feats[columns::YEAR_DIFF] = year_diff(p1.year, p2.year);
+        feats[columns::YEAR_DIFF] = year_diff(p1.year, p2.year, self.legacy_paper_years);
 
         feats[columns::TITLE_OVERLAP_WORDS] =
             counter_jaccard_data(&p1.title_words, &p2.title_words, f64::INFINITY);
@@ -2111,7 +2113,8 @@ impl RustFeaturizer {
                             raw_venue: raw_paper.venue.clone(),
                             raw_journal: raw_paper.journal_name.clone(),
                             raw_authors,
-                            year: raw_paper.year.filter(|year| *year > 0),
+                            // Preserve source stamps for the historical year-gap placement rule.
+                            year: raw_paper.year,
                             has_abstract: raw_paper.has_abstract,
                             predicted_language,
                             language_reliability,
@@ -2223,6 +2226,7 @@ impl RustFeaturizer {
             cluster_seeds_require,
             cluster_seed_require_value,
             cluster_seed_disallow_value,
+            legacy_paper_years: false,
             name_counts_manifest_sha256: raw_name_counts.manifest_sha256().map(str::to_owned),
             cluster_seeds_disallow_index: OnceLock::new(),
         })
@@ -2231,6 +2235,14 @@ impl RustFeaturizer {
 
 #[pymethods]
 impl RustFeaturizer {
+    /// Keep source stamps on requests scored by contract 1.
+    fn with_legacy_paper_years(&self) -> Self {
+        Self {
+            legacy_paper_years: true,
+            ..self.clone()
+        }
+    }
+
     #[staticmethod]
     #[pyo3(
         signature = (
@@ -2412,6 +2424,7 @@ impl RustFeaturizer {
             cluster_seeds_require,
             cluster_seed_require_value: self.cluster_seed_require_value,
             cluster_seed_disallow_value: self.cluster_seed_disallow_value,
+            legacy_paper_years: self.legacy_paper_years,
             name_counts_manifest_sha256: self.name_counts_manifest_sha256.clone(),
             cluster_seeds_disallow_index: OnceLock::new(),
         })
@@ -2433,6 +2446,7 @@ impl RustFeaturizer {
             cluster_seeds_disallow: extract_pair_set(cluster_seeds_disallow)?,
             cluster_seed_require_value: self.cluster_seed_require_value,
             cluster_seed_disallow_value: self.cluster_seed_disallow_value,
+            legacy_paper_years: self.legacy_paper_years,
             name_counts_manifest_sha256: self.name_counts_manifest_sha256.clone(),
             cluster_seeds_disallow_index: OnceLock::new(),
         })
@@ -2920,8 +2934,7 @@ impl RustFeaturizer {
         (full_first_names, orcids)
     }
 
-    /// Paper year per signature, for years above zero, as the featurizer reads years.
-    /// The year-gap split after name-conflict repair needs them.
+    /// Source year per signature for the year-gap split, including stamps on undated papers.
     fn signature_years(&self) -> Vec<(String, i64)> {
         self.signature_id_order()
             .iter()

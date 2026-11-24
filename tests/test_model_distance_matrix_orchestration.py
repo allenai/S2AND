@@ -11,7 +11,7 @@ import s2and.model as model_module
 from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer
+from s2and.model import Clusterer, bulk, distances
 from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext
 from tests.helpers import build_dummy_dataset
@@ -75,7 +75,7 @@ def test_block_feature_union_is_built_once_and_projected(
         )
 
     monkeypatch.setattr(
-        model_module,
+        distances,
         "build_block_upper_triangle_feature_matrix_indexed_rust",
         build_features,
     )
@@ -147,8 +147,8 @@ def test_rust_distance_matrix_propagates_ram_bounded_chunk_plan(
         captured["scorer_total_ram_bytes"] = total_ram_bytes
         return np.full(len(chunk.labels), 0.25, dtype=np.float64), 0.0
 
-    monkeypatch.setattr(model_module, "_compute_predict_batch_chunk_plan", chunk_plan)
-    monkeypatch.setattr(model_module, "_guard_predict_block_matrix_allocation", allocation_guard)
+    monkeypatch.setattr(distances, "_compute_predict_batch_chunk_plan", chunk_plan)
+    monkeypatch.setattr(distances, "_guard_predict_block_matrix_allocation", allocation_guard)
     monkeypatch.setattr(Clusterer, "_distance_matrix_chunk_helper_rust", chunk_helper)
     monkeypatch.setattr(Clusterer, "_predict_distance_matrix_chunk", predict_chunk)
 
@@ -182,7 +182,7 @@ def test_fastcluster_rejects_native_constraint_count_mismatch(
         ),
     )
     monkeypatch.setattr(
-        model_module,
+        distances,
         "_get_constraint_labels_block_upper_triangle_indexed_rust",
         lambda _indices, *, max_pairs, **_kwargs: np.full(max_pairs - 1, np.nan),
     )
@@ -241,7 +241,7 @@ def test_predict_from_rust_featurizer_streams_only_nontrivial_blocks(
         cluster_calls.append((block_key, tuple(signatures)))
         return [0] * len(signatures)
 
-    monkeypatch.setattr(model_module, "_build_signature_index_by_id", build_index)
+    monkeypatch.setattr(bulk, "_build_signature_index_by_id", build_index)
     monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", make_dists)
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", cluster_block)
 
@@ -280,7 +280,7 @@ def test_predict_from_rust_featurizer_skips_setup_for_only_trivial_blocks(
     def unexpected(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("trivial blocks must not run pairwise prediction setup")
 
-    monkeypatch.setattr(model_module, "_build_signature_index_by_id", unexpected)
+    monkeypatch.setattr(bulk, "_build_signature_index_by_id", unexpected)
     monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", unexpected)
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", unexpected)
 

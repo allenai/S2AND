@@ -2,9 +2,8 @@ import numpy as np
 import pytest
 from lightgbm import LGBMClassifier
 
-import s2and.model as model_module
 from s2and.consts import LARGE_INTEGER
-from s2and.model import _predict_and_combine
+from s2and.model import _predict_and_combine, distances
 from s2and.production_model import NativeLightGBMBinaryClassifier
 
 
@@ -24,7 +23,7 @@ class NonnegativeClassifier:
 def test_large_constrained_batch_never_sends_sentinel_rows_to_classifiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", 16)
+    monkeypatch.setattr(distances, "_PREDICT_FEATURE_COPY_MAX_BYTES", 16)
     classifier = NonnegativeClassifier()
     nameless_classifier = NonnegativeClassifier()
     features = np.asarray(
@@ -93,7 +92,7 @@ def test_real_native_and_python_scorers_combine_distances_in_original_row_order(
     copy_budget: int,
 ) -> None:
     """Mixing scorer APIs must preserve class-0 averaging and supervised rows."""
-    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
+    monkeypatch.setattr(distances, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
     main_features = np.asarray([[-3.0], [-2.0], [0.5], [1.0], [3.0]], dtype=np.float32)
     nameless_features = np.asarray([[0.0], [-3.0], [3.0], [-1.0], [0.0]], dtype=np.float32)
     labels = np.asarray([np.nan, -LARGE_INTEGER, np.nan, 1 - LARGE_INTEGER, np.nan], dtype=np.float64)
@@ -125,7 +124,7 @@ def test_native_scorers_take_compact_rows_as_views(
     copy_budget: int,
 ) -> None:
     """Compact rows reach native scorers without copies and score as the dense rows do."""
-    monkeypatch.setattr(model_module, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
+    monkeypatch.setattr(distances, "_PREDICT_FEATURE_COPY_MAX_BYTES", copy_budget)
     main, nameless = trained_scorers[0][1], trained_scorers[1][1]
     dense_main = np.linspace(-4.0, 4.0, 9).reshape(-1, 1)
     dense_nameless = dense_main[::-1].copy()

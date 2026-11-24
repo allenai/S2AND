@@ -13,16 +13,16 @@ from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.production_training_contract import load_model_plan
-from scripts.convert_to_arrow import _write_root_manifest
-from scripts.production.data.package_corrected_datasets import (
+from scripts.common.unknown_signatures import load_unknown_signatures
+from scripts.intake.convert_to_arrow import _write_root_manifest
+from scripts.linker.linker_source_bundle import validate_portable_source_bundle
+from scripts.pairwise.package_pairwise_inputs import package_pairwise_inputs
+from scripts.release.package_corrected_datasets import (
     DEFAULT_EPS_GRID,
     main,
     package_corrected_datasets,
     validate_corrected_datasets,
 )
-from scripts.production.data.package_pairwise_inputs import package_pairwise_inputs
-from scripts.production.model.linker_source_bundle import validate_portable_source_bundle
-from scripts.production.model.unknown_signatures import load_unknown_signatures
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import write_pairwise_dataset
 from tests.test_linker_source_bundle import (
@@ -358,7 +358,7 @@ def test_complete_snapshot_requires_public_license_before_copy(package_inputs: d
 def test_copy_file_hardlinks_and_is_idempotent_on_matching_sha256(tmp_path: Path) -> None:
     import os
 
-    from scripts.production.data.package_corrected_datasets import _copy_file
+    from scripts.release.package_corrected_datasets import _copy_file
 
     source = tmp_path / "source.txt"
     source.write_text("immutable payload\n", encoding="utf-8")

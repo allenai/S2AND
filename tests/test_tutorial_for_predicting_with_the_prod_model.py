@@ -191,7 +191,7 @@ def test_incremental_route_links_one_block_against_seeded_profiles(
                 "author_block": ["j wang", "j wang", "j wang", "j wang", "other"],
             }
         ),
-        "papers": pa.table({"paper_id": ["p1", "p2", "p3", "p4", "p5"], "year": [2010, 2020, None, 2001, 2010]}),
+        "papers": pa.table({"paper_id": ["p1", "p2", "p3", "p4", "p5"], "year": [2010, 2020, 1800, 2001, 2010]}),
     }
 
     def read_columns(dataset, name, columns):

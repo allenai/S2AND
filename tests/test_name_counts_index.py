@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
+from s2and import arrow_tables
 from s2and.arrow_inputs import MissingArrowArtifactError, require_name_counts_index_artifact
-from s2and.incremental_linking import feature_block_arrow
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import load_s2and_rust_extension
@@ -214,11 +214,11 @@ class _DuplicateNameMapping(Mapping[str, float]):
 
 
 def _read_index(path: Path) -> dict[str, float]:
-    header_struct = feature_block_arrow._NAME_COUNTS_INDEX_HEADER_STRUCT
-    record_struct = feature_block_arrow._NAME_COUNTS_INDEX_RECORD_STRUCT
+    header_struct = arrow_tables._NAME_COUNTS_INDEX_HEADER_STRUCT
+    record_struct = arrow_tables._NAME_COUNTS_INDEX_RECORD_STRUCT
     payload = path.read_bytes()
     magic, record_count, blob_offset, blob_size = header_struct.unpack_from(payload)
-    assert magic == feature_block_arrow._NAME_COUNTS_INDEX_MAGIC
+    assert magic == arrow_tables._NAME_COUNTS_INDEX_MAGIC
     blob = payload[blob_offset : blob_offset + blob_size]
     observed: dict[str, float] = {}
     for index in range(record_count):
@@ -233,7 +233,7 @@ def test_bounded_sort_runs_preserve_exact_binary_lookup_values(tmp_path: Path) -
     names = ("ada", "bea", "cy", "dee", "eve", "fay", "gia", "hal", "ian", "jay", "kim")
     mapping = {name: float(index + 2) for index, name in enumerate(names)}
     output_path = tmp_path / "first.bin"
-    metrics = feature_block_arrow._write_name_count_index_file(
+    metrics = arrow_tables._write_name_count_index_file(
         output_path,
         "first",
         mapping,
@@ -250,19 +250,19 @@ def test_bounded_sort_runs_preserve_exact_binary_lookup_values(tmp_path: Path) -
 
 def test_writer_rejects_duplicate_nonstring_and_invalid_count_entries(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="duplicate UTF-8 name 'ada'"):
-        feature_block_arrow.write_name_counts_index(
+        arrow_tables.write_name_counts_index(
             tmp_path,
             (_DuplicateNameMapping(), {}, {}, {}),
         )
 
     with pytest.raises(TypeError, match="name-count first keys must be strings"):
-        feature_block_arrow.write_name_counts_index(
+        arrow_tables.write_name_counts_index(
             tmp_path,
             ({1: 2.0, "1": 3.0}, {}, {}, {}),
         )
     for count in (float("nan"), 0.0):
         with pytest.raises(ValueError, match="finite positive number"):
-            feature_block_arrow.write_name_counts_index(tmp_path, ({"ada": count}, {}, {}, {}))
+            arrow_tables.write_name_counts_index(tmp_path, ({"ada": count}, {}, {}, {}))
     assert not (tmp_path / "name_counts_index").exists()
 
 
@@ -291,7 +291,7 @@ def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path, kind: str, 
     mappings[kind] = {name: 2.0}
 
     with pytest.raises(ValueError) as exc_info:
-        feature_block_arrow.write_name_counts_index(
+        arrow_tables.write_name_counts_index(
             tmp_path,
             tuple(mappings[mapping_kind] for mapping_kind in mapping_kinds),
         )
@@ -310,7 +310,7 @@ def test_name_count_key_contract_accepts_producible_canonical_keys() -> None:
         ("last-particle-initial", "last_first_initial", "van der berg a"),
     )
     for case_id, kind, name in cases:
-        assert feature_block_arrow._validated_name_count_entry(kind, name, 2.0) == (name, 2.0), case_id
+        assert arrow_tables._validated_name_count_entry(kind, name, 2.0) == (name, 2.0), case_id
 
 
 def test_fresh_writer_validates_each_name_count_entry_once(
@@ -319,16 +319,16 @@ def test_fresh_writer_validates_each_name_count_entry_once(
 ) -> None:
     mappings = ({"ada": 2.0, "grace": 3.0}, {"smith": 4.0}, {"ada smith": 2.0}, {"smith a": 2.0})
     validation_calls = 0
-    original_validator = feature_block_arrow._validated_name_count_entry
+    original_validator = arrow_tables._validated_name_count_entry
 
     def counted_validator(kind: str, raw_name: object, raw_count: object) -> tuple[str, float]:
         nonlocal validation_calls
         validation_calls += 1
         return original_validator(kind, raw_name, raw_count)
 
-    monkeypatch.setattr(feature_block_arrow, "_validated_name_count_entry", counted_validator)
+    monkeypatch.setattr(arrow_tables, "_validated_name_count_entry", counted_validator)
 
-    feature_block_arrow.write_name_counts_index(
+    arrow_tables.write_name_counts_index(
         tmp_path,
         mappings,
     )
@@ -347,7 +347,7 @@ def test_identical_counts_produce_byte_identical_flat_indexes(
     )
     reversed_mappings = tuple(dict(reversed(tuple(mapping.items()))) for mapping in mappings)
     outputs = [
-        feature_block_arrow.write_name_counts_index(tmp_path / label, values)
+        arrow_tables.write_name_counts_index(tmp_path / label, values)
         for label, values in (("first", mappings), ("second", reversed_mappings))
     ]
     indexes = [Path(index_path) for index_path, _metrics in outputs]
@@ -374,13 +374,13 @@ def test_reused_kind_hash_seed_preserves_binary_index_hashes() -> None:
         ("first-last-spaces", "first_last", "anne marie o connor"),
     ):
         name_bytes = name.encode("utf-8")
-        expected = feature_block_arrow._fnv64_bytes(
-            feature_block_arrow._NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes
+        expected = arrow_tables._fnv64_bytes(
+            arrow_tables._NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes
         )
 
         # The writer hashes each name from the kind's seed instead of the full prefix.
-        seed = feature_block_arrow._name_counts_index_kind_hash_seed(kind)
-        assert feature_block_arrow._fnv64_update(seed, name_bytes) == expected, case_id
+        seed = arrow_tables._name_counts_index_kind_hash_seed(kind)
+        assert arrow_tables._fnv64_update(seed, name_bytes) == expected, case_id
 
 
 def _temporary_indexes(root: Path) -> list[Path]:
@@ -391,7 +391,7 @@ def test_name_count_publication_retries_and_preserves_existing_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original_rename = Path.rename
-    real_writer = feature_block_arrow._write_name_count_index_file
+    real_writer = arrow_tables._write_name_count_index_file
     fail_material = True
 
     def fail_publication(path: Path, target: str | Path) -> Path:
@@ -411,7 +411,7 @@ def test_name_count_publication_retries_and_preserves_existing_index(
         written_kinds.append(kind)
         return real_writer(path, kind, mapping, **kwargs)
 
-    monkeypatch.setattr(feature_block_arrow, "_write_name_count_index_file", observe_write)
+    monkeypatch.setattr(arrow_tables, "_write_name_count_index_file", observe_write)
 
     with pytest.raises(OSError, match="injected material failure"):
         write_name_counts_index(tmp_path, tiny_name_counts_tuple())

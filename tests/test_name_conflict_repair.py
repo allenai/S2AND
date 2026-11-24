@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 from scipy.spatial.distance import squareform
 
-import s2and.block_corrections as block_corrections
 import s2and.name_conflict_repair as name_conflict_repair_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
+from s2and.corrections import block_corrections
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo
@@ -841,7 +841,7 @@ def test_eps_grid_from_a_rust_featurizer_refuses_required_seeds() -> None:
 
 
 def test_eps_sweep_applies_the_repair_to_cached_distances(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts.eps_sweep import sweep_eps_on_linking_gold
+    from scripts.eps import sweep_eps_on_linking_gold
 
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_build_arrow_featurizer", lambda *_args: _facts_featurizer())
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_cache_metadata", lambda *_args: {})

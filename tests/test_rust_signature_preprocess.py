@@ -2,12 +2,10 @@ from collections import Counter
 from itertools import combinations
 
 import numpy as np
-import pytest
 
-from s2and import feature_port, subblocking
+from s2and import feature_port
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, _single_pair_featurize
-from s2and.subblocking import make_subblocks
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, equalish, tiny_name_counts_index
 
 
@@ -197,42 +195,6 @@ def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path):
 
     assert equalish(python_features[coauthor_similarity_idx], rust_features[coauthor_similarity_idx])
     assert rust_features[coauthor_similarity_idx] == 1.0
-
-
-def test_subblocking_handles_missing_signature_affiliation_ngrams(monkeypatch: pytest.MonkeyPatch):
-    dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust")
-    signature_ids = list(dataset_rust.signatures.keys())
-    expected_affiliation_keys = {
-        signature_id: set(signature.author_info_affiliations_n_grams)
-        for signature_id, signature in dataset_rust.signatures.items()
-    }
-    for signature_id, signature in dataset_rust.signatures.items():
-        dataset_rust.signatures[signature_id] = signature._replace(author_info_affiliations_n_grams=None)
-
-    missing_ngram_keys: dict[str, set[str]] = {}
-    real_affiliation_keys = subblocking.signature_affiliation_feature_keys
-
-    def track_missing_affiliation_keys(signature):
-        assert signature.author_info_affiliations_n_grams is None
-        keys = real_affiliation_keys(signature)
-        missing_ngram_keys[signature.signature_id] = set(keys)
-        return keys
-
-    monkeypatch.setattr(subblocking, "signature_affiliation_feature_keys", track_missing_affiliation_keys)
-    output = make_subblocks(signature_ids, dataset_rust, maximum_size=2, first_k_letter_counts_sorted={})
-    assert sum(len(subblock) for subblock in output.values()) == len(signature_ids)
-    assert sorted(signature_id for subblock in output.values() for signature_id in subblock) == sorted(signature_ids)
-    assert sorted(tuple(sorted(subblock)) for subblock in output.values()) == [
-        ("0",),
-        ("1", "2"),
-        ("3", "7"),
-        ("4", "5"),
-        ("6", "8"),
-    ]
-    assert all(len(subblock) <= 2 for subblock in output.values())
-    assert missing_ngram_keys
-    for signature_id, keys in missing_ngram_keys.items():
-        assert keys == expected_affiliation_keys[signature_id]
 
 
 def test_classic_inference_uses_python_preprocessing() -> None:

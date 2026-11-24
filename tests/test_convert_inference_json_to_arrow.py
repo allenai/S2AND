@@ -10,10 +10,10 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
-import scripts.convert_to_arrow as convert_module
+import scripts.intake.convert_to_arrow as convert_module
 from s2and.arrow_inputs import ARROW_COLLECTION_KIND, ARROW_DATASET_KIND, ArrowDataset
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
-from scripts.convert_to_arrow import convert_service_json_to_arrow
+from scripts.intake.convert_to_arrow import convert_service_json_to_arrow
 
 
 def _read_table(path: str) -> pa.Table:

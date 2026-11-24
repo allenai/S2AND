@@ -10,8 +10,8 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 import s2and.runtime as runtime_module
+from s2and import arrow_tables
 from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData, Author, NameCounts
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
@@ -45,7 +45,7 @@ from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_from_preplanned_raw_arrow,
 )
 from s2and.model import Clusterer
-from scripts.arrow_conversion_helpers import (
+from scripts.common.arrow_conversion_helpers import (
     raw_planner_arrow_tables_from_anddata,
     write_raw_planner_arrow_from_anddata,
 )
@@ -581,7 +581,7 @@ def test_raw_planner_index_builds_and_reuses_bounded_batches(tmp_path: Path) -> 
     assert fresh["actual_max_batch_rows"] == 2
     assert reused["signatures_batch_index"] == {**fresh, "reused": True}
 
-    header_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT  # noqa: SLF001
+    header_struct = arrow_tables._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT  # noqa: SLF001
     header = index_path.read_bytes()
     with index_path.open("r+b") as index_file:
         values = list(header_struct.unpack(index_file.read(header_struct.size)))
@@ -626,10 +626,10 @@ def test_name_count_index_merge_failure_closes_sort_runs_before_cleanup(
         next(iter(records))
         raise RuntimeError("simulated merge failure")
 
-    monkeypatch.setattr(feature_block_arrow_module, "_write_sorted_name_count_records", fail_mid_merge)
+    monkeypatch.setattr(arrow_tables, "_write_sorted_name_count_records", fail_mid_merge)
 
     with pytest.raises(RuntimeError, match="simulated merge failure"):
-        feature_block_arrow_module._write_name_count_index_file(  # noqa: SLF001
+        arrow_tables._write_name_count_index_file(  # noqa: SLF001
             output_path,
             "first",
             {"ada": 1, "grace": 2},

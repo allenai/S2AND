@@ -10,14 +10,14 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-import scripts.convert_to_arrow as convert_to_arrow
+import scripts.intake.convert_to_arrow as convert_to_arrow
 from s2and.arrow_inputs import MissingArrowArtifactError
 from s2and.incremental_linking.feature_block import (
     write_arrow_ipc_table,
     write_raw_arrow_batch_lookup_indexes,
 )
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-from scripts.convert_to_arrow import RuntimeDatasetSources
+from scripts.intake.convert_to_arrow import RuntimeDatasetSources
 from tests.helpers import tiny_name_counts_tuple, write_test_arrow_artifact_manifest
 
 
@@ -707,7 +707,7 @@ def test_benchmark_overwrite_removes_only_stale_pair_artifacts(tmp_path: Path) -
 def test_runtime_conversion_rejects_sources_changed_during_conversion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import scripts.arrow_conversion_helpers as helpers
+    import scripts.common.arrow_conversion_helpers as helpers
 
     sources = _write_one_signature_sources(tmp_path)
     clusters_path = sources.source_dir / "clusters.json"

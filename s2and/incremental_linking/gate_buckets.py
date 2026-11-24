@@ -56,14 +56,3 @@ def validate_query_view(value: Any) -> QueryView:
     if view not in _VALID_QUERY_VIEWS:
         raise ValueError(f"Unknown retrieval query_view: {view!r}")
     return cast(QueryView, view)
-
-
-def normalize_query_views(query_view: str | Sequence[str], query_count: int) -> QueryView | tuple[QueryView, ...]:
-    """Validate scalar or per-query retrieval view input."""
-
-    if isinstance(query_view, str):
-        return validate_query_view(query_view)
-    views = tuple(validate_query_view(value) for value in query_view)
-    if len(views) != int(query_count):
-        raise ValueError(f"query_view length must match queries: {len(views)} != {int(query_count)}")
-    return views

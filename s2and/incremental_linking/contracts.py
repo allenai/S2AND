@@ -9,7 +9,8 @@ from typing import Any
 DEFAULT_RETRIEVAL_TOP_K = 25
 INCREMENTAL_LINKER_FORMAT_VERSION = 1
 # Feature and retrieval semantics require a new version even when column names stay equal.
-INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION = 1
+LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION = 1
+INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION = 2
 
 
 def canonical_json_digest(payload: Any) -> str:

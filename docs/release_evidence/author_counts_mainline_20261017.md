@@ -67,7 +67,7 @@ The Athena producer has focused tests and an offline plan. Live Athena execution
 The run root was `D:/local-unsynced/s2and_ca_mainline_20261017`.
 Its `commands/`, `bounds/`, `orcid_audit/`, and `checks/` directories preserve commands, decisions, resource records, and verification outputs.
 The previous common artifacts remain in `archive/previous_common_v1.3_M` under that root.
-The [count guide](../../scripts/production/counts/README.md) defines the Athena source and canonical key contract.
+The [count guide](../../scripts/intake/counts/README.md) defines the Athena source and canonical key contract.
 The [archived M report](../archive/name_count_experiment_20261009_results.md) preserves the earlier count study.
 
 Earlier giant-block wins and the 96.0540% versus 96.0548% benchmark comparison belong to runtime `2a6563c` and its exact artifacts.

@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from s2and._sha256 import sha256_file
-from scripts.production.counts import generate_author_counts_from_athena as exporter
+from scripts.intake.counts import generate_author_counts_from_athena as exporter
 
 ROWS: list[tuple[str | None, str | None, int]] = [
     ("Ána", "García", 1),

@@ -117,8 +117,8 @@ def test_promoted_row_features_reject_missing_rust_feature(monkeypatch: pytest.M
     row_signals["retrieval_rank"] = np.asarray([1.0], dtype=np.float32)
     original = s2and_rust.promoted_linker_non_pairwise_features
 
-    def stale_result(payload):
-        result = dict(original(payload))
+    def stale_result(payload, **kwargs):
+        result = dict(original(payload, **kwargs))
         del result["min_distance"]
         return result
 
@@ -143,8 +143,8 @@ def test_promoted_row_features_reject_incomplete_rust_telemetry(monkeypatch: pyt
     row_signals["retrieval_rank"] = np.asarray([1.0], dtype=np.float32)
     original = s2and_rust.promoted_linker_non_pairwise_features
 
-    def stale_result(payload):
-        result = dict(original(payload))
+    def stale_result(payload, **kwargs):
+        result = dict(original(payload, **kwargs))
         result["telemetry"] = {"generated_family_id_count": 0}
         return result
 
@@ -175,3 +175,33 @@ def test_row_features_report_generated_family_ids_and_signed_year_gaps() -> None
     np.testing.assert_allclose(features["candidate_year_span"], [5.0] * 3)
     np.testing.assert_allclose(features["year_gap_to_candidate_range"], [2.0, 5.0, 0.0])
     np.testing.assert_allclose(features["year_gap_signed_to_candidate_range"], [-2.0, 5.0, 0.0])
+
+
+def test_linker_and_gate_year_features_ignore_corpus_placeholders() -> None:
+    rows = LinkerCandidateBatch(
+        row_count=3,
+        left_signature_indices=np.asarray([10, 11, 12], dtype=np.uint32),
+        right_signature_indices=np.asarray([1, 2, 3], dtype=np.uint32),
+        pair_row_indices=np.asarray([0, 1, 2], dtype=np.uint32),
+        row_query_signature_indices=np.asarray([10, 11, 12], dtype=np.uint32),
+        row_component_keys=("c0", "c1", "c2"),
+    )
+    signals = _base_row_signals(3)
+    signals["retrieval_score"] = np.asarray([1.0] * 3, dtype=np.float32)
+    signals["retrieval_rank"] = np.asarray([1] * 3, dtype=np.float32)
+    signals["query_year"] = np.asarray([1601, 2020, 2020], dtype=np.float32)
+    signals["candidate_year_min"] = np.asarray([2010, 1800, 2010], dtype=np.float32)
+    features = build_promoted_non_pairwise_row_features(rows, signals)
+    legacy = build_promoted_non_pairwise_row_features(rows, signals, legacy_paper_years=True)
+    assert legacy["year_gap_to_candidate_range"][0] == 409
+    assert legacy["year_gap_signed_to_candidate_range"][0] == -409
+
+    signals["candidate_year_min"] = np.asarray([1700] * 3, dtype=np.float32)
+    signals["candidate_year_max"] = np.asarray([1800] * 3, dtype=np.float32)
+    upper_placeholder = build_promoted_non_pairwise_row_features(rows, signals)
+    for feature in ("year_compatibility", "candidate_year_span", "year_gap_to_candidate_range"):
+        np.testing.assert_array_equal(upper_placeholder[feature], [0.0] * 3)
+    np.testing.assert_allclose(features["year_compatibility"], [0.0, 0.0, 0.8])
+    np.testing.assert_allclose(features["candidate_year_span"], [5.0, 0.0, 5.0])
+    for feature in ("year_gap_to_candidate_range", "year_gap_signed_to_candidate_range"):
+        np.testing.assert_allclose(features[feature], [0.0, 0.0, 5.0])

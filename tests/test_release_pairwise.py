@@ -15,7 +15,7 @@ from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import NameTupleArtifact
 from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts
 from s2and.production_training_contract import block_membership_sha256, load_model_plan
-from scripts.production.model import release_pairwise
+from scripts.pairwise import release_pairwise
 
 
 def _sha256(path: Path) -> str:
@@ -374,7 +374,7 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     monkeypatch: pytest.MonkeyPatch,
     sidecar_change: str,
 ) -> None:
-    from scripts.production.model.plan_datasets import plan_unknown_signatures
+    from scripts.common.plan_datasets import plan_unknown_signatures
 
     actual_scorer = release_pairwise._B3Scorer
     model_plan = _arrow_model_plan(tmp_path, unknown=["s2"])

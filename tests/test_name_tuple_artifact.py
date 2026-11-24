@@ -13,7 +13,7 @@ import pytest
 
 from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.name_tuple_artifact import load_name_tuple_artifact
-from scripts.production import generate_canonical_name_tuples
+from scripts.intake import generate_canonical_name_tuples
 
 
 def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_path: Path) -> None:

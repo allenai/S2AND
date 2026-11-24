@@ -28,7 +28,7 @@ from s2and.featurizer import (
 from s2and.model import Clusterer, FastCluster
 from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import load_name_tuple_artifact
-from scripts.production.model import release_pairwise, train_pairwise
+from scripts.pairwise import release_pairwise, train_pairwise
 from tests.pairwise_release_helpers import (
     convert_release_arrow,
     source_sha256,

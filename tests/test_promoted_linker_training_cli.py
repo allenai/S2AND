@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
+from s2and.incremental_linking.runtime import CandidateBatchPairwiseModelResult
 from s2and.incremental_linking_training import classic as classic_training
-from scripts.production.model import train_linker_and_finalize as promoted_train
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.linker import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 from tests.test_linker_source_bundle import _write_arrow_root, _write_linker_inputs, _write_singleton_orcid_views
 
@@ -452,7 +460,7 @@ def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
 
 
-@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group"])
+@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group", "frozen", "non-top25"])
 def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -474,6 +482,11 @@ def test_release_serializes_complete_bundle_before_evaluation(
     if problem == "missing-test-group":
         labels = source_root / "labels" / "hwang_eval.parquet"
         pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
+    if problem == "non-top25":
+        source_manifest = source_root / "bundle.json"
+        source_config = json.loads(source_manifest.read_text(encoding="utf-8"))
+        source_config["models"]["classic"]["retrieval_top_k"] = 7
+        source_manifest.write_text(json.dumps(source_config), encoding="utf-8")
     bundle = promoted_train.load_bundle(source_root)
     bundle.models["classic"]["best_params"] = {"n_estimators": 1}
     map_path = bundle.root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
@@ -535,6 +548,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
             assert _kwargs["query_ids_by_table"] == {"s2and_eval_path": {"cal:q1", "s2and:q1"}}
         else:
             assert "holdout_identities" not in _kwargs
+            assert set(_kwargs["table_keys"]) == {"s2and_eval_path", "hwang_eval_path"}
         order.append(stage)
         stage_summaries[stage] = [{**item, "stage": stage} for item in FULL_MATERIALIZATION_SUMMARIES]
         return bundle, stage_summaries[stage]
@@ -554,9 +568,12 @@ def test_release_serializes_complete_bundle_before_evaluation(
         abstain_rule_summary={},
     )
 
-    def fit_classic(_bundle: Any, **_kwargs: Any) -> Any:
-        assert _kwargs["holdout_identities"] is training_authorities[0]
-        assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
+    def fit_linker(_bundle: Any, **_kwargs: Any) -> Any:
+        if problem == "frozen":
+            assert set(_kwargs["frozen_task_rows"]) == {"linker_train", "gate_fit", "gate_thresh"}
+        else:
+            assert _kwargs["holdout_identities"] is training_authorities[0]
+            assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
         order.append("fit")
         return calibrated
 
@@ -575,7 +592,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         assert Path(path).is_dir()
         return SimpleNamespace(incremental_linker_artifact=loaded_artifact)
 
-    def evaluate_classic(_bundle: Any, **kwargs: Any) -> Any:
+    def evaluate_linker(_bundle: Any, **kwargs: Any) -> Any:
         order.append("evaluate")
         assert kwargs["artifact"] is loaded_artifact
         return classic_training.ClassicEvaluation(
@@ -588,16 +605,16 @@ def test_release_serializes_complete_bundle_before_evaluation(
             },
         )
 
-    monkeypatch.setattr(promoted_train, "fit_classic", fit_classic)
-    monkeypatch.setattr(promoted_train, "evaluate_classic", evaluate_classic)
+    monkeypatch.setattr(promoted_train, "fit_linker", fit_linker)
+    monkeypatch.setattr(promoted_train, "evaluate_linker", evaluate_linker)
     monkeypatch.setattr(promoted_train, "save_incremental_linking_artifact", save_artifact)
     monkeypatch.setattr(promoted_train, "finalize_production_bundle", finalize_bundle)
     monkeypatch.setattr(promoted_train, "load_production_model", load_complete)
     validate_observed_metrics = promoted_train._validate_observed_official_metrics  # noqa: SLF001
 
-    def validate_metrics(metrics: dict[str, Any]) -> None:
+    def validate_metrics(metrics: dict[str, Any], *, ranker_refit: bool) -> None:
         order.append("validate")
-        validate_observed_metrics(metrics)
+        validate_observed_metrics(metrics, ranker_refit=ranker_refit)
 
     monkeypatch.setattr(promoted_train, "_validate_observed_official_metrics", validate_metrics)
     monkeypatch.setattr(
@@ -614,7 +631,34 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "--output-dir",
         str(output_dir),
     ]
-    if problem is not None:
+    if problem in {"frozen", "non-top25"}:
+        role_names = ("linker_train", "gate_fit", "gate_thresh")
+        roles = tmp_path / "roles.json"
+        roles.write_text(
+            json.dumps(assign_block_roles([BlockSpec(f"test {i}", 2) for i in range(3)], dict.fromkeys(role_names, 1))),
+            encoding="utf-8",
+        )
+        manifest = tmp_path / "tasks.json"
+        if problem == "frozen":
+            manifest.write_text("{}", encoding="utf-8")
+        args.extend(["--linker-task-manifest", str(manifest), "--block-role-assignments", str(roles)])
+
+        def materialize_frozen_tasks(
+            path: Path, *_args: Any, **_kwargs: Any
+        ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
+            assert problem == "frozen", "Fetched frozen task rows before validating the source window"
+            assert path == manifest
+            order.append("materialize_training")
+            stage_summaries["materialize_training"] = []
+            return {role: pd.DataFrame() for role in role_names}, []
+
+        monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", materialize_frozen_tasks)
+        if problem == "non-top25":
+            with pytest.raises(ValueError, match="Frozen linker tasks require top-25"):
+                promoted_train.main(args)
+            assert not order
+            return
+    elif problem is not None:
         message = {
             "unreviewed-singletons": "0/10 marked negative_singleton_orcid views",
             "missing-test-group": "did not all match source rows.*hwang:q1",
@@ -653,3 +697,229 @@ def test_release_serializes_complete_bundle_before_evaluation(
     }
     written_report = json.loads((output_dir / "linker_evaluation_report.json").read_text(encoding="utf-8"))
     assert written_report == result
+
+
+def _fixed_ranker_fixture(tmp_path: Path, *, counts_hash: str | None = None) -> tuple[Path, Path, str]:
+    from s2and._sha256 import sha256_file
+    from s2and.incremental_linking.artifact import save_incremental_linking_artifact
+    from s2and.production_bundle import finalize_production_bundle
+    from s2and.production_model import canonical_artifact_hashes, pairwise_bundle_binding
+    from tests.promoted_linking_helpers import (
+        build_tiny_promoted_booster,
+        tiny_logistic_gate_config,
+        write_synthetic_pairwise_bundle,
+    )
+
+    pairwise = tmp_path / "pairwise"
+    hashes = canonical_artifact_hashes()
+    if counts_hash is not None:
+        hashes["name_counts_manifest_sha256"] = counts_hash
+    write_synthetic_pairwise_bundle(pairwise, artifact_hashes=hashes, release_version="1.4")
+    manifest_path = pairwise / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_path.write_text(json.dumps({**manifest, "feature_contract_version": 1}), encoding="utf-8")
+    target = tmp_path / "target.json"
+    target_payload = {
+        "features": list(promoted_train.promoted_linker_feature_columns()),
+        "feature_count": len(promoted_train.promoted_linker_feature_columns()),
+        "params": {"n_estimators": 6},
+        "metrics": {},
+    }
+    target.write_text(json.dumps(target_payload), encoding="utf-8")
+    booster, _ = build_tiny_promoted_booster()
+    artifact = tmp_path / "artifact"
+    save_incremental_linking_artifact(
+        booster,
+        artifact,
+        gate_config=tiny_logistic_gate_config(),
+        target_spec=target_payload,
+        pairwise_bundle_binding=pairwise_bundle_binding(pairwise),
+    )
+    metadata_path = artifact / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata_path.write_text(json.dumps({**metadata, "feature_contract_version": 1}), encoding="utf-8")
+    complete = tmp_path / "fixed"
+    finalize_production_bundle(
+        pairwise_bundle_dir=pairwise,
+        output_bundle_dir=complete,
+        incremental_linker_artifact_dir=artifact,
+        target_json=target,
+    )
+    return pairwise, complete, sha256_file(complete / "incremental_linker" / "booster.lgb")
+
+
+def _fixed_ranker_source_fixture(tmp_path: Path) -> Path:
+    from tests.test_build_linker_task_tables import _ORCIDS, _block_inputs
+
+    source = tmp_path / "source"
+    _write_linker_inputs(source, leak=False)
+    dataset = "replay_demo"
+    block = _block_inputs(tmp_path / "replay", "a ross", _ORCIDS[0], query_year=1800, recent_seed_year=1820)
+    shutil.copytree(block["arrow_dir"], source / "datasets" / dataset)
+    components = source / "components" / f"{dataset}_members.parquet"
+    pd.read_parquet(components).assign(signature_id="s00").to_parquet(components, index=False)
+    for name, sid, label in [
+        ("train", "q_full", 1),
+        ("calibration", "q_initial", 1),
+        ("s2and_eval", "q_full", 0),
+        ("hwang_eval", "q_outside_home", 0),
+    ]:
+        path = source / "labels" / f"{name}.parquet"
+        pd.read_parquet(path).assign(query_signature_id=sid, label=label, first_name_bucket="full").to_parquet(
+            path, index=False
+        )
+    map_path = source / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
+    map_path.parent.mkdir()
+    map_path.write_bytes(b"")
+    return source
+
+
+@pytest.mark.parametrize("check", ["run", "contract", "opt_in", "source_manifest", "legacy_frozen"])
+def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
+    tmp_path: Path, check: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from s2and._sha256 import sha256_file
+    from s2and.production_model import load_production_model
+
+    source = _fixed_ranker_source_fixture(tmp_path)
+    counts = source / "datasets" / "replay_demo" / "name_counts_index" / "name_counts_index"
+    pairwise, fixed, digest = _fixed_ranker_fixture(tmp_path, counts_hash=sha256_file(counts / "manifest.json"))
+    output = tmp_path / "out"
+    args = promoted_train.build_parser().parse_args(
+        [
+            "--source-bundle-root",
+            str(source),
+            "--output-dir",
+            str(output),
+            "--pairwise-model-path",
+            str(pairwise),
+            "--target-json",
+            str(tmp_path / "target.json"),
+            "--name-counts-index-root",
+            str(counts),
+            "--fixed-ranker-bundle",
+            str(fixed),
+            "--expected-ranker-sha256",
+            digest,
+            "--n-jobs",
+            "1",
+            *([] if check == "opt_in" else ["--use-legacy-gate-calibration"]),
+        ]
+    )
+    if check == "legacy_frozen":
+        roles = tmp_path / "roles.json"
+        roles.write_text(json.dumps(assign_block_roles([BlockSpec("a ross", 1, frozenset())], {"gate_fit": 1})))
+        args.use_legacy_gate_calibration = False
+        args.linker_task_manifest = tmp_path / "frozen.json"
+        args.block_role_assignments = roles
+
+        def reject_task_read(*args, **kwargs):
+            pytest.fail("contract-1 ranker reached frozen task materialization")
+
+        monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", reject_task_read)
+        with pytest.raises(ValueError, match="Contract-1 fixed ranker requires legacy calibration"):
+            promoted_train.run(args)
+        assert not output.exists()
+        return
+    if check == "opt_in":
+        try:
+            with pytest.raises(ValueError, match="requires --use-legacy-gate-calibration"):
+                promoted_train.run(args)
+        finally:
+            assert not output.exists()
+    elif check == "source_manifest":
+        path = fixed / "manifest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**payload, "format_version": 999}), encoding="utf-8")
+        with pytest.raises(ValueError, match="format_version"):
+            promoted_train._load_fixed_ranker(fixed, digest)
+    elif check == "contract":
+        try:
+            promoted_train.run(args)
+        finally:
+            metadata_path = output / pairwise.name / "incremental_linker" / "metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert metadata["feature_contract_version"] == 1
+    else:
+        pairwise_year_diffs: list[float] = []
+        query_years: list[int] = []
+        linker_year_gaps: list[float] = []
+        year_indices = FeaturizationInfo(["year_diff"]).selected_feature_indices()
+        compute_pairs = promoted_train.compute_candidate_batch_pairwise_model_and_aggregate_stats
+        build_rows = promoted_train.build_promoted_non_pairwise_row_features
+
+        def record_pairwise_years(
+            dataset: ANDData | None, batch: LinkerCandidateBatch, **kwargs: Any
+        ) -> CandidateBatchPairwiseModelResult:
+            pairs = list(
+                zip(batch.left_signature_indices.tolist(), batch.right_signature_indices.tolist(), strict=True)
+            )
+            matrix = kwargs["featurizer"].featurize_pairs_matrix_indexed(pairs, year_indices, 1, np.nan)
+            pairwise_year_diffs.extend(np.asarray(matrix)[:, 0].tolist())
+            return compute_pairs(dataset, batch, **kwargs)
+
+        def record_linker_years(
+            batch: LinkerCandidateBatch, row_signals: Mapping[str, Any], *, legacy_paper_years: bool = False
+        ) -> dict[str, np.ndarray]:
+            features = build_rows(batch, row_signals, legacy_paper_years=legacy_paper_years)
+            query_years.extend(row_signals["query_year"].tolist())
+            linker_year_gaps.extend(features["year_gap_to_candidate_range"].tolist())
+            return features
+
+        monkeypatch.setattr(
+            promoted_train, "compute_candidate_batch_pairwise_model_and_aggregate_stats", record_pairwise_years
+        )
+        monkeypatch.setattr(promoted_train, "build_promoted_non_pairwise_row_features", record_linker_years)
+        report = promoted_train.run(args)
+        assert set(pairwise_year_diffs) == {20.0}
+        assert set(query_years) == {1800}
+        assert set(linker_year_gaps) == {20.0}
+        training_tables = {summary["table_key"] for summary in report["feature_materialization_summaries"]["training"]}
+        assert training_tables == {"classic_gate_source_path", "s2and_eval_path"}
+        complete = Path(report["complete_model_path"])
+        assert report["evaluation_summary"]["training_summary"]["ranker_refit"] is False
+        assert "training_rows" not in report["observed_metrics"]
+        assert report["observed_metrics"]["stratified_test_queries"] == 1
+        assert report["query_predictions"]["rows"] == 1
+        booster = Path("incremental_linker/booster.lgb")
+        assert (complete / booster).read_bytes() == (fixed / booster).read_bytes()
+        reloaded = load_production_model(complete).incremental_linker_artifact
+        assert reloaded is not None and reloaded.feature_contract_version == 1
+        assert report["artifact_summary"]["gate_config"]["training_summary"]["calibration_queries"] == 2
+
+
+@pytest.mark.parametrize("corrupt", ["digest", "staged_copy"])
+def test_fixed_ranker_publication_rechecks_booster_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corrupt: str
+) -> None:
+    import shutil
+
+    from s2and.incremental_linking import artifact as artifact_module
+    from s2and.incremental_linking.artifact import save_incremental_linking_artifact
+    from tests.promoted_linking_helpers import tiny_logistic_gate_config
+
+    _, fixed, digest = _fixed_ranker_fixture(tmp_path)
+    source = fixed / "incremental_linker" / "booster.lgb"
+    output = tmp_path / "new-artifact"
+    if corrupt == "digest":
+        digest = digest[::-1]
+    else:
+        # Keep the source digest valid and alter only the staged copy, so a check that hashes the source passes.
+        real_copyfile = shutil.copyfile
+
+        def copy_then_alter(src: Path, dst: Path) -> None:
+            real_copyfile(src, dst)
+            with Path(dst).open("ab") as staged:
+                staged.write(b"x")
+
+        monkeypatch.setattr(artifact_module.shutil, "copyfile", copy_then_alter)
+    with pytest.raises(ValueError, match="SHA-256 changed before publication"):
+        save_incremental_linking_artifact(
+            None,
+            output,
+            fixed_booster=(source, digest),
+            gate_config=tiny_logistic_gate_config(),
+            target_spec={},
+            pairwise_bundle_binding={"source": "fixture"},
+        )
+    assert not output.exists()

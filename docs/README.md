@@ -13,8 +13,8 @@ The [project README](../README.md) provides the installation and workflow overvi
 | Obtain the model, the index, and the data bundles | [Data and models](data.md) |
 | Reproduce the production training process on public data | [Reproduce the 1.3.1 model](reproduce.md) |
 | Correct data, add a dataset, or release another model | [Release process](release.md) |
-| Prepare a new corrected snapshot | [Data preparation commands](../scripts/production/data/README.md) |
-| Fit the production model | [Production commands](../scripts/production/README.md) |
+| Prepare a new corrected snapshot | [Data preparation commands](../scripts/intake/README.md) |
+| Fit the production model | [Production commands](../scripts/release/README.md) |
 | Run a research API experiment | [Training and evaluation](training.md) |
 
 One complete corrected snapshot supports research and the next correction cycle.
@@ -34,6 +34,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 
 ## Contributor guides
 
+- [Code map](code_map.md)
 - [Development and local CI](development.md)
 - [Bounded model runs](bounded_runs.md)
 - [Giant-block EPS review](eps_calibration.md)
@@ -46,7 +47,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 
 ## Historical notes
 
-Dated notes in the [archive](archive/) and [release evidence](release_evidence/) record prior profiling runs, experiments, and release checks.
+See the [archived name-count study](archive/name_count_experiment_20261009_results.md) and [release evidence](release_evidence/) for earlier experiments and release checks.
 The original paper process belongs to the [paper branch](../README.md#reproducibility).
 
 ## Glossary

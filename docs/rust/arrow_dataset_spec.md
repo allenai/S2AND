@@ -188,7 +188,7 @@ together when copying files to their serving location.
 Every script that produces S2AND runtime Arrow artifacts should use the shared
 writers instead of open-coding the table or sidecar formats:
 
-- `scripts.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)` or
+- `scripts.common.arrow_conversion_helpers.write_raw_planner_arrow_from_anddata(...)` or
   `write_raw_planner_arrow_tables(...)` for semantic Arrow IPC tables.
 - `write_raw_arrow_batch_lookup_indexes(...)` after the final table write for
   raw-planner sidecars.
@@ -239,7 +239,7 @@ the same feature view that S2AND would expose after normal preprocessing:
 as having no ORCID evidence; all non-ORCID features and constraints remain
 available. Name-count artifacts always use the canonical initial-character key.
 
-`scripts/convert_to_arrow.py` is the reference producer for deployable
+`scripts/intake/convert_to_arrow.py` is the reference producer for deployable
 dataset manifests and current batch-index sidecars. Use
 `s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
 `write_arrow_artifact_manifest(...)` to publish manifests from the paths the
@@ -356,7 +356,7 @@ All vectors in one file must have the same dimension, and `paper_id` values
 must be unique. Represent missing embeddings by omitting their rows. Partial
 coverage, including a valid zero-row table, is accepted. Missing vectors use
 the runtime's missing-vector feature behavior and can change scores.
-`scripts/convert_to_arrow.py service-json` and the shared `ANDData` table writer
+`scripts/intake/convert_to_arrow.py service-json` and the shared `ANDData` table writer
 can emit an empty table. The `benchmark` command requires at least one matching
 vector when it writes the embedding table.
 For a source contract that guarantees complete coverage, validate with
@@ -433,7 +433,7 @@ Each row keeps an excluded signature out of the cluster that contains its anchor
 | `excluded_signature_id` | `string` | no | Signature id excluded from the anchor's cluster |
 
 Both columns are required. Pairs are directional and unique, with distinct ids
-in each row. `scripts/convert_to_arrow.py service-json` writes this sidecar when
+in each row. `scripts/intake/convert_to_arrow.py service-json` writes this sidecar when
 the request supplies `profile_exclusions`. It checks the ids against the dataset
 and rejects exclusions that contradict required seed assignments. The writer
 sorts and deduplicates pairs. The `validate` command checks the declared file
@@ -469,7 +469,7 @@ Each file uses the `ANDData` fixed-pair contract: columns `signature_id_1`,
 `build_training_anddata_from_arrow(..., train_pairs=..., test_pairs=...)` or
 `ANDData(..., train_pairs=..., test_pairs=...)`.
 
-`scripts/convert_to_arrow.py` publishes these files only after checking that
+`scripts/intake/convert_to_arrow.py` publishes these files only after checking that
 train and test are both present, every row satisfies the contract, every
 signature exists in the dataset, and no unordered pair appears in two splits.
 The converter accepts legacy `pair1`/`pair2` and `pairs1`/`pair2` input headers
@@ -689,7 +689,7 @@ Required checks:
 - Fixed-pair label CSVs meet the contract in
   [Fixed-pair label CSVs](#fixed-pair-label-csvs); the converter checks this.
 
-`scripts/convert_to_arrow.py validate` does not check signature row order or
+`scripts/intake/convert_to_arrow.py validate` does not check signature row order or
 clusters-JSON references; verify those in the producer.
 
 Required physical-layout checks:
@@ -709,7 +709,7 @@ Validate a dataset required to supply both embeddings and name counts.
 Set `--dataset-dir` to the directory containing its dataset manifest.
 
 ```bash
-uv run python scripts/convert_to_arrow.py validate \
+uv run python scripts/intake/convert_to_arrow.py validate \
   --dataset-dir /path/to/arrow_root/pubmed \
   --require-embeddings \
   --require-name-counts-index

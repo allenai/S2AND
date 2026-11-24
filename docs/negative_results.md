@@ -103,6 +103,7 @@ A plain refit moves F1 by up to 0.4 points per dataset and 0.07 pooled across gi
 | Benchmark comparison of model versions 1.2 and 1.3 | 2026-10-16 | +0.06 to +0.23 points on corrected metadata, −0.24 on original metadata; treat as a tie |
 | Per-dataset gain and loss calls on small datasets | 2026-10-16 | 25 gains and 23 losses; the Qian interval is about 2.7 points wide |
 | Giant-block proxy labels built from 1.2-model clusters | 2026-10-16 | They favor 1.2; an ORCID-hidden sweep cut the apparent 3 to 8 point regression to under 0.7 |
+| Safe-action pair labels for EPS selection | 2026-11 | Abstentions can reflect insufficient evidence to link a pair. Use [ORCID B3](eps_calibration.md#freeze-populations) for identity scoring. |
 | EPS sweeps that score bulk clustering only | 2026-10-23 | Production output scored 0.5 to 1.0 points higher at most EPS values; the best EPS barely moved |
 | Refit with unchanged hyperparameters | 2026-11-20 | Up to ±0.4 points per small dataset (ArnetMiner, KISTI, PubMed); the calibrated EPS moves within the flat top of the validation curve |
 | Benchmark held-out blocks for SPECTER2 changes | 2026-11-20 | Held-out blocks have full SPECTER2 coverage and missed a giant-block collapse; check giant blocks |

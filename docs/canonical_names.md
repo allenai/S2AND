@@ -137,7 +137,7 @@ apostrophe variants of `O'Connor` become `oconnor`; and `Ou-Yang` and
 ### D10. Georgian and Armenian romanization
 
 Before transliteration, D10 applies the tables planned for Scholar's block keys
-(`BlockKeyNormalizers`). See [`s2and/text.py`](../s2and/text.py) for the full tables.
+(`BlockKeyNormalizers`). See [`s2and/text/canonical_names.py`](../s2and/text/canonical_names.py) for the full tables.
 
 | Script | Rule | Examples |
 | --- | --- | --- |
@@ -156,7 +156,7 @@ Pre-D10 indexes retain the older keys. Until a rebuild, lookups use counts for t
 | Joined capitals | Two or three ASCII capitals after removing whitespace and periods. | `_JOINED_INITIALS_GIVEN_NAMES` (`ED`, `MD`), `NAME_PREFIXES`, and a two-capital entry in `_DOTTED_GIVEN_NAME_ABBREVIATIONS` with a final period, such as `PH.` |
 | Mixed case | One ASCII capital and one or two ASCII lowercase letters after removing whitespace. A period prevents a match. | Any `a`, `e`, `i`, `o`, `u`, or `y`, plus `NAME_PREFIXES` and `_MIXED_CASE_NON_INITIALS`, such as `Md`, `Kh`, and `Jr` |
 
-See [`s2and/text.py`](../s2and/text.py) for the full exclusion lists.
+See [`s2and/text/canonical_names.py`](../s2and/text/canonical_names.py) for the full exclusion lists.
 Both branches require `last_name_allows_joined_initials` to pass. The canonical
 transliteration of the raw last name must contain at least one ASCII lowercase
 letter and at least as many lowercase letters as capitals. For example, `á`

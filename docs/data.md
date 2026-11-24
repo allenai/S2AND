@@ -53,7 +53,7 @@ After syncing `inference/` and `dataset/`, check the layout and index digests.
 The validator requires the root `manifest.json` from `dataset/`.
 
 ```bash
-uv run python scripts/verification/validate_local_arrow_release.py --release-root s2and/data
+uv run python scripts/release/verification/validate_local_arrow_release.py --release-root s2and/data
 ```
 
 For an inference-only download, verify the index directly. `load_production_model`
@@ -82,7 +82,7 @@ Older manifests lack the required public format `1` contract.
 The production count authority is A: one contribution per source author-table row.
 The Athena export preserves all raw first/last groups, including null names.
 The current repository normalizer creates the lookup keys after export.
-The [count guide](../scripts/production/counts/README.md) defines the complete build command.
+The [count guide](../scripts/intake/counts/README.md) defines the complete build command.
 Only AI2 staff can build the index, because its input is an internal Semantic Scholar author-table export.
 Other users use the released index and cannot regenerate it.
 Each future refresh of the index is a staff step.
@@ -127,7 +127,7 @@ A released model records the population it was fit on, and `evaluate-heldout` re
 Every corrected block is a subset of the same original block.
 
 The release owner writes the bundles from an internal snapshot with
-[`write_release_bundles.py`](../scripts/production/README.md#release-bundles).
+[`write_release_bundles.py`](../scripts/release/README.md#release-bundles).
 That snapshot also holds pre-cut pairwise copies, correction ledgers, and audit records.
 They are not published.
 [Stage 0 of the release process](release.md#stage-0-choose-the-input-snapshot) records the selected snapshot.
@@ -233,4 +233,4 @@ Set `main_data_dir` to the directory that contains the common index.
 The checked-in placeholder falls back to the package data directory with a warning.
 Other values must name an existing directory.
 
-See [the production commands](../scripts/production/README.md) for snapshot preparation and model fits.
+See [the production commands](../scripts/release/README.md) for snapshot preparation and model fits.

@@ -17,6 +17,7 @@ from s2and.consts import (
     LARGE_INTEGER,
     NUMPY_NAN,
     YEAR_DIFF_CAP,
+    normalize_paper_year,
 )
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_schema import (
@@ -357,6 +358,8 @@ class FeaturizationInfo:
             list of feature types to use
     """
 
+    legacy_paper_years = False
+
     def __init__(
         self,
         features_to_use: list[str] | None = None,
@@ -441,6 +444,7 @@ def _single_pair_featurize(
     index: int = -1,
     *,
     dataset: ANDData | None = None,
+    legacy_paper_years: bool = False,
 ) -> tuple[list[int | float], int]:
     """
     Creates the features array for a single signature pair
@@ -622,11 +626,16 @@ def _single_pair_featurize(
 
     features.append(counter_jaccard(venue_ngrams_1, venue_ngrams_2))
 
+    def feature_year(year: int | None) -> int | None:
+        if legacy_paper_years:
+            return year if year is not None and year > 0 else None
+        return normalize_paper_year(year)
+
     features.append(
         np.minimum(
             diff(
-                paper_1.year if paper_1.year is not None and paper_1.year > 0 else None,
-                paper_2.year if paper_2.year is not None and paper_2.year > 0 else None,
+                feature_year(paper_1.year),
+                feature_year(paper_2.year),
             ),
             YEAR_DIFF_CAP,
         )
@@ -738,7 +747,13 @@ def _execute_python_featurization_phase(
     n_jobs: int,
     chunk_size: int,
     scatter_context: ScatterContext,
+    legacy_paper_years: bool = False,
 ) -> str:
+    worker = (
+        functools.partial(_single_pair_featurize, legacy_paper_years=True)
+        if legacy_paper_years
+        else _single_pair_featurize
+    )
     if _python_featurization_runs_in_parallel(n_jobs):
         backend_used = "python_parallel"
         logger.info("Making %d feature vectors in parallel", len(pieces_of_work))
@@ -755,7 +770,7 @@ def _execute_python_featurization_phase(
             work_count = len(pieces_of_work)
             with tqdm(total=work_count, desc="Doing work", disable=work_count <= 10000) as pbar:
                 for feature_output, index in p.imap(
-                    functools.partial(parallel_helper, worker_func=_single_pair_featurize),
+                    functools.partial(parallel_helper, worker_func=worker),
                     pieces_of_work,
                     min(chunk_size, max(1, int((work_count / n_jobs) / 2))),
                 ):
@@ -772,7 +787,7 @@ def _execute_python_featurization_phase(
     logger.info("Making %d feature vectors in serial", len(pieces_of_work))
     partial_func = functools.partial(
         parallel_helper,
-        worker_func=functools.partial(_single_pair_featurize, dataset=dataset),
+        worker_func=functools.partial(worker, dataset=dataset),
     )
     for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
         result = partial_func(piece)
@@ -806,6 +821,7 @@ def _execute_rust_batch_featurization_phase(
     features: np.ndarray,
     nameless_features: np.ndarray | None,
     coauthor_similarity_values: np.ndarray | None,
+    legacy_paper_years: bool = False,
 ) -> RustBatchExecutionResult:
     if len(pieces_of_work) <= 0:
         raise ValueError("Rust batch execution requires non-empty pieces_of_work")
@@ -819,6 +835,8 @@ def _execute_rust_batch_featurization_phase(
             rust_batch_rss_peak_bytes = rss_now
 
     rust_featurizer = feature_port._get_rust_feature_data(dataset)
+    if legacy_paper_years:
+        rust_featurizer = rust_featurizer.with_legacy_paper_years()
     rust_selected_indices: list[int] | None = None
     if len(indices_needed_for_compute) > 0:
         rust_selected_indices = indices_needed_for_compute
@@ -1176,6 +1194,7 @@ def many_pairs_featurize(
                     features=features,
                     nameless_features=nameless_features,
                     coauthor_similarity_values=coauthor_similarity_values,
+                    legacy_paper_years=featurizer_info.legacy_paper_years,
                 )
                 rust_batch_plan = rust_batch_result.rust_batch_plan
                 rust_batch_total_ram_for_stage = rust_batch_result.rust_batch_total_ram_for_stage
@@ -1205,6 +1224,7 @@ def many_pairs_featurize(
                 n_jobs=n_jobs,
                 chunk_size=chunk_size,
                 scatter_context=default_scatter_context,
+                legacy_paper_years=featurizer_info.legacy_paper_years,
             )
         _sample_rust_batch_rss_peak()
         logger.info("Work completed")

@@ -178,7 +178,7 @@ fn is_name_dash(ch: char) -> bool {
 }
 
 // D3 apostrophe-like marks (mirrors Python `NAME_APOSTROPHE_LIKE_CHARS` in
-// s2and/text.py): ASCII apostrophe, backtick, spacing acute, curly quotes,
+// s2and/text/canonical_names.py): ASCII apostrophe, backtick, spacing acute, curly quotes,
 // modifier letters (okina/apostrophe), primes, saltillo, U+FE4D (classified with
 // apostrophe-like marks by issue #39 despite its Unicode name), fullwidth
 // apostrophe.
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(text_unidecode_char('\u{FDFD}'), "[?]");
     }
 
-    // Mirrors `NAME_PREFIXES` in s2and/text.py. Note "md" is deliberately NOT a
+    // Mirrors `NAME_PREFIXES` in s2and/text/normalize.py. Note "md" is deliberately NOT a
     // prefix (D7): it is a common South Asian given-name abbreviation.
     fn python_name_prefixes() -> HashSet<String> {
         [
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn mixed_case_non_initials_match_python_source() {
-        let python_source = include_str!("../../s2and/text.py");
+        let python_source = include_str!("../../s2and/text/canonical_names.py");
         let literal = python_source
             .split_once("_MIXED_CASE_NON_INITIALS = frozenset(")
             .expect("Python non-initials set")

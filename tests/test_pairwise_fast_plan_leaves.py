@@ -14,7 +14,7 @@ from hyperopt.pyll import stochastic
 from s2and.incremental_linking_training.classic import _build_classic_classifier
 from s2and.model import PairwiseModeler
 from s2and.model_pairwise import MAX_FAST_PLAN_LEAVES
-from scripts.production.model import train_pairwise
+from scripts.pairwise import train_pairwise
 from tests.helpers import pairwise_training_args
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +35,7 @@ def test_leaf_cap_matches_native_lockstep_limit() -> None:
 
 
 def test_shipped_incumbent_is_within_leaf_cap() -> None:
-    path = REPO_ROOT / "scripts/production/model/pairwise_incumbent_h13.json"
+    path = REPO_ROOT / "scripts/pairwise/pairwise_incumbent_h13.json"
     assert set(train_pairwise._load_incumbent_parameters(path)) == {"main", "nameless"}
 
 

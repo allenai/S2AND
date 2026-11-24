@@ -13,6 +13,9 @@ In a source checkout, run `git checkout <release-tag>` and set up the environmen
 
 > **Update at v1.3 release:** Replace `<release-tag>` with the verified release tag.
 
+Commands use the script folders of this checkout. Release `1.4` and earlier kept scripts under
+`scripts/production/`, `scripts/eps_sweep/` and `scripts/verification/`; see [moved files](../scripts/README.md#moved-files).
+
 ## Sync the 1.3.1 index and reference model
 
 ```bash
@@ -38,10 +41,10 @@ The examples use 12 threads; set `--n-jobs` and `--total-ram-bytes` to your mach
 ### 1. Pairwise hyperparameter search and fit
 
 ```bash
-uv run --no-sync python scripts/production/model/train_pairwise.py \
+uv run --no-sync python scripts/pairwise/train_pairwise.py \
   --model-plan "$ROOT/pairwise/model_plan.json" \
   --name-counts-index-root "$ROOT/name_counts_index" \
-  --incumbent-parameters scripts/production/model/pairwise_incumbent_h13.json \
+  --incumbent-parameters scripts/pairwise/pairwise_incumbent_h13.json \
   --output-dir "$RUN/pairwise/production_model_v1.3.1" \
   --matrix-work-dir "$RUN/matrix-work" \
   --n-jobs 12 \
@@ -56,7 +59,7 @@ The output is a pairwise-only model with pending EPS.
 ### 2. EPS selection on validation blocks
 
 ```bash
-uv run --no-sync python scripts/production/model/release_pairwise.py calibrate-eps \
+uv run --no-sync python scripts/pairwise/release_pairwise.py calibrate-eps \
   --source-bundle "$RUN/pairwise/production_model_v1.3.1" \
   --model-plan "$ROOT/pairwise/model_plan.json" \
   --output-bundle "$RUN/calibrated/production_model_v1.3.1" \
@@ -79,7 +82,7 @@ Test blocks never select EPS.
 ### 3. Incremental linker training and the complete model
 
 ```bash
-uv run --no-sync python scripts/production/model/train_linker_and_finalize.py \
+uv run --no-sync python scripts/linker/train_linker_and_finalize.py \
   --source-bundle-root "$ROOT" \
   --target-json tests/fixtures/incremental_linker_training_target.json \
   --pairwise-model-path "$RUN/calibrated/production_model_v1.3.1" \
@@ -93,7 +96,7 @@ It writes the complete model, reloads it, and evaluates the declared linker test
 Preflight resolves the frozen calibration and test assignments before featurization.
 Calibration groups can use the calibration source, and each assigned evaluation table must still contribute eligible calibration rows.
 Test groups must have eligible rows in their assigned evaluation tables.
-The linker fit, `evaluate_classic`, and the EPS tools reject an assignment whose source key
+The linker fit, `evaluate_linker`, and the EPS tools reject an assignment whose source key
 has no declared evaluation table.
 Rows marked `unlabeled_singleton_orcid` are excluded from both splits.
 Preflight checks each dataset in each label table. When ten or more views are marked
@@ -105,7 +108,7 @@ Source bundle assembly and corrected dataset packaging validate labels before co
 ### 4. Outer-test evaluation
 
 ```bash
-uv run --no-sync python scripts/production/model/release_pairwise.py evaluate-heldout \
+uv run --no-sync python scripts/pairwise/release_pairwise.py evaluate-heldout \
   --model-plan "$ROOT/pairwise/model_plan.json" \
   --model "$RUN/complete/production_model_v1.3.1" \
   --name-counts-index-root "$ROOT/name_counts_index" \
@@ -118,7 +121,7 @@ The report contains pairwise metrics on the frozen held-out pairs and B3 on the 
 ### 5. Identity-gold linker cases
 
 ```bash
-uv run --no-sync python scripts/verification/evaluate_incremental_gold.py evaluate \
+uv run --no-sync python scripts/release/verification/evaluate_incremental_gold.py evaluate \
   --snapshot "$ROOT" \
   --cases "$ROOT/evaluation_inputs/gold_identity_cases_seed13.json" \
   --model-dir "$RUN/complete/production_model_v1.3.1" \
@@ -157,7 +160,7 @@ A reviewed EPS can differ from the calibrated one, as it did for `1.3`.
 `apply_reviewed_eps.py` then writes the reviewed EPS into a fresh complete model:
 
 ```bash
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py \
+uv run --no-sync python scripts/eps/apply_reviewed_eps.py \
   --source-model "$RUN/complete/production_model_v1.3.1" \
   --output-model "$RUN/released-eps/production_model_v1.3.1" \
   --eps "<reviewed-eps>" \

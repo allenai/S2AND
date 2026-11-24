@@ -1,4 +1,5 @@
 use super::{ensure_unidecode_for_text, normalize_text_compat_from_map, py_len};
+use crate::features::PLACEHOLDER_YEARS;
 use crate::HashMap;
 use numpy::{PyArray1, PyArrayMethods, ToPyArray};
 use pyo3::prelude::*;
@@ -324,18 +325,30 @@ fn linker_year_gap_features(
     candidate_year_min: &[f32],
     candidate_year_max: &[f32],
     candidate_year_range_missing: &[f32],
+    year_compatibility: &mut [f32],
+    legacy_paper_years: bool,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut gap = vec![0.0f32; query_year.len()];
     let mut signed_gap = vec![0.0f32; query_year.len()];
     let mut span = vec![0.0f32; query_year.len()];
     for index in 0..query_year.len() {
-        if candidate_year_range_missing[index] == 0.0 {
+        let is_placeholder = |year| {
+            !legacy_paper_years && PLACEHOLDER_YEARS.iter().any(|&stamp| year == stamp as f32)
+        };
+        let placeholder_query = is_placeholder(query_year[index]);
+        let placeholder_range =
+            is_placeholder(candidate_year_min[index]) || is_placeholder(candidate_year_max[index]);
+        let range_missing = candidate_year_range_missing[index] != 0.0 || placeholder_range;
+        if placeholder_query || placeholder_range {
+            year_compatibility[index] = 0.0;
+        }
+        if !range_missing {
             let raw_span = (candidate_year_max[index] - candidate_year_min[index]).max(0.0);
             // Match the Python reference in tests/linker_row_feature_reference.py,
             // which applies np.round(span, 6) at the end.
             span[index] = linker_round(raw_span, 1_000_000.0);
         }
-        if query_year_missing[index] != 0.0 || candidate_year_range_missing[index] != 0.0 {
+        if query_year_missing[index] != 0.0 || placeholder_query || range_missing {
             continue;
         }
         if query_year[index] < candidate_year_min[index] {
@@ -366,9 +379,11 @@ fn linker_set_f32_array<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (signals, *, legacy_paper_years = false))]
 fn promoted_linker_non_pairwise_features<'py>(
     py: Python<'py>,
     signals: &Bound<'py, PyDict>,
+    legacy_paper_years: bool,
 ) -> PyResult<Py<PyDict>> {
     let row_query_signature_indices_obj = linker_dict_item(signals, "row_query_signature_indices")?;
     let row_query_signature_indices =
@@ -402,7 +417,7 @@ fn promoted_linker_non_pairwise_features<'py>(
         linker_extract_f32_vec(signals, "query_has_affiliations", row_count)?;
     let affiliation_overlap = linker_extract_f32_vec(signals, "affiliation_overlap", row_count)?;
     let coauthor_overlap = linker_extract_f32_vec(signals, "coauthor_overlap", row_count)?;
-    let year_compatibility = linker_extract_f32_vec(signals, "year_compatibility", row_count)?;
+    let mut year_compatibility = linker_extract_f32_vec(signals, "year_compatibility", row_count)?;
     let specter_exemplar_similarity =
         linker_extract_f32_vec(signals, "specter_exemplar_similarity", row_count)?;
     let min_distance = linker_extract_f32_vec(signals, "min_distance", row_count)?;
@@ -482,6 +497,8 @@ fn promoted_linker_non_pairwise_features<'py>(
             &candidate_year_min,
             &candidate_year_max,
             &candidate_year_range_missing,
+            &mut year_compatibility,
+            legacy_paper_years,
         );
 
     let mut affiliation_contradiction_severity = vec![0.0f32; row_count];

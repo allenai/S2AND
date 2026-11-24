@@ -14,7 +14,7 @@ from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.model_pairwise import FastCluster, constrained_linkage
-from scripts.eps_sweep import sweep_eps_on_linking_gold
+from scripts.eps import sweep_eps_on_linking_gold
 from tests.model_helpers import ConstantDistanceClassifier
 
 SIZE = 160

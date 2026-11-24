@@ -10,7 +10,7 @@ from sklearn.cluster import DBSCAN
 import s2and.model as model_module
 from s2and.consts import LARGE_INTEGER
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer, FastCluster
+from s2and.model import Clusterer, FastCluster, distances
 
 
 # Signaling NaN inputs raise NumPy's invalid-value flag; real constraint values are finite.
@@ -85,10 +85,10 @@ def test_bulk_labels_preserve_scalar_bits(
         chunk_values = constraints(*args, **kwargs)[2]
         return np.asarray([np.nan if value is None else value - large_integer for value in chunk_values])
 
-    monkeypatch.setattr(model_module, "get_constraints_block_upper_triangle_indexed_rust", constraints)
-    monkeypatch.setattr(model_module, "_get_constraint_labels_block_upper_triangle_indexed_rust", constraint_labels)
-    monkeypatch.setattr(model_module, "_build_block_feature_matrices_indexed_rust", features)
-    monkeypatch.setattr(model_module, "_predict_and_combine", predict)
+    monkeypatch.setattr(distances, "get_constraints_block_upper_triangle_indexed_rust", constraints)
+    monkeypatch.setattr(distances, "_get_constraint_labels_block_upper_triangle_indexed_rust", constraint_labels)
+    monkeypatch.setattr(distances, "_build_block_feature_matrices_indexed_rust", features)
+    monkeypatch.setattr(distances, "_predict_and_combine", predict)
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
         classifier=None,

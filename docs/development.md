@@ -63,12 +63,12 @@ The native version check then fails. `tests/conftest.py` stops when it finds tha
 Run the full local CI wrapper:
 
 ```bash
-uv run --no-project python scripts/run_ci_locally.py
+uv run --no-project python scripts/dev/run_ci_locally.py
 ```
 
-`scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
+`scripts/dev/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
 
-- lint (`scripts/sync_version.py --check`, `scripts/sync_feature_schema.py --check`,
+- lint (`scripts/dev/sync_version.py --check`, `scripts/dev/sync_feature_schema.py --check`,
   `ruff check`, and `ruff format --check`)
 - one required-runtime `typecheck-and-test` job, which in order:
   - syncs the locked environment, building `s2and` from source;
@@ -93,8 +93,8 @@ isolated uv tool environment. It does not install the runtime or ML dependency s
 Hosted CI invokes this same script. Run one job independently with:
 
 ```bash
-uv run --no-project python scripts/run_ci_locally.py lint
-uv run --no-project python scripts/run_ci_locally.py typecheck-and-test
+uv run --no-project python scripts/dev/run_ci_locally.py lint
+uv run --no-project python scripts/dev/run_ci_locally.py typecheck-and-test
 ```
 
 The CI runner's `ty` checks use Python 3.11 and the `linux` platform to match
@@ -106,7 +106,7 @@ to change the platform it emulates.
 If you want to skip Rust extension compilation while iterating, run only the static checks:
 
 ```bash
-uv run --no-project python scripts/run_ci_locally.py lint
+uv run --no-project python scripts/dev/run_ci_locally.py lint
 uv sync --active --extra dev --frozen --no-install-package s2and
 uv run --active --no-project ty check s2and
 uv run --active --no-project ty check scripts --ignore unresolved-reference --ignore unresolved-attribute
@@ -114,7 +114,7 @@ uv run --active --no-project ty check scripts --ignore unresolved-reference --ig
 
 The local `ty check scripts` command scans the whole `scripts/` tree and can
 include untracked subdirectories. Hosted CI checks top-level `scripts/*.py` and the
-`scripts/eps_sweep`, `scripts/production`, and `scripts/verification` directories.
+stage and shared directories listed in `ACTIVE_NESTED_SCRIPT_DIRS`.
 Both checks use the `[tool.ty]` defaults. The scripts check also ignores
 unresolved references and attributes from optional and native modules. Type
 errors remain blocking. Warnings remain visible.
@@ -129,9 +129,9 @@ uv run pytest -q tests/test_runtime.py tests/test_data.py tests/test_arrow_train
 
 The [inference guide](production_inference.md#explicit-execution-routes) owns
 the runtime contract. The production command reference covers
-[feature parity and subblocking quality](../scripts/production/README.md#acceptance-checks),
-[packaging](../scripts/production/README.md#distribution-and-arrow-checks), and
-[installed-runtime checks](../scripts/production/README.md#installed-release-smoke).
+[feature parity and subblocking quality](../scripts/release/README.md#acceptance-checks),
+[packaging](../scripts/release/README.md#distribution-and-arrow-checks), and
+[installed-runtime checks](../scripts/release/README.md#installed-release-smoke).
 
 ## Implementation notes
 
@@ -185,7 +185,7 @@ read name metadata from the prepared dataset in place.
 
 ## Bounded model runs
 
-Use `scripts/run_bounded.py` for long model jobs with shared thread budgets and
+Use `scripts/dev/run_bounded.py` for long model jobs with shared thread budgets and
 durable logs. Follow the [bounded model runs runbook](bounded_runs.md).
 
 ## Version bumping
@@ -209,7 +209,7 @@ Version bump workflow:
 # 1) edit VERSION to the new semantic version
 
 # 2) sync manifests and both lockfiles
-uv run python scripts/sync_version.py
+uv run python scripts/dev/sync_version.py
 
 # 3) rebuild the environment for the new version
 uv sync --extra dev
@@ -219,7 +219,7 @@ Notes:
 
 - The pre-commit hook only runs when `VERSION` is staged; it runs steps 2 and 3
   and stages the updated files.
-- `scripts/sync_version.py` rewrites the version in `pyproject.toml` and
+- `scripts/dev/sync_version.py` rewrites the version in `pyproject.toml` and
   `s2and_rust/Cargo.toml` and updates the package entries in `s2and_rust/Cargo.lock`
   and `uv.lock`. `cargo metadata --locked` and `uv lock --check` validate the
   updated files without re-resolving other dependencies.
@@ -230,5 +230,5 @@ Notes:
 - Docs index: [docs/README.md](README.md)
 - Runtime contract: [production_inference.md](production_inference.md#explicit-execution-routes)
 - Promoted incremental performance profiling:
-  [production command reference](../scripts/production/README.md#promoted-incremental-performance)
+  [production command reference](../scripts/release/README.md#promoted-incremental-performance)
 - v1.3 release operator runbook: [release.md](release.md)

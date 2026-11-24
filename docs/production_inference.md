@@ -248,16 +248,9 @@ least two subblocks to run the step.
 ### Arrow validation in release and evaluation tools
 
 Linker source assembly validates each original Arrow manifest and its table and
-index hashes before rebinding its name-count index path. Evaluation's automatic
-Arrow selection treats invalid manifests or corrupt declared data as errors;
-it does not silently switch to JSON. `scripts/eval_prod_models.py --no-arrow`
-explicitly selects JSON, skips Arrow inspection, and requires
-`--json-data-root`. Automatic selection can use JSON when the Arrow source
-or requested dataset is unavailable, the requested SPECTER generation is
-undeclared, or the name-count index is undeclared; it reports the fallback
-reason. A manifest missing required base artifacts is an error. SPECTER
-generation selection uses the declared manifest filename, including when the
-resolved on-disk filename has different casing.
+index hashes before rebinding its name-count index path. The release evaluator
+uses the Arrow benchmark and held-out labels. See the
+[reproduction guide](reproduce.md) for the evaluation command.
 
 ## Clustering corrections and close-pair bonus
 
@@ -278,7 +271,7 @@ the epsilon (EPS) search in `Clusterer.fit`. The dedicated
 `predict_eps_grid` and `predict_eps_grid_from_rust_featurizer` methods apply both
 corrections when eligible. Pass them matrices built from the same dataset or
 featurizer, free of caller supervision. See the correction order in
-[`s2and/block_corrections.py`](../s2and/block_corrections.py).
+[`s2and/corrections/block_corrections.py`](../s2and/corrections/block_corrections.py).
 
 ### ORCID name waiver
 
@@ -312,7 +305,7 @@ dtypes to contiguous `float64` as needed. Repair needs an exact
 `LARGE_DISTANCE` pair and skips matrices with NaN or any other distance above
 one. It can run during incremental altered-profile splitting and residual
 clustering. The removed `name_conflict_repair_*` settings raise `ValueError`.
-See [`s2and/name_conflict_repair.py`](../s2and/name_conflict_repair.py) for the
+See [`s2and/corrections/name_conflict_repair.py`](../s2and/corrections/name_conflict_repair.py) for the
 repair rounds and the joined-initials rule.
 
 ### ORCID joins
@@ -322,7 +315,7 @@ dominant ORCID in separate subblocks of one original block. The join requires
 sufficient ORCID coverage and compatible name evidence and respects seed
 disallows, profile exclusions, and `dont_merge_cluster_seeds`. Joined clusters
 can exceed the subblock size limit. `suppress_orcid` also disables the join.
-See [`s2and/orcid_join.py`](../s2and/orcid_join.py) for the evidence thresholds.
+See [`s2and/corrections/orcid_join.py`](../s2and/corrections/orcid_join.py) for the evidence thresholds.
 
 ### Year-gap split
 
@@ -336,7 +329,7 @@ The split requires a cluster model with a close-pair bonus and runs
 independently of name-conflict repair. During altered-profile pre-splitting,
 `incremental_dont_use_cluster_seeds=True` permits temporary cuts within a seed
 group. Incremental linking restores the original profile in its result. See
-[`s2and/year_gap_split.py`](../s2and/year_gap_split.py) for undated mentions and bridges.
+[`s2and/corrections/year_gap_split.py`](../s2and/corrections/year_gap_split.py) for undated mentions and bridges.
 
 ### Close-pair bonus
 
@@ -540,7 +533,7 @@ the pairwise source intact and keeps partial files out of the final path.
 The training command reloads the published bundle and evaluates the serialized
 artifact.
 
-See the [production command reference](../scripts/production/README.md) for
+See the [production command reference](../scripts/release/README.md) for
 arguments and the [release process](release.md) for stage order and gates.
 
 ## Name-count and reuse boundaries
@@ -586,7 +579,7 @@ and data that fails the hash check. New training contracts use the `1.4` set and
 verify its tuple hash against the canonical name-tuple artifact. A clusterer
 without a contract hash uses the `1.4` set for subblocking. See
 [the packaged count loader](../s2and/orcid_prefix_counts.py) and
-[`Clusterer._subblocking_prefix_counts`](../s2and/model.py).
+[`Clusterer._subblocking_prefix_counts`](../s2and/model/bulk.py).
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
@@ -606,8 +599,8 @@ The focused code gate is:
 ```powershell
 uv run pytest -q tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 uv run pytest -q tests/test_name_tuple_artifact.py tests/test_generate_orcid_name_prefix_counts.py
-uv run pytest -q tests/test_train_pairwise_script.py tests/test_promoted_linker_training_cli.py tests/test_eval_prod_models.py
-uv run ruff check s2and scripts/production/model tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
+uv run pytest -q tests/test_train_pairwise_script.py tests/test_promoted_linker_training_cli.py
+uv run ruff check s2and scripts/common scripts/linker scripts/pairwise scripts/release tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 git diff --check
 ```
 

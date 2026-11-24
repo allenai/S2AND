@@ -26,7 +26,7 @@ def base_arrow_paths(
     tmp_path: Path,
     *,
     with_indexes: bool = True,
-    years: list[int] | None = None,
+    years: list[int | None] | None = None,
 ) -> dict[str, str]:
     """Build one matching and one unrelated seed for a single query."""
     signatures = pa.table(

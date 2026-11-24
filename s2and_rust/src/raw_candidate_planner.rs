@@ -744,6 +744,7 @@ pub(crate) struct RawBlockQueryCandidatePlanner {
     query_mode: RawPlannerQueryMode,
     top_k: usize,
     orcid_enabled: bool,
+    legacy_paper_years: bool,
     num_threads: Option<usize>,
     max_exemplars: usize,
     /// Set by `release`; the planner then refuses to plan or reload.
@@ -1221,6 +1222,7 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         max_exemplars: usize,
         retain_seed_rows: bool,
+        legacy_paper_years: bool,
         prefetch_signature_ids: Vec<String>,
     ) -> PyResult<Self> {
         validate_retrieval_rank_top_k(top_k)?;
@@ -1354,6 +1356,7 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
             retain_seed_rows,
+            legacy_paper_years,
             None,
         )
         .map(|mut planner| {
@@ -1382,6 +1385,7 @@ impl RawBlockQueryCandidatePlanner {
         num_threads: Option<usize>,
         max_exemplars: usize,
         retain_seed_rows: bool,
+        legacy_paper_years: bool,
         previous: Option<ReusableSeedState>,
     ) -> PyResult<Self> {
         let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
@@ -1479,6 +1483,7 @@ impl RawBlockQueryCandidatePlanner {
                                     &affiliation_stopwords,
                                     &unidecode_char_map,
                                     orcid_enabled,
+                                    legacy_paper_years,
                                 )),
                             ))
                         })
@@ -1589,6 +1594,7 @@ impl RawBlockQueryCandidatePlanner {
             query_mode: RawPlannerQueryMode::Declared,
             top_k,
             orcid_enabled,
+            legacy_paper_years,
             num_threads,
             max_exemplars,
             released: false,
@@ -1826,6 +1832,7 @@ impl RawBlockQueryCandidatePlanner {
             self.num_threads,
             self.max_exemplars,
             true,
+            self.legacy_paper_years,
             Some(previous),
         )?;
         planner.query_mode = query_mode;
@@ -1876,6 +1883,7 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
             false,
+            false,
             Vec::new(),
         )?;
         planner.planner_query_signature_ids = query_signature_ids;
@@ -1898,7 +1906,8 @@ impl RawBlockQueryCandidatePlanner {
         num_threads = None,
         max_exemplars = 4,
         retain_seed_rows = false,
-        prefetch_signature_ids = None
+        prefetch_signature_ids = None,
+        legacy_paper_years = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn from_auto_queries(
@@ -1912,6 +1921,7 @@ impl RawBlockQueryCandidatePlanner {
         max_exemplars: usize,
         retain_seed_rows: bool,
         prefetch_signature_ids: Option<Vec<String>>,
+        legacy_paper_years: bool,
     ) -> PyResult<Self> {
         let mut planner = Self::build_from_query_signature_ids(
             py,
@@ -1924,6 +1934,7 @@ impl RawBlockQueryCandidatePlanner {
             num_threads,
             max_exemplars,
             retain_seed_rows,
+            legacy_paper_years,
             prefetch_signature_ids.unwrap_or_default(),
         )?;
         planner.query_mode = RawPlannerQueryMode::Auto;
@@ -2250,6 +2261,7 @@ impl RawBlockQueryCandidatePlanner {
                                     &self.state.affiliation_stopwords,
                                     &self.state.unidecode_char_map,
                                     self.orcid_enabled,
+                                    self.legacy_paper_years,
                                 ),
                             ))
                         })
@@ -3328,6 +3340,7 @@ fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
 /// A signature's features depend only on its own rows, so one value serves
 /// every plan of a dataset. `load` reads and featurizes only new signatures.
 struct LabeledPlanInputs {
+    legacy_paper_years: bool,
     signatures: HashMap<String, RawArrowSignature>,
     papers: HashMap<String, RawArrowPaper>,
     paper_authors: HashMap<String, Vec<(i64, String)>>,
@@ -3356,9 +3369,10 @@ struct LabeledLoadTelemetry {
 }
 
 impl LabeledPlanInputs {
-    fn new(py: Python<'_>) -> PyResult<Self> {
+    fn new(py: Python<'_>, legacy_paper_years: bool) -> PyResult<Self> {
         let text_module = py.import("s2and.text")?;
         Ok(Self {
+            legacy_paper_years,
             signatures: HashMap::default(),
             papers: HashMap::default(),
             paper_authors: HashMap::default(),
@@ -3434,6 +3448,7 @@ impl LabeledPlanInputs {
         let raw_name_counts = dataset.name_counts();
         let feature_start = Instant::now();
         let Self {
+            legacy_paper_years,
             papers,
             paper_authors,
             specter_by_paper_id,
@@ -3481,6 +3496,7 @@ impl LabeledPlanInputs {
                                     affiliation_stopwords,
                                     unidecode_char_map,
                                     orcid_enabled,
+                                    *legacy_paper_years,
                                 ),
                             ))
                         })
@@ -3722,7 +3738,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         }
     }
 
-    let mut inputs = LabeledPlanInputs::new(py)?;
+    let mut inputs = LabeledPlanInputs::new(py, false)?;
     let load = inputs.load(
         py,
         &dataset,
@@ -3777,7 +3793,7 @@ pub(crate) struct RawArrowLabeledCandidatePlanner {
 #[pymethods]
 impl RawArrowLabeledCandidatePlanner {
     #[new]
-    #[pyo3(signature = (dataset, component_members, orcid_enabled = false, num_threads = None, max_exemplars = 4))]
+    #[pyo3(signature = (dataset, component_members, orcid_enabled = false, num_threads = None, max_exemplars = 4, *, legacy_paper_years = false))]
     fn new(
         py: Python<'_>,
         dataset: PyRef<'_, ArrowDataset>,
@@ -3785,6 +3801,7 @@ impl RawArrowLabeledCandidatePlanner {
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
+        legacy_paper_years: bool,
     ) -> PyResult<Self> {
         let dataset = dataset.shared();
         let (component_order, raw_members_by_component) =
@@ -3798,7 +3815,7 @@ impl RawArrowLabeledCandidatePlanner {
                 }
             }
         }
-        let mut inputs = LabeledPlanInputs::new(py)?;
+        let mut inputs = LabeledPlanInputs::new(py, legacy_paper_years)?;
         inputs.load(py, &dataset, &members, orcid_enabled, num_threads)?;
         let components = build_labeled_components(
             py,

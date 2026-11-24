@@ -16,10 +16,10 @@ from pathlib import Path
 import psutil
 import pytest
 
-from scripts import run_bounded
-from scripts.run_bounded import is_compiler_telemetry
+from scripts.dev import run_bounded
+from scripts.dev.run_bounded import is_compiler_telemetry
 
-RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "run_bounded.py"
+RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "dev" / "run_bounded.py"
 CHILD_PYTHON = getattr(sys, "_base_executable", sys.executable)
 
 
@@ -307,7 +307,7 @@ def test_reader_lock_and_telemetry_error_do_not_abandon_worker(tmp_path: Path) -
         f"Path({str(marker)!r}).write_text('done')"
     )
     inject = (
-        f"import sys; sys.path.insert(0,{str(RUNNER.parents[1])!r}); from scripts import run_bounded as runner\n"
+        f"import sys; sys.path.insert(0,{str(RUNNER.parents[2])!r}); from scripts.dev import run_bounded as runner\n"
         "runner.POLL_SECONDS = 0.02\n"
         "runner.PROGRESS_INTERVAL_SECONDS = 0.04\n"
         "raise SystemExit(runner.main())\n"
@@ -371,8 +371,8 @@ def test_windows_job_family_containment(tmp_path: Path, subtests: pytest.Subtest
     with subtests.test("supervisor-exception"):
         output, marker = tmp_path / "exception", tmp_path / "family_exc.json"
         inject = (
-            f"import sys,json; sys.path.insert(0,{str(RUNNER.parents[1])!r})\n"
-            "from scripts import run_bounded as runner\n"
+            f"import sys,json; sys.path.insert(0,{str(RUNNER.parents[2])!r})\n"
+            "from scripts.dev import run_bounded as runner\n"
             "from pathlib import Path\n"
             "runner.POLL_SECONDS = 0.02\n"
             "original=runner.tree_rss\n"
@@ -411,8 +411,8 @@ def test_windows_job_family_containment(tmp_path: Path, subtests: pytest.Subtest
             prefix = None
             if delay_initial_record:
                 inject = (
-                    f"import sys,time; sys.path.insert(0,{str(RUNNER.parents[1])!r})\n"
-                    "from scripts import run_bounded as runner\n"
+                    f"import sys,time; sys.path.insert(0,{str(RUNNER.parents[2])!r})\n"
+                    "from scripts.dev import run_bounded as runner\n"
                     "original=runner.publish\n"
                     "def delayed_publish(path,payload):\n"
                     "    if path.name == 'run.json': time.sleep(0.12)\n"
@@ -453,8 +453,8 @@ def test_fast_exit_and_record_alias_guards(tmp_path: Path, subtests: pytest.Subt
         with subtests.test(fast_exit_status=status):
             output = tmp_path / f"fast_{idx}"
             inject = (
-                f"import sys,time; sys.path.insert(0,{str(RUNNER.parents[1])!r})\n"
-                "from scripts import run_bounded as runner\n"
+                f"import sys,time; sys.path.insert(0,{str(RUNNER.parents[2])!r})\n"
+                "from scripts.dev import run_bounded as runner\n"
                 "original=runner.publish\n"
                 "def slow_initial(path,payload):\n"
                 "    if path.name == 'run.json':\n"
@@ -541,8 +541,8 @@ def test_lingering_compiler_telemetry(tmp_path: Path, subtests: pytest.Subtests)
                 f"while not Path({str(marker)!r}).exists(): time.sleep(0.01)"
             )
             inject = (
-                f"import sys; sys.path.insert(0,{str(RUNNER.parents[1])!r})\n"
-                "from scripts import run_bounded as runner\n"
+                f"import sys; sys.path.insert(0,{str(RUNNER.parents[2])!r})\n"
+                "from scripts.dev import run_bounded as runner\n"
                 "runner.POLL_SECONDS = 0.02\n"
                 "runner.TELEMETRY_GRACE_SECONDS = 0.08\n"
                 "raise SystemExit(runner.main())\n"

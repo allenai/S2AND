@@ -35,8 +35,8 @@ cargo --version
 
 ## Package install
 
-> **Update at v1.3 release:** PyPI holds only `0.51.2`, which cannot read `1.3` models or data.
-> Use the checkout flow below until `1.0.0` is published.
+> **Update at v1.3 release:** Runtime `1.0.0` is not on PyPI yet.
+> Install the latest `1.0.0` beta with `uv pip install --pre s2and`, or use the checkout flow below.
 
 Runtime install:
 
@@ -78,8 +78,8 @@ uv sync --active --extra dev
 
 The `dev` extra includes everything the tests need. For count generation, you can install either extra on its own.
 
-- `orcid-counts` installs `orjson` for [ORCID prefix counts](../scripts/production/counts/generate_orcid_name_prefix_counts.py).
-- `author-counts` installs `boto3` and `duckdb` for [Athena author counts](../scripts/production/counts/generate_author_counts_from_athena.py).
+- `orcid-counts` installs `orjson` for [ORCID prefix counts](../scripts/intake/counts/generate_orcid_name_prefix_counts.py).
+- `author-counts` installs `boto3` and `duckdb` for [Athena author counts](../scripts/intake/counts/generate_author_counts_from_athena.py).
 
 ## Build the Rust extension from source
 

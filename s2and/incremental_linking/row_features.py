@@ -154,13 +154,17 @@ def _coerce_promoted_row_feature_telemetry(result: Mapping[str, Any]) -> dict[st
 def build_promoted_non_pairwise_row_features_with_telemetry(
     candidate_batch: LinkerCandidateBatch,
     row_signals: Mapping[str, Any],
+    *,
+    legacy_paper_years: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     """Build promoted non-`pw_*` linker features and return Rust row-formula telemetry."""
 
     from s2and.runtime import load_s2and_rust_extension
 
     s2and_rust = load_s2and_rust_extension()
-    result = s2and_rust.promoted_linker_non_pairwise_features(_rust_payload(candidate_batch, row_signals))
+    result = s2and_rust.promoted_linker_non_pairwise_features(
+        _rust_payload(candidate_batch, row_signals), legacy_paper_years=legacy_paper_years
+    )
     if not isinstance(result, Mapping):
         raise RuntimeError("Rust promoted row-feature result must be a mapping")
     telemetry = _coerce_promoted_row_feature_telemetry(result)
@@ -183,8 +187,12 @@ def build_promoted_non_pairwise_row_features_with_telemetry(
 def build_promoted_non_pairwise_row_features(
     candidate_batch: LinkerCandidateBatch,
     row_signals: Mapping[str, Any],
+    *,
+    legacy_paper_years: bool = False,
 ) -> dict[str, np.ndarray]:
     """Build promoted non-`pw_*` linker features with the Rust row-formula kernel."""
 
-    features, _telemetry = build_promoted_non_pairwise_row_features_with_telemetry(candidate_batch, row_signals)
+    features, _telemetry = build_promoted_non_pairwise_row_features_with_telemetry(
+        candidate_batch, row_signals, legacy_paper_years=legacy_paper_years
+    )
     return features

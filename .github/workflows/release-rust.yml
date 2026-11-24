@@ -78,7 +78,7 @@ jobs:
       # The script checks versions, runs Ruff, ty, and the Rust checks, syncs the locked environment, and runs pytest.
       - name: Run the full CI policy
         if: steps.decide.outputs.release == 'true'
-        run: uv run --no-project python scripts/run_ci_locally.py
+        run: uv run --no-project python scripts/dev/run_ci_locally.py
 
   source-distributions:
     name: source distributions
@@ -99,10 +99,10 @@ jobs:
         run: uv build --sdist --out-dir dist --clear
 
       - name: Verify package data inventory
-        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
+        run: uv run --no-project python scripts/release/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
+        run: uv run --no-project python scripts/release/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       # Building from sdist compiles the extension, which is a distinct path from
       # installing a wheel. Exercise it on every supported interpreter.
@@ -117,7 +117,7 @@ jobs:
             uv venv --python "$py" "$smoke_venv"
             uv pip install --python "$smoke_venv/bin/python" "$sdist"
             uv run --no-project --python "$smoke_venv/bin/python" python \
-              scripts/verification/smoke_installed_rust_api.py
+              scripts/release/verification/smoke_installed_rust_api.py
             echo "::endgroup::"
           done
 
@@ -154,10 +154,10 @@ jobs:
           args: --release --locked --compatibility pypi --out dist
 
       - name: Verify package data inventory
-        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
+        run: uv run --no-project python scripts/release/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
+        run: uv run --no-project python scripts/release/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       - name: Install and exercise Windows wheel
         shell: pwsh
@@ -167,7 +167,7 @@ jobs:
           uv venv --python "${{ matrix.py }}" $smokeVenv
           $python = Join-Path $smokeVenv "Scripts/python.exe"
           uv pip install --python $python $wheel
-          uv run --no-project --python $python python scripts/verification/smoke_installed_rust_api.py
+          uv run --no-project --python $python python scripts/release/verification/smoke_installed_rust_api.py
 
       - uses: actions/upload-artifact@v6
         with:
@@ -207,10 +207,10 @@ jobs:
           args: --release --locked --compatibility pypi --out dist
 
       - name: Verify package data inventory
-        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
+        run: uv run --no-project python scripts/release/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
+        run: uv run --no-project python scripts/release/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       - name: Install and exercise macOS wheel
         shell: bash
@@ -221,7 +221,7 @@ jobs:
           uv venv --python "${{ matrix.py }}" "$smoke_venv"
           uv pip install --python "$smoke_venv/bin/python" "$wheel"
           uv run --no-project --python "$smoke_venv/bin/python" python \
-            scripts/verification/smoke_installed_rust_api.py
+            scripts/release/verification/smoke_installed_rust_api.py
 
       - uses: actions/upload-artifact@v6
         with:
@@ -271,10 +271,10 @@ jobs:
             -i python3.11 -i python3.12 -i python3.13
 
       - name: Verify package data inventory
-        run: uv run --no-project python scripts/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
+        run: uv run --no-project python scripts/release/verification/verify_production_model_distributions.py --dist-dir dist --source-root .
 
       - name: Verify Rust distribution license notices
-        run: uv run --no-project python scripts/verification/verify_rust_distribution_licenses.py --dist-dir dist
+        run: uv run --no-project python scripts/release/verification/verify_rust_distribution_licenses.py --dist-dir dist
 
       - name: Set up QEMU for the arm64 wheel import
         if: matrix.platform.docker-platform == 'linux/arm64'
@@ -293,7 +293,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:/work:ro" -w /tmp \
               "python:${py}-${{ matrix.platform.python-image }}" \
               sh -c "pip install --quiet --no-deps --root-user-action=ignore '/work/${wheel}' \
-                && python /work/scripts/verification/smoke_installed_rust_api.py"
+                && python /work/scripts/release/verification/smoke_installed_rust_api.py"
             echo "::endgroup::"
           done
 
@@ -337,7 +337,7 @@ jobs:
           SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
           cd "$RUNNER_TEMP"
           uv run --no-project --python "$SMOKE_VENV/bin/python" python \
-            "$GITHUB_WORKSPACE/scripts/verification/smoke_installed_incremental_arrow.py"
+            "$GITHUB_WORKSPACE/scripts/release/verification/smoke_installed_incremental_arrow.py"
 
       # All matrix legs download identical artifacts; publish the tested set once
       # so the artifact name stays unique. `needs: [release-smoke]` still waits

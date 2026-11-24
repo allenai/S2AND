@@ -6,8 +6,11 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as ipc
+import pytest
 
-from scripts.production.data.prepare_identity_labels import (
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.intake.prepare_identity_labels import (
+    main,
     names_are_compatible,
     normalize_block_key,
     prepare_identity_labels,
@@ -21,6 +24,69 @@ def _write_signatures_arrow(directory: Path, rows: list[dict]) -> Path:
     with pa.OSFile(str(path), "wb") as sink, ipc.new_file(sink, table.schema) as writer:
         writer.write_table(table)
     return path
+
+
+def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Path) -> None:
+    shared = "0000-0002-1694-233X"
+    assignments = assign_block_roles(
+        [BlockSpec("a ross", 1, frozenset({shared})), BlockSpec("b ross", 1, frozenset({shared}))],
+        {"eps_cal": 1, "final_test_a": 1},
+        pinned_roles={"a ross": "eps_cal", "b ross": "final_test_a"},
+        closure_mode="home_pool",
+    )
+    path = tmp_path / "assignments.json"
+    path.write_text(json.dumps(assignments), encoding="utf-8")
+    gold = tmp_path / "gold.parquet"
+    pd.DataFrame(
+        {
+            "paper_id": ["1", "2"],
+            "position": [0, 0],
+            "orcid": [shared, shared],
+            "block_key": ["a ross", "b ross"],
+            "scored": [True, True],
+        }
+    ).to_parquet(gold, index=False)
+    for idx, block in enumerate(("a_ross", "b_ross"), 1):
+        directory = tmp_path / block
+        arrow_path = _write_signatures_arrow(
+            directory,
+            [
+                {
+                    "signature_id": f"s{idx}",
+                    "paper_id": str(idx),
+                    "author_position": 0,
+                    "author_block": block,
+                    "author_orcid": shared,
+                }
+            ],
+        )
+        output = directory / "labels.parquet"
+        audit_path = directory / "audit.json"
+        assert (
+            main(
+                [
+                    "--arrow-dataset-dir",
+                    str(directory),
+                    "--gold-parquet",
+                    str(gold),
+                    "--output-parquet",
+                    str(output),
+                    "--block-role-assignments",
+                    str(path),
+                    "--audit-json",
+                    str(audit_path),
+                ]
+            )
+            == 0
+        )
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        assert audit["scored_rows"] == int(idx == 2)
+        assert audit["unique_orcids"] == int(idx == 2)
+        assert audit["non_home_verified_rows"] == (1 if idx == 1 else 0)
+        labels = pd.read_parquet(output)
+        assert labels["signature_id"].tolist() == [f"s{idx}"]
+        assert labels["scored"].tolist() == [idx == 2]
+        assert pa.ipc.open_file(str(arrow_path)).read_all()["author_orcid"].to_pylist() == [shared]
 
 
 def test_normalize_block_key_and_name_compatibility() -> None:
@@ -196,7 +262,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Null scored must be rejected (not admitted via bool(nan) == True).
+            # Retain the identity and leave a null scored flag ineligible.
             {
                 "corpus_paper_id": 1031,
                 "position": 0.0,
@@ -314,11 +380,17 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     )
 
     verified = pd.read_parquet(out_parquet)
-    assert verified["signature_id"].tolist() == ["s_ok1", "s_ok2"]
+    assert verified.set_index("signature_id")["scored"].to_dict() == {
+        "s_ok1": True,
+        "s_ok2": True,
+        "s_unscored": False,
+        "s_null_scored": False,
+    }
+    verified = verified.loc[verified["scored"]]
     assert verified["orcid"].tolist() == [valid_orcid, valid_orcid]
     assert verified["split"].tolist() == ["development", "development"]
     assert audit["dropped_wrong_split"] == 1
-    assert audit["dropped_unscored"] == 2
+    assert audit["gold_unscored_verified_rows"] == 2
     assert audit["dropped_invalid_position"] == 1
     # s_wrong_block ('b_jones') is excluded at the Parquet block-key pushdown level before scanning!
     assert "s_wrong_block" not in set(verified["signature_id"])
@@ -328,7 +400,31 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     assert audit["dropped_excluded_orcid_group"] == 1
     assert audit["dropped_reviewed_error_signature"] == 1
     assert audit["dropped_conflicting_gold_rows"] == 2
-    assert audit["verified_rows"] == 2
+    assert audit["scored_rows"] == 2
     assert audit["repeated_orcids"] == 1
     assert audit["verification_mode"] == "position_block_and_name"
-    assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 2
+    assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 4
+
+
+@pytest.mark.parametrize("scored_order", [(False, True), (True, False)])
+def test_duplicate_verified_labels_keep_any_scored_evidence(tmp_path: Path, scored_order: tuple[bool, bool]) -> None:
+    orcid = "0000-0002-1694-233X"
+    arrow = tmp_path / "a_ross"
+    _write_signatures_arrow(
+        arrow,
+        [
+            {
+                "signature_id": "s1",
+                "paper_id": "1",
+                "author_position": 0,
+                "author_block": "a ross",
+                "author_orcid": orcid,
+            }
+        ],
+    )
+    gold = tmp_path / "gold.parquet"
+    row = {"paper_id": "1", "position": 0, "orcid": orcid, "block_key": "a ross"}
+    pd.DataFrame([{**row, "scored": scored} for scored in scored_order]).to_parquet(gold)
+    output = tmp_path / "labels.parquet"
+    prepare_identity_labels(arrow, gold, output)
+    assert pd.read_parquet(output)[["signature_id", "scored"]].values.tolist() == [["s1", True]]

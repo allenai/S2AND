@@ -16,7 +16,7 @@ from s2and.production_training_contract import (
     ProductionArtifactAuthority,
     load_packaged_artifact_authority,
 )
-from scripts.production.model import train_pairwise
+from scripts.pairwise import train_pairwise
 from tests.helpers import pairwise_training_args
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 from tests.training_helpers import write_classic_tiny_bundle
@@ -251,7 +251,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     assert built_members
     assert summary["main_pairwise_best_params"]
     assert summary["nameless_pairwise_best_params"]
-    from s2and.production_training_contract import block_membership_sha256, frozen_test_blocks
+    from s2and.production_training_contract import block_membership_sha256
 
     signatures = json.loads(development_files["signatures"].read_text(encoding="utf-8"))
     blocks: dict[str, list[str]] = {}
@@ -269,7 +269,7 @@ def test_train_pairwise_bundle_runs_real_featurization_and_model_fits(
     )
     record = summary["cluster_test_splits"]["qian"]
     assert record["block_membership_sha256"] == block_membership_sha256(blocks)
-    assert frozen_test_blocks(dict(reversed(list(blocks.items()))), record) == expected_test
+    assert sorted(record["test_block_ids"]) == sorted(expected_test)
     assert "best_clustering_params" not in summary
     assert 0.0 <= summary["main_validation_roc_auc"] <= 1.0
     assert 0.0 <= summary["nameless_validation_roc_auc"] <= 1.0

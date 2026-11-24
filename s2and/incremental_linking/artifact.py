@@ -19,6 +19,7 @@ from s2and.incremental_linking.contracts import (
     DEFAULT_RETRIEVAL_TOP_K,
     INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
     INCREMENTAL_LINKER_FORMAT_VERSION,
+    LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
     canonical_json_digest,
 )
 from s2and.incremental_linking.features import promoted_linker_feature_columns
@@ -57,12 +58,17 @@ def _validated_metadata(payload: Any) -> tuple[dict[str, Any], NumpyLogisticGate
         raise ValueError(f"Incremental linker artifact metadata is missing fields: {missing}")
     if payload["kind"] != INCREMENTAL_LINKER_KIND:
         raise ValueError(f"Incremental linker artifact kind must be {INCREMENTAL_LINKER_KIND!r}")
-    for field, expected in (
-        ("format_version", INCREMENTAL_LINKER_FORMAT_VERSION),
-        ("feature_contract_version", INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION),
-    ):
-        if type(payload[field]) is not int or payload[field] != expected:
-            raise ValueError(f"Incremental linker artifact {field} must equal supported version {expected}")
+    if type(payload["format_version"]) is not int or payload["format_version"] != INCREMENTAL_LINKER_FORMAT_VERSION:
+        raise ValueError(
+            "Incremental linker artifact format_version must equal supported version "
+            f"{INCREMENTAL_LINKER_FORMAT_VERSION}"
+        )
+    feature_version = payload["feature_contract_version"]
+    if type(feature_version) is not int or feature_version not in {
+        LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+        INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+    }:
+        raise ValueError(f"Unsupported incremental linker artifact feature_contract_version: {feature_version!r}")
     if payload["feature_names"] != list(promoted_linker_feature_columns()):
         raise ValueError("Incremental linker artifact feature_names must match the runtime ordered feature names")
 
@@ -100,6 +106,12 @@ class IncrementalLinkingArtifact:
     retrieval_top_k: int
     pairwise_bundle_binding_digest: str
     target_spec_digest: str
+    feature_contract_version: int = INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
+
+    @property
+    def legacy_paper_years(self) -> bool:
+        """Return whether this linker was trained on raw positive paper years."""
+        return self.feature_contract_version == LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
 
     @property
     def feature_columns(self) -> tuple[str, ...]:
@@ -184,6 +196,8 @@ def save_incremental_linking_artifact(
     gate_config: Mapping[str, Any],
     target_spec: Mapping[str, Any],
     pairwise_bundle_binding: Mapping[str, Any],
+    fixed_booster: tuple[Path, str] | None = None,
+    feature_contract_version: int = INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
 ) -> dict[str, Any]:
     """Write `booster.lgb` and the minimal current runtime metadata."""
 
@@ -195,12 +209,17 @@ def save_incremental_linking_artifact(
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{artifact_dir.name}.staging-", dir=artifact_dir.parent))
     try:
-        booster = lightgbm_booster(model)
         booster_path = staging_dir / BOOSTER_FILENAME
-        booster.save_model(str(booster_path))
+        if fixed_booster is None:
+            lightgbm_booster(model).save_model(str(booster_path))
+        else:
+            source, expected_sha256 = fixed_booster
+            shutil.copyfile(source, booster_path)
+            if _sha256_file(booster_path) != expected_sha256:
+                raise ValueError("Fixed ranker SHA-256 changed before publication")
         metadata: dict[str, Any] = {
             "booster_sha256": _sha256_file(booster_path),
-            "feature_contract_version": INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION,
+            "feature_contract_version": feature_contract_version,
             "feature_names": list(promoted_linker_feature_columns()),
             "format_version": INCREMENTAL_LINKER_FORMAT_VERSION,
             "gate_config": dict(gate_config),
@@ -250,6 +269,7 @@ def _load_incremental_linking_artifact(
         retrieval_top_k=int(metadata["retrieval_top_k"]),
         pairwise_bundle_binding_digest=str(metadata["pairwise_bundle_binding_digest"]),
         target_spec_digest=str(metadata["target_spec_digest"]),
+        feature_contract_version=int(metadata["feature_contract_version"]),
     )
 
 

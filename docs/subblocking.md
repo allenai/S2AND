@@ -1,23 +1,16 @@
 # Subblocking
 
-Subblocking keeps pairwise distance construction bounded for large blocks. It is
-used by `Clusterer.predict_from_arrow(..., batching_threshold=N)` on the
-Rust Arrow route (see [Python and Rust routing](#python-and-rust-routing)). Production
-and EPS sweeps use the native planner. `make_subblocks_with_telemetry(...)` is the
-standalone Python reference for partition and quality checks. `make_subblocks(...)`
-returns just its subblock dictionary.
+Subblocking keeps pairwise distance construction bounded for large blocks.
+`Clusterer.predict_from_arrow(..., batching_threshold=N)` and the EPS sweep both
+use the native Rust planner over Arrow inputs.
 
 `N` becomes the maximum subblock size. Every emitted subblock is expected to
 have at most `N` signatures.
 
 ## Default fallback
 
-Oversized groups that cannot be split by names go to a fallback cluster function.
-
-- Arrow prediction uses the graph fallback. Graph preparation and clustering failures propagate.
-- Direct callers of `make_subblocks(...)` or `make_subblocks_with_telemetry(...)`
-  that do not pass a cluster function get the SPECTER fallback,
-  `cluster_with_specter(...)`.
+Oversized groups that cannot be split by names use the native graph fallback.
+The caller receives errors from graph preparation and clustering.
 
 The graph configuration is available on `Clusterer`:
 
@@ -68,7 +61,6 @@ A record is marked when all of these conditions are true:
 - It is not a member of an active caller-required seed group.
 
 The native Arrow planner returns one bucket per dead end for records that meet the first three conditions.
-The Python reference helper `no_middle_dead_end_buckets(...)` computes the same buckets for parity checks.
 A record's piece is its final subblock after required seed groups are packed.
 
 After bulk prediction, the step does these operations for each bucket of each original block:
@@ -101,16 +93,12 @@ Current normalization handles every dash-like given-name separator uniformly. Da
 canonical first name regardless of the dash code point: both `Sang-Min` and `Sang<U+2010>Min` normalize to
 `first="sang min", middle=""`. Subblock keys then apply the [compound first-name rule](#compound-first-names).
 
-The Python reference uses precomputed canonical first and middle fields when available and reconstructs them
-with the same canonicalizer when Rust preprocessing deferred those fields. The native Arrow planner normalizes raw name columns.
-
 ## Compound first names
 
 A canonical first name with two or more tokens is a compound, for example `hui min` from `Hui-Min` or `j d` from
 `J.-D.`. A compound keys as one token, so it does not make a prefix bucket of its own. The rule changes only the
 first and middle names that form subblock keys. Canonical names, features, name counts and constraints do not
-change. `s2and.subblocking.subblocking_name_parts(...)` and the Rust Arrow planner apply the same rule to the
-whole request before the partition flow starts.
+change. The planner applies this rule to the whole request before the partition flow starts.
 
 1. If every token has one character, the key first is the first token. The other tokens go before the canonical
    middle: `j d` with middle `t` keys as first `j`, middle `d t`, in the single-letter group.
@@ -147,13 +135,12 @@ data hash used to build the counts. The producer excludes 19 reviewed groups and
 preserves the shared-surname rule. The [loader](../s2and/orcid_prefix_counts.py)
 validates the count data hash, canonical prefix-pair keys, and positive integer
 counts. Missing or malformed artifacts raise before partitioning. Models without
-a contract hash and the standalone Python reference default to the `1.4` counts.
-The reference also accepts an explicit mapping for parity checks.
+a contract hash use the `1.4` counts.
 
 The planner considers these counts after exact-name and `same_prefix_tokens`
 merge candidates.
 
-`make_subblocks(...)` and `make_subblocks_with_telemetry(...)` have a `use_orcid_subblocking` flag. When enabled, the
+The native planner supports optional same-ORCID repair. When enabled, the
 final repair pass can merge whole subblocks that contain the same ORCID, but it never extracts only ORCID signatures
 from an existing subblock. The merge runs only when the combined whole subblocks fit within `maximum_size`; otherwise
 the split is preserved and telemetry records the capacity skip.
@@ -188,24 +175,16 @@ Default `GraphSubblockingConfig` behavior:
   bounded coauthor-posting edges after projection edges have been scored.
 - Adaptive projection, aggregate packing, and local moves are experimental knobs and are off by default.
 
-For bounded samples, the [graph quality comparison](../scripts/verification/compare_graph_subblocking_arrow_quality.py)
-uses the Python helper `_read_arrow_rows_by_values` to load the union of required
-`signatures`, `paper_authors`, and selected embedding rows, then slices the
-in-memory evidence for each fallback group. The helper uses raw-planner batch
-lookup indexes (`signatures_batch_index`, `paper_authors_batch_index`, and
-`specter_batch_index` for embeddings) and refuses filtered full scans. Missing
-required artifacts and malformed Arrow schemas raise before graph clustering.
+The native planner requires Arrow signatures and the batch indexes for its
+evidence tables. Missing required artifacts and invalid Arrow schemas raise
+before clustering. Use the [native threshold sweep](../scripts/release/README.md#subblocking-quality)
+to inspect partitions and ORCID-group preservation.
 
-## Python and Rust routing
+## Prediction
 
 Call `Clusterer.predict_from_arrow(blocks, arrow_dataset, batching_threshold=N,
 total_ram_bytes=...)` to partition oversized blocks with the native Rust graph
 planner and reuse one Rust featurizer across the emitted subblocks.
-
-The graph quality comparison checks coverage and the size cap for both planners.
-In projection mode, their deterministic random-number generators and seed derivations
-can produce different edges and partitions for the same signatures. For a fixed
-candidate edge set, each planner resolves score ties deterministically.
 
 `batching_threshold=None` keeps full-block prediction. A positive threshold caps
 native subblock size and leaves blocks at or below the cap intact. `total_ram_bytes`
@@ -217,7 +196,7 @@ for disallow precedence.
 
 ## Telemetry
 
-`make_subblocks_with_telemetry(...)` returns the final subblocks plus telemetry for the partition process, including:
+The native planner records partition telemetry, including:
 
 - input and single-letter/multi-letter signature counts
 - first-name dead-end counts
@@ -225,8 +204,7 @@ for disallow precedence.
 - pre-merge and final subblock counts
 - ORCID repair capacity skips
 - `*_specter_labeled_*` subblock and signature counts, which count every
-  fallback-produced subblock (keys containing `|specter=`), whichever fallback
-  ran
+  graph fallback subblock (keys containing `|specter=`)
 
 ## Incremental prediction
 

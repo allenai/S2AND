@@ -17,14 +17,14 @@
 - Linker source preflight resolves calibration and test assignments with the trainer's selector
   and rejects missing eligible rows, mismatched `base_group_id` values, inconsistent eval-table
   paths, labels for missing replay datasets, and duplicate or conflicting candidates, before any copy.
-  The fit, `evaluate_classic` and the EPS tools reject an assignment whose source key has no eval table.
+  The fit, `evaluate_linker` and the EPS tools reject an assignment whose source key has no eval table.
 - Linker source preflight checks each dataset within each label table: with ten or more marked
   `negative_singleton_orcid` views, at least 10% must have a positive candidate. Mark unreviewed
   views `unlabeled_singleton_orcid`.
 - Giant EPS sweeps require `--batching-threshold` and record it. Applying a snapshot sweep requires
   `--expected-batching-threshold`, one snapshot, and a `--datasets` list that matches the snapshot's
   calibration assignments outside `s2and_eval`; it rejects curves recorded for another dataset.
-  The EPS reference excludes the same final-test split as `evaluate_classic`.
+  The EPS reference excludes the same final-test split as `evaluate_linker`.
 - Corrected dataset packaging requires `--precision-f1-tolerance`. Calibration requires
   `--allow-zero-precision-f1-tolerance` when a close-pair bonus wins at zero tolerance, and saves
   the refused run's trials for the retry.
@@ -100,6 +100,24 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 ### Breaking changes
 
+- `s2and.model`, `s2and.text` and the linker training module are now packages,
+  and the correction modules live in `s2and.corrections`. Old import paths still
+  work. Module constants such as `s2and.model._FUSED_BLOCK_SCORING` are read
+  in their new modules, so assigning them through the old path has no effect.
+- Scripts moved into one folder per pipeline stage under `scripts/`: `intake`,
+  `judging`, `pairwise`, `linker`, `eps`, `release` and `dev`, with shared
+  modules in `common`. Commands from earlier releases need the new paths. See
+  [moved files](../scripts/README.md#moved-files).
+- Removed the Python subblocker from `s2and.subblocking`: `make_subblocks`,
+  `make_subblocks_with_telemetry`, `cluster_with_specter`,
+  `cluster_with_graph_fallback`, `subdivide_helper`,
+  `DatasetGraphSubblockingFallback`, `no_middle_dead_end_buckets`,
+  `make_dataset_graph_subblocking_cluster_fn` and
+  `signature_affiliation_feature_keys`.
+  Subblocking runs in Rust inside `Clusterer.predict_from_arrow`.
+- Removed unused evaluation helpers `claims_eval`, `facet_eval`,
+  `FacetEvalResult` and `min_pair_edit` from `s2and.eval`, and `equal_initial`
+  from `s2and.text`. They have no replacement.
 - Releases publish three Amazon Simple Storage Service (S3) bundles:
   `inference` (model and count index), `dataset` (Arrow training and evaluation
   data), and `source` (editable records).
@@ -113,12 +131,6 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   train, validation, and held-out pairs. Plans require Arrow papers and embeddings.
   The published `1.3` data reproduces the `1.3` training and validation matrices.
 - `train_pairwise.py` and `train_linker_and_finalize.py` require `--n-jobs`.
-- Production bundle evaluation in `eval_prod_models.py` uses the test block IDs
-  and order-independent membership digest recorded by the trainer. It verifies
-  membership for JSON and Arrow, reads `data_random_seed` from
-  `reproducibility/pairwise_training_config.json`, and rejects `--seed` outside
-  `--train`. For an older bundle without these records, use the frozen release
-  evaluator or retrain.
 - Arrow batch indexes use `S2ABI003` with a 32-byte header. Rebuild older indexes
   and regenerate their dataset manifests. Index validators and `overwrite=False`
   reuse check layout and size. `ArrowDataset.open_trusted(paths)` accepts
@@ -159,8 +171,6 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   blocks. Augmented evaluation cannot contain a benchmark development signature.
 - Production conversion and evaluation use SPECTER2. Runtime conversion writes
   one embedding table under manifest key `specter`, usually `specter2.arrow`.
-  `eval_prod_models.py` removes `--specter1-model-path`. SPECTER1 remains an
-  explicit research comparison in `--train` mode.
 - Python and Rust share the `canonical_v2` name and feature behavior. Titles
   retain letters and digits, CLD2 uses plain-text mode, malformed email is
   treated as missing, and query-author features use canonical name fields.
@@ -189,8 +199,7 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   spaces in venues, affiliations, and suffixes.
 - `ANDData` groups by `author_info.block`. The `block_type` constructor
   argument, `Signature.author_info_given_block`, `get_original_blocks()`,
-  and `get_s2_blocks()` are removed. `facet_eval()` drops `block_type` and
-  uses the S2 grouping for block size, homonymity, and synonymity. Legacy
+  and `get_s2_blocks()` are removed. Legacy
   `author_info.given_block` JSON is accepted as an ignored field. Preserve
   original benchmark partitions externally if you need them.
 
@@ -457,8 +466,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   preserve name conflicts and explicit disallows.
 - JSON seed `require` pairs form connected components. Explicit `disallow`
   pairs retain precedence. Incremental altered-profile splitting honors the
-  ignore-seeds flag through postprocessing. Arrow-backed facet evaluation
-  computes deferred canonical names before comparing them.
+  ignore-seeds flag through postprocessing.
 - Subblocked prediction keeps original input blocks independent. Initial-only
   groups attach within their block, and an active required component exceeding
   `batching_threshold` within a block raises `ValueError`. Mixed initial and
@@ -473,14 +481,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   empty.
 - Altered-profile split components receive IDs that cannot collide with
   existing profile IDs.
-- Automatic `eval_prod_models.py` routing can use JSON if the Arrow source or
-  requested dataset is unavailable or lacks a declared embedding generation or
-  name-count index. Selection uses the embedding filename declared in the
-  manifest even if the file resolves to a different name. The evaluator
-  reports why it fell back to JSON. Broken collection bindings, missing base
-  artifacts, and invalid or corrupt declared data raise errors. Empty Arrow
-  files identify their table and path. `--no-arrow` skips Arrow inspection.
-  Linker source assembly rejects Arrow inputs that differ from their recorded
+- Linker source assembly rejects Arrow inputs that differ from their recorded
   manifest checksums.
 - Caller distances in bulk prediction are checked against seed groups only
   within each request block. Near-hard values within `1e-6` of `0` or `10000`
@@ -522,7 +523,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   remains available for training and full-block Python prediction.
 - The `S2AND_BACKEND` environment variable is removed. Direct
   `s2and.runtime.build_runtime_context(...)` calls without `backend` now
-  select Python. `scripts/bench_preprocess_phases.py` drops `--backend`.
+  select Python.
 - `ArrowDataset.name_counts_manifest`, `ValidatedNameCountsManifest`, and
   `NameCountsBinding` are removed. Use `ArrowDataset.name_counts_index`,
   `NameCountsIndex.path`, and `NameCountsIndex.manifest_sha256`.
@@ -534,9 +535,9 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   removed. The raw Arrow planner accepts caller-declared query IDs through
   `from_query_signatures` and can derive queries with `from_auto_queries`.
 - Legacy migration tools and release dispatchers are retired. Use
-  [the performance profiler](../scripts/verification/profile_promoted_incremental_arrow.py),
-  [the full-block parity check](../scripts/verification/compare_full_predict_arrow_parity.py),
-  and [the subblocking quality check](../scripts/verification/compare_graph_subblocking_arrow_quality.py).
+  [the performance profiler](../scripts/release/verification/profile_promoted_incremental_arrow.py),
+  [the full-block parity check](../scripts/release/verification/compare_full_predict_arrow_parity.py),
+  and [the native subblocking quality check](../scripts/release/README.md#subblocking-quality).
 - `RustFeaturizer.update_cluster_seeds`, `signature_rule_metadata`, and
   `update_signature_name_counts` are removed. Apply seed overlays with
   `with_cluster_seeds`.

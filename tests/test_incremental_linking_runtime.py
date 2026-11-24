@@ -923,7 +923,7 @@ def test_retrieved_candidates_score_a_loaded_artifact_and_record_missing_queries
     monkeypatch.setattr(
         runtime_module,
         "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _batch, _signals: _row_features_with_telemetry(np.asarray([0.1, 0.9, 0.8], dtype=np.float32)),
+        lambda _batch, _signals, **_kwargs: _row_features_with_telemetry(np.asarray([0.1, 0.9, 0.8], dtype=np.float32)),
     )
     result = _predict_incremental_link_or_abstain_retrieved_candidates(
         load_incremental_linking_artifact(artifact_dir),
@@ -1075,7 +1075,9 @@ def test_runtime_orcid_force_link_policy_is_independent_of_model_features(
     monkeypatch.setattr(
         runtime_module,
         "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.95, 0.10], dtype=np.float32)),
+        lambda _candidate_batch, _row_signals, **_kwargs: _row_features_with_telemetry(
+            np.asarray([0.95, 0.10], dtype=np.float32)
+        ),
     )
 
     force_enabled = _predict_incremental_link_or_abstain_retrieved_candidates(
@@ -1192,7 +1194,9 @@ def test_private_retrieved_candidate_slice_returns_no_candidate_abstains(
     monkeypatch.setattr(
         runtime_module,
         "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([], dtype=np.float32)),
+        lambda _candidate_batch, _row_signals, **_kwargs: _row_features_with_telemetry(
+            np.asarray([], dtype=np.float32)
+        ),
     )
 
     result = _predict_incremental_link_or_abstain_retrieved_candidates(
@@ -1400,7 +1404,9 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
     monkeypatch.setattr(
         runtime_module,
         "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9], dtype=np.float32)),
+        lambda _candidate_batch, _row_signals, **_kwargs: _row_features_with_telemetry(
+            np.asarray([0.9], dtype=np.float32)
+        ),
     )
 
     result = runtime_module._predict_incremental_link_or_abstain_production_from_retrieval_private(  # noqa: SLF001
@@ -1479,7 +1485,9 @@ def test_from_retrieval_name_check_skips_required_seed_members(
     monkeypatch.setattr(
         runtime_module,
         "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9], dtype=np.float32)),
+        lambda _candidate_batch, _row_signals, **_kwargs: _row_features_with_telemetry(
+            np.asarray([0.9], dtype=np.float32)
+        ),
     )
     seeds = dict.fromkeys(members, "c1")
 

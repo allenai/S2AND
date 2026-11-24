@@ -9,7 +9,7 @@ if ! git diff --cached --name-only --diff-filter=ACM | grep -qx "VERSION"; then
   exit 0
 fi
 
-VERSION_TARGETS="$(uv run python scripts/sync_version.py --print-targets)"
+VERSION_TARGETS="$(uv run python scripts/dev/sync_version.py --print-targets)"
 VERSION_FILES=()
 while IFS= read -r version_file; do
   version_file="${version_file%$'\r'}"
@@ -18,16 +18,16 @@ while IFS= read -r version_file; do
   fi
 done <<< "$VERSION_TARGETS"
 
-if uv run python scripts/sync_version.py --check; then
+if uv run python scripts/dev/sync_version.py --check; then
   exit 0
 fi
 
 echo "sync_version out of date; syncing manifests and lockfiles..."
-uv run python scripts/sync_version.py
+uv run python scripts/dev/sync_version.py
 uv sync --extra dev
 
 # Keep sync script formatted to avoid CI failures.
-uv run --active --no-project ruff format scripts/sync_version.py
+uv run --active --no-project ruff format scripts/dev/sync_version.py
 
 # Stage version-related files so the commit includes the updates.
 git add "${VERSION_FILES[@]}"

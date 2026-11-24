@@ -578,6 +578,8 @@ def _rescore_query_disallow_endpoint(
             cluster_seeds_path=context.cluster_seeds_path,
             cluster_seed_disallows_path=context.cluster_seed_disallows_path,
         )
+        if getattr(context.clusterer.featurizer_info, "legacy_paper_years", False):
+            featurizer = featurizer.with_legacy_paper_years()
         featurizer_seconds = time.perf_counter() - featurizer_started
         featurizer_build_count = 1
         featurizer_built_signature_count = len(required_signature_ids)
@@ -1170,6 +1172,7 @@ class _BackgroundSeedPlanner:
         top_k: int,
         orcid_enabled: bool,
         num_threads: int,
+        legacy_paper_years: bool,
     ) -> None:
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="s2and-seed-planner"
@@ -1182,6 +1185,7 @@ class _BackgroundSeedPlanner:
             top_k,
             orcid_enabled,
             num_threads,
+            legacy_paper_years,
         )
 
     @staticmethod
@@ -1192,6 +1196,7 @@ class _BackgroundSeedPlanner:
         top_k: int,
         orcid_enabled: bool,
         num_threads: int,
+        legacy_paper_years: bool,
     ) -> Any:
         planner_class = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner  # noqa: SLF001
         with temporary_cluster_seed_sidecars(
@@ -1206,6 +1211,7 @@ class _BackgroundSeedPlanner:
                 max_exemplars=4,
                 retain_seed_rows=True,
                 prefetch_signature_ids=query_signature_ids,
+                legacy_paper_years=legacy_paper_years,
             )
 
     def take(self, cluster_seeds_path: Path, cluster_seed_disallows_path: str | None) -> Any | None:
@@ -1281,6 +1287,7 @@ def start_background_seed_planner(
             suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False))
         ),
         num_threads=clusterer.n_jobs,
+        legacy_paper_years=getattr(artifact, "legacy_paper_years", False),
     )
 
 
@@ -1532,7 +1539,14 @@ def _predict_incremental_promoted_linker_from_arrow(
         if unassigned_signature_ids:
             planner_build_start = time.perf_counter()
             disallows_path_text = None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)
-            planner_key = (id(arrow_dataset), retrieval_top_k, bool(orcid_enabled), clusterer.n_jobs)
+            legacy_linker_years = getattr(artifact, "legacy_paper_years", False)
+            planner_key = (
+                id(arrow_dataset),
+                retrieval_top_k,
+                bool(orcid_enabled),
+                clusterer.n_jobs,
+                legacy_linker_years,
+            )
             if (
                 attachment_state is not None
                 and attachment_state.planner is not None
@@ -1556,6 +1570,7 @@ def _predict_incremental_promoted_linker_from_arrow(
                     orcid_enabled=bool(orcid_enabled),
                     num_threads=clusterer.n_jobs,
                     max_exemplars=4,
+                    legacy_paper_years=legacy_linker_years,
                     # Window featurizers build from these rows instead of re-reading Arrow,
                     # and attachment passes reload from them.
                     retain_seed_rows=True,
@@ -1663,6 +1678,8 @@ def _predict_incremental_promoted_linker_from_arrow(
                         cluster_seeds_path=cluster_seeds_path,
                         cluster_seed_disallows_path=cluster_seed_disallows_path,
                     )
+            if getattr(clusterer.featurizer_info, "legacy_paper_years", False):
+                raw_batch_featurizer = raw_batch_featurizer.with_legacy_paper_years()
             raw_batch_featurizer_seconds += time.perf_counter() - featurizer_start
             raw_batch_featurizer_count += 1
             raw_batch_featurizer_signature_count += len(signature_ids)

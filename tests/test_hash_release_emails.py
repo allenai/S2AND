@@ -18,7 +18,7 @@ from s2and.featurizer import NUM_FEATURES
 from s2and.incremental_linking import linker_pairwise
 from s2and.incremental_linking.feature_block_arrow import write_arrow_batch_lookup_index
 from s2and.text import email_prefix_suffix
-from scripts.production.data.hash_release_emails import (
+from scripts.intake.hash_release_emails import (
     EMAIL_REDACTED_TOKEN,
     hash_feature_email,
     hash_release_emails,

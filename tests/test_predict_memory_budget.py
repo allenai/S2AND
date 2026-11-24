@@ -11,6 +11,7 @@ from s2and import memory_budget
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
+from s2and.model import distances as distance_module
 from s2and.production_model import NativeLightGBMBinaryClassifier
 from tests.helpers import build_dummy_dataset
 from tests.model_helpers import ConstantDistanceClassifier
@@ -91,7 +92,7 @@ def test_python_calibration_bounds_features_and_native_scoring_without_changing_
     total_ram_bytes = 20_000_000
     feature_batches: list[tuple[int, int | None]] = []
     scorer_batches: list[tuple[int, int | None]] = []
-    real_featurize = model_module.many_pairs_featurize
+    real_featurize = distance_module.many_pairs_featurize
     real_scorer_plan = memory_budget.compute_native_scorer_chunk_plan
 
     def record_features(pairs, *args: Any, **kwargs: Any):
@@ -107,7 +108,7 @@ def test_python_calibration_bounds_features_and_native_scoring_without_changing_
         "memory_snapshot_for_stage",
         lambda **_kwargs: _snapshot(available_bytes=20_000, total_ram_bytes=total_ram_bytes),
     )
-    monkeypatch.setattr(model_module, "many_pairs_featurize", record_features)
+    monkeypatch.setattr(distance_module, "many_pairs_featurize", record_features)
     monkeypatch.setattr(memory_budget, "compute_native_scorer_chunk_plan", record_scorer_plan)
 
     distances = clusterer.make_distance_matrices(blocks, dataset, disable_tqdm=True, total_ram_bytes=total_ram_bytes)

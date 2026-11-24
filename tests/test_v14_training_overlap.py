@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
@@ -64,7 +65,9 @@ def test_training_overlap_cli_checks_both_sealed_halves(
     blocks_path.write_text(json.dumps({"a_ross": "a ross", "b_ross": "b ross"}), encoding="utf-8")
     pd.DataFrame(
         {
-            "signature_id": ["a-001", "a-001", "train"] if signature_hit else ["train-1", "train-2", "train-3"],
+            "signature_id": ["train-1", "train-2", "train-3"],
+            "paper_id": ["a-001", "a-001", "train"] if signature_hit else ["p1", "p2", "p3"],
+            "position": [0, 0, 0],
             "orcid": [None, None, f"https://orcid.org/{training_orcid}" if training_orcid else None],
         }
     ).to_parquet(train_path, index=False)
@@ -76,12 +79,50 @@ def test_training_overlap_cli_checks_both_sealed_halves(
             str(blocks_path),
             "--training-parquet",
             str(train_path),
+            *(["--allow-no-training-orcids"] if not training_orcid else []),
         ]
     ) == int(expected_overlap)
     report = json.loads(capsys.readouterr().out)
     assert report["passed"] == (not expected_overlap)
     assert report["training_shards"][0]["rows"] == 3
+    assert report["distinct_training_orcids"] == int(orcid_hit)
     assert report["sealed_roles"] == {
-        "final_test_a": {"signatures": 1, "orcids": 1, "signature_overlap": int(signature_hit), "orcid_overlap": 0},
-        "final_test_b": {"signatures": 1, "orcids": 2, "signature_overlap": 0, "orcid_overlap": int(orcid_hit)},
+        "final_test_a": {
+            "signatures": 1,
+            "orcids": 1,
+            "signature_overlap": 0,
+            "paper_position_overlap": int(signature_hit),
+            "orcid_overlap": 0,
+        },
+        "final_test_b": {
+            "signatures": 1,
+            "orcids": 2,
+            "signature_overlap": 0,
+            "paper_position_overlap": 0,
+            "orcid_overlap": int(orcid_hit),
+        },
     }
+
+
+def test_build_inventory_uses_giant_and_private_training_labels(tmp_path: Path) -> None:
+    from scripts.intake.build_v14_training_inventory import build_training_inventory
+
+    gold, extra, out = (tmp_path / name for name in ("gold.parquet", "extra.parquet", "out.parquet"))
+    a, b = "0000-0002-1694-233X", "0000-0001-5000-0007"
+    pq.write_table(
+        pa.table(
+            {
+                "cluster_block_key": ["a khan", "not a giant"],
+                "corpus_paper_id": [31, 32],
+                "position": [2, 0],
+                "orcid": [a, b],
+            }
+        ),
+        gold,
+    )
+    pq.write_table(pa.table({"signature_id": ["42-5"], "author_orcid": [f"https://orcid.org/{b}"]}), extra)
+    assert build_training_inventory(gold, [extra], out) == {str(gold): 1, str(extra): 1}
+    assert pq.read_table(out).to_pylist() == [
+        {"signature_id": "31-2", "orcid": a, "paper_id": "31", "position": 2},
+        {"signature_id": "42-5", "orcid": b, "paper_id": None, "position": None},
+    ]

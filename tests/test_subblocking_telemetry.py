@@ -10,7 +10,6 @@ import pytest
 
 import s2and.subblocking as subblocking
 from s2and.arrow_inputs import ArrowDataset
-from s2and.data import Signature
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
 from s2and.production_bundle_contract import CALIBRATED_EPS_CALIBRATION
 from s2and.production_model import _load_pairwise_staging_model, canonical_artifact_hashes
@@ -35,100 +34,6 @@ class _SingleBatchArrowLease:
     def open_file(self, _table_key: str):
         with Path(self.path).open("rb") as source:
             yield source
-
-
-def _signature(signature_id: str, *, first: str, middle: str | None = None, orcid: str | None = None) -> Signature:
-    return Signature(
-        author_info_first=first,
-        author_info_first_normalized=first,
-        author_info_middle=middle,
-        author_info_middle_normalized=middle or "",
-        author_info_last_normalized="wang",
-        author_info_last="Wang",
-        author_info_suffix_normalized=None,
-        author_info_suffix=None,
-        author_info_coauthors=None,
-        author_info_coauthor_blocks=None,
-        author_info_full_name=None,
-        author_info_affiliations=[],
-        author_info_affiliations_n_grams=None,
-        author_info_coauthor_n_grams=None,
-        author_info_email=None,
-        author_info_orcid=orcid,
-        author_info_name_counts=None,
-        author_info_position=0,
-        author_info_block="h wang",
-        author_info_estimated_gender=None,
-        author_info_estimated_ethnicity=None,
-        paper_id=int(signature_id[1:]) if signature_id[1:].isdigit() else 0,
-        sourced_author_source=None,
-        sourced_author_ids=[],
-        author_id=None,
-        signature_id=signature_id,
-    )
-
-
-def test_make_subblocks_uses_specter_for_oversized_single_letter_block(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="h", middle=""),
-            "s2": _signature("s2", first="h", middle=""),
-            "s3": _signature("s3", first="h", middle=""),
-            "s4": _signature("s4", first="h", middle=""),
-        },
-        random_seed=0,
-    )
-
-    monkeypatch.setattr(
-        subblocking,
-        "cluster_with_specter",
-        lambda signature_ids, anddata, target_subblock_size, compute_block_fn=None: {
-            "0": list(signature_ids[:2]),
-            "1": list(signature_ids[2:]),
-        },
-    )
-
-    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4"],
-        dataset,
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"], ["s3", "s4"]]
-
-    def reject_fallback(*_args, **_kwargs):
-        pytest.fail("The subblock already fits at capacity")
-
-    monkeypatch.setattr(subblocking, "cluster_with_specter", reject_fallback)
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2"], dataset, maximum_size=2, first_k_letter_counts_sorted={}
-    )
-    assert list(subblocks.values()) == [["s1", "s2"]]
-    assert telemetry["specter_invocation_count"] == 0
-
-
-def test_make_subblocks_rejects_coercion_collisions_and_preserves_integer_ids() -> None:
-    dataset = SimpleNamespace(signatures={1: _signature("1", first="anna")}, random_seed=0)
-
-    with pytest.raises(ValueError, match="must be unique.*'1'"):
-        subblocking.make_subblocks_with_telemetry(
-            [1, "1"],
-            dataset,
-            maximum_size=2,
-            first_k_letter_counts_sorted={},
-        )
-
-    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
-        [1],
-        dataset,
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-
-    output_signature_ids = [signature_id for subblock in subblocks.values() for signature_id in subblock]
-    assert output_signature_ids == [1]
-    assert type(output_signature_ids[0]) is int
 
 
 def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(tmp_path) -> None:
@@ -167,163 +72,6 @@ def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(t
             True,
         )
     arrow_dataset.close()
-
-
-def test_subdivide_helper_accepts_prefix_exactly_at_capacity() -> None:
-    names = np.array(["anna", "anna", "bill"])
-    signature_ids = np.array(["s1", "s2", "s3"])
-
-    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=2, starting_k=2)
-
-    assert dead_ends == {}
-    assert {key: sorted(values.tolist()) for key, values in output.items()} == {
-        "an": ["s1", "s2"],
-        "bi": ["s3"],
-    }
-
-
-def test_subdivide_helper_keeps_terminal_full_name_groups_separate() -> None:
-    names = np.array(["ann", "ann", "anna", "anne", "anne", "bill"])
-    ids = np.array(["s1", "s2", "s3", "s4", "s5", "s6"])
-    output, dead_ends = subblocking.subdivide_helper(names, ids, maximum_size=1, starting_k=2)
-
-    assert {key: values.tolist() for key, values in output.items()} == {"anna": ["s3"], "bi": ["s6"]}
-    assert {key: values.tolist() for key, values in dead_ends.items()} == {"ann": ["s1", "s2"], "anne": ["s4", "s5"]}
-
-
-def test_make_subblocks_does_not_fallback_when_longer_name_prefixes_fit(monkeypatch) -> None:
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="anna"),
-            "s2": _signature("s2", first="anne"),
-            "s3": _signature("s3", first="anny"),
-        },
-        random_seed=0,
-    )
-
-    def _fail_if_called(*_args, **_kwargs):
-        raise AssertionError("name-prefix subdivision should avoid fallback")
-
-    monkeypatch.setattr(subblocking, "cluster_with_specter", _fail_if_called)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3"],
-        dataset,
-        maximum_size=1,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert sorted(subblocks.values()) == [["s1"], ["s2"], ["s3"]]
-    assert telemetry["first_name_dead_end_signature_count"] == 0
-    assert telemetry["specter_invocation_count"] == 0
-
-
-def test_cluster_with_specter_surfaces_unexpected_auxiliary_feature_failures(monkeypatch) -> None:
-    first_signature = _signature("s1", first="anna")._replace(
-        author_info_coauthor_blocks=["a smith"],
-        author_info_affiliations=["alpha laboratory"],
-    )
-    second_signature = _signature("s2", first="anne")._replace(
-        author_info_coauthor_blocks=["b smith"],
-        author_info_affiliations=["beta laboratory"],
-    )
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": first_signature,
-            "s2": second_signature,
-        },
-        papers={},
-        specter_embeddings={},
-        random_seed=0,
-    )
-
-    def _raise_unexpected(_self, _values):
-        raise RuntimeError("unexpected auxiliary failure")
-
-    from sklearn.preprocessing import MultiLabelBinarizer
-
-    monkeypatch.setattr(MultiLabelBinarizer, "fit_transform", _raise_unexpected)
-
-    with pytest.raises(RuntimeError, match="unexpected auxiliary failure"):
-        subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
-
-
-def test_cluster_with_specter_handles_embeddings_and_fallback(monkeypatch) -> None:
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="anna"),
-            "s2": _signature("s2", first="anne"),
-        },
-        papers={},
-        specter_embeddings={
-            "1": np.ones(768, dtype=np.float64),
-            "2": np.concatenate((np.zeros(767, dtype=np.float64), np.ones(1, dtype=np.float64))),
-        },
-        random_seed=0,
-    )
-
-    ids = ["s1", "s2"]
-    output = subblocking.cluster_with_specter(ids, dataset, target_subblock_size=1)
-    assert sorted(output.values()) == [["s1"], ["s2"]]
-
-    dataset.specter_embeddings.clear()
-    output = subblocking.cluster_with_specter(ids, dataset, target_subblock_size=1)
-    assert sorted(output.values()) == [["s1"], ["s2"]]
-
-    def reject_clustering(*_args, **_kwargs):
-        pytest.fail("The input already fits at capacity")
-
-    monkeypatch.setattr("genieclust.Genie", reject_clustering)
-    assert subblocking.cluster_with_specter(ids[:1], dataset, target_subblock_size=1) == {"0": ["s1"]}
-
-
-def test_cluster_with_specter_caps_requested_clusters_below_sample_count(monkeypatch) -> None:
-    requested_clusters: list[int] = []
-
-    class StrictGenie:
-        def __init__(self, *, n_clusters: int, gini_threshold: float) -> None:
-            requested_clusters.append(n_clusters)
-            assert gini_threshold == 0.01
-
-        def fit_predict(self, values: np.ndarray) -> np.ndarray:
-            return np.zeros(values.shape[0], dtype=int)
-
-    monkeypatch.setattr("genieclust.Genie", StrictGenie)
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="anna"),
-            "s2": _signature("s2", first="anne"),
-        },
-        papers={},
-        specter_embeddings={
-            "1": np.ones(768, dtype=np.float64),
-            "2": np.ones(768, dtype=np.float64),
-        },
-        random_seed=0,
-    )
-
-    output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
-
-    assert requested_clusters == [1]
-    assert sorted(output.values()) == [["s1"], ["s2"]]
-
-
-def test_union_find_find_compresses_long_parent_chain_without_recursion() -> None:
-    union_find = subblocking._UnionFind(1500)  # noqa: SLF001
-    union_find.parent = list(range(1, 1500)) + [1499]
-
-    assert union_find.find(0) == 1499
-    assert union_find.parent[0] == 1499
-
-
-def test_union_find_capacity_counts_existing_components() -> None:
-    bridge = (2, 0)
-    union_find = subblocking._UnionFind(4)
-    assert union_find.union_if_capacity(0, 1, maximum_size=3)
-    assert union_find.union_if_capacity(*bridge, maximum_size=3)
-    assert not union_find.union_if_capacity(2, 3, maximum_size=3)
-    assert union_find.find(0) == union_find.find(1) == union_find.find(2)
-    assert union_find.find(2) != union_find.find(3)
 
 
 def test_normalize_orcid_for_subblocking_matches_rust_arrow_canonical_form() -> None:
@@ -405,37 +153,28 @@ def test_subblocking_name_parts_respect_join_ratio_and_capacity() -> None:
         ),
     ],
 )
-def test_python_and_arrow_subblock_compound_first_names_identically(tmp_path, rows, maximum_size, expected) -> None:
-    """Both planners key compounds the same way from the same raw names."""
+def test_native_subblock_compound_first_names(tmp_path, rows, maximum_size, expected) -> None:
+    """Group compound first names using the raw Arrow names."""
     load_s2and_rust_extension()
     signatures_path = tmp_path / "signatures.arrow"
     _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
-    signatures = {}
-    for sid, first, middle in rows:
-        # _write_signatures_arrow stores the last name "wang", and canonicalization reads it.
-        parts = subblocking.canonicalize_name_parts(first, middle, "wang")
-        signatures[sid] = _signature(sid, first=parts.first, middle=parts.middle)
-    dataset = SimpleNamespace(signatures=signatures, random_seed=0)
-    python_subblocks, _ = subblocking.make_subblocks_with_telemetry(
-        list(signatures), dataset, maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=False
-    )
+    signature_ids = [row[0] for row in rows]
     with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
         native_subblocks, _, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
-            list(signatures),
+            signature_ids,
             maximum_size,
             first_k_letter_counts_sorted={},
             graph_subblocking_config=subblocking.GraphSubblockingConfig(),
             use_orcid_subblocking=False,
         )
 
-    python_plan = {key: sorted(values) for key, values in python_subblocks.items()}
-    assert python_plan == {key: sorted(values) for key, values in native_subblocks.items()}
+    native_plan = {key: sorted(values) for key, values in native_subblocks.items()}
     if expected is not None:
-        assert python_plan == expected
+        assert native_plan == expected
     else:
         # Ten "huimin" records exceed the cap of nine, so the compound keys as "hui" and not as "huimin".
-        compound_key = next(key for key, values in python_plan.items() if "s10" in values)
+        compound_key = next(key for key, values in native_plan.items() if "s10" in values)
         assert compound_key.split(", ")[0] == "hui"
 
 
@@ -463,23 +202,12 @@ def _rows(*groups: tuple[str, str, int]) -> list[tuple[str, str, str]]:
         ),
     ],
 )
-def test_python_and_arrow_report_the_same_no_middle_dead_ends(tmp_path, rows, maximum_size, expected) -> None:
-    """Both planners report the no-middle bucket of each first-name dead end, from the same raw names."""
+def test_native_reports_no_middle_dead_ends(tmp_path, rows, maximum_size, expected) -> None:
+    """Report the no-middle bucket of each first-name dead end."""
     load_s2and_rust_extension()
     signatures_path = tmp_path / "signatures.arrow"
     _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
-    names = {sid: subblocking.canonicalize_name_parts(first, middle, "wang") for sid, first, middle in rows}
-    signature_ids = list(names)
-    python_dead_ends = subblocking.no_middle_dead_end_buckets(
-        signature_ids, [(parts.first, parts.middle) for parts in names.values()], maximum_size
-    )
-    dataset = SimpleNamespace(
-        signatures={sid: _signature(sid, first=parts.first, middle=parts.middle) for sid, parts in names.items()},
-        random_seed=0,
-    )
-    python_subblocks, _ = subblocking.make_subblocks_with_telemetry(
-        signature_ids, dataset, maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=False
-    )
+    signature_ids = [row[0] for row in rows]
     with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
         native_subblocks, _, native_dead_ends = subblocking._make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
@@ -490,25 +218,10 @@ def test_python_and_arrow_report_the_same_no_middle_dead_ends(tmp_path, rows, ma
             use_orcid_subblocking=False,
         )
 
-    assert python_dead_ends == expected
     assert {first: sorted(bucket) for first, bucket in native_dead_ends.items()} == expected
-    # Each reported record sits in the no-middle bucket of its dead end in both plans.
-    for plan in (python_subblocks, native_subblocks):
-        bucket_of = {sid: key for key, members in plan.items() for sid in members}
-        for first, bucket in expected.items():
-            assert all(f"{first}|middle=" in bucket_of[sid].split(", ") for sid in bucket)
-
-
-def test_terminal_full_name_is_used_for_merge_scoring() -> None:
-    assert subblocking._subblock_merge_candidate_metadata("a|middle=b=c", 2) == (2, "a", "b=c", "b=c", "b=c")
-
-    candidates = subblocking._sorted_subblock_merge_candidates(
-        {"chen|middle=w": ["s1"], "cheng": ["s2"]},
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert candidates == [(("chen|middle=w", "cheng"), 100004.0)]
+    bucket_of = {sid: key for key, members in native_subblocks.items() for sid in members}
+    for first, bucket in expected.items():
+        assert all(f"{first}|middle=" in bucket_of[sid].split(", ") for sid in bucket)
 
 
 @pytest.mark.parametrize(
@@ -550,33 +263,26 @@ def test_terminal_full_name_is_used_for_merge_scoring() -> None:
     ],
     ids=["whole-subblocks", "disabled", "transitive-over-capacity"],
 )
-def test_python_and_arrow_orcid_repair_preserve_whole_subblocks(
+def test_native_orcid_repair_preserves_whole_subblocks(
     tmp_path: Path, names, maximum_size: int, enabled: bool, expected, skipped
 ) -> None:
-    """Both real implementations obey the same ORCID and capacity contract."""
+    """Preserve whole subblocks during same-ORCID repair."""
     rows = [(f"s{index}", first, "", orcid) for index, (first, orcid) in enumerate(names, start=1)]
     signatures_path = tmp_path / "signatures.arrow"
     _write_signatures_arrow(signatures_path, rows)
-    dataset = SimpleNamespace(
-        signatures={
-            sid: _signature(sid, first=first, middle=middle, orcid=orcid) for sid, first, middle, orcid in rows
-        },
-        random_seed=0,
-    )
-    kwargs = dict(maximum_size=maximum_size, first_k_letter_counts_sorted={}, use_orcid_subblocking=enabled)
-    python_result = subblocking.make_subblocks_with_telemetry(list(dataset.signatures), dataset, **kwargs)
     with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow_dataset:
-        native_result = subblocking._make_subblocks_with_telemetry_arrow_rust(
+        subblocks, telemetry, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
-            list(dataset.signatures),
-            **kwargs,
+            [row[0] for row in rows],
+            maximum_size=maximum_size,
+            first_k_letter_counts_sorted={},
+            use_orcid_subblocking=enabled,
             graph_subblocking_config=subblocking.GraphSubblockingConfig(),
-        )[:2]
-    for subblocks, telemetry in (python_result, native_result):
-        assert sorted(sorted(members) for members in subblocks.values()) == expected
-        assert telemetry["orcid_subblocking_enabled"] is enabled
-        assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == skipped[0]
-        assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == skipped[1]
+        )
+    assert sorted(sorted(members) for members in subblocks.values()) == expected
+    assert telemetry["orcid_subblocking_enabled"] is enabled
+    assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == skipped[0]
+    assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == skipped[1]
 
 
 def _write_signatures_arrow(
@@ -657,7 +363,7 @@ def _open_subblocking_arrow_dataset(paths: dict[str, str], tmp_path: Path) -> Ar
     return ArrowDataset.open(tmp_path, require_specter="specter" in paths)
 
 
-def test_loaded_models_use_their_orcid_prefix_counts_in_both_planners(tmp_path: Path) -> None:
+def test_native_subblocking_uses_loaded_models_orcid_prefix_counts(tmp_path: Path) -> None:
     refreshed_hashes = canonical_artifact_hashes()
     original_hashes = {
         **refreshed_hashes,
@@ -672,22 +378,16 @@ def test_loaded_models_use_their_orcid_prefix_counts_in_both_planners(tmp_path: 
     rows = [("s1", "ch", ""), ("s2", "cy", ""), ("s3", "cq", "")]
     signatures_path = tmp_path / "signatures.arrow"
     _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
-    signatures = {sid: _signature(sid, first=first, middle=middle) for sid, first, middle in rows}
-    dataset = SimpleNamespace(signatures=signatures, random_seed=0)
-    block = {"c wang": list(signatures)}
+    block = {"c wang": [row[0] for row in rows]}
     with _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, tmp_path) as arrow:
         for model, count, expected in zip(
             models, (16, None), ([["s1", "s2"], ["s3"]], [["s1"], ["s2"], ["s3"]]), strict=True
         ):
             counts = model._subblocking_prefix_counts()
             assert counts.get("ch", {}).get("cy") == count
-            python_subblocks = subblocking.make_subblocks(
-                list(signatures), dataset, maximum_size=2, first_k_letter_counts_sorted=counts
-            )
             native_subblocks, _ = model._build_arrow_subblocked_block_dict(
                 block, arrow, batching_threshold=2, cluster_seeds_require={}
             )
-            assert sorted(map(sorted, python_subblocks.values())) == expected
             assert sorted(map(sorted, native_subblocks.values())) == expected
 
 
@@ -703,7 +403,7 @@ def test_unexported_model_uses_the_orcid_prefix_counts_its_contract_records() ->
     assert Clusterer._subblocking_prefix_counts(unbound)["ch"]["cy"] == 16
 
 
-def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
+def test_native_subblock_prefix_subdivision(tmp_path) -> None:
     load_s2and_rust_extension()
     cases = (
         (
@@ -737,20 +437,6 @@ def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
         signatures_path = case_root / "signatures.arrow"
         _write_signatures_arrow(signatures_path, [(*row, None) for row in rows])
         signature_ids = [row[0] for row in rows]
-        dataset = SimpleNamespace(
-            signatures={
-                signature_id: _signature(signature_id, first=first, middle=middle)
-                for signature_id, first, middle in rows
-            },
-            random_seed=0,
-        )
-
-        python_subblocks, _python_telemetry = subblocking.make_subblocks_with_telemetry(
-            signature_ids,
-            dataset,
-            maximum_size=1,
-            first_k_letter_counts_sorted={},
-        )
         arrow_dataset = _open_subblocking_arrow_dataset({"signatures": str(signatures_path)}, case_root)
         rust_subblocks, _rust_telemetry, _ = subblocking._make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
@@ -760,7 +446,6 @@ def test_rust_arrow_prefix_subdivision_matches_python(tmp_path) -> None:
             graph_subblocking_config=subblocking.GraphSubblockingConfig(),
         )
 
-        assert {key: sorted(values) for key, values in python_subblocks.items()} == expected, case_id
         assert {key: sorted(values) for key, values in rust_subblocks.items()} == expected, case_id
         arrow_dataset.close()
 

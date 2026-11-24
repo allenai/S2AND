@@ -520,7 +520,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
 - Legacy migration tools and release dispatchers are retired. Use
   [the performance profiler](../scripts/verification/profile_promoted_incremental_arrow.py),
   [the full-block parity check](../scripts/verification/compare_full_predict_arrow_parity.py),
-  and [the subblocking quality check](../scripts/verification/compare_graph_subblocking_arrow_quality.py).
+  and [the native subblocking quality check](../scripts/production/README.md#subblocking-quality).
 - `RustFeaturizer.update_cluster_seeds`, `signature_rule_metadata`, and
   `update_signature_name_counts` are removed. Apply seed overlays with
   `with_cluster_seeds`.

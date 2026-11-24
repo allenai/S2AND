@@ -57,7 +57,6 @@ Use [the data guide](../docs/data.md) to download them.
 | `verification/evaluate_incremental_gold.py` | Freeze bounded gold identity cases before scores; test positive and author-absent profiles through the complete model's public Arrow API |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/profile_promoted_incremental_arrow.py` | Produce the release performance report from a bounded promoted incremental Arrow workload |
-| `verification/compare_graph_subblocking_arrow_quality.py` | Produce the release subblocking-quality report by comparing Python and Rust graph subblocking on the frozen Arrow and component inputs |
 | `verification/smoke_installed_rust_api.py` | Check that the installed `s2and._s2and_rust` extension exposes the expected API |
 | `verification/verify_rust_distribution_licenses.py` | Release CI check that Rust wheels and source distributions keep their license notices |
 

@@ -267,11 +267,7 @@ def test_eps_sweep_uses_production_native_planner(monkeypatch, raw_config, neigh
         calls.append((signature_ids, kwargs))
         return {"a": ["1", "2"], "b": ["3"]}, {"graph_fallback_native": True}, {}
 
-    def reject_python(*args, **kwargs):
-        raise AssertionError("EPS selection must not use the Python graph fallback")
-
     monkeypatch.setattr(subblocking, "_make_subblocks_with_telemetry_arrow_rust", native)
-    monkeypatch.setattr(subblocking, "make_subblocks_with_telemetry", reject_python)
     blocks, telemetry = sweep_eps_on_linking_gold._build_arrow_subblocked_block_dict(
         args=argparse.Namespace(batching_threshold=2, use_orcid_subblocking=orcid),
         clusterer=SimpleNamespace(

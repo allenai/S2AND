@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 import s2and.model as model_module
-import s2and.subblocking as subblocking_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData, _ordered_coauthors_for_signature
 from s2and.featurizer import FeaturizationInfo
@@ -359,34 +358,6 @@ def test_sampling_balanced_homonym_synonym_respects_sample_size():
     )
     assert len(sampled) == 1
     assert sampled[0] in all_pairs
-
-
-def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypatch):
-    class Signature:
-        def __init__(self, first_name, middle_name, orcid=None):
-            self.author_info_first = first_name
-            self.author_info_middle = middle_name
-            self.author_info_first_normalized = first_name
-            self.author_info_middle_normalized = middle_name
-            self.author_info_orcid = orcid
-
-    anddata = SimpleNamespace(signatures={"s1": Signature("ab", "cd")})
-
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {}, {"ab": np.array(["s1"])}
-        if call_count["value"] == 2:
-            return {}, {"cd": np.array(["s1"])}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    monkeypatch.setattr(subblocking_module, "subdivide_helper", fake_subdivide_helper)
-    monkeypatch.setattr(subblocking_module, "cluster_with_specter", lambda *args, **kwargs: {"0": ["s1"]})
-
-    output = subblocking_module.make_subblocks(["s1"], anddata, maximum_size=2, first_k_letter_counts_sorted={})
-    assert output == {"ab|middle=cd": ["s1"]}
 
 
 def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_order(monkeypatch):

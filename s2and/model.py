@@ -3514,8 +3514,7 @@ class Clusterer:
 
         Returns:
             The subblocks, and the key first name of the dead end of each record that the
-            native planner reports in a no-middle dead-end bucket (see
-            ``no_middle_dead_end_buckets``).
+            native planner reports in a no-middle dead-end bucket.
         """
 
         if prediction_state is None:

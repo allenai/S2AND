@@ -215,10 +215,6 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
         fake_predict_multiple,
         fake_predict_incremental,
     )
-    monkeypatch.setattr(
-        "s2and.subblocking.make_subblocks",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python subblocking must not run")),
-    )
     clusterer = _clusterer()
     predicted, dists = clusterer._predict_from_arrow_request(
         {"small": ["9"], "large": [str(index) for index in range(9)]},

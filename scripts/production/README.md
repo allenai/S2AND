@@ -292,19 +292,22 @@ It fails on any mismatch and then writes no report.
 
 ### Subblocking quality
 
+Run native subblocking on one reviewed Arrow block with the ORCID repair
+disabled. Inspect subblock sizes and the share of repeated ORCID groups
+preserved by the partition.
+
 ```powershell
-uv run python scripts/verification/compare_graph_subblocking_arrow_quality.py `
-  --arrow-root "$Root/benchmarks/REVIEWED_DATASET" `
-  --component-members-parquet path/to/reviewed_components.parquet `
+uv run python scripts/analyze_giant_block_subblocking.py `
+  --arrow-dataset "$Root/benchmarks/REVIEWED_DATASET" `
+  --block "REVIEWED_BLOCK" `
+  --thresholds REVIEWED_MAXIMUM_SIZE `
   --output-dir "$RunRoot/reports/subblocking" `
-  --maximum-size REVIEWED_MAXIMUM_SIZE `
-  --allow-full `
-  --seed REVIEWED_SEED
+  --random-seed REVIEWED_SEED `
+  --n-jobs 12
 ```
 
-The component-members file needs `signature_id` and `candidate_component_key` columns.
-Rows for signatures outside the Arrow dataset are ignored.
-Pass `--baseline-summary` with an earlier report to add deltas.
+Confirm that the largest subblock fits the requested threshold and record the
+preservation metrics with the release evidence.
 
 ### Promoted incremental performance
 

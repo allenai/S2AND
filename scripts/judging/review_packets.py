@@ -1,6 +1,6 @@
 """Leak-proof blind review packet builder and validator for Sol 6.2 manual labeling.
 
-Enforces strict field allowlists (raw paper metadata only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never ``signature_id``,
+Enforces strict field allowlists (raw paper metadata only — never ``signature_id``,
 ``paper_id``, ``author_id``, predicted cluster summaries, ORCIDs, scores, ranks, model
 names, or ground-truth flags), flattens author lists to plain strings, scrubs incidental
 ORCIDs and emails, requires a fresh packet directory with the private answer key stored
@@ -968,6 +968,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
     reports = []
     verdicts = []
     requests = []
+    gate_votes: dict[tuple[str, str, str], dict[str, set[str | None]]] = defaultdict(lambda: defaultdict(set))
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
         key = json.loads(key_path.read_text(encoding="utf-8"))
         if ledger is not None:
@@ -978,6 +979,17 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
         reports.append({"family": family, "verdicts": str(verdict_path), **report})
         verdicts.append(aligned)
         requests.append(natural_requests)
+        if ledger is not None and key["packet_type"] == "linker":
+            for item in key["items"]:
+                block = normalize_block_key(item["block_key"])
+                if item["is_control"] or ledger.roles.role_for(block) != "gate_thresh":
+                    continue
+                signature = item["query_signature_id"]
+                if not isinstance(signature, str) or not signature:
+                    raise ValueError("Gate threshold judging keys must identify each query signature")
+                for candidate in item["slot_to_candidate_key"].values():
+                    _, verdict, _ = aligned["linker", block, item["source_id"], candidate]
+                    gate_votes[block, signature, candidate][family].add(verdict)
     agreement = []
     for i, j in combinations(range(len(judges)), 2):
         if families[i] == families[j]:
@@ -1033,7 +1045,24 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                 },
             }
         )
-    return {**(ledger.bindings if ledger is not None else {}), "judges": reports, "cross_family_agreement": agreement}
+    report = {**(ledger.bindings if ledger is not None else {}), "judges": reports, "cross_family_agreement": agreement}
+    if gate_votes:
+        labels = []
+        for (block, query, candidate), votes in sorted(gate_votes.items()):
+            consensus = set().union(*votes.values())
+            if votes.keys() != set(families) or len(consensus) != 1 or not consensus <= _DECIDED:
+                continue
+            labels.append(
+                {
+                    "dataset": block,
+                    "query_signature_id": query,
+                    "candidate_component_key": candidate,
+                    "verdict": next(iter(consensus)),
+                }
+            )
+        report["gate_thresh_labels"] = labels
+        report["gate_thresh_planned_candidates"] = len(gate_votes)
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:

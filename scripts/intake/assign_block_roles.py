@@ -5,10 +5,6 @@ Features:
   (stripping invalid values and ``EXCLUDED_ORCID_GROUPS``).
 - Permanently excludes ``f matsen`` and pins all legacy 1.4 giant/reviewed blocks
   (including ``s feldman``) to ``dev_test``.
-- Supports ``closure_mode="strict"`` (zero cross-role ORCID overlap via union-find closure)
-  and ``closure_mode="home_pool"`` (avoids real-graph mega-component percolation by assigning
-  each cross-pool ORCID one home pool whose mentions in other pools are marked unscored,
-  mirroring ``orcid-blocks-v2/cross_holders.parquet``).
 - Uses stable seeded SHA-256 hashing and per-stratum proportional allocation so strata
   never alias to roles and overflow blocks go to an explicit ``unassigned`` list rather than
   leaking into ``final_test``.
@@ -31,11 +27,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     FINAL_TEST_ROLES,
-    in_orcid_home_role,
     load_block_roles,
     normalize_block_key,
 )
@@ -151,16 +147,14 @@ def verify_role_assignments(
     *,
     excluded_blocks: Collection[str] = PERMANENT_EXCLUDED_BLOCKS,
     dev_test_blocks: Collection[str] = LEGACY_DEV_TEST_BLOCKS,
-    closure_mode: Literal["strict", "home_pool", "block_only"] = "strict",
+    closure_mode: Literal["strict", "block_only"] = "strict",
     enforce_source_splits: bool = False,
-    orcid_home_role: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Verify strict block, ORCID, excluded-block, source-split, and legacy dev_test invariants."""
     by_key = {normalize_block_key(block.block_key): block for block in blocks}
     norm_mapping = {normalize_block_key(k): r for k, r in block_to_role.items()}
     excluded_set = {normalize_block_key(k) for k in excluded_blocks} | set(PERMANENT_EXCLUDED_BLOCKS)
     dev_set = {normalize_block_key(k) for k in dev_test_blocks} | set(LEGACY_DEV_TEST_BLOCKS)
-    home_roles = orcid_home_role or {}
     _validate_source_splits(blocks, enforce_source_splits)
 
     for key, role in norm_mapping.items():
@@ -188,21 +182,9 @@ def verify_role_assignments(
         orcids_by_role[role].update(_clean_orcids(by_key[key].orcids))
 
     raw_counts = Counter(orcid for orcids in orcids_by_role.values() for orcid in orcids)
-    for orcid, role in home_roles.items():
-        if orcid not in orcids_by_role.get(role, ()):
-            raise ValueError(f"ORCID {orcid!r} is missing from its home role {role!r}")
-    scored_counts = Counter(
-        orcid
-        for role, orcids in orcids_by_role.items()
-        for orcid in orcids
-        if in_orcid_home_role(orcid, role, home_roles)
-    )
     raw_overlap = {orcid for orcid, count in raw_counts.items() if count > 1}
-    scored_overlap = {orcid for orcid, count in scored_counts.items() if count > 1}
-    if closure_mode == "block_only":
-        scored_overlap = set()
-    if scored_overlap or (closure_mode == "strict" and raw_overlap):
-        raise ValueError(f"ORCID overlap across roles: {sorted(scored_overlap or raw_overlap)[:5]}")
+    if closure_mode == "strict" and raw_overlap:
+        raise ValueError(f"ORCID overlap across roles: {sorted(raw_overlap)[:5]}")
 
     role_counts = {role: sum(1 for r in norm_mapping.values() if r == role) for role in VALID_ROLES}
     role_signatures = {
@@ -218,7 +200,7 @@ def verify_role_assignments(
             role: {stratum: counts[role, stratum] for stratum in strata} for role in VALID_ROLES
         },
         "closure_mode": closure_mode,
-        "cross_role_orcid_overlap": len(scored_overlap),
+        "cross_role_orcid_overlap": 0,
         "raw_cross_role_orcid_overlap": len(raw_overlap),
     }
 
@@ -394,9 +376,8 @@ def assign_block_roles(
     seed: int = 20261123,
     extra_dev_test_blocks: Collection[str] = (),
     pinned_roles: Mapping[str, str] | None = None,
-    pinned_home_roles: Mapping[str, str] | None = None,
     excluded_blocks: Collection[str] = (),
-    closure_mode: Literal["strict", "home_pool", "block_only"] = "strict",
+    closure_mode: Literal["strict", "block_only"] = "strict",
     enforce_source_splits: bool = False,
     require_pinned_present: bool = False,
 ) -> dict[str, Any]:
@@ -409,11 +390,8 @@ def assign_block_roles(
         seed: Seed for stable SHA-256 component ranking.
         extra_dev_test_blocks: Additional reviewed blocks (e.g. 1.4 Batches 1-6) pinned to ``dev_test``.
         pinned_roles: Optional explicit ``{block_key: role}`` pins (e.g. prior frozen assignments).
-        pinned_home_roles: Previously scored homes to preserve, including single-role ORCIDs.
         excluded_blocks: Extra blocks to exclude alongside ``PERMANENT_EXCLUDED_BLOCKS``.
-        closure_mode: ``"strict"`` enforces zero cross-role ORCID overlap via union-find closure;
-            ``"home_pool"`` avoids mega-component percolation and outputs ``orcid_home_role``
-            so cross-pool ORCID mentions can be marked unscored.
+        closure_mode: Use block-only allocation or require identity-disjoint blocks.
         enforce_source_splits: When True, both final test halves accept only ``holdout`` blocks and
             training/tuning roles accept only ``development`` blocks.
         require_pinned_present: When True, raise if any explicitly pinned/dev_test/excluded block
@@ -488,7 +466,7 @@ def assign_block_roles(
 
     if closure_mode == "strict":
         components = build_orcid_components(active_blocks)
-    elif closure_mode in {"home_pool", "block_only"}:
+    elif closure_mode == "block_only":
         components = [(block.block_key,) for block in sorted(active_blocks, key=lambda b: b.block_key)]
     else:
         raise ValueError(f"Unsupported closure_mode: {closure_mode!r}")
@@ -596,31 +574,6 @@ def assign_block_roles(
         )
         remaining.update(targets)
 
-    # Keep scored identities in evaluation when an author crosses into a development pool.
-    orcid_home_role: dict[str, str] = {}
-    if closure_mode == "home_pool" or pinned_home_roles:
-        orcid_role_mentions: dict[str, Counter[str]] = defaultdict(Counter)
-        evaluation_roles = {*FINAL_TEST_ROLES, "dev_test"}
-        pinned_homes = pinned_home_roles or {}
-        for key, role in block_to_role.items():
-            for orcid in by_key[key].orcids:
-                count = by_key[key].orcid_mention_counts.get(orcid, 1)
-                if type(count) is not int or count < 1:
-                    raise ValueError(f"Invalid ORCID mention count in block {key!r}: {count!r}")
-                orcid_role_mentions[orcid][role] += count
-        role_priority = {role: idx for idx, role in enumerate(ASSIGNABLE_ROLES)}
-        for orcid, home in pinned_homes.items():
-            if orcid not in EXCLUDED_ORCID_GROUPS and home not in orcid_role_mentions.get(orcid, {}):
-                raise ValueError(f"Pinned ORCID {orcid!r} is missing from its home role {home!r}")
-        for orcid, role_map in sorted(orcid_role_mentions.items()):
-            home = pinned_homes.get(orcid)
-            if "dev_test" in role_map and any(role in role_map for role in FINAL_TEST_ROLES):
-                home = "dev_test"
-            if closure_mode == "home_pool" and len(role_map) > 1:
-                orcid_home_role[orcid] = home or max(
-                    role_map, key=lambda role: (role in evaluation_roles, role_map[role], -role_priority[role])
-                )
-
     verification = verify_role_assignments(
         active_blocks,
         block_to_role,
@@ -628,7 +581,6 @@ def assign_block_roles(
         dev_test_blocks=dev_test_set,
         closure_mode=closure_mode,
         enforce_source_splits=enforce_source_splits,
-        orcid_home_role=orcid_home_role,
     )
     roles: dict[str, list[str]] = {role: [] for role in VALID_ROLES}
     for key, role in sorted(block_to_role.items()):
@@ -665,7 +617,6 @@ def assign_block_roles(
             "largest_component_size": component_sizes[0] if component_sizes else 0,
             "top_5_component_sizes": component_sizes[:5],
         },
-        "orcid_home_role": orcid_home_role,
         "verification": verification,
     }
 
@@ -824,12 +775,10 @@ def freeze_identity_roles(
                 {
                     (row["corpus_paper_id"], row["position"])
                     for row in evidence_rows.values()
-                    if not row["excluded"]
-                    and not row["reviewed_error"]
-                    and not evidence_identities(row).isdisjoint(cross_role)
+                    if not row["reviewed_error"] and not evidence_identities(row).isdisjoint(cross_role)
                 }
             )
-    for key in ("closure_mode", "cross_block_components", "component_size_summary", "orcid_home_role"):
+    for key in ("closure_mode", "cross_block_components", "component_size_summary"):
         roles.pop(key)
     roles["verification"].pop("closure_mode")
     roles["verification"]["raw_cross_role_orcid_overlap"] = len(cross_role)
@@ -858,19 +807,17 @@ def main(argv: list[str] | None = None) -> int:
         "--blocks-json",
         type=Path,
         required=True,
-        help="JSON or Parquet with block_key, signature_count, orcids, size/script/region bands, and split.",
+        help="Parquet produced by build_freeze_input.",
     )
-    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--targets-json", type=Path, required=True, help="JSON dict of {role: target_block_count}.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261123)
-    parser.add_argument("--closure-mode", choices=["strict", "home_pool"], default="strict")
-    parser.add_argument("--enforce-source-splits", action="store_true")
     parser.add_argument(
         "--pinned-roles-json",
         type=Path,
         default=None,
-        help="Prior assignments.json to preserve. Strict mode also accepts a pin map.",
+        help="Prior assignments.json to preserve on a re-freeze.",
     )
     parser.add_argument("--extra-pins-json", type=Path, help="New block-role pins, for a first freeze or re-freeze.")
     parser.add_argument("--dev-test-blocks", nargs="*", default=())
@@ -882,78 +829,20 @@ def main(argv: list[str] | None = None) -> int:
     if out_json.exists() and not args.overwrite:
         raise FileExistsError(f"Refusing to overwrite existing {out_json}; pass --overwrite or use a fresh directory")
 
-    if args.identity_evidence:
-        if out_json.exists() and args.pinned_roles_json is None:
-            raise ValueError("Pass the prior assignments.json when re-freezing")
-        result = freeze_identity_roles(
-            args.blocks,
-            args.identity_evidence,
-            read_json_object(args.targets_json),
-            prior_path=args.pinned_roles_json,
-            extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
-            dev_test_blocks=args.dev_test_blocks,
-            excluded_blocks=args.exclude_blocks,
-            seed=args.seed,
-        )
-    else:
-        pinned_roles: dict[str, str] | None = None
-        pinned_home_roles: dict[str, str] | None = None
-        excluded_blocks = list(args.exclude_blocks)
-        if args.pinned_roles_json is not None:
-            raw_pins = json.loads(args.pinned_roles_json.read_text(encoding="utf-8"))
-            if isinstance(raw_pins, dict) and isinstance(raw_pins.get("block_to_role"), dict):
-                prior = load_block_roles(args.pinned_roles_json)
-                pinned_roles = prior.block_to_role
-                pinned_home_roles = {
-                    orcid: prior.orcid_home_role.get(orcid, pinned_roles[block])
-                    for block, orcids in prior.block_orcids.items()
-                    for orcid in orcids
-                }
-                prior_exclusions = raw_pins.get("excluded_blocks", [])
-                if not isinstance(prior_exclusions, list) or any(
-                    not isinstance(block, str) for block in prior_exclusions
-                ):
-                    raise ValueError(f"Expected an excluded block list in {args.pinned_roles_json}")
-                excluded_blocks.extend(prior_exclusions)
-            elif isinstance(raw_pins, dict):
-                if args.closure_mode == "home_pool":
-                    raise ValueError(
-                        "Use prior assignments.json for --pinned-roles-json under home_pool. "
-                        "Add pins with --extra-pins-json."
-                    )
-                pinned_roles = raw_pins
-            else:
-                raise ValueError(f"Expected JSON mapping in {args.pinned_roles_json}")
-
-        if args.closure_mode == "home_pool" and out_json.exists() and pinned_home_roles is None:
-            raise ValueError("Pass the prior assignments.json when re-freezing home_pool")
-        if args.extra_pins_json is not None:
-            raw_extra = json.loads(args.extra_pins_json.read_text(encoding="utf-8"))
-            if not isinstance(raw_extra, dict):
-                raise ValueError(f"Expected JSON mapping in {args.extra_pins_json}")
-            extra = {normalize_block_key(key): role for key, role in raw_extra.items()}
-            if len(extra) != len(raw_extra):
-                raise ValueError("Duplicate normalized keys in --extra-pins-json")
-            pinned_roles = dict(pinned_roles or {})
-            for key, role in extra.items():
-                if key in pinned_roles and pinned_roles[key] != role:
-                    raise ValueError(f"New pin conflicts with the frozen role for {key!r}")
-                pinned_roles[key] = role
-
-        blocks = load_blocks(args.blocks, require_orcid_lists=True)
-        targets = json.loads(args.targets_json.read_text(encoding="utf-8"))
-        result = assign_block_roles(
-            blocks,
-            targets,
-            seed=args.seed,
-            extra_dev_test_blocks=args.dev_test_blocks,
-            pinned_roles=pinned_roles,
-            pinned_home_roles=pinned_home_roles,
-            excluded_blocks=excluded_blocks,
-            closure_mode=args.closure_mode,
-            enforce_source_splits=args.enforce_source_splits,
-            require_pinned_present=pinned_roles is not None,
-        )
+    if out_json.exists() and (
+        args.pinned_roles_json is None or sha256_file(args.pinned_roles_json) != sha256_file(out_json)
+    ):
+        raise ValueError("Pass the existing assignments.json as the prior manifest when re-freezing")
+    result = freeze_identity_roles(
+        args.blocks,
+        args.identity_evidence,
+        read_json_object(args.targets_json),
+        prior_path=args.pinned_roles_json,
+        extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
+        dev_test_blocks=args.dev_test_blocks,
+        excluded_blocks=args.exclude_blocks,
+        seed=args.seed,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _replace_json(out_json, result)
     with (args.output_dir / "assignments.csv").open("w", encoding="utf-8", newline="") as handle:

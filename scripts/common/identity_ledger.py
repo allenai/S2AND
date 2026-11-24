@@ -10,8 +10,8 @@ from typing import Literal, TypedDict, cast
 import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
-from scripts.common.arrow_roots import read_json_object
-from scripts.common.block_roles import FINAL_TEST_ROLES, BlockRoles, normalize_block_key
+from scripts.common.arrow_roots import read_json_object, resolved_manifest_artifact_path
+from scripts.common.block_roles import BlockRoles, normalize_block_key
 
 EVIDENCE_SHA256_FIELD = "identity_evidence_sha256"
 ROLE_SHA256_FIELD = "block_role_assignments_sha256"
@@ -57,6 +57,7 @@ class IdentityEvidence:
     sha256: str
     snapshot_sha256: str
     intake_sha256: str
+    name_counts_index_sha256: str
     blocks: dict[str, EvidenceBlock]
 
     def read_block(self, block: str, *, dataset_dir: Path | None = None) -> dict[str, MentionEvidence]:
@@ -68,11 +69,21 @@ class IdentityEvidence:
         path = (self.path.parent / metadata["path"]).resolve()
         if path.parent != self.path.parent or sha256_file(path) != metadata["sha256"]:
             raise ValueError(f"Identity evidence digest mismatch for {block!r}")
-        if (
-            dataset_dir is not None
-            and sha256_file(dataset_dir / "manifest.json") != metadata["dataset_manifest_sha256"]
-        ):
-            raise ValueError(f"Identity evidence was built for a different dataset generation: {block!r}")
+        if dataset_dir is not None:
+            manifest = dataset_dir / "manifest.json"
+            if sha256_file(manifest) != metadata["dataset_manifest_sha256"]:
+                raise ValueError(f"Identity evidence was built for a different dataset generation: {block!r}")
+            arrow_manifest = read_json_object(manifest)
+            signature_path = resolved_manifest_artifact_path(
+                manifest, arrow_manifest["paths"]["signatures"], key="signatures"
+            )
+            if sha256_file(signature_path) != arrow_manifest["files"]["signatures"]["sha256"]:
+                raise ValueError(f"Identity evidence signature digest mismatch: {block!r}")
+            index = resolved_manifest_artifact_path(
+                manifest, arrow_manifest["paths"]["name_counts_index"], key="name_counts_index"
+            )
+            if sha256_file(index / "manifest.json") != self.name_counts_index_sha256:
+                raise ValueError(f"Identity evidence name-counts index digest mismatch: {block!r}")
         rows = cast(list[MentionEvidence], pq.read_table(path).to_pylist())
         by_signature = {row["signature_id"]: row for row in rows}
         if (
@@ -91,7 +102,12 @@ def load_identity_evidence(path: Path) -> IdentityEvidence:
     if payload.get("format_version") != 1 or not isinstance(payload.get("blocks"), dict) or not payload["blocks"]:
         raise ValueError(f"Invalid identity evidence manifest: {path}")
     return IdentityEvidence(
-        path, sha256_file(path), payload["snapshot_sha256"], payload["intake_sha256"], payload["blocks"]
+        path,
+        sha256_file(path),
+        payload["snapshot_sha256"],
+        payload["intake_sha256"],
+        payload["name_counts_index_sha256"],
+        payload["blocks"],
     )
 
 
@@ -146,13 +162,21 @@ class BlockEligibility:
         """Return score-eligible gold labels for this block."""
         return {sid: orcid for sid in self.rows if (orcid := self.eligibility(sid).score_orcid) is not None}
 
+    @staticmethod
+    def _component_is_safe(decisions: list[Eligibility]) -> bool:
+        return (
+            all(decision.fit_ok for decision in decisions)
+            and len(set().union(*(decision.identities for decision in decisions))) <= 1
+        )
+
+    def component_is_safe(self, members: Collection[str]) -> bool:
+        """Check every member for fit eligibility and mixed evidence."""
+        return self._component_is_safe([self.eligibility(sid) for sid in members])
+
     def component_label(self, members: Collection[str]) -> str | None:
         """Label a component when all members pass and its evidence identifies one author."""
         decisions = [self.eligibility(sid) for sid in members]
-        if any(not decision.fit_ok for decision in decisions):
-            return None
-        identities = set().union(*(decision.identities for decision in decisions))
-        if len(identities) != 1:
+        if not self._component_is_safe(decisions):
             return None
         return next((decision.score_orcid for decision in decisions if decision.score_orcid is not None), None)
 
@@ -179,7 +203,7 @@ class IdentityLedger:
         """Return the eligibility view for an assigned block."""
         block = normalize_block_key(block)
         role = self.roles.role_for(block)
-        split = "holdout" if role in FINAL_TEST_ROLES else "development"
+        split = self.roles.source_splits[block]
         rows = self.evidence.read_block(block, dataset_dir=dataset_dir)
         return BlockEligibility(block, role, split, rows, self.roles)
 

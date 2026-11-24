@@ -703,7 +703,7 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
             BlockSpec("sealed", 2, frozenset({shared}), source_split="holdout"),
         ],
         {"eps_cal": 1, "final_test_a": 1},
-        closure_mode="home_pool",
+        closure_mode="block_only",
         enforce_source_splits=True,
     )
     write_json(role_path, result)
@@ -1010,7 +1010,7 @@ def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Pa
         read_sweep_curve(tmp_path, "unit")
 
 
-@pytest.mark.parametrize("mode", ["strict", "home_pool"])
+@pytest.mark.parametrize("mode", ["strict", "block_only"])
 def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mode: str) -> None:
     from types import SimpleNamespace
 
@@ -1036,7 +1036,6 @@ def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mod
         encoding="utf-8",
     )
     roles = load_block_roles(role_path)
-    assert not roles.orcid_home_role
     ref = tmp_path / block / "orcid_reference.parquet"
     ref.parent.mkdir()
     pd.DataFrame({"signature_id": ["one", "two"], "orcid": [sealed, sealed]}).to_parquet(ref, index=False)

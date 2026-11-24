@@ -229,6 +229,8 @@ def prepare_identity_labels(
     Keep verified identity evidence in every output row. Set ``scored`` to false for Gold
     rows without explicit eligibility (when Gold has a ``scored`` column) or outside their frozen home.
     """
+    if block_roles is not None and block_roles.evidence_sha256 is not None:
+        raise ValueError("Use the identity ledger to score evidence-backed roles")
     arrow_dir = arrow_dataset_dir.resolve()
     gold_path = gold_parquet_path.resolve()
     out_path = output_parquet_path.resolve()

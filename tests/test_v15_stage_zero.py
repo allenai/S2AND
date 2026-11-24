@@ -29,6 +29,7 @@ from scripts.intake import (
 )
 from scripts.judging import review_packets
 from scripts.linker import build_linker_inputs, build_linker_task_tables
+from scripts.linker.train_linker_and_finalize import _apply_blind_gate_labels
 from scripts.pairwise import mine_pairwise_pairs
 from tests.test_giant_eps_release import _complete_model
 from tests.test_identity_ledger import DEPOSITED, GOLD, request_bundle
@@ -275,7 +276,65 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     rows = pq.read_table(tasks / "gate_thresh.parquet").to_pylist()
     assert len(rows) == 50
     assert {row["query_signature_id"] for row in rows} == {"531-0", "532-0"}
-    assert all(not row["candidate_gold_scored"] and not row["query_gold_scored"] for row in rows)
+    assert all(
+        row["label"] is None and not row["candidate_gold_scored"] and not row["query_gold_scored"] for row in rows
+    )
+    genuine = next(row for row in rows if row["candidate_identity_eligible"])
+    candidate = genuine["candidate_component_key"]
+    query = genuine["query_signature_id"]
+    exemplar = next(sid for sid, component in seed_map.items() if component == candidate)
+    blind_items = _json(
+        tmp_path / "blind-items.json",
+        [
+            {
+                "source_id": "request",
+                "block_key": gate,
+                "query": {"signature_id": query, "paper_id": query.split("-")[0], "title": "Study"},
+                "candidates": [
+                    {
+                        "candidate_key": candidate,
+                        "exemplars": [{"signature_id": exemplar, "paper_id": exemplar.split("-")[0], "title": "Study"}],
+                    }
+                ],
+            }
+        ],
+    )
+    blind_key_path = tmp_path / "gate-key.json"
+    _run(
+        review_packets,
+        "build",
+        *binding,
+        "--allowed-role",
+        "gate_thresh",
+        "--packet-type",
+        "linker",
+        "--items-json",
+        blind_items,
+        "--output-dir",
+        tmp_path / "gate-packets",
+        "--answer-key-path",
+        blind_key_path,
+        "--control-fraction",
+        "0",
+    )
+    (item,) = json.loads(blind_key_path.read_text())["items"]
+    (slot,) = item["slot_to_candidate_key"]
+    blind_judges = []
+    for family in ("sol", "claude"):
+        verdict_path = _json(
+            tmp_path / f"gate-{family}.jsonl", {"item_id": item["item_id"], "candidate_verdicts": {slot: "same"}}
+        )
+        blind_judges.extend(["--judge", family, verdict_path, blind_key_path])
+    judged_path = tmp_path / "gate-judgments.json"
+    _run(review_packets, "score", *binding, *blind_judges, "--output-json", judged_path)
+    report = json.loads(judged_path.read_text())
+    gate_table = pq.read_table(tasks / "gate_thresh.parquet").to_pandas()
+    scored = _apply_blind_gate_labels(gate_table, report, roles)
+    assert scored["label"].sum() == scored["candidate_gold_scored"].sum() == 1
+    assert scored["query_gold_scored"].sum() == 0
+    report["gate_thresh_labels"][0]["candidate_component_key"] = "outside-window"
+    with pytest.raises(ValueError, match="outside the frozen windows"):
+        _apply_blind_gate_labels(gate_table, report, roles)
 
     pairs = tmp_path / "pairs.csv"
     assignments = inputs / "a_lovelace" / "assignments.parquet"

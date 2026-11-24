@@ -28,13 +28,13 @@ def _write_signatures_arrow(directory: Path, rows: list[dict]) -> Path:
     return path
 
 
-def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Path) -> None:
+def test_identity_label_join_masks_cross_role_orcid_in_both_roles(tmp_path: Path) -> None:
     shared = "0000-0002-1694-233X"
     assignments = assign_block_roles(
         [BlockSpec("a ross", 1, frozenset({shared})), BlockSpec("b ross", 1, frozenset({shared}))],
         {"eps_cal": 1, "final_test_a": 1},
         pinned_roles={"a ross": "eps_cal", "b ross": "final_test_a"},
-        closure_mode="home_pool",
+        closure_mode="block_only",
     )
     path = tmp_path / "assignments.json"
     path.write_text(json.dumps(assignments), encoding="utf-8")
@@ -82,12 +82,12 @@ def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Pat
             == 0
         )
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
-        assert audit["scored_rows"] == int(idx == 2)
-        assert audit["unique_orcids"] == int(idx == 2)
-        assert audit["non_home_verified_rows"] == (1 if idx == 1 else 0)
+        assert audit["scored_rows"] == 0
+        assert audit["unique_orcids"] == 0
+        assert audit["non_home_verified_rows"] == 1
         labels = pd.read_parquet(output)
         assert labels["signature_id"].tolist() == [f"s{idx}"]
-        assert labels["scored"].tolist() == [idx == 2]
+        assert labels["scored"].tolist() == [False]
         assert pa.ipc.open_file(str(arrow_path)).read_all()["author_orcid"].to_pylist() == [shared]
 
 

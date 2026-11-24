@@ -30,8 +30,7 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
         ],
         {"eps_cal": 1, "final_test_a": 1},
         pinned_roles={block: "eps_cal", "sealed": "final_test_a"},
-        closure_mode="home_pool",
-        pinned_home_roles={_OUTSIDE_HOME: "final_test_a"},
+        closure_mode="block_only",
     )
     roles_path.write_text(json.dumps(result), encoding="utf-8")
     assignments = dict.fromkeys(("q_full", "q_initial", "s00", "s01", "s02", "s03", "q_outside_home"), "merged")
@@ -187,7 +186,7 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_
                 ],
                 {"pairwise_train": 1, "final_test_a": 1},
                 pinned_roles={block: "pairwise_train", "sealed": "final_test_a"},
-                closure_mode="home_pool",
+                closure_mode="block_only",
             )
         ),
         encoding="utf-8",

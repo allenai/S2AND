@@ -94,6 +94,7 @@ from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles  # noqa: E402
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
+from scripts.common.identity_ledger import EVIDENCE_SHA256_FIELD, ROLE_SHA256_FIELD  # noqa: E402
 from scripts.common.initial_query_sources import (  # noqa: E402
     MAP_RELATIVE_PATH,
     MAP_SHA256_FIELD,
@@ -1978,6 +1979,36 @@ def _release_table_plan(
     return training_keys, calibration_query_ids, evaluation_keys
 
 
+def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], roles: BlockRoles) -> pd.DataFrame:
+    """Attach agreed blind outcomes to the matching frozen production window."""
+    if report.get(EVIDENCE_SHA256_FIELD) != roles.evidence_sha256 or report.get(ROLE_SHA256_FIELD) != roles.sha256:
+        raise ValueError("Gate threshold judgments use different evidence or frozen roles")
+    if not rows["label"].isna().all() or rows["query_gold_scored"].any() or rows["candidate_gold_scored"].any():
+        raise ValueError("Frozen production requests must have no pre-existing labels")
+    keys = ["dataset", "query_signature_id", "candidate_component_key"]
+    judged = pd.DataFrame.from_records(report.get("gate_thresh_labels", []), columns=[*keys, "verdict"])
+    if judged.empty or judged.duplicated(keys).any() or not judged["verdict"].isin({"same", "different"}).all():
+        raise ValueError("Expected unique, agreed gate threshold verdicts")
+    indexed = pd.MultiIndex.from_frame(rows[keys])
+    decisions = judged.set_index(keys)["verdict"]
+    if not indexed.is_unique or len(decisions.index.difference(indexed)):
+        raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
+    labeled = rows.copy()
+    verdicts = decisions.reindex(indexed).reset_index(drop=True)
+    eligible = labeled["candidate_identity_eligible"].reset_index(drop=True)
+    if (verdicts.eq("same") & ~eligible).any():
+        raise ValueError("A gate threshold positive refers to a mixed or ineligible component")
+    known = verdicts.notna() & eligible
+    if not known.any():
+        raise ValueError("No gate threshold verdict covers an eligible component")
+    labeled["label"] = verdicts.eq("same").astype("int8").to_numpy()
+    labeled["candidate_gold_scored"] = known.to_numpy()
+    grouped = labeled.groupby("query_group_id", sort=False)
+    labeled["query_gold_scored"] = grouped["candidate_gold_scored"].transform("all")
+    labeled["gold_safe_target"] = grouped["label"].transform("any")
+    return labeled
+
+
 def _materialize_frozen_linker_tasks(
     manifest_path: Path,
     roles: BlockRoles,
@@ -1988,6 +2019,7 @@ def _materialize_frozen_linker_tasks(
     n_jobs: int,
     total_ram_bytes: int,
     max_query_groups: int | None,
+    gate_judgments: Path | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
     """Verify frozen inputs and attach model features without changing candidate windows."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1998,6 +2030,14 @@ def _materialize_frozen_linker_tasks(
         raise ValueError("Frozen linker tasks use a different distance policy or package version. Rebuild the tasks.")
     if manifest["block_role_assignments_sha256"] != roles.sha256:
         raise ValueError("The linker task tables must use the same frozen block roles")
+    if roles.evidence_sha256 is not None and (
+        manifest.get(EVIDENCE_SHA256_FIELD) != roles.evidence_sha256
+        or gate_judgments is None
+        or manifest.get("gate_label_source") != "blind_judging"
+    ):
+        raise ValueError("Ledger-backed linker tasks require the same identity evidence and --gate-thresh-judgments")
+    if gate_judgments is not None and roles.evidence_sha256 is None:
+        raise ValueError("Gate threshold judgments require ledger-backed linker tasks")
     if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
         raise ValueError("The linker manifest must contain exactly linker_train, gate_fit and gate_thresh at top-25")
     tasks: dict[str, pd.DataFrame] = {}
@@ -2011,6 +2051,8 @@ def _materialize_frozen_linker_tasks(
         if sha256_file(table_path) != table["sha256"]:
             raise ValueError(f"Frozen linker table changed: {table_path}")
         rows = pd.read_parquet(table_path)
+        if role == "gate_thresh" and gate_judgments is not None:
+            rows = _apply_blind_gate_labels(rows, json.loads(gate_judgments.read_text(encoding="utf-8")), roles)
         expected_counts = {
             block: spec["counts"]["rows"] for block, spec in table["blocks"].items() if spec["counts"]["rows"]
         }
@@ -2086,6 +2128,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     source_bundle = load_bundle(args.source_bundle_root)
     frozen_manifest = getattr(args, "linker_task_manifest", None)
     roles_path = getattr(args, "block_role_assignments", None)
+    gate_judgments = getattr(args, "gate_thresh_judgments", None)
+    if gate_judgments is not None and frozen_manifest is None:
+        raise ValueError("--gate-thresh-judgments requires frozen linker tasks")
     if (frozen_manifest is None) != (roles_path is None):
         raise ValueError("--linker-task-manifest and --block-role-assignments must be used together")
     block_roles = load_block_roles(roles_path) if roles_path is not None else None
@@ -2180,6 +2225,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 n_jobs=int(args.n_jobs),
                 total_ram_bytes=int(args.total_ram_bytes),
                 max_query_groups=max_query_groups,
+                **({"gate_judgments": gate_judgments} if gate_judgments is not None else {}),
             )
             fit_kwargs["frozen_task_rows"] = task_rows
         else:
@@ -2333,6 +2379,9 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expected-ranker-sha256", help="Required SHA-256 for the fixed source ranker.")
     parser.add_argument(
         "--use-legacy-gate-calibration", action="store_true", help="Fit with the source M1 calibration rows."
+    )
+    parser.add_argument(
+        "--gate-thresh-judgments", type=Path, help="Bound blind judging consensus for production requests."
     )
     parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen linker_train, gate_fit and gate_thresh.")
     parser.add_argument("--block-role-assignments", type=Path, help="Role manifest used to build the linker tables.")

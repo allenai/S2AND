@@ -1,15 +1,14 @@
-"""Read frozen block roles and apply their ORCID scoring policy."""
+"""Read frozen block roles and their identity coverage."""
 
 from __future__ import annotations
 
 import json
 import re
 from collections import defaultdict
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from s2and._sha256 import sha256_file
+from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.text import normalize_orcid
 
 FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
@@ -21,23 +20,17 @@ def normalize_block_key(value: str | None) -> str:
     return _WHITESPACE_OR_UNDERSCORE.sub(" ", value.strip().lower()) if value else ""
 
 
-def in_orcid_home_role(orcid: str, role: str, home_roles: Mapping[str, str]) -> bool:
-    """Return whether a normalized ORCID is eligible for scoring in this role."""
-    return home_roles.get(orcid, role) == role
-
-
 @dataclass(frozen=True)
 class BlockRoles:
-    """Frozen block assignments and the home role of each shared ORCID."""
+    """Frozen block assignments and the roles holding each identity."""
 
     block_to_role: dict[str, str]
-    orcid_home_role: dict[str, str]
     sha256: str
-    closure_mode: str
     block_orcids: dict[str, frozenset[str]]
     identity_roles: dict[str, frozenset[str]] = field(default_factory=dict)
     evidence_sha256: str | None = None
     snapshot_sha256: str | None = None
+    source_splits: dict[str, str] = field(default_factory=dict)
 
     def role_for(self, block_key: str) -> str:
         """Return the assigned role or reject an unassigned block."""
@@ -51,9 +44,7 @@ class BlockRoles:
         role = self.role_for(block_key)
         if orcid not in self.block_orcids[normalize_block_key(block_key)]:
             raise ValueError(f"ORCID {orcid!r} is absent from frozen block {block_key!r}")
-        if self.evidence_sha256 is not None:
-            return self.identity_roles[orcid] == {role}
-        return in_orcid_home_role(orcid, role, self.orcid_home_role)
+        return self.identity_roles[orcid] == {role}
 
 
 def load_block_roles(path: Path) -> BlockRoles:
@@ -76,20 +67,11 @@ def load_block_roles(path: Path) -> BlockRoles:
             by_block[key] = role
     if "block_to_role" in payload and payload["block_to_role"] != by_block:
         raise ValueError(f"Inconsistent block_to_role and roles in {path}")
-    if payload.get("format_version") == 2:
-        return _load_evidence_roles(path, payload, by_block)
-    mode = payload.get("closure_mode", verification.get("closure_mode", "strict"))
-    if mode not in {"strict", "home_pool"}:
-        raise ValueError(f"Invalid closure_mode in {path}")
-    homes = payload.get("orcid_home_role", {} if mode == "strict" else None)
-    assigned_roles = set(by_block.values())
-    if not isinstance(homes, dict) or any(
-        normalize_orcid(orcid) != orcid or role not in assigned_roles for orcid, role in homes.items()
-    ):
-        raise ValueError(f"Invalid orcid_home_role in {path}")
+    bound = payload.get("format_version") == 2
     raw_orcids = payload.get("block_orcids")
-    if not isinstance(raw_orcids, dict) or set(raw_orcids) != by_block.keys():
-        raise ValueError(f"Expected block_orcids for every assigned block in {path}. Re-freeze the role assignments.")
+    expected = set(payload["evidence_blocks"]) if bound else set(by_block)
+    if not isinstance(raw_orcids, dict) or set(raw_orcids) != expected or by_block.keys() - raw_orcids.keys():
+        raise ValueError(f"Expected identity coverage for every frozen block in {path}")
     block_orcids: dict[str, frozenset[str]] = {}
     roles_by_orcid: dict[str, set[str]] = defaultdict(set)
     for block, orcids in raw_orcids.items():
@@ -99,39 +81,23 @@ def load_block_roles(path: Path) -> BlockRoles:
             raise ValueError(f"Invalid frozen ORCID list for {block!r} in {path}")
         block_orcids[block] = frozenset(str(orcid) for orcid in orcids)
         for orcid in orcids:
-            roles_by_orcid[orcid].add(by_block[block])
-    overlap = {orcid: roles for orcid, roles in roles_by_orcid.items() if len(roles) > 1}
-    if (
-        mode == "strict"
-        and overlap
-        or homes.keys() != overlap.keys()
-        or any(home not in overlap[orcid] for orcid, home in homes.items())
-    ):
-        raise ValueError(f"ORCID home roles do not match frozen block ORCIDs in {path}")
-    return BlockRoles(by_block, homes, sha256_file(path), mode, block_orcids)
-
-
-def _load_evidence_roles(path: Path, payload: dict, by_block: dict[str, str]) -> BlockRoles:
-    block_orcids = {}
-    roles_by_orcid: dict[str, set[str]] = defaultdict(set)
-    if (
-        set(payload["block_orcids"]) != set(payload["evidence_blocks"])
-        or by_block.keys() - payload["block_orcids"].keys()
-    ):
-        raise ValueError(f"Frozen roles and evidence do not cover the same exported blocks: {path}")
-    for block, orcids in payload["block_orcids"].items():
-        if not isinstance(orcids, list) or any(normalize_orcid(orcid) != orcid for orcid in orcids):
-            raise ValueError(f"Invalid frozen ORCID list for {block!r} in {path}")
-        block_orcids[block] = frozenset(orcids)
-        for orcid in orcids:
             roles_by_orcid[orcid].add(by_block.get(block, "unassigned"))
+    digests = {key: payload.get(key) for key in ("identity_evidence_sha256", "snapshot_sha256")} if bound else {}
+    if bound and not all(is_lowercase_sha256(value) for value in digests.values()):
+        raise ValueError(f"Invalid identity evidence or snapshot digest in {path}")
+    source_splits = payload.get("block_source_splits", {}) if bound else {}
+    if bound and (
+        not isinstance(source_splits, dict)
+        or source_splits.keys() != expected
+        or any(split not in {"development", "holdout"} for split in source_splits.values())
+    ):
+        raise ValueError(f"Expected source splits for every evidence block in {path}")
     return BlockRoles(
         by_block,
-        {},
         sha256_file(path),
-        "block_only",
         block_orcids,
         {orcid: frozenset(roles) for orcid, roles in roles_by_orcid.items()},
-        payload["identity_evidence_sha256"],
-        payload["snapshot_sha256"],
+        digests.get("identity_evidence_sha256"),
+        digests.get("snapshot_sha256"),
+        source_splits,
     )

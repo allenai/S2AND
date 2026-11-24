@@ -197,7 +197,7 @@ def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_pat
         [BlockSpec("a smith", 5, frozenset({shared, local, other})), BlockSpec("b smith", 2, frozenset({shared}))],
         {"gate_thresh": 1, "final_test_a": 1},
         pinned_roles={"a smith": "gate_thresh", "b smith": "final_test_a"},
-        closure_mode="home_pool",
+        closure_mode="block_only",
     )
     path = tmp_path / "roles.json"
     path.write_text(json.dumps(assignments), encoding="utf-8")

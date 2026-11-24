@@ -87,8 +87,10 @@ def _block_rows(
                 paper,
                 position,
                 normalize_block_key(item["cluster_block_key"]),
-                tuple(
-                    _optional_str(item.get("author_" + part, item.get(part))) for part in ("first", "middle", "last")
+                (
+                    _optional_str(item.get("author_first", item.get("first"))),
+                    _optional_str(item.get("author_middle", item.get("middle"))),
+                    _optional_str(item.get("author_last", item.get("last"))),
                 ),
             )
             if matched is None:
@@ -175,6 +177,7 @@ def build_identity_evidence(
         "format_version": 1,
         "snapshot_sha256": snapshot_digest,
         "intake_sha256": intake_digest,
+        "name_counts_index_sha256": binding["name_counts_index_sha256"],
         "blocks": metadata,
         "audit": audits,
     }

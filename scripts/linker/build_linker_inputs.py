@@ -187,12 +187,23 @@ def build_linker_inputs(
             index_path = resolved_manifest_artifact_path(
                 arrow_manifest, read_json_object(arrow_manifest)["paths"]["name_counts_index"], key="name_counts_index"
             )
-            binding = {
-                "generation": arrow.generation_id,
+            common_binding = {
                 "index_sha256": sha256_file(index_path / "manifest.json"),
                 "model_sha256": model_digest,
                 "roles_sha256": roles.sha256,
                 **(ledger.bindings if ledger is not None else {}),
+            }
+            if ledger is not None and common_binding["index_sha256"] != ledger.evidence.name_counts_index_sha256:
+                raise ValueError(f"Linker input name-counts index does not match intake for {block!r}")
+            with exclusive_file_lock(output_dir / ".inputs.lock"):
+                path = output_dir / "inputs_binding.json"
+                if not path.is_file():
+                    _replace_json(path, common_binding)
+                elif read_json_object(path) != common_binding:
+                    raise ValueError(f"Existing linker inputs use a different model, roles, or index: {output_dir}")
+            binding = {
+                "generation": arrow.generation_id,
+                **common_binding,
                 "labels_sha256": sha256_file(label_path) if label_path is not None else None,
                 "request_sha256": sha256_file(request) if request is not None else None,
                 "queries_per_block": queries_per_block,
@@ -210,7 +221,7 @@ def build_linker_inputs(
                 }:
                     raise ValueError(f"Existing linker inputs have changed: {target}")
             else:
-                signatures = _read_signatures(arrow, block)
+                signatures = _read_signatures(arrow, block, include_orcid=ledger is None)
                 if ledger is None:
                     assert label_path is not None
                     identities, scored = read_external_reference_identity_evidence(label_path, require_scored=True)
@@ -243,7 +254,11 @@ def build_linker_inputs(
                         queries = sorted(
                             scored, key=lambda sid: (hashlib.sha256(f"{seed}:{block}:{sid}".encode()).digest(), sid)
                         )[:queries_per_block]
-                    if not queries or len(set(queries)) != len(queries) or set(queries) - signatures.keys():
+                    if (
+                        (not queries and not use_arrivals)
+                        or len(set(queries)) != len(queries)
+                        or set(queries) - signatures.keys()
+                    ):
                         raise ValueError(f"{block!r} needs unique, real query signatures from its full dataset")
                 remaining = sorted((signatures.keys() if role == "gate_thresh" else eligible) - set(queries))
                 if not remaining:

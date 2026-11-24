@@ -19,6 +19,7 @@ from scripts.common.identity_ledger import (
     evidence_identities,
     load_identity_evidence,
 )
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
 
 SCHEMA = pa.schema(
     [
@@ -37,8 +38,8 @@ def mention_counts(rows: dict[str, MentionEvidence]) -> Counter[str]:
     mentions = {
         (row["corpus_paper_id"], row["position"], orcid)
         for row in rows.values()
-        if not row["excluded"] and not row["reviewed_error"]
-        for orcid in evidence_identities(row)
+        if not row["reviewed_error"]
+        for orcid in evidence_identities(row) - EXCLUDED_ORCID_GROUPS
     }
     return Counter(orcid for _, _, orcid in mentions)
 

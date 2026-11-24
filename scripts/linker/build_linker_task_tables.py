@@ -69,11 +69,15 @@ def read_seed_components(path: Path) -> dict[str, str]:
     return components
 
 
-def _read_signatures(arrow: ArrowDataset, block: str) -> dict[str, tuple[str, str | None]]:
+def _read_signatures(
+    arrow: ArrowDataset, block: str, *, include_orcid: bool = True
+) -> dict[str, tuple[str, str | None]]:
     signatures: dict[str, tuple[str, str | None]] = {}
     with arrow.use() as lease, lease.open_file("signatures") as infile, pa.PythonFile(infile, mode="r") as source:
         reader = ipc.open_file(source)
-        columns = ["signature_id", "author_block", "author_middle", "author_orcid"]
+        columns = ["signature_id", "author_block", "author_middle"]
+        if include_orcid:
+            columns.append("author_orcid")
         columns = [name for name in columns if name in reader.schema.names]
         for index in range(reader.num_record_batches):
             for row in reader.get_batch(index).select(columns).to_pylist():
@@ -104,7 +108,7 @@ def _freeze_block_rows(
     n_jobs: int,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     role = block_roles.role_for(block)
-    signatures = _read_signatures(arrow, block)
+    signatures = _read_signatures(arrow, block, include_orcid=eligibility is None)
     if missing := (set(seeds) | set(query_ids) | set(identities)) - signatures.keys():
         raise ValueError(f"{block!r} inputs reference missing signatures: {sorted(missing)[:5]}")
     if len(set(query_ids)) != len(query_ids) or set(query_ids) & seeds.keys():
@@ -240,6 +244,13 @@ def _freeze_block_rows(
             finally:
                 planner.release()
     frame = pd.DataFrame(rows, columns=pd.Index(_TASK_COLUMNS))
+    if role == "gate_thresh" and eligibility is not None:
+        safe_for_judging = {
+            component: eligibility.component_is_safe(component_members)
+            for component, component_members in members.items()
+        }
+        frame["label"] = pd.Series(pd.NA, index=frame.index, dtype="Int8")
+        frame["candidate_identity_eligible"] = frame["candidate_component_key"].map(safe_for_judging).astype(bool)
     return frame, {"rows": len(frame), "requested_queries": len(query_ids), "planned_queries": len(queries), **counts}
 
 
@@ -275,11 +286,15 @@ def build_linker_task_tables(
             f"Linker inputs must match frozen task roles: missing={sorted(required - by_block.keys())}, "
             f"unexpected={sorted(by_block.keys() - required)}"
         )
+    common_binding = None
+    if ledger is not None:
+        common_binding = read_json_object(inputs_path.parent / "inputs_binding.json")
+        ledger.require_bindings(common_binding, context="Linker inputs")
     tables: dict[str, Any] = {}
     output_dir.mkdir(parents=True, exist_ok=False)
     for role in TASK_ROLES:
         role_blocks = sorted(key for key in by_block if roles.role_for(key) == role)
-        if blocks is not None and not role_blocks:
+        if not role_blocks:
             continue
         block_records = {}
         role_path = output_dir / f"{role}.parquet"
@@ -303,7 +318,11 @@ def build_linker_task_tables(
                 else:
                     eligibility = ledger.for_block(block, dataset_dir=arrow_dir)
                     input_manifest = read_json_object(inputs_path.parent / spec["input_manifest"])
-                    ledger.require_bindings(input_manifest["binding"], context=f"{block} linker inputs")
+                    observed = input_manifest["binding"]
+                    if common_binding is None or any(
+                        observed.get(key) != value for key, value in common_binding.items()
+                    ):
+                        raise ValueError(f"Input model, index, or ledger digest mismatch for {block!r}")
                     for path in (seed_path, query_path):
                         if input_manifest["files"].get(path.name) != sha256_file(path):
                             raise ValueError(f"Linker input digest mismatch: {path}")
@@ -345,9 +364,11 @@ def build_linker_task_tables(
         "distance_policy_version": DISTANCE_POLICY_VERSION,
         "s2and_version": __version__,
         "retrieval_top_k": DEFAULT_RETRIEVAL_TOP_K,
+        **({"linker_input_binding": common_binding} if common_binding is not None else {}),
         "seed": seed,
         "holdout_fraction": holdout_fraction,
         "tables": tables,
+        **({"gate_label_source": "blind_judging"} if ledger is not None and "gate_thresh" in tables else {}),
     }
     (output_dir / TASK_MANIFEST).write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return manifest

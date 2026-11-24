@@ -153,7 +153,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
         specs,
         dict.fromkeys(TASK_ROLES, 1),
         pinned_roles={**{key: role for role, key in blocks.items()}, "sealed": "final_test_a"},
-        closure_mode="home_pool",
+        closure_mode="block_only",
     )
     roles_path, inputs_path, output = tmp_path / "roles.json", tmp_path / "inputs.json", tmp_path / "tasks"
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")
@@ -279,7 +279,7 @@ def _freeze_fixture(
         ],
         {"gate_fit": 1},
         pinned_roles={block: "gate_fit", "sealed": "final_test_a"},
-        closure_mode="home_pool",
+        closure_mode="block_only",
     )
     path.write_text(json.dumps(roles), encoding="utf-8")
     identities, labels = read_external_reference_identity_evidence(Path(spec["labels"]))
@@ -313,7 +313,7 @@ def test_joined_identity_evidence_reaches_task_builder(tmp_path: Path, check: st
         ],
         dict.fromkeys(TASK_ROLES, 1),
         pinned_roles={**{block: role for role, block in blocks.items()}, "sealed": "final_test_a"},
-        closure_mode="home_pool",
+        closure_mode="block_only",
     )
     roles_path, inputs_path = tmp_path / "roles.json", tmp_path / "inputs.json"
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")

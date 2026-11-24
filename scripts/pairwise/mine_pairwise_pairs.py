@@ -64,7 +64,7 @@ def _mention_orcids(root: Path, block: str) -> dict[str, str | None]:
 
 
 def _eligible_mentions(
-    spec: BlockInput, block: str, frozen_orcids: frozenset[str], homes: Mapping[str, str]
+    spec: BlockInput, block: str, frozen_orcids: frozenset[str], identity_roles: Mapping[str, frozenset[str]]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
     deposited = _mention_orcids(spec.arrow_dir, block)
     if spec.labels is None:
@@ -77,7 +77,9 @@ def _eligible_mentions(
     eligible = {}
     for sid, orcid in deposited.items():
         gold = identities.get(sid)
-        if any(homes.get(oid, "pairwise_train") != "pairwise_train" for oid in (gold, orcid) if oid):
+        if any(
+            identity_roles.get(oid, frozenset({"pairwise_train"})) != {"pairwise_train"} for oid in (gold, orcid) if oid
+        ):
             continue
         eligible[sid] = gold or orcid or f"signature:{sid}"
     labels = {sid: oid for sid, oid in scored.items() if sid in eligible and oid not in EXCLUDED_ORCID_GROUPS}
@@ -220,11 +222,6 @@ def mine_pairs(
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)
 
-    homes = {
-        orcid: roles.orcid_home_role.get(orcid, role)
-        for key, role in roles.block_to_role.items()
-        for orcid in roles.block_orcids[key]
-    }
     rng = random.Random(seed)
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []
@@ -232,7 +229,7 @@ def mine_pairs(
         identities, gold, clusters, excluded = (
             _ledger_mentions(ledger, spec, block)
             if ledger is not None
-            else _eligible_mentions(spec, block, roles.block_orcids[block], homes)
+            else _eligible_mentions(spec, block, roles.block_orcids[block], roles.identity_roles)
         )
         signatures = sorted(identities)
         labeled = sorted(gold)

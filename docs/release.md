@@ -24,7 +24,7 @@ The seven giant replay sources lack full abstract text.
 Preserve their available current records and vectors; a new abstract-based encoding needs another source of full abstracts.
 
 See the [data guide](data.md) for artifact layout and required bundles.
-The [production command reference](../scripts/production/README.md) contains executable commands.
+The [production command reference](../scripts/release/README.md) contains executable commands.
 Keep source snapshots and fit outputs in separate directories.
 
 ## Fixed decisions
@@ -93,11 +93,11 @@ Recompute pairwise and linker features after a count-authority change.
 Exclude the 19 mixed-identity ORCID groups listed in `EXCLUDED_ORCID_GROUPS`.
 Keep the rule requiring matching, nonempty canonical surnames.
 Run the focused producer checks before a bounded rebuild.
-See [the count commands](../scripts/production/README.md#count-artifacts).
+See [the count commands](../scripts/release/README.md#count-artifacts).
 
 Verify that the wheel contains the canonical tuple file and `s2and_surname_variants_canonical.txt`.
 Check for the ORCID counts and their tuple-dependency manifest in both `s2and/data/` and `s2and/data/orcid_prefix_counts_v1_4/`.
-See [distribution checks](../scripts/production/README.md#distribution-and-arrow-checks).
+See [distribution checks](../scripts/release/README.md#distribution-and-arrow-checks).
 
 ## Stage 2: build training and evaluation data
 
@@ -112,7 +112,7 @@ Package the corrected records, pairwise inputs, benchmark projections, and compl
 The producer writes an internal snapshot with portable paths to one shared count index.
 Validate the assembled snapshot after relocation.
 Check record counts, gold coverage, masks, pair endpoints, split assignments, and native Arrow opens.
-See [the preparation commands](../scripts/production/data/README.md).
+See [the preparation commands](../scripts/intake/README.md).
 
 Freeze identity-gold cases against the final snapshot with `evaluate_incremental_gold.py prepare`.
 The cases bind the published benchmark files, so evaluation needs only the `dataset` bundle.
@@ -121,7 +121,7 @@ Freeze them again after any change to the benchmark Arrow data or the count inde
 Write the published bundles with `write_release_bundles.py`.
 The command proves that the benchmark Arrow data rebuilds the snapshot's prepared populations.
 It then writes the dataset model plan.
-See [release bundles](../scripts/production/README.md#release-bundles).
+See [release bundles](../scripts/release/README.md#release-bundles).
 
 The model plan declares the fit population rather than a fixed seven-source list.
 The current release declares seven non-patent benchmarks and non-patent augmentation.
@@ -204,13 +204,13 @@ Freeze that package before final acceptance tests.
 
 Read `evaluation_summary.stratified_eval_test_split.overall.test` as regression evidence because earlier development used that population.
 Full-source diagnostics can also include gate-calibration queries.
-Score frozen identity-gold cases through the complete model with [evaluate_incremental_gold.py](../scripts/verification/evaluate_incremental_gold.py).
+Score frozen identity-gold cases through the complete model with [evaluate_incremental_gold.py](../scripts/release/verification/evaluate_incremental_gold.py).
 Report those scores separately from the [manual safe-action label](data.md#incremental-tasks) scores.
 
 The public loader requires the two pairwise prediction fixtures and complete incremental artifact.
 Evaluate the outer test, the identity-gold cases, parity, subblocking quality, and representative performance.
 Model-dependent release metrics must use the serialized complete model without a second fit.
-The [acceptance checks](../scripts/production/README.md#acceptance-checks) list the commands.
+The [acceptance checks](../scripts/release/README.md#acceptance-checks) list the commands.
 
 The release owner compares the reports with the declared thresholds before publication.
 Retain the reports, including those of a failed check.
@@ -225,11 +225,11 @@ Verify wheel and source archive contents.
 Install the candidate distributions in an empty environment outside the checkout.
 Run bulk and incremental prediction with the real complete model and combined data root.
 The workflow's synthetic smoke does not replace this check.
-See [installed release smoke](../scripts/production/README.md#installed-release-smoke).
+See [installed release smoke](../scripts/release/README.md#installed-release-smoke).
 
 Publish through `.github/workflows/release-rust.yml`.
 A push to `main` that changes `VERSION` starts it; a manual dispatch from the reviewed `main` commit does too.
-Its validate job runs `scripts/run_ci_locally.py`, the same checks as pull-request CI.
+Its validate job runs `scripts/dev/run_ci_locally.py`, the same checks as pull-request CI.
 A push whose version PyPI already has releases nothing; a manual run fails on that version.
 Verify the workflow commit before approval of its protected PyPI environment.
 The workflow publishes one source archive and 15 platform/interpreter wheels.
@@ -240,7 +240,7 @@ Hold that approval until model and data acceptance are complete.
 A beta lets integrators test before acceptance. It never replaces Stage 6.
 
 1. Set `VERSION` to a PEP 440 pre-release such as `1.0.0b1`.
-   Run `uv run python scripts/sync_version.py`; Cargo files receive `1.0.0-beta.1`.
+   Run `uv run python scripts/dev/sync_version.py`; Cargo files receive `1.0.0-beta.1`.
 2. Push the branch and dispatch `release-rust.yml` on it.
    A pre-release builds and smoke-tests on any branch; the publish jobs run only on `main`.
    The validate job fails when PyPI already has the version.
@@ -261,7 +261,7 @@ Release `1.3` uses `s3://ai2-s2-research-public/s2and/1.3/` with `inference/`, `
 Model release `1.3.1` changes only linkage settings, so it publishes `inference/` and `dataset/` under `s2and/1.3.1/` and reuses the `1.3` `source/` bundle.
 Its `dataset/` is the `1.3` bundle with the `1.3.1` model plan.
 Model release `1.3.2` rebinds the `1.3.1` model to a rebuilt name-count index with
-`scripts/production/model/rebind_name_counts_index.py`, so it publishes only `inference/` under `s2and/1.3.2/`.
+`scripts/release/rebind_name_counts_index.py`, so it publishes only `inference/` under `s2and/1.3.2/`.
 Release `1.4` publishes `inference/` and `dataset/` under `s2and/1.4/` and no `source/` bundle.
 Reuse the dataset bundle for model-only updates with unchanged data.
 Sync `inference` and `dataset` into one fresh local root.

@@ -16,7 +16,7 @@ from s2and.production_training_contract import (
     ProductionArtifactAuthority,
     load_packaged_artifact_authority,
 )
-from scripts.production.model import train_pairwise
+from scripts.pairwise import train_pairwise
 from tests.helpers import pairwise_training_args
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 from tests.training_helpers import write_classic_tiny_bundle

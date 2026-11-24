@@ -511,7 +511,7 @@ def _load_artifact_specs(root: Path) -> tuple[str, Mapping[str, _ArtifactSpec]]:
             required_keys=sorted(_REQUIRED_RUNTIME_KEYS),
             missing_keys=missing_base,
             missing_files={},
-            producer_hint="generate a complete Arrow bundle with scripts/convert_to_arrow.py",
+            producer_hint="generate a complete Arrow bundle with scripts/intake/convert_to_arrow.py",
         )
     if ("specter" in file_keys) != ("specter_batch_index" in file_keys):
         raise ValueError("Arrow artifact files must contain both specter and specter_batch_index or neither")

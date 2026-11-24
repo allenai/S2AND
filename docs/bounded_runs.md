@@ -34,9 +34,9 @@ Run these Git checks in order before an expensive launch.
 Give each command its own time and memory limit.
 
 ```bash
-uv run --no-sync python scripts/run_bounded.py --output-dir scratch/git-head-check --max-seconds 15 --max-rss-gib 1 -- git rev-parse --verify "HEAD^{commit}"
-uv run --no-sync python scripts/run_bounded.py --output-dir scratch/git-tree-check --max-seconds 15 --max-rss-gib 1 -- git cat-file -e "HEAD^{tree}"
-uv run --no-sync python scripts/run_bounded.py --output-dir scratch/git-ref-check --max-seconds 15 --max-rss-gib 1 -- git for-each-ref --sort=-committerdate "--format=%(refname)%00%(objectname)%00%(*objectname)"
+uv run --no-sync python scripts/dev/run_bounded.py --output-dir scratch/git-head-check --max-seconds 15 --max-rss-gib 1 -- git rev-parse --verify "HEAD^{commit}"
+uv run --no-sync python scripts/dev/run_bounded.py --output-dir scratch/git-tree-check --max-seconds 15 --max-rss-gib 1 -- git cat-file -e "HEAD^{tree}"
+uv run --no-sync python scripts/dev/run_bounded.py --output-dir scratch/git-ref-check --max-seconds 15 --max-rss-gib 1 -- git for-each-ref --sort=-committerdate "--format=%(refname)%00%(objectname)%00%(*objectname)"
 ```
 
 These checks cover the HEAD commit, root tree, and ref enumeration.
@@ -51,7 +51,7 @@ Leave the checkout in place while jobs use its files or environment.
 
 ## Launch and verify
 
-Wrap each milestone with `scripts/run_bounded.py`.
+Wrap each milestone with `scripts/dev/run_bounded.py`.
 Set `--output-dir` to a fresh directory and set `--max-rss-gib`.
 Select `--max-seconds SECONDS` or `--no-deadline`.
 Use `--no-deadline` when the approved workload has no wall deadline.

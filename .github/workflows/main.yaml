@@ -25,7 +25,7 @@ jobs:
           key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Run shared lint policy
-        run: uv run --no-project python scripts/run_ci_locally.py lint
+        run: uv run --no-project python scripts/dev/run_ci_locally.py lint
 
   typecheck-and-test:
     name: typecheck-and-test (${{ matrix.os }}, py${{ matrix.py }})
@@ -77,4 +77,4 @@ jobs:
           key: uv-venv-${{ runner.os }}-py${{ matrix.py }}-${{ hashFiles('pyproject.toml', 'uv.lock', 's2and_rust/Cargo.toml', 's2and_rust/Cargo.lock', 's2and_rust/build.rs', 's2and_rust/src/**', 's2and_rust/vendor/**') }}
 
       - name: Run shared typecheck-and-test policy
-        run: uv run --no-project python scripts/run_ci_locally.py typecheck-and-test
+        run: uv run --no-project python scripts/dev/run_ci_locally.py typecheck-and-test

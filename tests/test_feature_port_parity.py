@@ -18,7 +18,7 @@ from s2and.feature_port import (
 )
 from s2and.featurizer import _single_pair_featurize
 from s2and.text import canonicalize_name_parts, detect_language
-from scripts.convert_to_arrow import join_canonical_benchmark_names
+from scripts.intake.convert_to_arrow import join_canonical_benchmark_names
 from tests.helpers import build_arrow_training_dataset, equalish, tiny_name_counts_index
 
 

@@ -7,12 +7,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scripts.production.data.gate_public_snapshot import (
+from scripts.intake.gate_public_snapshot import (
     REDACTED_ABSTRACT_MARKER,
     gate_public_dataset,
     load_paper_id_set,
 )
-from scripts.production.data.hash_release_emails import (
+from scripts.intake.hash_release_emails import (
     EMAIL_REDACTED_TOKEN,
     hash_feature_email,
     scan_tree_for_plaintext_emails,

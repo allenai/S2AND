@@ -4,7 +4,7 @@ This design addresses the data-split, leakage, distribution, and release-enginee
 
 ## Core rules
 
-1. **One block key = one lifecycle role.** Assign every canonical block key a single role via seeded SHA-256 hash (`scripts/production/data/assign_block_roles.py`), with multi-block author closure (`strict` union-find or `home_pool` mirroring `cross_holders.parquet` in Gold ORCID v2 to avoid giant-component percolation). A block key keeps the same role across classic benchmarks, Gold ORCID v2, production block exports, and LLM-adjudicated packets.
+1. **One block key = one lifecycle role.** Assign every canonical block key a single role via seeded SHA-256 hash (`scripts/intake/assign_block_roles.py`), with multi-block author closure (`strict` union-find or `home_pool` mirroring `cross_holders.parquet` in Gold ORCID v2 to avoid giant-component percolation). A block key keeps the same role across classic benchmarks, Gold ORCID v2, production block exports, and LLM-adjudicated packets.
 2. **Partition `orcid-blocks-v2` by block instead of cross-fitting the full pipeline.** Gold ORCID v2 provides 1.77M development blocks (~2,800 giants >10k) and 888k holdout blocks (1,443 giants). Block-disjoint pools keep every downstream stage strictly out-of-sample for upstream models without nested cross-fitting.
 3. **Separate linker-table construction from model release.** Freeze validated linker/gate task tables before starting a release fit. Do not mix data refresh, model fitting, and new giant-block task design into one release run.
 4. **Ship what was validated.** Do not pool `train + val` and refit after selection; refit seed noise (±0.4 F1 pts on small benchmarks) shifts downstream distances seen by the linker.
@@ -67,7 +67,7 @@ in the saved reference against frozen block membership. A nonzero raw overlap is
 
 ### Check sealed overlap with 1.4 training
 
-Run `uv run python -m scripts.production.data.check_v14_training_overlap` with
+Run `uv run python -m scripts.intake.check_v14_training_overlap` with
 `--block-role-assignments`, `--blocks-json`, and one or more `--training-parquet` arguments.
 Map every block in both final-test halves to its Arrow directory. Supply the 1.4 training signature
 inventory as Parquet shards with string `signature_id` and nullable string `orcid` columns.
@@ -76,7 +76,7 @@ It reports distinct overlaps for each sealed half and exits with status 1 if eit
 
 ### Build linker tasks
 
-Run `scripts/production/data/build_linker_task_tables.py --block-role-assignments assignments.json
+Run `scripts/linker/build_linker_task_tables.py --block-role-assignments assignments.json
 --block-inputs inputs.json --output-dir linker_tasks --n-jobs N`. Key `inputs.json` by block with entries
 `arrow_dir`, `seeds`, `labels`, and `queries`. Give each block a manifest-backed Arrow dataset,
 a Parquet seed table with `signature_id` and `component_key` from ORCID-hidden pre-attachment clustering,
@@ -115,7 +115,7 @@ Use ORCID Gold v2 and classic benchmarks for bulk pairwise training, ranker trai
 - **Phase 1C — Per-release paired disagreements (1,600 packets):** Fresh `1.5 != 1.4` disagreements (`600` bulk diffs accounting for ~51% "can't tell" on raw paper pairs, `600` linker attach/abstain diffs, `200` correction diffs, `200` controls).
 - **Phase 2 (conditional):** `5,000` `>45yr` historical pairwise training pairs (only if lifting `YEAR_DIFF_CAP=50`); `1,200–3,000` gate hard-negative packets (only if Phase 1A reliability flags >5 pp error after reweighting); `700–1,500` one-time cross-family audit of AMiner v6 merges & unknown signatures.
 
-### Non-negotiable packet rules (`scripts/production/data/review_packets.py`)
+### Non-negotiable packet rules (`scripts/judging/review_packets.py`)
 - **Strict field allowlist:** Paper metadata only for pair packets (never predicted-cluster summaries, scores, ranks, split names, cluster IDs, or ORCIDs).
 - **Isolated passes across judge families** with independently randomized A/B or candidate order. Report agreement and Cohen's κ on jointly decided items, the jointly decided share, and missing verdicts.
 - **10–15% embedded ORCID gold controls** per packet (re-examine when the family fails the 90% control bar) + **10–20% cross-family model audit** on sealed test packets and classic benchmarks.
@@ -143,12 +143,12 @@ agreement, and Cohen’s κ by task and stratum. Kappa uses jointly decided verd
 
 ### Score and sample by frozen role
 
-Run `uv run python -m scripts.eps_sweep.orcid_b3` with `--block-role-assignments`, `--role`, `--block`,
+Run `uv run python -m scripts.eps.orcid_b3` with `--block-role-assignments`, `--role`, `--block`,
 `--arrow-dir`, `--snapshot-root`, `--assignments-json` and `--eps`. Pass verified labels with
 `--external-labels` when available. The scorer requires assignments for every reference signature and
 reports B3 with and without singletons.
 
-Run `uv run python -m scripts.production.data.mine_pairwise_pairs` with `--block-role-assignments`,
+Run `uv run python -m scripts.pairwise.mine_pairwise_pairs` with `--block-role-assignments`,
 `--blocks-json`, `--pairs-per-block` and `--output`. Map block keys to Arrow directories in the input JSON.
 The miner excludes mentions whose Arrow ORCID has a frozen home outside `pairwise_train`.
 It samples uniformly from the remaining signatures and writes pairs and inclusion probabilities.

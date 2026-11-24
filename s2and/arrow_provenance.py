@@ -1,7 +1,7 @@
 """Conversion provenance binding an Arrow dataset to the source files it was converted from.
 
 An Arrow manifest proves that the Arrow tables are intact, but not which JSON
-inputs produced them. ``scripts/convert_to_arrow.py`` writes a provenance record
+inputs produced them. ``scripts/intake/convert_to_arrow.py`` writes a provenance record
 next to each converted dataset. Release commands that featurize frozen JSON
 inputs through Rust verify that record first, so stale Arrow data with the same
 signature IDs but different names, papers or embeddings is rejected.

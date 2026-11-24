@@ -6,7 +6,7 @@ from pathlib import Path
 
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.production_bundle import _write_json
-from scripts.eps_sweep.common import write_json
+from scripts.eps.common import write_json
 
 
 def test_checksummed_artifacts_use_lf_line_endings(tmp_path: Path) -> None:

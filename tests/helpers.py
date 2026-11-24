@@ -253,7 +253,7 @@ def build_arrow_training_dataset(
         write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
     )
-    from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
+    from scripts.common.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 
     if name_counts == "tiny":
         loader = tiny_name_counts_tuple

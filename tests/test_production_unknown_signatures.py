@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.production.model.release_pairwise import _aggregate_b3, _b3_report
+from scripts.pairwise.release_pairwise import _aggregate_b3, _b3_report
 from scripts.production.model.unknown_signatures import (
     augmented_unknown_ids,
     exclude_unknown_pairs,

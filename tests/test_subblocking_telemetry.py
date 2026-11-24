@@ -519,7 +519,7 @@ def _eps_sweep_and_production_subblocks(
     """Subblock one block through production and through the sweep with ORCID subblocking off and on."""
     from s2and.featurizer import FeaturizationInfo
     from s2and.model import Clusterer
-    from scripts.eps_sweep.sweep_eps_on_linking_gold import _build_arrow_subblocked_block_dict
+    from scripts.eps.sweep_eps_on_linking_gold import _build_arrow_subblocked_block_dict
 
     monkeypatch.setattr(subblocking, "_resolved_orcid_prefix_counts", lambda counts: {})
     clusterer = Clusterer(FeaturizationInfo(["year_diff"]), None, n_jobs=1, random_state=7)
@@ -604,7 +604,7 @@ def test_eps_sweep_orcid_subblocking_flag_matches_production_only_when_enabled(t
 
 def test_eps_sweep_orcid_free_copy_plans_like_hidden_orcid_sweep(tmp_path, monkeypatch):
     """Production always repairs by ORCID; on the ORCID-free copy that equals the sweep's hidden-ORCID plan."""
-    from scripts.eps_sweep.sweep_eps_on_linking_gold import _write_orcid_free_dataset
+    from scripts.eps.sweep_eps_on_linking_gold import _write_orcid_free_dataset
 
     load_s2and_rust_extension()
     shared_orcid = "0000-0002-1825-0097"

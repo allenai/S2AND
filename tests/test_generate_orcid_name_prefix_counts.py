@@ -15,8 +15,8 @@ from s2and.orcid_prefix_counts import (
     ORCID_PREFIX_MANIFEST_FILENAME,
     load_canonical_orcid_prefix_counts,
 )
-from scripts.production.counts import generate_orcid_name_prefix_counts as generator
-from scripts.production.counts._run_support import load_guardrails
+from scripts.intake.counts import generate_orcid_name_prefix_counts as generator
+from scripts.intake.counts._run_support import load_guardrails
 
 ORCID_1 = "0000-0000-0000-0000"
 NAME_TUPLES_PATH = Path(PROJECT_ROOT_PATH) / "s2and" / "data" / "s2and_name_tuples_canonical.txt"

@@ -7,7 +7,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.helpers import write_arrow_tables_bundle
 
 
@@ -16,7 +16,7 @@ from tests.helpers import write_arrow_tables_bundle
 def test_training_overlap_cli_checks_both_sealed_halves(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], signature_hit: bool, orcid_source: str | None
 ) -> None:
-    from scripts.production.data.check_v14_training_overlap import main
+    from scripts.intake.check_v14_training_overlap import main
 
     orcid_hit = orcid_source is not None
     expected_overlap = signature_hit or orcid_hit

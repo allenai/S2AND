@@ -73,9 +73,9 @@ Rust Rayon. See [Build a Rust-backed training dataset](training.md#build-a-rust-
    `profile_promoted_incremental_arrow.py` require `--n-jobs`.
    Set the script's allocation explicitly. The parent setting still matters for runtimes that initialize
    before the override.
-   [Pairwise trainer](../scripts/production/model/train_pairwise.py) ·
-   [Linker trainer](../scripts/production/model/train_linker_and_finalize.py) ·
-   [Profiler](../scripts/verification/profile_promoted_incremental_arrow.py)
+   [Pairwise trainer](../scripts/pairwise/train_pairwise.py) ·
+   [Linker trainer](../scripts/linker/train_linker_and_finalize.py) ·
+   [Profiler](../scripts/release/verification/profile_promoted_incremental_arrow.py)
 
    For release jobs, follow the [operating rules](release.md#operating-rules).
 

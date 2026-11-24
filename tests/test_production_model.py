@@ -1327,7 +1327,7 @@ def test_rebinding_the_name_count_index_changes_only_the_bound_metadata(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     """Bind a complete model to another index and keep every trained file."""
-    from scripts.production.model.rebind_name_counts_index import rebind_name_counts_index
+    from scripts.release.rebind_name_counts_index import rebind_name_counts_index
     from tests.helpers import tiny_name_counts_index_path
 
     _, source_clusterer = synthetic_pairwise_bundle
@@ -1527,7 +1527,7 @@ def test_contract_one_prediction_and_eps_replay_stamped_year(
 ) -> None:
     import s2and.incremental_linking.runtime as linker_runtime
     import s2and.model as model_module
-    from scripts.eps_sweep import sweep_eps_on_linking_gold as sweep
+    from scripts.eps import sweep_eps_on_linking_gold as sweep
 
     clusterer, arrow = contract_one_inference
     pair_ids = ["q1", "s1"]

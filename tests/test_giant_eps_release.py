@@ -16,10 +16,11 @@ from s2and.metrics import b3_precision_recall_fscore
 from s2and.production_bundle import finalize_production_bundle
 from s2and.production_model import canonical_artifact_hashes, load_production_model
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust
-from scripts.eps_sweep import apply_reviewed_eps as apply_reviewed_eps_module
-from scripts.eps_sweep import orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
-from scripts.eps_sweep.apply_reviewed_eps import apply_reviewed_eps
-from scripts.eps_sweep.common import (
+from scripts.common.block_roles import load_block_roles
+from scripts.eps import apply_reviewed_eps as apply_reviewed_eps_module
+from scripts.eps import orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
+from scripts.eps.apply_reviewed_eps import apply_reviewed_eps
+from scripts.eps.common import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
     RELEASE_ROUTE,
@@ -27,8 +28,7 @@ from scripts.eps_sweep.common import (
     read_sweep_curve,
     write_json,
 )
-from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-from scripts.production.data.block_roles import load_block_roles
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
@@ -986,10 +986,10 @@ def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mod
     from types import SimpleNamespace
 
     from s2and._sha256 import sha256_file
-    from scripts.eps_sweep.apply_reviewed_eps import _require_test_separated_reference
-    from scripts.eps_sweep.orcid_b3 import BLOCK_ROLE_SHA256_FIELD, REFERENCE_POLICY_ALL_IDENTITIES
-    from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-    from scripts.production.data.block_roles import load_block_roles
+    from scripts.common.block_roles import load_block_roles
+    from scripts.eps.apply_reviewed_eps import _require_test_separated_reference
+    from scripts.eps.orcid_b3 import BLOCK_ROLE_SHA256_FIELD, REFERENCE_POLICY_ALL_IDENTITIES
+    from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
     from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD
 
     block = "a ross"

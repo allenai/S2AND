@@ -16,7 +16,7 @@ from s2and.incremental_linking import runtime
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.runtime import build_runtime_context
-from scripts.production.model import train_linker_and_finalize as materializer
+from scripts.linker import train_linker_and_finalize as materializer
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 _MEMORY_BUDGET = 100_000_000

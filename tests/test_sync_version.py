@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import sync_version
+from scripts.dev import sync_version
 from tests.shell_helpers import run_bash
 
 
@@ -35,12 +35,12 @@ git() {
 uv() {
     printf '%s\n' "$*" >> commands
     case "$*" in
-        'run python scripts/sync_version.py --print-targets')
+        'run python scripts/dev/sync_version.py --print-targets')
             printf 'VERSION\r\nfolder with spaces/manifest.toml\r\nuv.lock\r\n' ;;
-        'run python scripts/sync_version.py --check') return "$CHECK_STATUS" ;;
-        'run python scripts/sync_version.py') return "$SYNC_STATUS" ;;
+        'run python scripts/dev/sync_version.py --check') return "$CHECK_STATUS" ;;
+        'run python scripts/dev/sync_version.py') return "$SYNC_STATUS" ;;
         'sync --extra dev') return 0 ;;
-        'run --active --no-project ruff format scripts/sync_version.py') return 0 ;;
+        'run --active --no-project ruff format scripts/dev/sync_version.py') return 0 ;;
         *) return 98 ;;
     esac
 }
@@ -61,18 +61,18 @@ uv() {
         assert not log.exists(), "Unrelated commits must not run version tooling"
     elif check_status == "0":
         assert log.read_text().splitlines() == [
-            "run python scripts/sync_version.py --print-targets",
-            "run python scripts/sync_version.py --check",
+            "run python scripts/dev/sync_version.py --print-targets",
+            "run python scripts/dev/sync_version.py --check",
         ]
     elif sync_status != "0":
-        assert log.read_text().splitlines()[-1] == "run python scripts/sync_version.py"
+        assert log.read_text().splitlines()[-1] == "run python scripts/dev/sync_version.py"
     else:
         assert log.read_text().splitlines() == [
-            "run python scripts/sync_version.py --print-targets",
-            "run python scripts/sync_version.py --check",
-            "run python scripts/sync_version.py",
+            "run python scripts/dev/sync_version.py --print-targets",
+            "run python scripts/dev/sync_version.py --check",
+            "run python scripts/dev/sync_version.py",
             "sync --extra dev",
-            "run --active --no-project ruff format scripts/sync_version.py",
+            "run --active --no-project ruff format scripts/dev/sync_version.py",
         ]
 
 

@@ -18,7 +18,7 @@ from s2and.incremental_linking.feature_block import (
     write_arrow_ipc_table,
     write_name_counts_index,
 )
-from scripts.verification.validate_local_arrow_release import validate_release_root
+from scripts.release.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
 

@@ -7,8 +7,8 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from scripts.verification import compare_full_predict_arrow_parity as parity_module
-from scripts.verification.compare_full_predict_arrow_parity import (
+from scripts.release.verification import compare_full_predict_arrow_parity as parity_module
+from scripts.release.verification.compare_full_predict_arrow_parity import (
     _assert_exact,
     _cluster_partition,
     _feature_constraint_report,

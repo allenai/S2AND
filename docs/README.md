@@ -13,8 +13,8 @@ The [project README](../README.md) provides the installation and workflow overvi
 | Obtain the model, the index, and the data bundles | [Data and models](data.md) |
 | Reproduce the production training process on public data | [Reproduce the 1.3.1 model](reproduce.md) |
 | Correct data, add a dataset, or release another model | [Release process](release.md) |
-| Prepare a new corrected snapshot | [Data preparation commands](../scripts/production/data/README.md) |
-| Fit the production model | [Production commands](../scripts/production/README.md) |
+| Prepare a new corrected snapshot | [Data preparation commands](../scripts/intake/README.md) |
+| Fit the production model | [Production commands](../scripts/release/README.md) |
 | Run a research API experiment | [Training and evaluation](training.md) |
 
 One complete corrected snapshot supports research and the next correction cycle.

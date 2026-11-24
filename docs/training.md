@@ -4,7 +4,7 @@ This guide describes research training and evaluation through the API.
 It uses the published benchmark data and the name-count index from the inference bundle. See [where to download both bundles](data.md#download).
 The examples expose test metrics for direct research inspection.
 Production release selection uses development data and keeps candidate test scores separate until the declared release evaluation.
-See [the production commands](../scripts/production/README.md#pairwise-model) for the maintained production trainer.
+See [the production commands](../scripts/release/README.md#pairwise-model) for the maintained production trainer.
 See [the reproduction guide](reproduce.md) for the production training steps on published data.
 See [the release process](release.md) for model acceptance and publication.
 
@@ -68,7 +68,7 @@ pairwise model uses 33 feature columns; the separate 53-feature target in
 incremental linker.
 
 After a deliberate feature-contract change, regenerate native constants with
-`uv run --no-project python scripts/sync_feature_schema.py`. Shared local and
+`uv run --no-project python scripts/dev/sync_feature_schema.py`. Shared local and
 hosted CI run the script with `--check` to reject stale generated code. Feature
 calculations remain independent across languages and are checked by parity tests.
 
@@ -192,15 +192,15 @@ files, feature provenance, checksums, and staged publication. Follow the
 [release process](release.md) for pairwise training, validation-only EPS
 selection, linker finalization, and evaluation through the reloaded bundle.
 
-See [production linker training and evaluation](../scripts/production/README.md#complete-model-and-linker-evaluation) for the training splits and reports.
+See [production linker training and evaluation](../scripts/release/README.md#complete-model-and-linker-evaluation) for the training splits and reports.
 After a complete bundle passes the acceptance checks, [load the model and run inference](production_inference.md#load-a-production-model).
 
 ## Reference scripts
 
-- `scripts/production/model/train_pairwise.py`: pairwise production-bundle stage
-- `scripts/production/model/release_pairwise.py`: EPS calibration and outer-test
+- `scripts/pairwise/train_pairwise.py`: pairwise production-bundle stage
+- `scripts/pairwise/release_pairwise.py`: EPS calibration and outer-test
   evaluation
-- `scripts/production/model/train_linker_and_finalize.py`: one-fit
+- `scripts/linker/train_linker_and_finalize.py`: one-fit
   complete-bundle finalization, reload, and evaluation
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: complete-model
   prediction example on one Arrow or JSON dataset

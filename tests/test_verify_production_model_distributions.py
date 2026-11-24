@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verification.verify_production_model_distributions import verify_production_model_distributions
+from scripts.release.verification.verify_production_model_distributions import verify_production_model_distributions
 
 TUPLE_DATA_PATH = "s2and/data/s2and_name_tuples_canonical.txt"
 ORCID_DATA_PATH = "s2and/data/first_k_letter_counts_from_orcid.json"

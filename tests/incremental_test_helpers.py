@@ -9,7 +9,7 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import load_incremental_linking_artifact, save_incremental_linking_artifact
 from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
 from s2and.model import Clusterer, FastCluster
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
+from scripts.common.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 from tests.helpers import write_test_arrow_artifact_manifest
 from tests.model_helpers import ConstantDistanceClassifier
 from tests.promoted_linking_helpers import (

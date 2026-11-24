@@ -12,9 +12,9 @@ import numpy as np
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_tuple_artifact import load_name_tuple_artifact
-from scripts.convert_to_arrow import benchmark_dataset_sources, convert_runtime_dataset_to_arrow
-from scripts.production.counts.generate_orcid_name_prefix_counts import write_publication
-from scripts.production.generate_canonical_name_tuples import regenerate
+from scripts.intake.convert_to_arrow import benchmark_dataset_sources, convert_runtime_dataset_to_arrow
+from scripts.intake.counts.generate_orcid_name_prefix_counts import write_publication
+from scripts.intake.generate_canonical_name_tuples import regenerate
 
 PAIRWISE_LAST_NAMES = (
     "Adams",

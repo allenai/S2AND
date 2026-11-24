@@ -10,7 +10,7 @@ from s2and import memory_budget
 from s2and.arrow_inputs import PUBLIC_DATA_KIND, build_arrow_artifact_manifest, write_arrow_artifact_manifest
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
-from scripts.verification import smoke_installed_incremental_arrow as smoke_module
+from scripts.release.verification import smoke_installed_incremental_arrow as smoke_module
 from tests.helpers import tiny_name_counts_tuple
 
 

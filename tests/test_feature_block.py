@@ -45,7 +45,7 @@ from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_from_preplanned_raw_arrow,
 )
 from s2and.model import Clusterer
-from scripts.arrow_conversion_helpers import (
+from scripts.common.arrow_conversion_helpers import (
     raw_planner_arrow_tables_from_anddata,
     write_raw_planner_arrow_from_anddata,
 )

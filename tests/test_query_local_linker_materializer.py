@@ -17,7 +17,7 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking import runtime as linker_runtime
 from s2and.incremental_linking.feature_block import write_raw_arrow_batch_lookup_indexes
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle, build_linker_retrieval_batch_from_raw_plan_bundle
-from scripts.production.model import train_linker_and_finalize as trainer
+from scripts.linker import train_linker_and_finalize as trainer
 from scripts.production.model.initial_query_sources import derived_query_id
 from tests.raw_arrow_helpers import base_arrow_paths, open_arrow_dataset, write_ipc
 

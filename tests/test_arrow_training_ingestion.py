@@ -45,7 +45,7 @@ from s2and.incremental_linking.feature_block_arrow import (
     write_raw_arrow_batch_lookup_indexes,
 )
 from s2and.runtime import load_s2and_rust_extension
-from scripts.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
+from scripts.common.arrow_conversion_helpers import write_raw_planner_arrow_from_anddata
 from tests.helpers import (
     tiny_name_counts_index,
     tiny_name_counts_tuple,

@@ -11,7 +11,7 @@ import pytest
 from s2and.arrow_inputs import ARROW_COLLECTION_KIND
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
 from s2and.incremental_linking.feature_block import write_name_counts_index
-from scripts.verification import profile_promoted_incremental_arrow as profile
+from scripts.release.verification import profile_promoted_incremental_arrow as profile
 from tests.helpers import (
     tiny_name_counts_tuple,
     write_minimal_arrow_prediction_bundle,

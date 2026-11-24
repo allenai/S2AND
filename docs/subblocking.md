@@ -177,7 +177,7 @@ Default `GraphSubblockingConfig` behavior:
 
 The native planner requires Arrow signatures and the batch indexes for its
 evidence tables. Missing required artifacts and invalid Arrow schemas raise
-before clustering. Use the [native threshold sweep](../scripts/production/README.md#subblocking-quality)
+before clustering. Use the [native threshold sweep](../scripts/release/README.md#subblocking-quality)
 to inspect partitions and ORCID-group preservation.
 
 ## Prediction

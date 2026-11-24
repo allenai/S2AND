@@ -14,19 +14,19 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
-from scripts.eps_sweep.common import DISTANCE_POLICY_VERSION
-from scripts.eps_sweep.orcid_b3 import read_external_reference_identity_evidence
-from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-from scripts.production.data.block_roles import load_block_roles
-from scripts.production.data.build_linker_task_tables import (
+from scripts.common.block_roles import load_block_roles
+from scripts.eps.common import DISTANCE_POLICY_VERSION
+from scripts.eps.orcid_b3 import read_external_reference_identity_evidence
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.intake.prepare_identity_labels import prepare_identity_labels
+from scripts.linker.build_linker_task_tables import (
     TASK_MANIFEST,
     TASK_ROLES,
     _freeze_block_rows,
     build_linker_task_tables,
     read_seed_components,
 )
-from scripts.production.data.prepare_identity_labels import prepare_identity_labels
-from scripts.production.model.train_linker_and_finalize import _materialize_frozen_linker_tasks
+from scripts.linker.train_linker_and_finalize import _materialize_frozen_linker_tasks
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 
 _OUTSIDE_HOME = "0000-0002-1694-233X"

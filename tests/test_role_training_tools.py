@@ -12,12 +12,12 @@ import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
-from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.test_build_linker_task_tables import _ORCIDS, _OUTSIDE_HOME, _block_inputs
 
 
 def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> None:
-    from scripts.eps_sweep import orcid_b3
+    from scripts.eps import orcid_b3
 
     block = "a ross"
     spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
@@ -60,7 +60,7 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
 
 
 def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None:
-    from scripts.production.data import mine_pairwise_pairs
+    from scripts.pairwise import mine_pairwise_pairs
 
     block = "a ross"
     spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
@@ -80,7 +80,7 @@ def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None
 
 
 def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from scripts.production.data.mine_pairwise_pairs import main
+    from scripts.pairwise.mine_pairwise_pairs import main
 
     block = "a ross"
     spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
@@ -113,7 +113,7 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
 
 
 def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
-    from scripts.eps_sweep.orcid_b3 import score_block_role
+    from scripts.eps.orcid_b3 import score_block_role
 
     block = "a ross"
     spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
@@ -143,7 +143,7 @@ def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
 @pytest.mark.parametrize("check", ["sampling_frame", "manifest"])
 def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str) -> None:
     from s2and._sha256 import sha256_file
-    from scripts.production.data.mine_pairwise_pairs import mine_pairs
+    from scripts.pairwise.mine_pairwise_pairs import mine_pairs
 
     block = "a ross"
     spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
@@ -187,7 +187,7 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str
 
 
 def test_role_b3_scores_singleton_only_reference(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from scripts.eps_sweep.orcid_b3 import main
+    from scripts.eps.orcid_b3 import main
 
     block = "a ross"
     identity = _ORCIDS[0]
@@ -232,10 +232,10 @@ def test_role_b3_scores_singleton_only_reference(tmp_path: Path, capsys: pytest.
 @pytest.mark.parametrize(
     ("entry_point", "option"),
     [
-        ("scripts.eps_sweep.orcid_b3", "--assignments-json"),
-        ("scripts/production/data/build_linker_task_tables.py", "--block-inputs"),
-        ("scripts.production.data.check_v14_training_overlap", "--training-parquet"),
-        ("scripts.production.data.mine_pairwise_pairs", "--pairs-per-block"),
+        ("scripts.eps.orcid_b3", "--assignments-json"),
+        ("scripts/linker/build_linker_task_tables.py", "--block-inputs"),
+        ("scripts.intake.check_v14_training_overlap", "--training-parquet"),
+        ("scripts.pairwise.mine_pairwise_pairs", "--pairs-per-block"),
     ],
     ids=["orcid-b3", "build-linker-task-tables", "check-v14-training-overlap", "mine-pairwise-pairs"],
 )

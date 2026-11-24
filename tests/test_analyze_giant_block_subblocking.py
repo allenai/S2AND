@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from scripts import analyze_giant_block_subblocking as analysis
+from scripts.release.verification import analyze_giant_block_subblocking as analysis
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
 

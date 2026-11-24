@@ -78,8 +78,8 @@ uv sync --active --extra dev
 
 The `dev` extra includes everything the tests need. For count generation, you can install either extra on its own.
 
-- `orcid-counts` installs `orjson` for [ORCID prefix counts](../scripts/production/counts/generate_orcid_name_prefix_counts.py).
-- `author-counts` installs `boto3` and `duckdb` for [Athena author counts](../scripts/production/counts/generate_author_counts_from_athena.py).
+- `orcid-counts` installs `orjson` for [ORCID prefix counts](../scripts/intake/counts/generate_orcid_name_prefix_counts.py).
+- `author-counts` installs `boto3` and `duckdb` for [Athena author counts](../scripts/intake/counts/generate_author_counts_from_athena.py).
 
 ## Build the Rust extension from source
 

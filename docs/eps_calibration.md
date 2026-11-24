@@ -80,7 +80,7 @@ $BatchingThreshold = 15000
 $Giants = @('a_khan', 'h_wang', 'j_smith', 's_gupta', 's_lee', 's_park')
 $Grid = @('0.40', '0.45', '0.50', '0.55', '0.60', '0.62', '0.64', '0.65', '0.66', '0.68', '0.70', '0.75', '0.80')
 
-uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
+uv run --no-sync python scripts/eps/sweep_eps_on_linking_gold.py `
   --dataset j_smith --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
   --score-mode orcid-b3 --output-dir "$EpsRun/smoke/j_smith" --route bulk `
   --batching-threshold $BatchingThreshold `
@@ -109,7 +109,7 @@ Run each giant sequentially within the approved resource budget:
 
 ```powershell
 foreach ($Dataset in $Giants) {
-  uv run --no-sync python scripts/eps_sweep/sweep_eps_on_linking_gold.py `
+  uv run --no-sync python scripts/eps/sweep_eps_on_linking_gold.py `
     --dataset $Dataset --arrow-root $Snapshot --replay-bundle incremental --model-path $Candidate `
     --score-mode orcid-b3 --output-dir "$EpsRun/b3/$Dataset" `
     --distance-cache-dir "$EpsRun/b3-cache/$Dataset" `
@@ -119,7 +119,7 @@ foreach ($Dataset in $Giants) {
   if ($LASTEXITCODE -ne 0) { throw "B3 sweep fails for $Dataset" }
 }
 
-uv run --no-sync python scripts/eps_sweep/plot_b3_eps_sweeps.py `
+uv run --no-sync python scripts/eps/plot_b3_eps_sweeps.py `
   --root "$EpsRun/b3" --datasets $Giants --output "$EpsRun/b3.png" --reference-eps 0.57
 ```
 
@@ -142,7 +142,7 @@ Record the reason for that choice.
 ```powershell
 $PrecisionF1Tolerance = (Get-Content -Raw "$Snapshot/pairwise/model_plan.json" | ConvertFrom-Json).eps.precision_f1_tolerance
 if ($null -eq $PrecisionF1Tolerance) { $PrecisionF1Tolerance = 0 }
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
+uv run --no-sync python scripts/eps/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3.1" `
   --sweep-root "$EpsRun/b3" --datasets $Giants --eps $ReviewedEps `
   --expected-batching-threshold $BatchingThreshold --precision-f1-tolerance $PrecisionF1Tolerance `
@@ -166,7 +166,7 @@ It still checks the EPS range, the fresh output paths, the model load, and the u
 Release `1.3` used this form:
 
 ```powershell
-uv run --no-sync python scripts/eps_sweep/apply_reviewed_eps.py `
+uv run --no-sync python scripts/eps/apply_reviewed_eps.py `
   --source-model $Candidate --output-model "$EpsRun/reviewed/production_model_v1.3" `
   --eps 0.53 --review-note '<decision, tradeoff, and internal evidence location>' `
   --output-report "$EpsRun/eps_review.json"

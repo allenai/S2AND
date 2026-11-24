@@ -8,8 +8,8 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
-from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-from scripts.production.data.prepare_identity_labels import (
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.intake.prepare_identity_labels import (
     main,
     names_are_compatible,
     normalize_block_key,

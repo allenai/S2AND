@@ -841,7 +841,7 @@ def test_eps_grid_from_a_rust_featurizer_refuses_required_seeds() -> None:
 
 
 def test_eps_sweep_applies_the_repair_to_cached_distances(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts.eps_sweep import sweep_eps_on_linking_gold
+    from scripts.eps import sweep_eps_on_linking_gold
 
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_build_arrow_featurizer", lambda *_args: _facts_featurizer())
     monkeypatch.setattr(sweep_eps_on_linking_gold, "_cache_metadata", lambda *_args: {})

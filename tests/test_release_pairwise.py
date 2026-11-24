@@ -15,7 +15,7 @@ from s2and.name_counts_index import NameCountsIndex
 from s2and.name_tuple_artifact import NameTupleArtifact
 from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts
 from s2and.production_training_contract import block_membership_sha256, load_model_plan
-from scripts.production.model import release_pairwise
+from scripts.pairwise import release_pairwise
 
 
 def _sha256(path: Path) -> str:

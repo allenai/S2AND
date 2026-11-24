@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-from scripts.production.data.block_roles import load_block_roles
-from scripts.production.data.review_packets import (
+from scripts.common.block_roles import load_block_roles
+from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.judging.review_packets import (
     ORCID_REDACTED_TOKEN,
     build_blind_linker_packets,
     build_blind_pair_packets,

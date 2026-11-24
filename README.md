@@ -107,7 +107,7 @@ The [inference guide](docs/production_inference.md) describes raw inputs, embedd
 
 ## Training and evaluation
 
-- Reproduce the production model on published data with the [reproduction guide](docs/reproduce.md) and [production commands](scripts/production/README.md#pairwise-model).
+- Reproduce the production model on published data with the [reproduction guide](docs/reproduce.md) and [production commands](scripts/release/README.md#pairwise-model).
 - Run smaller experiments and inspect metrics through the Python API with the [training and evaluation guide](docs/training.md).
 
 ## Runtime and scaling
@@ -122,7 +122,7 @@ See [subblocking](docs/subblocking.md), [threading](docs/threading.md), and [env
 
 ## Development
 
-Run the full CI checks with `uv run --no-project python scripts/run_ci_locally.py`.
+Run the full CI checks with `uv run --no-project python scripts/dev/run_ci_locally.py`.
 
 The tests require the native extension from the development setup.
 See [the development guide](docs/development.md) for focused checks and native build recovery.

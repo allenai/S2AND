@@ -17,7 +17,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
-from scripts.eps_sweep import common, sweep_eps_on_linking_gold
+from scripts.eps import common, sweep_eps_on_linking_gold
 from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
 from tests.model_helpers import ConstantDistanceClassifier
 
@@ -443,7 +443,7 @@ def test_distance_cache_key_reuses_pairwise_across_linker_and_eps_variants(tmp_p
 
 
 def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
-    from scripts.eps_sweep import orcid_b3
+    from scripts.eps import orcid_b3
     from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
     from tests.raw_arrow_helpers import base_arrow_paths
 
@@ -540,7 +540,7 @@ def test_distance_cache_rejects_a_different_pairwise_contract(tmp_path: Path) ->
 def test_eps_sweep_rejects_sealed_dataset_before_reference_collection(tmp_path, monkeypatch) -> None:
     from contextlib import nullcontext
 
-    from scripts.eps_sweep import orcid_b3
+    from scripts.eps import orcid_b3
 
     roles = tmp_path / "roles.json"
     roles.write_text(

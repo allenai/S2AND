@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import run_ci_locally as run_ci
+from scripts.dev import run_ci_locally as run_ci
 
 
 def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
@@ -22,8 +22,8 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
 
     ruff_requirement = run_ci.exact_dev_tool_requirement("ruff")
     assert calls == [
-        ["run", "--no-project", "python", "scripts/sync_version.py", "--check"],
-        ["run", "--no-project", "python", "scripts/sync_feature_schema.py", "--check"],
+        ["run", "--no-project", "python", "scripts/dev/sync_version.py", "--check"],
+        ["run", "--no-project", "python", "scripts/dev/sync_feature_schema.py", "--check"],
         ["tool", "run", "--isolated", ruff_requirement, "check", "s2and", "scripts", "tests"],
         ["tool", "run", "--isolated", ruff_requirement, "format", "--check", "s2and", "scripts", "tests"],
     ]
@@ -82,7 +82,7 @@ def test_ci_builds_native_runtime_and_requires_smoke_before_pytest(
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == 1
     assert lifecycle == ["ensure-rust", "sync-and-build-rust", "check-rust", "typecheck"]
-    assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
+    assert calls[0][0] == ["run", "--no-sync", "python", "scripts/release/verification/smoke_installed_rust_api.py"]
     assert calls[0][1] is None
     assert all("-ra" in args for args in pytest_calls)
     assert pytest_calls[0] == [

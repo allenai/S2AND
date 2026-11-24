@@ -7,7 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from scripts.production.data.assign_block_roles import (
+from scripts.common.block_roles import load_block_roles
+from scripts.intake.assign_block_roles import (
     LEGACY_DEV_TEST_BLOCKS,
     PERMANENT_EXCLUDED_BLOCKS,
     BlockSpec,
@@ -16,7 +17,6 @@ from scripts.production.data.assign_block_roles import (
     main,
     verify_role_assignments,
 )
-from scripts.production.data.block_roles import load_block_roles
 
 
 def _sample_blocks() -> list[BlockSpec]:

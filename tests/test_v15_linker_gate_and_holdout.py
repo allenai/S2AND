@@ -14,10 +14,10 @@ from s2and.incremental_linking_training.classic import (
     _score_query_choices,
     report_logistic_gate_error_weights,
 )
-from scripts.eps_sweep import apply_reviewed_eps as apply_eps
-from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
-from scripts.production.data.block_roles import load_block_roles
-from scripts.production.model import train_linker_and_finalize as promoted_train
+from scripts.common.block_roles import load_block_roles
+from scripts.eps import apply_reviewed_eps as apply_eps
+from scripts.eps.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
+from scripts.linker import train_linker_and_finalize as promoted_train
 
 
 def _synthetic_gate_data() -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:

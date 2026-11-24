@@ -6,7 +6,7 @@ import zipfile
 
 import pytest
 
-from scripts.verification.verify_rust_distribution_licenses import LICENSE_PATHS, verify_archive
+from scripts.release.verification.verify_rust_distribution_licenses import LICENSE_PATHS, verify_archive
 
 
 @pytest.mark.parametrize(

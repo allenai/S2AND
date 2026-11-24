@@ -533,7 +533,7 @@ the pairwise source intact and keeps partial files out of the final path.
 The training command reloads the published bundle and evaluates the serialized
 artifact.
 
-See the [production command reference](../scripts/production/README.md) for
+See the [production command reference](../scripts/release/README.md) for
 arguments and the [release process](release.md) for stage order and gates.
 
 ## Name-count and reuse boundaries
@@ -600,7 +600,7 @@ The focused code gate is:
 uv run pytest -q tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 uv run pytest -q tests/test_name_tuple_artifact.py tests/test_generate_orcid_name_prefix_counts.py
 uv run pytest -q tests/test_train_pairwise_script.py tests/test_promoted_linker_training_cli.py
-uv run ruff check s2and scripts/production/model tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
+uv run ruff check s2and scripts/common scripts/linker scripts/pairwise scripts/release tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 git diff --check
 ```
 

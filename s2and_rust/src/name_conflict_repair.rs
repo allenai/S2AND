@@ -1,4 +1,4 @@
-//! Kernels for name-conflict repair; `s2and/name_conflict_repair.py` states the rule.
+//! Kernels for name-conflict repair; `s2and/corrections/name_conflict_repair.py` states the rule.
 //!
 //! Both kernels read a condensed block matrix front to back.
 

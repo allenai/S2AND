@@ -1,4 +1,4 @@
-"""Compatibility imports for cluster corrections."""
+"""Compatibility imports. The code lives in `s2and.corrections.name_conflict_repair`."""
 
 from __future__ import annotations
 

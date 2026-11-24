@@ -100,6 +100,10 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
 
 ### Breaking changes
 
+- `s2and.model`, `s2and.text` and the linker training module are now packages,
+  and the correction modules live in `s2and.corrections`. Old import paths still
+  work. Module constants such as `s2and.model._FUSED_BLOCK_SCORING` are read
+  in their new modules, so assigning them through the old path has no effect.
 - Scripts moved into one folder per pipeline stage under `scripts/`: `intake`,
   `judging`, `pairwise`, `linker`, `eps`, `release` and `dev`, with shared
   modules in `common`. Commands from earlier releases need the new paths. See

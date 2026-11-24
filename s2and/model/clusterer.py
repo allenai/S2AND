@@ -571,7 +571,8 @@ class Clusterer:
     predict_incremental_from_arrow = incremental.predict_incremental_from_arrow
 
 
-# Resolve the original return annotation for fit without an import cycle.
+# classic.py reads Clusterer at run time (for example _default_predict_helper in predict).
+# Bind it here because classic.py cannot import clusterer.py without a cycle.
 classic.Clusterer = Clusterer
 
 # Preserve the original signatures and pickle paths of the class methods.

@@ -1,4 +1,4 @@
-"""Compatibility imports for Arrow tables and batch indexes."""
+"""Compatibility imports. The code lives in `s2and.arrow_tables`."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Compatibility imports for cluster corrections."""
+"""Compatibility imports. The code lives in `s2and.corrections.seed_merging`."""
 
 from collections import defaultdict as defaultdict
 from collections.abc import Iterable as Iterable

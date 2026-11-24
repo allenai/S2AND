@@ -7,15 +7,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from scripts.common.email_redaction import (
+    EMAIL_REDACTED_TOKEN,
+    hash_feature_email,
+    scan_tree_for_plaintext_emails,
+)
 from scripts.intake.gate_public_snapshot import (
     REDACTED_ABSTRACT_MARKER,
     gate_public_dataset,
     load_paper_id_set,
-)
-from scripts.intake.hash_release_emails import (
-    EMAIL_REDACTED_TOKEN,
-    hash_feature_email,
-    scan_tree_for_plaintext_emails,
 )
 
 

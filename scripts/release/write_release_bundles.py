@@ -33,12 +33,12 @@ from s2and.arrow_training import load_signatures_from_arrow  # noqa: E402
 from s2and.incremental_linking.policy import NAME_COUNTS_MANIFEST_SHA256_FIELD  # noqa: E402
 from s2and.name_counts_index import NameCountsIndex  # noqa: E402
 from s2and.production_training_contract import load_model_plan  # noqa: E402
-from scripts.common.plan_datasets import require_arrow_plan  # noqa: E402
-from scripts.common.unknown_signatures import load_unknown_signatures  # noqa: E402
-from scripts.intake.hash_release_emails import (  # noqa: E402
+from scripts.common.email_redaction import (  # noqa: E402
     hash_release_emails,
     scan_tree_for_plaintext_emails,
 )
+from scripts.common.plan_datasets import require_arrow_plan  # noqa: E402
+from scripts.common.unknown_signatures import load_unknown_signatures  # noqa: E402
 
 # The giant-block ORCID B3 sweep reads the ORCID-error list from the data root.
 DATASET_FILES = (

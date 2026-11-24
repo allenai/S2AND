@@ -7,6 +7,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as ipc
 
+from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.production.data.block_roles import load_block_roles
 from scripts.production.data.prepare_identity_labels import (
     names_are_compatible,
     normalize_block_key,
@@ -21,6 +23,48 @@ def _write_signatures_arrow(directory: Path, rows: list[dict]) -> Path:
     with pa.OSFile(str(path), "wb") as sink, ipc.new_file(sink, table.schema) as writer:
         writer.write_table(table)
     return path
+
+
+def test_identity_label_join_keeps_shared_orcid_only_in_home_role(tmp_path: Path) -> None:
+    shared = "0000-0002-1694-233X"
+    assignments = assign_block_roles(
+        [BlockSpec("a ross", 1, frozenset({shared})), BlockSpec("b ross", 1, frozenset({shared}))],
+        {"eps_cal": 1, "final_test_a": 1},
+        pinned_roles={"a ross": "eps_cal", "b ross": "final_test_a"},
+        closure_mode="home_pool",
+    )
+    path = tmp_path / "assignments.json"
+    path.write_text(json.dumps(assignments), encoding="utf-8")
+    roles = load_block_roles(path)
+    gold = tmp_path / "gold.parquet"
+    pd.DataFrame(
+        {
+            "paper_id": ["1", "2"],
+            "position": [0, 0],
+            "orcid": [shared, shared],
+            "block_key": ["a ross", "b ross"],
+            "scored": [True, True],
+        }
+    ).to_parquet(gold, index=False)
+    for idx, block in enumerate(("a_ross", "b_ross"), 1):
+        directory = tmp_path / block
+        arrow_path = _write_signatures_arrow(
+            directory,
+            [
+                {
+                    "signature_id": f"s{idx}",
+                    "paper_id": str(idx),
+                    "author_position": 0,
+                    "author_block": block,
+                    "author_orcid": shared,
+                }
+            ],
+        )
+        output = directory / "labels.parquet"
+        audit = prepare_identity_labels(directory, gold, output, block_roles=roles)
+        assert audit["dropped_non_home_role"] == (1 if idx == 1 else 0)
+        assert pd.read_parquet(output)["signature_id"].tolist() == ([] if idx == 1 else ["s2"])
+        assert pa.ipc.open_file(str(arrow_path)).read_all()["author_orcid"].to_pylist() == [shared]
 
 
 def test_normalize_block_key_and_name_compatibility() -> None:

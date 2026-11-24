@@ -5,10 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.production.data.block_roles import load_block_roles
 from scripts.production.data.review_packets import (
     ORCID_REDACTED_TOKEN,
     build_blind_linker_packets,
     build_blind_pair_packets,
+    main,
+    score_judges,
     validate_blind_packet_records,
 )
 
@@ -164,3 +168,128 @@ def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path:
     assert any("ORCID pattern" in v for v in violations)
     assert any("plaintext email" in v for v in violations)
     assert any("forbidden key" in v for v in violations)
+
+
+def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_path: Path) -> None:
+    shared = "0000-0002-1694-233X"
+    local = "0000-0001-5000-0007"
+    assignments = assign_block_roles(
+        [BlockSpec("a smith", 5, frozenset({shared, local})), BlockSpec("b smith", 2, frozenset({shared}))],
+        {"gate_thresh": 1, "final_test_a": 1},
+        pinned_roles={"a smith": "gate_thresh", "b smith": "final_test_a"},
+        closure_mode="home_pool",
+    )
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps(assignments), encoding="utf-8")
+    roles = load_block_roles(path)
+    shared_paper = _paper(1)
+    gold_paper = {**_paper(2), "author_orcid": local}
+    item = {"source_id": "natural", "block_key": "a smith", "paper_a": shared_paper, "paper_b": gold_paper}
+    controls = [
+        {**item, "source_id": "outside_home"},
+        {**item, "source_id": "inside_home", "paper_a": gold_paper, "metadata": {"gold_label": 1}},
+        {**item, "source_id": "unscored", "paper_a": {**gold_paper, "scored": False}},
+    ]
+    result = build_blind_pair_packets(
+        items=[item],
+        control_items=controls,
+        output_dir=tmp_path / "packets",
+        block_roles=roles,
+        control_fraction=0.5,
+    )
+    key = json.loads(Path(result["answer_key_path"]).read_text(encoding="utf-8"))
+    assert result["excluded_controls"] == 2
+    assert {row["source_id"] for row in key["items"]} == {"natural", "inside_home"}
+
+
+def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Path) -> None:
+    def make_item(source_id: str, *, label: int | None = None) -> dict:
+        return {
+            "source_id": source_id,
+            "block_key": "a lee",
+            "paper_a": _paper(1),
+            "paper_b": _paper(2),
+            "metadata": {"stratum": "giant", "gold_label": label},
+        }
+
+    regular = [make_item(source) for source in ("first", "second", "third")]
+    controls = [make_item(source, label=label) for source, label in (("true_same", 1), ("true_different", 0))]
+    verdicts_by_family = {
+        "sol": {
+            "first": "same",
+            "second": "different",
+            "third": "insufficient_evidence",
+            "true_same": "same",
+            "true_different": "same",
+        },
+        "claude": {"first": "same", "second": "different", "true_same": "different", "true_different": "different"},
+    }
+    arguments = ["score"]
+    for idx, (family, verdicts) in enumerate(verdicts_by_family.items()):
+        report = build_blind_pair_packets(
+            items=regular,
+            control_items=controls,
+            output_dir=tmp_path / family,
+            control_fraction=0.5,
+            seed=100 + idx,
+            control_seed=10,
+            max_items_per_shard=3,
+        )
+        answer_key = Path(report["answer_key_path"])
+        items = json.loads(answer_key.read_text(encoding="utf-8"))["items"]
+        path = tmp_path / f"{family}.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"item_id": row["item_id"], "verdict": verdicts[row["source_id"]]}) + "\n"
+                for row in items
+                if row["source_id"] in verdicts
+            ),
+            encoding="utf-8",
+        )
+        arguments.extend(["--judge", family, str(path), str(answer_key)])
+    result_path = tmp_path / "score.json"
+    assert main([*arguments, "--output-json", str(result_path)]) == 0
+    summary = json.loads(result_path.read_text(encoding="utf-8"))
+    for judge, skew, missing in zip(summary["judges"], (1, -1), (0, 1), strict=True):
+        assert len(judge["by_shard"]) == 2
+        assert sorted(report["control_accuracy"] for report in judge["by_shard"].values()) == [0, 1]
+        assert judge["by_stratum"]["giant"]["decided_share"] == 0.8
+        assert judge["by_stratum"]["giant"]["false_same_minus_false_different"] == skew
+        assert judge["by_stratum"]["giant"]["missing"] == missing
+    agreement = summary["cross_family_agreement"][0]
+    assert agreement["both_decided_share"] == 0.8
+    assert agreement["agreement"] == 0.5
+    assert agreement["cohen_kappa"] == 0.2
+
+
+def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path) -> None:
+    item = {
+        "source_id": "real_query",
+        "block_key": "a smith",
+        "query": _paper(1),
+        "candidates": [
+            {"candidate_key": "a", "exemplars": [_paper(2)]},
+            {"candidate_key": "b", "exemplars": [_paper(3)]},
+        ],
+    }
+    judges = []
+    orders = []
+    for family, seed in (("sol", 1), ("claude", 5)):
+        summary = build_blind_linker_packets(queries=[item], output_dir=tmp_path / family, seed=seed)
+        key_path = Path(summary["answer_key_path"])
+        (record,) = json.loads(key_path.read_text(encoding="utf-8"))["items"]
+        slots = record["slot_to_candidate_key"]
+        orders.append(slots)
+        verdicts = {
+            "item_id": record["item_id"],
+            "candidate_verdicts": {
+                slot: "same" if candidate == "a" else "different" for slot, candidate in slots.items()
+            },
+        }
+        verdicts_path = tmp_path / f"{family}.jsonl"
+        verdicts_path.write_text(json.dumps(verdicts) + "\n", encoding="utf-8")
+        judges.append((family, verdicts_path, key_path))
+    assert orders[0] != orders[1]
+    assert score_judges(judges)["cross_family_agreement"][0]["agreement"] == 1.0
+    with pytest.raises(ValueError, match="distinct judge families"):
+        score_judges([judges[0], judges[0]])

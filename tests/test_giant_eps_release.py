@@ -28,6 +28,8 @@ from scripts.eps_sweep.common import (
     read_sweep_curve,
     write_json,
 )
+from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+from scripts.production.data.block_roles import load_block_roles
 from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, derived_query_id
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
@@ -698,6 +700,86 @@ def test_eps_only_update_accepts_an_explicit_dataset_list_and_preserves_artifact
     assert _changed_files(source, output) == {"clusterer.json", "manifest.json"}
     assert load_production_model(output).cluster_model.eps == 0.65
     assert load_production_model(source).cluster_model.eps == 0.5
+
+
+def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Path) -> None:
+    shared = "0000-0002-1694-233X"
+    local = "0000-0001-5000-0007"
+    role_path = tmp_path / "assignments.json"
+    result = assign_block_roles(
+        [
+            BlockSpec("unit", 3, frozenset({shared, local}), source_split="development"),
+            BlockSpec("sealed", 2, frozenset({shared}), source_split="holdout"),
+        ],
+        {"eps_cal": 1, "final_test_a": 1},
+        closure_mode="home_pool",
+        enforce_source_splits=True,
+    )
+    write_json(role_path, result)
+    assert result["verification"]["raw_cross_role_orcid_overlap"] == 1
+    assert result["verification"]["cross_role_orcid_overlap"] == 0
+    block_roles = load_block_roles(role_path)
+    source = _complete_model(tmp_path)
+    sweep_root = tmp_path / "curves"
+    sweep = _curve(sweep_root, sha256_file(source / "manifest.json"))
+    plan_path = sweep / "plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    raw = base_arrow_paths(tmp_path / "raw")
+    with pa.OSFile(raw["signatures"], "rb") as handle:
+        table = pa.ipc.open_file(handle).read_all()
+    table = table.set_column(
+        table.schema.get_field_index("author_orcid"), "author_orcid", pa.array([shared, local, local])
+    )
+    table = table.append_column("author_block", pa.array(["unit"] * 3))
+    paths = write_arrow_tables_bundle(tmp_path / "raw", {"signatures": table})
+    write_test_arrow_artifact_manifest(tmp_path / "raw", {**raw, **paths})
+    with ArrowDataset.open(tmp_path / "raw") as arrow:
+        reference = orcid_b3.read_reference(
+            arrow,
+            Path(plan["arrow_root"]),
+            "unit",
+            test_identities=frozenset(),
+            error_records=frozenset(),
+            allow_all_identities=True,
+            block_roles=block_roles,
+        )
+    assert reference.with_singletons == {"s1": local, "s2": local}
+    assert reference.stats["excluded_non_home_role_records"] == 1
+
+    reference_path = sweep / "orcid_reference.parquet"
+    summary_path = sweep / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    def set_sweep(labels: dict[str, str], *, bind_manifest: bool) -> None:
+        pd.DataFrame({"signature_id": list(labels), "orcid": list(labels.values())}).to_parquet(reference_path)
+        plan["reference"] = {**reference.stats, "sha256": sha256_file(reference_path)}
+        if not bind_manifest:
+            del plan["reference"][orcid_b3.BLOCK_ROLE_SHA256_FIELD]
+        write_json(plan_path, plan)
+        write_json(summary_path, {**summary, "plan_sha256": sha256_file(plan_path)})
+
+    def apply() -> dict:
+        return apply_reviewed_eps(
+            source,
+            tmp_path / "output",
+            sweep_root,
+            ["unit"],
+            0.65,
+            "Fixture review",
+            tmp_path / "review.json",
+            expected_batching_threshold=15000,
+            block_role_assignments=role_path,
+        )
+
+    set_sweep(reference.with_singletons, bind_manifest=False)
+    with pytest.raises(ValueError, match="same frozen block roles"):
+        apply()
+    set_sweep({**reference.with_singletons, "q1": shared}, bind_manifest=True)
+    with pytest.raises(ValueError, match="outside its home role"):
+        apply()
+    set_sweep(reference.with_singletons, bind_manifest=True)
+    assert apply()["sweep_plans"]["unit"]["reference"][orcid_b3.BLOCK_ROLE_SHA256_FIELD] == block_roles.sha256
+    assert load_production_model(tmp_path / "output").cluster_model.eps == 0.65
 
 
 def test_owner_review_can_set_the_close_pair_bonus_and_release_version(tmp_path: Path) -> None:

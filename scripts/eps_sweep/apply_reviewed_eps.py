@@ -41,11 +41,12 @@ from scripts.eps_sweep.common import (
     write_json,
 )
 from scripts.eps_sweep.orcid_b3 import (
+    BLOCK_ROLE_SHA256_FIELD,
     REFERENCE_POLICY,
     REFERENCE_POLICY_ALL_IDENTITIES,
     final_test_query_identities,
 )
-from scripts.production.data.prepare_identity_labels import normalize_block_key
+from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key
 from scripts.production.model.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
@@ -55,22 +56,12 @@ from scripts.production.model.initial_query_sources import (
 TestIdentityLoader = Callable[[Path, str, InitialQuerySources], frozenset[str]]
 
 
-def _load_verified_eps_cal_blocks(assignments_path: Path) -> tuple[frozenset[str], str]:
-    """Load an ``assign_block_roles.py`` manifest and verify zero cross-role ORCID overlap."""
-    payload = json.loads(assignments_path.read_text(encoding="utf-8"))
-    verification = payload.get("verification")
-    if not isinstance(verification, dict) or verification.get("cross_role_orcid_overlap") != 0:
-        raise ValueError(f"Block role manifest {assignments_path} does not certify zero cross-role ORCID overlap")
-    roles = payload.get("roles")
-    if not isinstance(roles, dict) or "eps_cal" not in roles:
-        raise ValueError(f"Block role manifest {assignments_path} missing roles.eps_cal")
-    eps_cal = frozenset(normalize_block_key(block) for block in roles["eps_cal"])
-    final_test = frozenset(normalize_block_key(block) for block in roles.get("final_test", ()))
-    if eps_cal & final_test:
-        raise ValueError(f"Block role manifest {assignments_path} overlaps eps_cal and final_test")
+def _eps_cal_blocks(block_roles: BlockRoles) -> frozenset[str]:
+    """Read the disjoint EPS calibration pool from verified roles."""
+    eps_cal = frozenset(block for block, role in block_roles.block_to_role.items() if role == "eps_cal")
     if not eps_cal:
-        raise ValueError(f"Block role manifest {assignments_path} has an empty eps_cal pool")
-    return eps_cal, sha256_file(assignments_path)
+        raise ValueError("Block role manifest has an empty eps_cal pool")
+    return eps_cal
 
 
 def _require_test_separated_reference(
@@ -81,6 +72,7 @@ def _require_test_separated_reference(
     query_sources: InitialQuerySources,
     *,
     verified_eps_cal_blocks: frozenset[str] | None = None,
+    block_roles: BlockRoles | None = None,
 ) -> dict[str, Any]:
     """Recheck that the reference used for the curve contains no final-test record."""
     stats = plan.get("reference")
@@ -104,6 +96,16 @@ def _require_test_separated_reference(
     reference_path = sweep_root / dataset / "orcid_reference.parquet"
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
+    if block_roles is not None and (
+        policy == REFERENCE_POLICY_ALL_IDENTITIES or block_roles.closure_mode == "home_pool"
+    ):
+        role_digest = stats.get(BLOCK_ROLE_SHA256_FIELD)
+        if (block_roles.closure_mode == "home_pool" or role_digest is not None) and role_digest != block_roles.sha256:
+            raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
+        if block_roles.orcid_home_role:
+            orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
+            if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
+                raise ValueError(f"The EPS reference contains an ORCID outside its home role: {dataset}")
     if policy == REFERENCE_POLICY:
         reference = set(pd.read_parquet(reference_path, columns=["signature_id"])["signature_id"].astype(str))
         if overlap := reference & test_identities(snapshot_root, dataset, query_sources):
@@ -154,8 +156,10 @@ def _validated_sweep_plans(
 ) -> dict[str, dict[str, Any]]:
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
     verified_eps_cal: frozenset[str] | None = None
+    block_roles = None
     if block_role_assignments is not None:
-        verified_eps_cal, _ = _load_verified_eps_cal_blocks(block_role_assignments)
+        block_roles = load_block_roles(block_role_assignments)
+        verified_eps_cal = _eps_cal_blocks(block_roles)
     folders = {path.name for path in sweep_root.iterdir() if path.is_dir()}
     if ignored := sorted(folders - set(datasets)):
         print(f"Ignoring EPS sweep folders outside --datasets: {ignored}", file=sys.stderr)
@@ -238,6 +242,7 @@ def _validated_sweep_plans(
             test_identities,
             query_sources,
             verified_eps_cal_blocks=verified_eps_cal,
+            block_roles=block_roles,
         )
         diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)
         if not diagnostic["reference_coverage"].eq(1).all():

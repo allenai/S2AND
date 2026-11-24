@@ -87,6 +87,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--score-mode", choices=["safe-action-proxy", "orcid-b3"], default="safe-action-proxy")
+    parser.add_argument("--block-role-assignments", type=Path, help="Apply frozen eps_cal ORCID home roles.")
     parser.add_argument(
         "--reference-labels",
         type=Path,
@@ -215,6 +216,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--compute-missing-dists requires --max-subblocks or explicit --allow-full-run")
     if args.score_mode == "orcid-b3" and (args.use_orcid_subblocking or not args.suppress_orcid_constraints):
         raise ValueError("ORCID-B3 requires hidden ORCID constraints and hidden ORCID subblocking")
+    if getattr(args, "block_role_assignments", None) is not None and (
+        args.score_mode != "orcid-b3" or not args.allow_all_reference_identities
+    ):
+        raise ValueError("--block-role-assignments requires ORCID B3 and --allow-all-reference-identities")
     if args.score_mode != "orcid-b3" and (args.reference_labels is not None or args.allow_all_reference_identities):
         raise ValueError("--reference-labels and --allow-all-reference-identities require --score-mode orcid-b3")
     if args.route == "production" and args.max_subblocks is not None:
@@ -1324,8 +1329,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 read_reference,
                 reviewed_error_records,
             )
+            from scripts.production.data.block_roles import load_block_roles
 
             allow_all = bool(getattr(args, "allow_all_reference_identities", False))
+            roles_path = getattr(args, "block_role_assignments", None)
+            block_roles = load_block_roles(roles_path) if roles_path is not None else None
+            if block_roles is not None and block_roles.role_for(args.dataset) != "eps_cal":
+                raise ValueError(f"Dataset {args.dataset!r} is not in the frozen eps_cal pool")
             external_path = getattr(args, "reference_labels", None)
             external_labels = (
                 load_external_reference_labels(external_path, dataset=args.dataset)
@@ -1349,6 +1359,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 query_sources=query_sources,
                 external_labels=external_labels,
                 allow_all_identities=allow_all,
+                block_roles=block_roles,
             )
             identity_reference = reference.repeated
             diagnostic_reference = reference.with_singletons

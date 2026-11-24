@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import re
 import sys
 from collections import Counter
 from collections.abc import Collection
@@ -24,15 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and.text import canonical_lasts_equivalent, canonicalize_name_parts, normalize_orcid  # noqa: E402
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
-
-_WHITESPACE_OR_UNDERSCORE = re.compile(r"[\s_]+")
-
-
-def normalize_block_key(value: str | None) -> str:
-    """Normalize block keys for comparison across underscore and space conventions."""
-    if not value:
-        return ""
-    return _WHITESPACE_OR_UNDERSCORE.sub(" ", str(value).strip().lower())
+from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
 
 
 def names_are_compatible(
@@ -163,6 +154,7 @@ def prepare_identity_labels(
     audit_json_path: Path | None = None,
     error_signature_ids: Collection[str] = (),
     expected_split: str | None = None,
+    block_roles: BlockRoles | None = None,
 ) -> dict[str, Any]:
     """Stream, verify, and join Gold ORCID rows onto one Arrow block dataset.
 
@@ -178,6 +170,7 @@ def prepare_identity_labels(
     - ``cluster_block_key`` match when present in gold
     - canonical name compatibility when gold author name columns are present
     - exclusion of any reviewed wrong-ORCID ``error_signature_ids``
+    - ORCID home roles when frozen block assignments are supplied
     """
     arrow_dir = arrow_dataset_dir.resolve()
     gold_path = gold_parquet_path.resolve()
@@ -209,6 +202,9 @@ def prepare_identity_labels(
 
     arrow_paper_ids = {str(pid) for pid in sigs["paper_id_norm"].dropna().unique()}
     arrow_blocks_norm = {str(b) for b in sigs["block_norm"].unique() if b}
+    if block_roles is not None:
+        for block in arrow_blocks_norm:
+            block_roles.role_for(block)
 
     schema = pq.read_schema(gold_path)
     col_names = list(schema.names)
@@ -271,6 +267,8 @@ def prepare_identity_labels(
         "gold_rows_scanned": 0,
         "dropped_wrong_split": 0,
         "dropped_unscored": 0,
+        "dropped_non_home_role": 0,
+        "block_role_assignments_sha256": block_roles.sha256 if block_roles is not None else None,
         "dropped_invalid_or_missing_orcid": 0,
         "dropped_excluded_orcid_group": 0,
         "dropped_invalid_position": 0,
@@ -368,6 +366,9 @@ def prepare_identity_labels(
         if len(distinct_orcids) > 1:
             audit["dropped_conflicting_gold_rows"] += len(entries)
             continue
+        if block_roles is not None and not block_roles.scores(entries[0]["author_block"], entries[0]["orcid"]):
+            audit["dropped_non_home_role"] += len(entries)
+            continue
         verified.append(entries[0])
 
     out_cols = ["signature_id", "orcid", "paper_id", "position", "author_block", "dataset", "name_verified"]
@@ -402,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-parquet", type=Path, required=True)
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--audit-json", type=Path, default=None)
+    parser.add_argument("--block-role-assignments", type=Path, help="Apply the frozen ORCID home-role mask.")
     parser.add_argument(
         "--expected-split",
         default=None,
@@ -432,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_json_path=args.audit_json,
         error_signature_ids=errors,
         expected_split=args.expected_split,
+        block_roles=load_block_roles(args.block_role_assignments) if args.block_role_assignments is not None else None,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

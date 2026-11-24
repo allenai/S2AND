@@ -15,7 +15,9 @@ import json
 import random
 import re
 import sys
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
+from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
 from scripts.production.data.hash_release_emails import _find_plaintext_emails, scrub_text_emails  # noqa: E402
 
 ORCID_REDACTED_TOKEN = "[ORCID_REDACTED]"
@@ -272,6 +276,31 @@ def _select_controls(
     return rng.sample(list(control_items), target)
 
 
+def _scored_controls(
+    items: Sequence[Mapping[str, Any]], block_roles: BlockRoles | None, *, packet_type: str
+) -> list[Mapping[str, Any]]:
+    if block_roles is None:
+        return list(items)
+    result = []
+    for item in items:
+        block = str(item["block_key"])
+        block_roles.role_for(block)
+        if packet_type == "pair":
+            papers = [item["paper_a"], item["paper_b"]]
+        else:
+            papers = [item["query"], *(paper for cand in item["candidates"] for paper in cand["exemplars"])]
+        orcids = [normalize_orcid(str(paper.get("orcid") or paper.get("author_orcid") or "")) for paper in papers]
+        if all(
+            orcid
+            and orcid not in EXCLUDED_ORCID_GROUPS
+            and paper.get("scored", True) is True
+            and block_roles.scores(block, orcid)
+            for paper, orcid in zip(papers, orcids, strict=True)
+        ):
+            result.append(item)
+    return result
+
+
 def _stratified_interleave(
     regular: Sequence[tuple[bool, Mapping[str, Any]]],
     controls: Sequence[tuple[bool, Mapping[str, Any]]],
@@ -339,6 +368,7 @@ def build_blind_pair_packets(
     max_items_per_shard: int = 40,
     max_bytes_per_shard: int = 180_000,
     max_abstract_chars: int = 1200,
+    block_roles: BlockRoles | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked, order-randomized blind pair packets plus a separate private answer key.
 
@@ -355,8 +385,9 @@ def build_blind_pair_packets(
     key_path = _resolve_answer_key_path(output_dir, answer_key_path)
 
     effective_control_seed = seed if control_seed is None else control_seed
+    eligible_controls = _scored_controls(control_items, block_roles, packet_type="pair")
     chosen_controls = _select_controls(
-        len(items), control_items, control_fraction=control_fraction, control_seed=effective_control_seed
+        len(items), eligible_controls, control_fraction=control_fraction, control_seed=effective_control_seed
     )
     combined = _stratified_interleave(
         [(False, item) for item in items],
@@ -406,12 +437,15 @@ def build_blind_pair_packets(
     packets_dir = output_dir / "packets"
     packets_dir.mkdir(parents=True, exist_ok=False)
     shard_paths: list[str] = []
+    key_items = iter(answer_key)
     for shard_index, shard in enumerate(shards, start=1):
         shard_path = packets_dir / f"pair_shard_{shard_index:03d}.jsonl"
         with shard_path.open("w", encoding="utf-8", newline="\n") as handle:
             for rec in shard:
                 handle.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
         shard_paths.append(shard_path.relative_to(output_dir).as_posix())
+        for _ in shard:
+            next(key_items)["shard"] = shard_paths[-1]
 
     key_payload = {
         "packet_type": "pair",
@@ -431,6 +465,7 @@ def build_blind_pair_packets(
         "shard_count": len(shard_paths),
         "total_items": len(blind_records),
         "control_items": key_payload["control_items"],
+        "excluded_controls": len(control_items) - len(eligible_controls),
         "shards": shard_paths,
     }
 
@@ -447,6 +482,7 @@ def build_blind_linker_packets(
     max_items_per_shard: int = 25,
     max_bytes_per_shard: int = 180_000,
     max_abstract_chars: int = 900,
+    block_roles: BlockRoles | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked blind linker candidate packets with shuffled neutral candidate slots."""
     if not 0.0 <= control_fraction <= 0.5:
@@ -457,8 +493,9 @@ def build_blind_linker_packets(
     key_path = _resolve_answer_key_path(output_dir, answer_key_path)
 
     effective_control_seed = seed if control_seed is None else control_seed
+    eligible_controls = _scored_controls(control_queries, block_roles, packet_type="linker")
     chosen_controls = _select_controls(
-        len(queries), control_queries, control_fraction=control_fraction, control_seed=effective_control_seed
+        len(queries), eligible_controls, control_fraction=control_fraction, control_seed=effective_control_seed
     )
     combined = _stratified_interleave(
         [(False, q) for q in queries],
@@ -520,12 +557,15 @@ def build_blind_linker_packets(
     packets_dir = output_dir / "packets"
     packets_dir.mkdir(parents=True, exist_ok=False)
     shard_paths: list[str] = []
+    key_items = iter(answer_key)
     for shard_index, shard in enumerate(shards, start=1):
         shard_path = packets_dir / f"linker_shard_{shard_index:03d}.jsonl"
         with shard_path.open("w", encoding="utf-8", newline="\n") as handle:
             for rec in shard:
                 handle.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
         shard_paths.append(shard_path.relative_to(output_dir).as_posix())
+        for _ in shard:
+            next(key_items)["shard"] = shard_paths[-1]
 
     key_payload = {
         "packet_type": "linker",
@@ -545,8 +585,155 @@ def build_blind_linker_packets(
         "shard_count": len(shard_paths),
         "total_items": len(blind_records),
         "control_items": key_payload["control_items"],
+        "excluded_controls": len(control_queries) - len(eligible_controls),
         "shards": shard_paths,
     }
+
+
+_DECIDED = frozenset({"same", "different"})
+_VERDICTS = _DECIDED | {"insufficient_evidence", "cannot_tell", "abstain"}
+
+
+def _fraction(numerator: int, denominator: int) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def _judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict[str, Any]:
+    decided = sum(verdict in _DECIDED for verdict, _ in rows)
+    controls = [(verdict, truth) for verdict, truth in rows if truth is not None]
+    same = sum(truth == "same" for _, truth in controls)
+    different = len(controls) - same
+    false_same = sum(verdict == "same" and truth == "different" for verdict, truth in controls)
+    false_different = sum(verdict == "different" and truth == "same" for verdict, truth in controls)
+    false_same_rate = _fraction(false_same, different)
+    false_different_rate = _fraction(false_different, same)
+    return {
+        "items": len(rows),
+        "missing": sum(verdict is None for verdict, _ in rows),
+        "decided": decided,
+        "decided_share": _fraction(decided, len(rows)),
+        "controls": len(controls),
+        "control_accuracy": _fraction(sum(verdict == truth for verdict, truth in controls), len(controls)),
+        "same_controls": same,
+        "different_controls": different,
+        "false_same": false_same,
+        "false_different": false_different,
+        "false_same_rate": false_same_rate,
+        "false_different_rate": false_different_rate,
+        "false_same_minus_false_different": (
+            false_same_rate - false_different_rate
+            if false_same_rate is not None and false_different_rate is not None
+            else None
+        ),
+    }
+
+
+def _read_judge_verdicts(
+    verdicts_path: Path, answer_key: Path
+) -> tuple[dict[str, Any], dict[tuple[str, str, str], str | None]]:
+    key = json.loads(answer_key.read_text(encoding="utf-8"))
+    by_item = {row["item_id"]: row for row in key["items"]}
+    if len(by_item) != len(key["items"]):
+        raise ValueError(f"Duplicate item IDs in {answer_key}")
+    verdicts: dict[str, Any] = {}
+    with verdicts_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            item_id = record["item_id"]
+            if item_id not in by_item or item_id in verdicts:
+                raise ValueError(f"Unknown or duplicate item {item_id!r} in {verdicts_path}:{line_number}")
+            verdicts[item_id] = record
+
+    by_shard: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
+    by_stratum: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
+    aligned: dict[tuple[str, str, str], str | None] = {}
+    for item_id, item in by_item.items():
+        record = verdicts.get(item_id, {})
+        metadata = item.get("metadata", {})
+        shard = item.get("shard")
+        if shard is None and len(key["shards"]) == 1:
+            shard = key["shards"][0]
+        if shard not in key["shards"]:
+            raise ValueError(f"Missing or invalid shard for {item_id!r} in {answer_key}")
+        stratum = str(metadata.get("stratum", "unstratified"))
+        if key["packet_type"] == "pair":
+            slots = {"": ""}
+            item_verdicts = {"": record["verdict"]} if record else {}
+            gold_label = metadata.get("gold_label")
+            gold_keys = [""] if gold_label in (1, "same") else []
+            if item["is_control"] and gold_label not in (0, 1, "same", "different"):
+                raise ValueError(f"Missing or invalid gold_label for control {item_id!r}")
+        elif key["packet_type"] == "linker":
+            slots = item["slot_to_candidate_key"]
+            item_verdicts = record["candidate_verdicts"] if record else {}
+            gold_keys = metadata.get("gold_candidate_keys")
+            if item["is_control"] and (not isinstance(gold_keys, list) or set(gold_keys) - set(slots.values())):
+                raise ValueError(f"Missing or invalid gold_candidate_keys for control {item_id!r}")
+        else:
+            raise ValueError(f"Unknown packet type in {answer_key}")
+        if set(item_verdicts) - set(slots) or any(value not in _VERDICTS for value in item_verdicts.values()):
+            raise ValueError(f"Invalid verdict or slot for {item_id!r} in {verdicts_path}")
+        for slot, candidate in slots.items():
+            identity = (normalize_block_key(item["block_key"]), item["source_id"], candidate)
+            if identity in aligned:
+                raise ValueError(f"Duplicate source and candidate {identity!r} in {answer_key}")
+            verdict = item_verdicts.get(slot)
+            truth = ("same" if candidate in gold_keys else "different") if item["is_control"] else None
+            aligned[identity] = verdict
+            by_shard[shard].append((verdict, truth))
+            by_stratum[stratum].append((verdict, truth))
+    return {
+        "by_shard": {shard: _judge_metrics(rows) for shard, rows in sorted(by_shard.items())},
+        "by_stratum": {stratum: _judge_metrics(rows) for stratum, rows in sorted(by_stratum.items())},
+    }, aligned
+
+
+def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
+    """Score JSONL verdicts and pairwise agreement across judge families.
+
+    Args:
+        judges: Family, verdict file, and private answer key for each judge.
+
+    Returns:
+        Per-judge control metrics and agreement on the same source items.
+    """
+    families = [family.strip().casefold() for family, _, _ in judges]
+    if not all(families) or len(set(families)) < 2:
+        raise ValueError("The Phase 0 scorer requires at least two distinct judge families")
+    if len({path.resolve() for _, path, _ in judges}) != len(judges):
+        raise ValueError("Each judge must supply a distinct verdict file")
+    reports = []
+    verdicts = []
+    for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
+        report, aligned = _read_judge_verdicts(verdict_path, key_path)
+        reports.append({"family": family, "verdicts": str(verdict_path), **report})
+        verdicts.append(aligned)
+    agreement = []
+    for i, j in combinations(range(len(judges)), 2):
+        if families[i] == families[j]:
+            continue
+        left, right = verdicts[i], verdicts[j]
+        overlap = left.keys() & right.keys()
+        paired = [(left[key], right[key]) for key in overlap if left[key] in _DECIDED and right[key] in _DECIDED]
+        left_counts = Counter(a for a, _ in paired)
+        right_counts = Counter(b for _, b in paired)
+        n = len(paired)
+        matches = sum(a == b for a, b in paired)
+        expected = sum(left_counts[decision] * right_counts[decision] for decision in _DECIDED)
+        agreement.append(
+            {
+                "judges": [i, j],
+                "families": [families[i], families[j]],
+                "overlap": len(overlap),
+                "both_decided": n,
+                "both_decided_share": _fraction(n, len(overlap)),
+                "agreement": _fraction(matches, n),
+                "cohen_kappa": _fraction(matches * n - expected, n * n - expected),
+            }
+        )
+    return {"judges": reports, "cross_family_agreement": agreement}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -561,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--packet-type", choices=["pair", "linker"], required=True)
     build_p.add_argument("--items-json", type=Path, required=True)
     build_p.add_argument("--controls-json", type=Path, default=None)
+    build_p.add_argument("--block-role-assignments", type=Path)
     build_p.add_argument("--output-dir", type=Path, required=True)
     build_p.add_argument("--answer-key-path", type=Path, default=None)
     build_p.add_argument("--seed", type=int, default=20261123)
@@ -568,7 +756,21 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--control-fraction", type=float, default=0.12)
     build_p.add_argument("--max-items-per-shard", type=int, default=40)
 
+    score_p = subparsers.add_parser("score", help="Score controls and agreement across judge families.")
+    score_p.add_argument(
+        "--judge", action="append", nargs=3, metavar=("FAMILY", "VERDICTS", "ANSWER_KEY"), required=True
+    )
+    score_p.add_argument("--output-json", type=Path)
+
     args = parser.parse_args(argv)
+    if args.command == "score":
+        report = score_judges([(family, Path(verdicts), Path(key)) for family, verdicts, key in args.judge])
+        rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        if args.output_json is not None:
+            args.output_json.write_text(rendered, encoding="utf-8")
+        else:
+            print(rendered, end="")
+        return 0
     if args.command == "validate":
         paths = sorted(args.path.rglob("*.jsonl")) if args.path.is_dir() else [args.path]
         all_violations: list[str] = []
@@ -581,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
 
     items = json.loads(args.items_json.read_text(encoding="utf-8"))
     controls = json.loads(args.controls_json.read_text(encoding="utf-8")) if args.controls_json else ()
+    block_roles = load_block_roles(args.block_role_assignments) if args.block_role_assignments else None
     if args.packet_type == "pair":
         report = build_blind_pair_packets(
             items=items,
@@ -591,6 +794,7 @@ def main(argv: list[str] | None = None) -> int:
             control_seed=args.control_seed,
             control_fraction=args.control_fraction,
             max_items_per_shard=args.max_items_per_shard,
+            block_roles=block_roles,
         )
     else:
         report = build_blind_linker_packets(
@@ -602,6 +806,7 @@ def main(argv: list[str] | None = None) -> int:
             control_seed=args.control_seed,
             control_fraction=args.control_fraction,
             max_items_per_shard=args.max_items_per_shard,
+            block_roles=block_roles,
         )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

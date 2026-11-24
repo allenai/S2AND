@@ -7,15 +7,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from s2and.incremental_linking_training import classic as classic_training
 from s2and.incremental_linking_training.classic import (
     _fit_promoted_logistic_gate,
     _promoted_stratified_gate_spec,
     _score_query_choices,
     build_whole_author_holdout_rows,
-    select_logistic_gate_error_weights,
+    report_logistic_gate_error_weights,
 )
 from scripts.eps_sweep import apply_reviewed_eps as apply_eps
 from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
+from scripts.production.data.block_roles import load_block_roles
 from scripts.production.model import train_linker_and_finalize as promoted_train
 
 
@@ -110,7 +112,7 @@ def test_promoted_stratified_gate_spec_validates_fit_and_validation_splits() -> 
         )
 
 
-def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa() -> None:
+def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> None:
     rows, choices, probs = _synthetic_gate_data()
     res1 = _fit_promoted_logistic_gate(
         rows,
@@ -147,16 +149,82 @@ def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa(
     # Default grid includes the production 0.25 baseline and rejects empty choices.
     val_qids = set(choices.loc[val_mask, "query_case_id"].astype(str))
     row_val_mask = rows["query_group_id"].astype(str).isin(val_qids).to_numpy()
-    tuned = select_logistic_gate_error_weights(
-        res1["gate_config"],
+    config = {
+        **res1["gate_config"],
+        "weights": [[0.0] * 3] * 4,
+        "bias": np.log([0.10, 0.025, 0.875]).tolist(),
+    }
+    report = report_logistic_gate_error_weights(
+        config,
         rows.loc[row_val_mask].reset_index(drop=True),
         choices.loc[val_mask].reset_index(drop=True),
         probs[row_val_mask],
     )
-    swept_weights = [trial["false_abstain_weight"] for trial in tuned["sweep"]]
-    assert 0.25 in swept_weights
+    assert report["configured_false_abstain_weight"] == 0.25
+    assert "gate_config" not in report
+    assert res1["gate_config"]["error_weights"]["false_abstain"] == 0.25
+    baseline = next(trial for trial in report["sweep"] if trial["false_abstain_weight"] == 0.25)
+    links = baseline["link_count"]
+    assert baseline["gold_precision"] == pytest.approx(baseline["gold_correct_links"] / links)
+    assert baseline["gold_recall"] == pytest.approx(baseline["gold_correct_links"] / report["gold_linkable_queries"])
+    assert any(trial["added_links"] for trial in report["sweep"])
+    assert report["sweep"][0]["removed_links"]
+    for trial in report["sweep"]:
+        links += len(trial["added_links"]) - len(trial["removed_links"])
+        assert trial["link_count"] == links
     with pytest.raises(ValueError, match="non-empty"):
-        select_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
+        report_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
+
+
+@pytest.mark.parametrize("configured_weight", [None, 0.34])
+def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured_weight: float | None
+) -> None:
+    rows, _, probabilities = _synthetic_gate_data()
+    rows = rows.assign(feature=probabilities, candidate_gold_scored=True)
+    rows.loc[rows["query_group_id"].isin({"q_000", "q_049"}), "candidate_gold_scored"] = False
+    gate_fit = rows.loc[rows["split"].eq("calibration_fit")]
+    gate_thresh = rows.loc[rows["split"].eq("calibration_check")]
+    linker_train = gate_fit.assign(query_group_id=lambda frame: "train_" + frame["query_group_id"])
+    fitted_rows = []
+
+    class Ranker:
+        def fit(self, features: np.ndarray, labels: np.ndarray, *, sample_weight: np.ndarray) -> None:
+            fitted_rows.append(len(features))
+
+        def predict_proba(self, features: np.ndarray) -> np.ndarray:
+            positive = np.asarray(features)[:, 0]
+            return np.column_stack((1 - positive, positive))
+
+    monkeypatch.setattr(classic_training, "_build_classic_classifier", lambda *_args, **_kwargs: Ranker())
+    gate = {"false_abstain_weight": configured_weight} if configured_weight is not None else {}
+    bundle = classic_training.OfficialBundle(
+        root=tmp_path,
+        bundle_name="fixture",
+        assets={},
+        expected_metrics={},
+        models={
+            "classic": {
+                "feature_columns": ["feature"],
+                "best_params": {},
+                "promoted_stratified_gate": gate,
+                "stratified_eval_test_split": {},
+            }
+        },
+    )
+    result = classic_training.fit_classic(
+        bundle,
+        n_jobs=1,
+        holdout_identities=classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
+        frozen_task_rows={"linker_train": linker_train, "gate_fit": gate_fit, "gate_thresh": gate_thresh},
+    )
+    assert fitted_rows == [78]
+    assert result.gate_config["training_summary"]["fit_queries"] == 39
+    assert result.gate_config["training_summary"]["validation_queries"] == 20
+    assert result.gate_config["error_weights"]["false_abstain"] == (configured_weight or 0.25)
+    report = result.abstain_rule_summary["promoted_logistic_gate"]["false_abstain_weight_report"]
+    assert report["n_queries"] == 20
+    assert report["configured_false_abstain_weight"] == result.gate_config["error_weights"]["false_abstain"]
 
 
 def test_build_whole_author_holdout_rows_guards_membership_features_and_labels() -> None:
@@ -255,7 +323,7 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
         ),
         encoding="utf-8",
     )
-    eps_cal, _ = apply_eps._load_verified_eps_cal_blocks(role_manifest)  # noqa: SLF001
+    eps_cal = apply_eps._eps_cal_blocks(load_block_roles(role_manifest))  # noqa: SLF001
     assert eps_cal == frozenset({"a smith", "b lee"})
 
     # Rejects block-disjoint policy when no role manifest is provided.

@@ -21,7 +21,7 @@ import csv
 import hashlib
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
-from scripts.production.data.prepare_identity_labels import normalize_block_key  # noqa: E402
+from scripts.production.data.block_roles import FINAL_TEST_ROLES, in_orcid_home_role, normalize_block_key  # noqa: E402
 
 PERMANENT_EXCLUDED_BLOCKS = frozenset({"f matsen"})
 LEGACY_DEV_TEST_BLOCKS = frozenset(
@@ -47,10 +47,10 @@ VALID_ROLES = (
     "gate_thresh",
     "eps_cal",
     "dev_test",
-    "final_test",
+    *FINAL_TEST_ROLES,
 )
 ASSIGNABLE_ROLES = (
-    "final_test",
+    *FINAL_TEST_ROLES,
     "eps_cal",
     "gate_thresh",
     "gate_fit",
@@ -140,12 +140,15 @@ def verify_role_assignments(
     dev_test_blocks: Collection[str] = LEGACY_DEV_TEST_BLOCKS,
     closure_mode: Literal["strict", "home_pool"] = "strict",
     enforce_source_splits: bool = False,
+    orcid_home_role: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Verify strict block, ORCID, excluded-block, source-split, and legacy dev_test invariants."""
     by_key = {normalize_block_key(block.block_key): block for block in blocks}
     norm_mapping = {normalize_block_key(k): r for k, r in block_to_role.items()}
     excluded_set = {normalize_block_key(k) for k in excluded_blocks} | set(PERMANENT_EXCLUDED_BLOCKS)
     dev_set = {normalize_block_key(k) for k in dev_test_blocks} | set(LEGACY_DEV_TEST_BLOCKS)
+    home_roles = orcid_home_role or {}
+    _validate_source_splits(blocks, enforce_source_splits)
 
     for key, role in norm_mapping.items():
         if role not in VALID_ROLES:
@@ -154,10 +157,10 @@ def verify_role_assignments(
             raise ValueError(f"Excluded block {key!r} must not appear in active assignments")
         if key not in by_key:
             raise ValueError(f"Assigned block {key!r} missing from block metadata")
-        if enforce_source_splits and by_key[key].source_split is not None:
+        if enforce_source_splits:
             split = by_key[key].source_split
-            if role == "final_test" and split != "holdout":
-                raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter 'final_test'")
+            if role in FINAL_TEST_ROLES and split != "holdout":
+                raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter {role!r}")
             if role in TRAINING_AND_TUNING_ROLES and split != "development":
                 raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter {role!r}")
 
@@ -171,55 +174,92 @@ def verify_role_assignments(
     for key, role in norm_mapping.items():
         orcids_by_role[role].update(_clean_orcids(by_key[key].orcids))
 
-    roles_present = sorted(orcids_by_role)
-    cross_role_orcids: set[str] = set()
-    for idx, role_a in enumerate(roles_present):
-        for role_b in roles_present[idx + 1 :]:
-            overlap = orcids_by_role[role_a] & orcids_by_role[role_b]
-            if overlap:
-                cross_role_orcids.update(overlap)
-                if closure_mode == "strict":
-                    raise ValueError(
-                        f"ORCID overlap between {role_a!r} and {role_b!r}: "
-                        f"count={len(overlap)}, sample={sorted(overlap)[:5]}"
-                    )
+    raw_counts = Counter(orcid for orcids in orcids_by_role.values() for orcid in orcids)
+    for orcid, role in home_roles.items():
+        if orcid not in orcids_by_role.get(role, ()):
+            raise ValueError(f"ORCID {orcid!r} is missing from its home role {role!r}")
+    scored_counts = Counter(
+        orcid
+        for role, orcids in orcids_by_role.items()
+        for orcid in orcids
+        if in_orcid_home_role(orcid, role, home_roles)
+    )
+    raw_overlap = {orcid for orcid, count in raw_counts.items() if count > 1}
+    scored_overlap = {orcid for orcid, count in scored_counts.items() if count > 1}
+    if scored_overlap or (closure_mode == "strict" and raw_overlap):
+        raise ValueError(f"ORCID overlap across roles: {sorted(scored_overlap or raw_overlap)[:5]}")
 
     role_counts = {role: sum(1 for r in norm_mapping.values() if r == role) for role in VALID_ROLES}
     role_signatures = {
         role: sum(by_key[key].signature_count for key, r in norm_mapping.items() if r == role) for role in VALID_ROLES
     }
+    strata = sorted({block.stratum for block in blocks})
+    counts = Counter((role, by_key[key].stratum) for key, role in norm_mapping.items())
     return {
         "total_assigned_blocks": len(norm_mapping),
         "role_block_counts": role_counts,
         "role_signature_counts": role_signatures,
+        "role_block_counts_by_stratum": {
+            role: {stratum: counts[role, stratum] for stratum in strata} for role in VALID_ROLES
+        },
         "closure_mode": closure_mode,
-        "cross_role_orcid_overlap": 0 if closure_mode == "strict" else len(cross_role_orcids),
+        "cross_role_orcid_overlap": len(scored_overlap),
+        "raw_cross_role_orcid_overlap": len(raw_overlap),
     }
 
 
-def _eligible_roles_for_component(
-    component: tuple[str, ...],
+def _validate_source_splits(blocks: Sequence[BlockSpec], enforce: bool) -> None:
+    if enforce:
+        for block in blocks:
+            if block.source_split not in {"development", "holdout"}:
+                raise ValueError(
+                    f"Block {block.block_key!r} has missing or invalid source_split: {block.source_split!r}"
+                )
+
+
+def _allocate_strata(
+    components: Sequence[tuple[str, ...]],
     by_key: Mapping[str, BlockSpec],
-    candidate_roles: Sequence[str],
+    remaining: dict[str, int],
+    block_to_role: dict[str, str],
     *,
+    seed: int,
     enforce_source_splits: bool,
-) -> list[str]:
-    if not enforce_source_splits:
-        return list(candidate_roles)
-    splits = {by_key[k].source_split for k in component if by_key[k].source_split is not None}
-    if not splits:
-        return list(candidate_roles)
-    eligible: list[str] = []
-    for role in candidate_roles:
-        if role == "final_test":
-            if splits == {"holdout"}:
-                eligible.append(role)
-        elif role in TRAINING_AND_TUNING_ROLES:
-            if splits == {"development"}:
-                eligible.append(role)
-        else:
-            eligible.append(role)
-    return eligible
+) -> None:
+    groups: dict[tuple[str, str], deque[tuple[str, ...]]] = defaultdict(deque)
+    sizes: Counter[tuple[str, str]] = Counter()
+    for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
+        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
+        splits = {by_key[key].source_split for key in component} if enforce_source_splits else set()
+        split = "holdout" if splits == {"holdout"} else "development" if splits == {"development"} else ""
+        group = (by_key[primary].stratum, split)
+        groups[group].append(component)
+        sizes[group] += len(component)
+
+    for role, target in remaining.items():
+        allowed = "holdout" if role in FINAL_TEST_ROLES else "development"
+        eligible = {
+            group
+            for group, size in sizes.items()
+            if size and (not enforce_source_splits or group[1] == allowed or role == "dev_test")
+        }
+        total = sum(sizes[group] for group in eligible)
+        target = min(target, total)
+        # Spend the largest outstanding proportional quota before taking another block.
+        deficits = {group: target * sizes[group] for group in eligible}
+        tie_break = {group: _hash_rank(seed, f"{role}:{group}") for group in eligible}
+        assigned = 0
+        while assigned < target and eligible:
+            group = max(eligible, key=lambda group: (deficits[group], tie_break[group]))
+            component = groups[group].popleft()
+            for key in component:
+                block_to_role[key] = role
+            assigned += len(component)
+            sizes[group] -= len(component)
+            deficits[group] -= total * len(component)
+            if not groups[group]:
+                eligible.remove(group)
+        remaining[role] = max(0, remaining[role] - assigned)
 
 
 def assign_block_roles(
@@ -247,17 +287,24 @@ def assign_block_roles(
         closure_mode: ``"strict"`` enforces zero cross-role ORCID overlap via union-find closure;
             ``"home_pool"`` avoids mega-component percolation and outputs ``orcid_home_role``
             so cross-pool ORCID mentions can be marked unscored.
-        enforce_source_splits: When True, ``final_test`` accepts only ``holdout`` blocks and
+        enforce_source_splits: When True, both final test halves accept only ``holdout`` blocks and
             training/tuning roles accept only ``development`` blocks.
         require_pinned_present: When True, raise if any explicitly pinned/dev_test/excluded block
             is absent from ``blocks``.
     """
+    role_targets = dict(role_targets)
+    if "final_test" in role_targets:
+        if any(role in role_targets for role in FINAL_TEST_ROLES):
+            raise ValueError("Specify an aggregate final_test target or individual half targets")
+        total = role_targets.pop("final_test")
+        role_targets.update(final_test_a=(total + 1) // 2, final_test_b=total // 2)
     invalid_targets = sorted(set(role_targets) - set(ASSIGNABLE_ROLES))
     if invalid_targets:
         raise ValueError(f"Unsupported target roles: {invalid_targets}")
     for role, count in role_targets.items():
         if count < 0:
             raise ValueError(f"Target count for {role!r} must be >= 0, got {count}")
+    _validate_source_splits(blocks, enforce_source_splits)
 
     excluded_set = {normalize_block_key(k) for k in excluded_blocks} | set(PERMANENT_EXCLUDED_BLOCKS)
     dev_test_set = {normalize_block_key(k) for k in extra_dev_test_blocks} | set(LEGACY_DEV_TEST_BLOCKS)
@@ -295,9 +342,12 @@ def assign_block_roles(
 
     if require_pinned_present:
         missing_pins = sorted(
-            {normalize_block_key(k) for k in (pinned_roles or {})}
-            | {normalize_block_key(k) for k in extra_dev_test_blocks}
-            | {normalize_block_key(k) for k in excluded_blocks} - seen_keys
+            (
+                {normalize_block_key(k) for k in (pinned_roles or {})}
+                | {normalize_block_key(k) for k in extra_dev_test_blocks}
+                | {normalize_block_key(k) for k in excluded_blocks}
+            )
+            - seen_keys
         )
         if missing_pins:
             raise ValueError(f"Pinned/excluded blocks missing from input: {missing_pins}")
@@ -337,58 +387,42 @@ def assign_block_roles(
         for role in target_order
     }
 
-    # Allocate within each stratum proportionally to remaining per-role targets using stable SHA-256 order.
-    by_stratum: dict[str, list[tuple[str, ...]]] = defaultdict(list)
-    for component in free_components:
-        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
-        by_stratum[by_key[primary].stratum].append(component)
-
-    unassigned: list[str] = []
-    role_stratum_counts: dict[str, dict[str, int]] = {role: defaultdict(int) for role in target_order}
-    for key, role in block_to_role.items():
-        if role in role_stratum_counts:
-            role_stratum_counts[role][by_key[key].stratum] += 1
-
-    # Process each stratum independently so every role gets proportional share of every stratum.
-    total_free_blocks = sum(len(comp) for comp in free_components)
-    for stratum in sorted(by_stratum):
-        stratum_comps = sorted(by_stratum[stratum], key=lambda comp: (_hash_rank(seed, comp[0]), comp[0]))
-        stratum_size = sum(len(comp) for comp in stratum_comps)
-        stratum_fraction = stratum_size / max(1, total_free_blocks)
-        for component in stratum_comps:
-            eligible = [
-                role
-                for role in _eligible_roles_for_component(
-                    component, by_key, target_order, enforce_source_splits=enforce_source_splits
-                )
-                if remaining.get(role, 0) > 0
-            ]
-            if not eligible:
-                unassigned.extend(component)
-                continue
-            # Score each eligible role by its proportional stratum deficit first, then overall remaining ratio.
-            chosen = max(
-                eligible,
-                key=lambda role: (
-                    (int(role_targets[role]) * stratum_fraction - role_stratum_counts[role][stratum])
-                    / max(1.0, int(role_targets[role]) * stratum_fraction),
-                    remaining[role] / max(1, int(role_targets[role])),
-                    -target_order.index(role),
-                ),
-            )
-            for key in component:
-                block_to_role[key] = chosen
-                role_stratum_counts[chosen][by_key[key].stratum] += 1
-            remaining[chosen] = max(0, remaining[chosen] - len(component))
-
-    verification = verify_role_assignments(
-        active_blocks,
-        block_to_role,
-        excluded_blocks=excluded_set,
-        dev_test_blocks=dev_test_set,
-        closure_mode=closure_mode,
+    if enforce_source_splits:
+        cohorts = {
+            FINAL_TEST_ROLES[0]: FINAL_TEST_ROLES,
+            "pairwise_train": TRAINING_AND_TUNING_ROLES,
+            "dev_test": ("dev_test",),
+        }
+    else:
+        cohorts = {FINAL_TEST_ROLES[0]: ASSIGNABLE_ROLES}
+    targets_by_cohort = {
+        cohort: {role: count for role, count in remaining.items() if role in members}
+        for cohort, members in cohorts.items()
+    }
+    # Reserve the total sample before role rounding so rare strata reach small roles.
+    selected: dict[str, str] = {}
+    _allocate_strata(
+        free_components,
+        by_key,
+        {cohort: sum(targets.values()) for cohort, targets in targets_by_cohort.items()},
+        selected,
+        seed=seed,
         enforce_source_splits=enforce_source_splits,
     )
+    selected_components: dict[str, list[tuple[str, ...]]] = defaultdict(list)
+    for component in free_components:
+        if component[0] in selected:
+            selected_components[selected[component[0]]].append(component)
+    for cohort, targets in targets_by_cohort.items():
+        _allocate_strata(
+            selected_components[cohort],
+            by_key,
+            targets,
+            block_to_role,
+            seed=seed,
+            enforce_source_splits=enforce_source_splits,
+        )
+        remaining.update(targets)
 
     # For home_pool mode, assign every multi-pool ORCID a deterministic home role (largest mention count,
     # preferring dev_test/final_test over training pools so held-out identities stay clean).
@@ -404,6 +438,15 @@ def assign_block_roles(
                 home = max(role_map, key=lambda r: (role_map[r], -role_priority.get(r, 99)))
                 orcid_home_role[orcid] = home
 
+    verification = verify_role_assignments(
+        active_blocks,
+        block_to_role,
+        excluded_blocks=excluded_set,
+        dev_test_blocks=dev_test_set,
+        closure_mode=closure_mode,
+        enforce_source_splits=enforce_source_splits,
+        orcid_home_role=orcid_home_role,
+    )
     roles: dict[str, list[str]] = {role: [] for role in VALID_ROLES}
     for key, role in sorted(block_to_role.items()):
         roles[role].append(key)
@@ -419,7 +462,7 @@ def assign_block_roles(
         "role_targets": {role: int(role_targets[role]) for role in target_order},
         "roles": roles,
         "block_to_role": dict(sorted(block_to_role.items())),
-        "unassigned": sorted(unassigned),
+        "unassigned": sorted(by_key.keys() - block_to_role.keys()),
         "shortfalls": shortfalls,
         "cross_block_components": multi_block_components,
         "component_size_summary": {
@@ -433,19 +476,37 @@ def assign_block_roles(
     }
 
 
-def _load_blocks_json(path: Path) -> list[BlockSpec]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockSpec]:
+    """Load block metadata from JSON or Parquet."""
+    if path.suffix.casefold() == ".parquet":
+        import pyarrow.parquet as pq
+
+        raw = pq.read_table(path).to_pylist()
+    else:
+        raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
-        raise ValueError(f"Expected a JSON list of block specs in {path}")
+        raise ValueError(f"Expected a list of block specs in {path}")
     specs: list[BlockSpec] = []
     for item in raw:
+        key = item.get("block_key") or item.get("cluster_block_key")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"Missing block_key in {path}")
+        orcids = item.get("orcids", None if require_orcid_lists else [])
+        if not isinstance(orcids, list):
+            raise ValueError(f"Expected an ORCID list for {key!r} in {path}")
+        count = int(item["signature_count"])
+        size = item.get("size_band") or ("<=1000" if count <= 1000 else "1001-15000" if count <= 15000 else ">15000")
+        region = item.get("script_region") or "/".join(
+            str(item[field]) for field in ("script", "region") if item.get(field)
+        )
+        stratum = item.get("stratum") or "/".join(str(value) for value in (size, region) if value) or "default"
         specs.append(
             BlockSpec(
-                block_key=str(item["block_key"]),
-                signature_count=int(item["signature_count"]),
-                orcids=frozenset(str(o) for o in item.get("orcids", ())),
-                stratum=str(item.get("stratum", "default")),
-                source_split=str(item["source_split"]) if item.get("source_split") is not None else None,
+                block_key=key,
+                signature_count=count,
+                orcids=frozenset(str(orcid) for orcid in orcids if orcid),
+                stratum=str(stratum),
+                source_split=item.get("source_split") or item.get("split"),
             )
         )
     return specs
@@ -454,10 +515,11 @@ def _load_blocks_json(path: Path) -> list[BlockSpec]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--blocks",
         "--blocks-json",
         type=Path,
         required=True,
-        help="JSON list of {block_key, signature_count, orcids, stratum, source_split?}.",
+        help="JSON or Parquet with block_key, signature_count, orcids, size/script/region bands, and split.",
     )
     parser.add_argument("--targets-json", type=Path, required=True, help="JSON dict of {role: target_block_count}.")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -489,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             raise ValueError(f"Expected JSON mapping in {args.pinned_roles_json}")
 
-    blocks = _load_blocks_json(args.blocks_json)
+    blocks = load_blocks(args.blocks, require_orcid_lists=args.closure_mode == "home_pool")
     targets = json.loads(args.targets_json.read_text(encoding="utf-8"))
     result = assign_block_roles(
         blocks,

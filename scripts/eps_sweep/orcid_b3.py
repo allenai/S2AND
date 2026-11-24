@@ -21,6 +21,7 @@ from s2and.incremental_linking_training.classic import (
 )
 from s2and.text import normalize_orcid
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
+from scripts.production.data.block_roles import BlockRoles, in_orcid_home_role, normalize_block_key
 from scripts.production.model.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
@@ -30,6 +31,7 @@ from scripts.production.model.initial_query_sources import (
 # Selection references exclude final-test identities and reviewed ORCID errors.
 REFERENCE_POLICY = "final_test_orcid_groups_and_reviewed_error_records_excluded"
 REFERENCE_POLICY_ALL_IDENTITIES = "all_reference_identities_block_disjoint"
+BLOCK_ROLE_SHA256_FIELD = "block_role_assignments_sha256"
 ORCID_ERROR_RECORDS = "orcid_error_query_signatures.json"
 
 
@@ -48,6 +50,8 @@ def load_external_reference_labels(path: Path, *, dataset: str | None = None) ->
         raise ValueError(f"External reference labels missing required columns: {missing}")
     if dataset is not None and "dataset" in frame.columns:
         frame = frame[frame["dataset"].astype(str).eq(str(dataset))]
+    if "scored" in frame:
+        frame = frame[frame["scored"].eq(True).fillna(False)]
     labels: dict[str, str] = {}
     for signature_id, raw_orcid in zip(frame["signature_id"], frame["orcid"], strict=True):
         if signature_id is None or raw_orcid is None or pd.isna(signature_id) or pd.isna(raw_orcid):
@@ -150,6 +154,7 @@ def read_reference(
     query_sources: InitialQuerySources | None = None,
     external_labels: Mapping[str, str] | None = None,
     allow_all_identities: bool = False,
+    block_roles: BlockRoles | None = None,
 ) -> OrcidReference:
     """Build ORCID references outside final-test identities (or all identities for block-disjoint pools).
 
@@ -160,6 +165,7 @@ def read_reference(
     """
     if allow_all_identities and test_identities:
         raise ValueError("allow_all_identities cannot be set when test_identities is non-empty")
+    role = block_roles.role_for(dataset) if block_roles is not None else None
     if query_sources is None:
         query_sources = load_initial_query_sources(snapshot_root, arrow_datasets={dataset: arrow_dataset})
     origins = query_sources.origins.get(dataset, {})
@@ -169,6 +175,8 @@ def read_reference(
             reader = ipc.open_file(source)
             has_arrow_orcid = "author_orcid" in reader.schema.names
             columns = ["signature_id", "author_orcid"] if has_arrow_orcid else ["signature_id"]
+            if block_roles is not None:
+                columns.append("author_block")
             table = reader.read_all().select(columns)
     rows = table.to_pydict()
     sig_ids = [str(sid) for sid in rows["signature_id"]]
@@ -177,12 +185,15 @@ def read_reference(
     arrow_identity_map: dict[str, str] = {}
     excluded_rows = 0
     excluded_errors = 0
+    excluded_non_home = 0
     matched_external = 0
-    for signature_id, raw_arrow_orcid in zip(sig_ids, arrow_orcids, strict=True):
+    for index, (signature_id, raw_arrow_orcid) in enumerate(zip(sig_ids, arrow_orcids, strict=True)):
         if signature_id.startswith("visibleq:") and signature_id not in clones:
             raise ValueError("Derived query copies require their source map in the snapshot")
         if signature_id in clones:
             continue
+        if block_roles is not None and normalize_block_key(rows["author_block"][index]) != normalize_block_key(dataset):
+            raise ValueError(f"ORCID reference for {dataset!r} contains a signature from another block: {signature_id}")
         if raw_arrow_orcid is not None:
             norm_arrow = normalize_orcid(raw_arrow_orcid)
             if norm_arrow and norm_arrow not in EXCLUDED_ORCID_GROUPS:
@@ -198,7 +209,14 @@ def read_reference(
         elif signature_id in error_records:
             excluded_errors += bool(orcid)
         elif orcid:
-            candidates[signature_id] = orcid
+            if (
+                block_roles is not None
+                and role is not None
+                and not in_orcid_home_role(orcid, role, block_roles.orcid_home_role)
+            ):
+                excluded_non_home += 1
+            else:
+                candidates[signature_id] = orcid
     # Resolve final-test identities from BOTH external labels AND Arrow author_orcid so an
     # unlabeled final-test record sharing an Arrow ORCID with dev records cannot leak its author group.
     if allow_all_identities:
@@ -238,6 +256,7 @@ def read_reference(
             "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES if allow_all_identities else REFERENCE_POLICY,
             "reference_source": "external_labels" if external_labels is not None else "arrow_author_orcid",
             **extra_external_stats,
+            **({BLOCK_ROLE_SHA256_FIELD: block_roles.sha256} if block_roles is not None else {}),
             MAP_SHA256_FIELD: query_sources.sha256,
             "reference_signatures": len(repeated),
             "reference_groups": len(set(repeated.values())),
@@ -249,6 +268,7 @@ def read_reference(
             "excluded_final_test_group_signatures": len(candidates) - len(with_singletons),
             "excluded_final_test_signature_fraction": excluded_fraction,
             "excluded_reviewed_error_records": excluded_errors,
+            "excluded_non_home_role_records": excluded_non_home,
             "excluded_initial_query_copies": len(clones),
             "excluded_mixed_orcid_rows": excluded_rows,
             "excluded_orcid_groups": sorted(EXCLUDED_ORCID_GROUPS),

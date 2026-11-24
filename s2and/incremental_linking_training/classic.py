@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import re
@@ -566,6 +565,11 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
                 "classic.promoted_stratified_gate.tune_false_abstain_weights must be a nonempty sequence of floats"
             )
         out["tune_false_abstain_weights"] = [float(w) for w in tune_weights]
+    if "false_abstain_weight" in out:
+        weight = float(out["false_abstain_weight"])
+        if not np.isfinite(weight) or weight <= 0:
+            raise ValueError("classic.promoted_stratified_gate.false_abstain_weight must be finite and positive")
+        out["false_abstain_weight"] = weight
     return out
 
 
@@ -605,6 +609,8 @@ def _weighted_error_metrics(
 
 
 def _summarize_predictions(predictions: pd.DataFrame) -> dict[str, Any]:
+    if "chosen_candidate_gold_scored" in predictions:
+        predictions = predictions.loc[predictions["chosen_candidate_gold_scored"]]
     positives = predictions[predictions["query_safe_target"] == 1]
     negatives = predictions[predictions["query_safe_target"] == 0]
     accepted = predictions["predicted_action"] == "link_candidate"
@@ -836,6 +842,8 @@ def _score_query_choices(
         keep_columns.append("supervision_type")
     if "base_group_id" in df.columns:
         keep_columns.append("base_group_id")
+    frozen_columns = ("candidate_gold_scored", "gold_safe_target", "query_signature_id")
+    keep_columns.extend(column for column in frozen_columns if column in df)
     if bucket_column:
         keep_columns.append(bucket_column)
     output_columns = [
@@ -856,6 +864,11 @@ def _score_query_choices(
         output_columns.append("supervision_type")
     if "base_group_id" in df.columns:
         output_columns.append("base_group_id")
+    output_columns.extend(
+        "chosen_candidate_gold_scored" if column == "candidate_gold_scored" else column
+        for column in frozen_columns
+        if column in df
+    )
     if bucket_column:
         output_columns.append("review_bucket")
     if include_margin:
@@ -898,6 +911,10 @@ def _score_query_choices(
             row["supervision_type"] = str(chosen["supervision_type"])
         if "base_group_id" in group.columns:
             row["base_group_id"] = str(chosen["base_group_id"])
+        for column in frozen_columns:
+            if column in group:
+                key = "chosen_candidate_gold_scored" if column == "candidate_gold_scored" else column
+                row[key] = chosen[column]
         if bucket_column:
             row["review_bucket"] = str(chosen[bucket_column])
         if include_margin:
@@ -1211,24 +1228,20 @@ def _fit_promoted_logistic_gate(
     }
 
 
-def select_logistic_gate_error_weights(
+_FALSE_ABSTAIN_REPORT_WEIGHTS = (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50)
+
+
+def report_logistic_gate_error_weights(
     base_gate_config: Mapping[str, Any],
     candidate_rows: pd.DataFrame,
     choices: pd.DataFrame,
     probabilities: np.ndarray,
     *,
-    false_abstain_weights: Sequence[float] = (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50),
+    false_abstain_weights: Sequence[float] = _FALSE_ABSTAIN_REPORT_WEIGHTS,
 ) -> dict[str, Any]:
-    """Tune the logistic gate ``false_abstain`` decision weight on held-out validation rows.
-
-    Computes the gate feature matrix and class probabilities once, then sweeps
-    ``error_weights["false_abstain"]`` (always including the base weight) out-of-sample on
-    ``choices`` (e.g. the 1.5 ``gate_thresh`` split). Selects the weight minimizing the fixed
-    production ``weighted_average_error`` (tie-breaking on higher ``balanced_accuracy``, then
-    proximity to the base ``false_abstain`` weight).
-    """
+    """Report gold link metrics and decision changes on held-out gate choices."""
     if choices.empty or candidate_rows.empty:
-        raise ValueError("select_logistic_gate_error_weights requires non-empty validation choices and candidate_rows")
+        raise ValueError("The gate weight report requires non-empty validation choices and candidate rows")
     if not false_abstain_weights:
         raise ValueError("false_abstain_weights must be nonempty")
     base_weights = dict(base_gate_config.get("error_weights", LOGISTIC_GATE_ERROR_WEIGHTS))
@@ -1269,28 +1282,44 @@ def select_logistic_gate_error_weights(
     link_cost = w_fl * class_proba[:, 0] + w_wc * class_proba[:, 1]
     safe_prob = class_proba[:, 1] + class_proba[:, 2]
 
+    link_columns = ["query_case_id", "dataset", "chosen_candidate_component_key"]
+    if "query_signature_id" in choices:
+        link_columns.append("query_signature_id")
+    links = choices[link_columns].rename(columns={"chosen_candidate_component_key": "candidate_component_key"})
+    seed_targets = choices.get("gold_safe_target", choices["query_safe_target"]).astype(bool).to_numpy()
+    gold_scored = (
+        choices["chosen_candidate_gold_scored"].to_numpy(dtype=bool)
+        if "chosen_candidate_gold_scored" in choices
+        else np.ones(len(choices), dtype=bool)
+    )
+    correct = choices["chosen_candidate_target"].eq(1).to_numpy() & seed_targets & gold_scored
+    gold_linkable = int(np.count_nonzero(seed_targets))
+    previous = link_cost < base_fa * safe_prob
+    previous_weight = base_fa
     sweep: list[dict[str, Any]] = []
-    best_config: dict[str, Any] | None = None
-    best_key: tuple[float, float, float] | None = None
     for w_val in candidate_grid:
-        abstain_cost = w_val * safe_prob
-        link = link_cost < abstain_cost
-        preds = _apply_logistic_gate_predictions(choices.copy(), link)
-        metrics = _summarize_predictions(preds)
-        sweep.append({"false_abstain_weight": w_val, "metrics": metrics})
-        key = (
-            float(metrics["weighted_average_error"]),
-            -float(metrics["balanced_accuracy"]),
-            abs(w_val - base_fa),
+        link = link_cost < w_val * safe_prob
+        link_count = int(np.count_nonzero(link))
+        scored_links = int(np.count_nonzero(link & gold_scored))
+        correct_count = int(np.count_nonzero(link & correct))
+        sweep.append(
+            {
+                "false_abstain_weight": w_val,
+                "previous_weight": previous_weight,
+                "link_count": link_count,
+                "gold_scored_links": scored_links,
+                "gold_correct_links": correct_count,
+                "gold_precision": correct_count / scored_links if scored_links else None,
+                "gold_recall": correct_count / gold_linkable if gold_linkable else None,
+                "added_links": links.loc[link & ~previous].to_dict(orient="records"),
+                "removed_links": links.loc[previous & ~link].to_dict(orient="records"),
+            }
         )
-        if best_key is None or key < best_key:
-            best_key = key
-            best_config = copy.deepcopy(dict(base_gate_config))
-            best_config["error_weights"] = {**base_weights, "false_abstain": w_val}
-    assert best_config is not None
+        previous, previous_weight = link, w_val
     return {
-        "gate_config": best_config,
-        "selected_false_abstain_weight": float(best_config["error_weights"]["false_abstain"]),
+        "configured_false_abstain_weight": base_fa,
+        "gold_linkable_queries": gold_linkable,
+        "n_queries": int(len(choices)),
         "sweep": sweep,
     }
 
@@ -2124,12 +2153,68 @@ def _score_eval_candidate_rows(
     return pd.concat(frames, ignore_index=True)
 
 
+def _score_frozen_gate_rows(
+    task_rows: Mapping[str, pd.DataFrame],
+    model: LGBMClassifier,
+    feature_columns: tuple[str, ...],
+) -> ClassicStratifiedEvalScores:
+    """Score complete windows and keep only verified outcomes for gate fitting."""
+    rows = pd.concat(
+        [task_rows[split].assign(split=split) for split in ("gate_fit", "gate_thresh")],
+        ignore_index=True,
+    )
+    probabilities = np.asarray(model.predict_proba(_classic_feature_matrix(rows, feature_columns)), dtype=np.float64)[
+        :, 1
+    ]
+    choices = _score_query_choices(rows, probabilities, query_id_column="query_group_id", include_margin=True)
+    splits = rows.drop_duplicates("query_group_id").set_index("query_group_id")["split"]
+    choices["split"] = choices["query_case_id"].map(splits)
+    keep_choices = choices["split"].eq("gate_thresh") | choices["chosen_candidate_gold_scored"]
+    query_ids = set(choices.loc[keep_choices, "query_case_id"])
+    keep_rows = rows["query_group_id"].isin(query_ids).to_numpy(dtype=bool)
+    return ClassicStratifiedEvalScores(
+        rows.loc[keep_rows], probabilities[keep_rows], choices.loc[keep_choices], pd.DataFrame()
+    )
+
+
+def _classic_internal_eval(
+    bundle: OfficialBundle,
+    spec: dict[str, Any],
+    model: LGBMClassifier,
+    feature_columns: tuple[str, ...],
+    retrieval_top_k: int,
+    gate: NumpyLogisticGate,
+) -> dict[str, Any]:
+    """Evaluate the classic gate's existing internal holdout."""
+    source_path = _resolve_path(bundle, spec.get("classic_gate_source_path", spec["hwang_eval_path"]))
+    rows = _read_csv(source_path, compression="gzip")
+    rows, _ = _drop_unlabeled_singleton_orcid_rows(rows, context="classic_gate_source")
+    rows = _filter_candidate_rows_to_retrieval_top_k(
+        rows,
+        retrieval_top_k=retrieval_top_k,
+        context="classic_gate_source",
+    )
+    probabilities = np.asarray(model.predict_proba(_classic_feature_matrix(rows, feature_columns)), dtype=np.float64)[
+        :, 1
+    ]
+    choices = _score_eval_candidate_rows(rows, probabilities, include_margin=True, limits=(retrieval_top_k,))
+    groups_path = _resolve_path(bundle, spec["classic_gate_internal_eval_base_groups_path"])
+    groups = set(_read_csv(groups_path)["base_group_id"].astype(str))
+    choices = choices[choices["base_group_id"].isin(groups)].drop(columns=["retrieval_rank_limit"])
+    internal = rows[rows["base_group_id"].astype(str).isin(groups)]
+    predictions = _apply_promoted_logistic_gate_to_candidate_rows(
+        internal, choices, probabilities[internal.index.to_numpy(dtype=np.int64)], gate
+    )
+    return _summarize_predictions(predictions)
+
+
 def fit_classic(
     bundle: OfficialBundle,
     *,
     n_jobs: int = DEFAULT_CLASSIC_N_JOBS,
     holdout_identities: ClassicHoldoutIdentities | None = None,
     pre_materialization_holdout_summary: Mapping[str, Any] | None = None,
+    frozen_task_rows: Mapping[str, pd.DataFrame] | None = None,
 ) -> CalibratedClassicModel:
     """Fit the booster and gate without reading frozen test labels/features.
 
@@ -2140,6 +2225,8 @@ def fit_classic(
             may omit this when the bundle retains complete holdout tables.
         pre_materialization_holdout_summary: Earlier exclusion counts to report.
             When supplied, any remaining overlap is a materialization failure.
+        frozen_task_rows: Optional featureized linker_train, gate_fit, and gate_thresh
+            windows from frozen development blocks.
 
     Returns:
         Fitted booster, calibrated gate, and training diagnostics.
@@ -2158,7 +2245,11 @@ def fit_classic(
         )
     calibration_limit = retrieval_top_k
     monotone_constraints = _resolve_classic_monotone_constraints(spec, feature_columns)
-    train_df = _read_csv(_resolve_path(bundle, spec["train_path"]), compression="gzip")
+    if frozen_task_rows is None:
+        train_df = _read_csv(_resolve_path(bundle, spec["train_path"]), compression="gzip")
+    else:
+        frozen_train = frozen_task_rows["linker_train"]
+        train_df = frozen_train.loc[frozen_train["candidate_gold_scored"]].reset_index(drop=True)
     train_df, unlabeled_singleton_filter_summary = _drop_unlabeled_singleton_orcid_rows(
         train_df,
         context="classic_train",
@@ -2211,37 +2302,6 @@ def fit_classic(
     model.fit(train_matrix, train_labels, sample_weight=sample_weight)
     train_seconds = float(perf_counter() - started)
 
-    gate_source_path = _resolve_path(bundle, spec.get("classic_gate_source_path", spec["hwang_eval_path"]))
-    gate_source_eval = _read_csv(gate_source_path, compression="gzip")
-    gate_source_eval, _gate_source_filter_summary = _drop_unlabeled_singleton_orcid_rows(
-        gate_source_eval,
-        context="classic_gate_source",
-    )
-    gate_source_eval = _filter_candidate_rows_to_retrieval_top_k(
-        gate_source_eval,
-        retrieval_top_k=retrieval_top_k,
-        context="classic_gate_source",
-    )
-    gate_source_probabilities = np.asarray(
-        model.predict_proba(_classic_feature_matrix(gate_source_eval, feature_columns)),
-        dtype=np.float64,
-    )[:, 1]
-    gate_source_query_choices = _score_eval_candidate_rows(
-        gate_source_eval,
-        gate_source_probabilities,
-        include_margin=True,
-        limits=(calibration_limit,),
-    )
-
-    internal_eval_groups = set(
-        _read_csv(_resolve_path(bundle, spec["classic_gate_internal_eval_base_groups_path"]))["base_group_id"].astype(
-            str
-        )
-    )
-    internal_eval_rows = gate_source_query_choices[
-        (gate_source_query_choices["retrieval_rank_limit"] == calibration_limit)
-        & (gate_source_query_choices["base_group_id"].isin(internal_eval_groups))
-    ].copy()
     promoted_gate_config = _promoted_stratified_gate_spec(spec)
     promoted_gate_summary: dict[str, Any] | None = None
     if promoted_gate_config is None:
@@ -2249,43 +2309,57 @@ def fit_classic(
     if spec.get("stratified_eval_test_split") is None:
         raise ValueError("classic.promoted_stratified_gate requires classic.stratified_eval_test_split")
 
-    split_spec = dict(spec["stratified_eval_test_split"])
-    calibration_splits = tuple(str(split) for split in promoted_gate_config["calibration_splits"])
-    stratified_scores = _score_classic_stratified_rows(
-        bundle,
-        spec,
-        split_spec,
-        lambda matrix: np.asarray(model.predict_proba(matrix), dtype=np.float64)[:, 1],
-        feature_columns,
-        splits=calibration_splits,
-        include_calibration_source=True,
-        retrieval_top_k=retrieval_top_k,
-    )
+    if frozen_task_rows is None:
+        calibration_splits = tuple(str(split) for split in promoted_gate_config["calibration_splits"])
+        fit_splits = promoted_gate_config.get("fit_splits")
+        validation_splits = promoted_gate_config.get("validation_splits")
+        stratified_scores = _score_classic_stratified_rows(
+            bundle,
+            spec,
+            dict(spec["stratified_eval_test_split"]),
+            lambda matrix: np.asarray(model.predict_proba(matrix), dtype=np.float64)[:, 1],
+            feature_columns,
+            splits=calibration_splits,
+            include_calibration_source=True,
+            retrieval_top_k=retrieval_top_k,
+        )
+    else:
+        calibration_splits = ("gate_fit", "gate_thresh")
+        fit_splits = ("gate_fit",)
+        validation_splits = ("gate_thresh",)
+        stratified_scores = _score_frozen_gate_rows(frozen_task_rows, model, feature_columns)
     calibration_split_label = "+".join(calibration_splits)
     selected_gate_result = _fit_promoted_logistic_gate(
         stratified_scores.rows,
         stratified_scores.choices,
         stratified_scores.probabilities,
         calibration_splits=calibration_splits,
-        fit_splits=promoted_gate_config.get("fit_splits"),
-        validation_splits=promoted_gate_config.get("validation_splits"),
+        fit_splits=fit_splits,
+        validation_splits=validation_splits,
+        error_weights={
+            **LOGISTIC_GATE_ERROR_WEIGHTS,
+            "false_abstain": promoted_gate_config["false_abstain_weight"],
+        }
+        if "false_abstain_weight" in promoted_gate_config
+        else None,
     )
     logistic_gate_config = dict(selected_gate_result["gate_config"])
-    tune_fa_grid = promoted_gate_config.get("tune_false_abstain_weights")
-    fa_tuning_result: dict[str, Any] | None = None
-    if tune_fa_grid is not None:
-        val_splits = tuple(str(s) for s in promoted_gate_config["validation_splits"])
+    fa_grid = promoted_gate_config.get("tune_false_abstain_weights")
+    if frozen_task_rows is not None and fa_grid is None:
+        fa_grid = _FALSE_ABSTAIN_REPORT_WEIGHTS
+    weight_report: dict[str, Any] | None = None
+    if fa_grid is not None and validation_splits is not None:
+        val_splits = tuple(str(s) for s in validation_splits)
         val_choice_mask = stratified_scores.choices["split"].astype(str).isin(val_splits).to_numpy(dtype=bool)
         val_qids = set(stratified_scores.choices.loc[val_choice_mask, "query_case_id"].astype(str))
         val_row_mask = stratified_scores.rows["query_group_id"].astype(str).isin(val_qids).to_numpy(dtype=bool)
-        fa_tuning_result = select_logistic_gate_error_weights(
+        weight_report = report_logistic_gate_error_weights(
             logistic_gate_config,
             stratified_scores.rows.loc[val_row_mask].reset_index(drop=True),
             stratified_scores.choices.loc[val_choice_mask].reset_index(drop=True),
             stratified_scores.probabilities[val_row_mask],
-            false_abstain_weights=tune_fa_grid,
+            false_abstain_weights=fa_grid,
         )
-        logistic_gate_config = dict(fa_tuning_result["gate_config"])
     calibration_metrics = {
         "split": calibration_split_label,
         **dict(selected_gate_result["calibration_metrics"]),
@@ -2317,14 +2391,7 @@ def fit_classic(
             if selected_gate_result.get("validation_metrics") is not None
             else None
         ),
-        "false_abstain_tuning": (
-            {
-                "selected_false_abstain_weight": fa_tuning_result["selected_false_abstain_weight"],
-                "trial_count": len(fa_tuning_result["sweep"]),
-            }
-            if fa_tuning_result is not None
-            else None
-        ),
+        "false_abstain_weight_report": weight_report,
         "calibration_split_metrics": {
             split: metrics
             for split, metrics in dict(selected_gate_result["split_metrics"]).items()
@@ -2333,22 +2400,12 @@ def fit_classic(
         "selected_feature_importance": list(selected_gate_result["selected_feature_importance"]),
     }
 
-    gate = load_logistic_gate_config(logistic_gate_config)
-    internal_eval_source_rows = gate_source_eval[
-        gate_source_eval["base_group_id"].astype(str).isin(internal_eval_groups)
-        & (pd.to_numeric(gate_source_eval["retrieval_rank"], errors="coerce") <= calibration_limit)
-    ].copy()
-    internal_eval_source_probabilities = gate_source_probabilities[
-        internal_eval_source_rows.index.to_numpy(dtype=np.int64)
-    ]
-    internal_eval_choices = internal_eval_rows.drop(columns=["retrieval_rank_limit"], errors="ignore")
-    internal_eval_summary = _summarize_predictions(
-        _apply_promoted_logistic_gate_to_candidate_rows(
-            internal_eval_source_rows,
-            internal_eval_choices,
-            internal_eval_source_probabilities,
-            gate,
+    internal_eval_summary = (
+        _classic_internal_eval(
+            bundle, spec, model, feature_columns, retrieval_top_k, load_logistic_gate_config(logistic_gate_config)
         )
+        if frozen_task_rows is None
+        else dict(selected_gate_result["validation_metrics"])
     )
     return CalibratedClassicModel(
         model=model,

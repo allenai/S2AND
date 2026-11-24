@@ -35,6 +35,7 @@ from s2and.production_bundle import (
 )
 from s2and.production_bundle_contract import (
     CALIBRATED_EPS_CALIBRATION,
+    LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_FEATURE_CONTRACT_VERSION,
     PAIRWISE_ONLY_BUNDLE_KIND,
     PENDING_EPS_CALIBRATION,
@@ -1760,23 +1761,27 @@ def test_background_planner_preserves_contract_one_stamped_query(
         background.release()
 
 
-def test_pairwise_eps_publication_preserves_contract_one(
-    tmp_path: Path, synthetic_pairwise_bundle: tuple[Path, Clusterer]
+@pytest.mark.parametrize(
+    ("legacy_years", "contract"),
+    [(True, LEGACY_PAIRWISE_FEATURE_CONTRACT_VERSION), (False, PAIRWISE_FEATURE_CONTRACT_VERSION)],
+)
+def test_pairwise_eps_publication_preserves_contract(
+    tmp_path: Path, synthetic_pairwise_bundle: tuple[Path, Clusterer], legacy_years: bool, contract: int
 ) -> None:
     _, clusterer = synthetic_pairwise_bundle
-    clusterer.featurizer_info.legacy_paper_years = True
-    clusterer.nameless_featurizer_info.legacy_paper_years = True
+    clusterer.featurizer_info.legacy_paper_years = legacy_years
+    clusterer.nameless_featurizer_info.legacy_paper_years = legacy_years
     source, output = tmp_path / "pending", tmp_path / "calibrated"
     write_pairwise_production_bundle(clusterer, source, release_version="1.4", eps_calibration=PENDING_EPS_CALIBRATION)
     manifest = source / "manifest.json"
-    assert json.loads(manifest.read_text(encoding="utf-8"))["feature_contract_version"] == 1
+    assert json.loads(manifest.read_text(encoding="utf-8"))["feature_contract_version"] == contract
     finalize_pairwise_eps(
         source_bundle_dir=source,
         output_bundle_dir=output,
         expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
         new_eps=0.37,
     )
-    assert json.loads((output / "manifest.json").read_text(encoding="utf-8"))["feature_contract_version"] == 1
+    assert json.loads((output / "manifest.json").read_text(encoding="utf-8"))["feature_contract_version"] == contract
 
 
 @pytest.mark.parametrize("overlay", ["view", "seeds"])

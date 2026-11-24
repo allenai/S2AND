@@ -14,7 +14,6 @@ import os
 import pickle
 import shutil
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,8 +30,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 from s2and._atomic_io import exclusive_file_lock  # noqa: E402
 from s2and._sha256 import sha256_file as _file_sha256  # noqa: E402
 from s2and.arrow_inputs import (  # noqa: E402
-    ARROW_COLLECTION_KIND,
-    PUBLIC_DATA_KIND,
     ArrowDataset,
     build_arrow_artifact_manifest,
     read_arrow_collection_root,
@@ -41,7 +38,7 @@ from s2and.arrow_inputs import (  # noqa: E402
 )
 from s2and.arrow_provenance import write_conversion_provenance  # noqa: E402
 from s2and.arrow_schema import validate_arrow_schema  # noqa: E402
-from s2and.consts import PUBLIC_DATA_FORMAT_VERSION  # noqa: E402
+from scripts.common.arrow_roots import write_root_manifest  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -76,28 +73,6 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _replace_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            encoding="utf-8",
-            delete=False,
-        ) as tmp_file:
-            tmp_file.write(encoded)
-            tmp_path = Path(tmp_file.name)
-        tmp_path.replace(path)
-    except Exception:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-        raise
-
-
 def _resolve_manifest_path(path_value: Any, base_dir: Path | None) -> Path:
     path = Path(str(path_value))
     if path.is_absolute() or base_dir is None:
@@ -111,22 +86,6 @@ def _manifest_relative_path(path_value: Any, manifest_dir: Path) -> str:
         return Path(os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))).as_posix()
     except ValueError:
         return path.as_posix()
-
-
-def _root_child_manifest_path(root: Path, raw_path: Any, *, label: str) -> Path:
-    if not isinstance(raw_path, str) or not raw_path:
-        raise ValueError(f"{label} path must be a nonempty string")
-    relative_path = Path(raw_path.replace("\\", "/"))
-    if relative_path.is_absolute():
-        raise ValueError(f"{label} path must be relative to its root")
-    resolved = (root / relative_path).resolve()
-    try:
-        resolved.relative_to(root.resolve())
-    except ValueError as exc:
-        raise ValueError(f"{label} path escapes its root") from exc
-    if not resolved.is_file():
-        raise FileNotFoundError(f"{label} manifest does not exist: {resolved}")
-    return resolved
 
 
 def _read_generic_root_manifest(
@@ -146,58 +105,6 @@ def _read_generic_root_manifest(
 def _validate_existing_root_manifest(root_manifest_path: Path) -> None:
     if root_manifest_path.exists():
         _read_generic_root_manifest(root_manifest_path)
-
-
-def _manifest_bindings(
-    output_root: Path,
-    paths: Mapping[str, str],
-    *,
-    label: str,
-) -> dict[str, dict[str, str]]:
-    bindings: dict[str, dict[str, str]] = {}
-    for name, path_text in sorted(paths.items()):
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"{label} keys must be nonempty strings")
-        manifest_path = _root_child_manifest_path(output_root, path_text, label=f"{label}.{name}")
-        bindings[name] = {
-            "path": str(path_text).replace("\\", "/"),
-            "sha256": _file_sha256(manifest_path),
-        }
-    return bindings
-
-
-def write_root_manifest(
-    output_root: Path,
-    *,
-    dataset_manifests: Mapping[str, str],
-    replay_bundles: Mapping[str, str] | None = None,
-    release_version: str | None = None,
-) -> dict[str, Any]:
-    if release_version is not None and (not release_version or release_version.strip() != release_version):
-        raise ValueError("release_version must be a nonempty trimmed string")
-    if not dataset_manifests:
-        raise ValueError("dataset_manifests must be nonempty")
-    if replay_bundles and release_version is None:
-        raise ValueError("Only a published public-data root may declare replay_bundles")
-    payload: dict[str, Any] = {
-        "kind": PUBLIC_DATA_KIND if release_version is not None else ARROW_COLLECTION_KIND,
-        "format_version": PUBLIC_DATA_FORMAT_VERSION,
-        "dataset_manifests": _manifest_bindings(
-            output_root,
-            dataset_manifests,
-            label="dataset_manifests",
-        ),
-    }
-    if release_version is not None:
-        payload["release_version"] = release_version
-    if replay_bundles:
-        payload["replay_bundles"] = _manifest_bindings(
-            output_root,
-            replay_bundles,
-            label="replay_bundles",
-        )
-    _replace_json(output_root / "manifest.json", payload)
-    return payload
 
 
 def _upsert_root_manifest(output_root: Path, *, dataset_name: str, dataset_dir: Path) -> None:

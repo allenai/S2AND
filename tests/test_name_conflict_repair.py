@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 from scipy.spatial.distance import squareform
 
-import s2and.block_corrections as block_corrections
 import s2and.name_conflict_repair as name_conflict_repair_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
+from s2and.corrections import block_corrections
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
 from s2and.featurizer import FeaturizationInfo

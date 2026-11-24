@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 
-from s2and.incremental_linking.feature_block_arrow import (
+from s2and.arrow_tables import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     write_name_counts_index,
     write_raw_planner_arrow_tables,

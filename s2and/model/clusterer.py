@@ -11,17 +11,17 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from s2and.arrow_inputs import ArrowDataset
-from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
-from s2and.model_pairwise import FastCluster, clone_cluster_model, intify
-from s2and.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
-from s2and.prediction_state import PredictionState
-from s2and.profile_exclusions import (
+from s2and.corrections.name_conflict_repair import DEFAULT_MAX_AVERAGE_DISTANCE
+from s2and.corrections.profile_exclusions import (
     evict_profile_exclusion_violations,
     normalize_profile_exclusions,
     validate_profile_exclusions,
 )
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
+from s2and.model_pairwise import FastCluster, clone_cluster_model, intify
+from s2and.prediction_state import PredictionState
 from s2and.runtime import RuntimeContext, build_runtime_context
 from s2and.subblocking import GraphSubblockingConfig
 from s2and.supervision import normalize_partial_supervision, validate_seed_group_separations

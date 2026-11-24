@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from s2and import memory_budget
 from s2and.arrow_inputs import ArrowDataset, arrow_string_array
-from s2and.block_corrections import correction_fingerprint
+from s2and.corrections.block_corrections import correction_fingerprint
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset, release_rust_handle
 from s2and.incremental_linking.completion import ResidualClusterer

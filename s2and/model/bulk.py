@@ -14,7 +14,8 @@ import numpy as np
 
 from s2and import memory_budget
 from s2and.arrow_inputs import ArrowDataset
-from s2and.block_corrections import (
+from s2and.consts import LARGE_DISTANCE
+from s2and.corrections.block_corrections import (
     BlockCorrections,
     arrow_small_block_signatures,
     average_linkage_cut,
@@ -22,7 +23,15 @@ from s2and.block_corrections import (
     orcid_join_enabled,
     year_gap_split_enabled,
 )
-from s2and.consts import LARGE_DISTANCE
+from s2and.corrections.orcid_join import join_orcids_across_subblocks
+from s2and.corrections.profile_exclusions import enforce_profile_exclusions_in_block
+from s2and.corrections.seed_merging import (
+    filter_generated_seed_negatives,
+    merge_seed_labels,
+    pack_seed_components,
+    restore_seed_membership,
+    seed_disallow_adjacency,
+)
 from s2and.data import ANDData
 from s2and.feature_port import RESIDUAL_FEATURIZER, build_rust_featurizer_from_arrow_dataset
 from s2and.incremental_linking.completion_metadata import (
@@ -41,22 +50,13 @@ from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
 from s2and.model_pairwise import FastCluster, clone_cluster_model, intify
-from s2and.orcid_join import join_orcids_across_subblocks
 from s2and.orcid_prefix_counts import (
     DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
     ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD,
     load_packaged_orcid_prefix_counts,
 )
 from s2and.prediction_state import PredictionState
-from s2and.profile_exclusions import enforce_profile_exclusions_in_block
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
-from s2and.seed_merging import (
-    filter_generated_seed_negatives,
-    merge_seed_labels,
-    pack_seed_components,
-    restore_seed_membership,
-    seed_disallow_adjacency,
-)
 from s2and.subblocking import (
     GraphSubblockingConfig,
     _make_subblocks_with_telemetry_arrow_rust,

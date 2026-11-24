@@ -9,11 +9,11 @@
 | Check the request's name-count index against the bundle | [`incremental_linking/policy.py`](../s2and/incremental_linking/policy.py) (`require_arrow_name_counts_index_for_clusterer`) |
 | Bulk · Split oversized blocks | [`subblocking.py`](../s2and/subblocking.py) |
 | Bulk · Score pairs and cluster by average linkage | [`model/distances.py`](../s2and/model/distances.py) |
-| Bulk · Apply enabled cluster corrections inside each block | [`block_corrections.py`](../s2and/block_corrections.py) |
+| Bulk · Apply enabled cluster corrections inside each block | [`corrections/block_corrections.py`](../s2and/corrections/block_corrections.py) |
 | Bulk · Reunite no-middle-name pieces across subblocks | [`model/bulk.py`](../s2and/model/bulk.py) (`_reunite_no_middle_dead_ends`) |
 | Bulk · Attach initial-only groups | [`model/bulk.py`](../s2and/model/bulk.py) |
-| Bulk · Join clusters across subblocks by ORCID | [`orcid_join.py`](../s2and/orcid_join.py) |
-| Incremental · Set up required seed memberships and disallows | [`model/incremental.py`](../s2and/model/incremental.py) (`Clusterer.predict_incremental_from_arrow`), [`seed_merging.py`](../s2and/seed_merging.py), then [`incremental_linking/production.py`](../s2and/incremental_linking/production.py) |
+| Bulk · Join clusters across subblocks by ORCID | [`corrections/orcid_join.py`](../s2and/corrections/orcid_join.py) |
+| Incremental · Set up required seed memberships and disallows | [`model/incremental.py`](../s2and/model/incremental.py) (`Clusterer.predict_incremental_from_arrow`), [`corrections/seed_merging.py`](../s2and/corrections/seed_merging.py), then [`incremental_linking/production.py`](../s2and/incremental_linking/production.py) |
 | Incremental · Retrieve candidate seed profiles | [`raw_candidate_planner.rs`](../s2and_rust/src/raw_candidate_planner.rs) |
 | Incremental · Score and rank candidates | [`incremental_linking/runtime.py`](../s2and/incremental_linking/runtime.py) |
 | Incremental · Gate the best link or abstain | [`incremental_linking/logistic_gate.py`](../s2and/incremental_linking/logistic_gate.py) |
@@ -36,17 +36,17 @@
 | --- | --- |
 | Training data and local assets | [`s2and/data.py`](../s2and/data.py) holds `ANDData`. [`s2and/data/`](../s2and/data/) holds assets and downloaded bundles. |
 | Arrow table schema | [`arrow_schema_contract.json`](../s2and/arrow_schema_contract.json) |
-| Batch index readers and writers | [`incremental_linking/feature_block_arrow.py`](../s2and/incremental_linking/feature_block_arrow.py) |
+| Batch index readers and writers | [`arrow_tables.py`](../s2and/arrow_tables.py) |
 | Bundle manifest writing | [`production_bundle.py`](../s2and/production_bundle.py) |
 | Bundle manifest validation on load | [`production_model.py`](../s2and/production_model.py) (`_validate_manifest`) |
 | Ordered pairwise feature columns | [`feature_schema.py`](../s2and/feature_schema.py) |
 | Native pairwise feature calculations | [`features.rs`](../s2and_rust/src/features.rs) |
 | Native LightGBM scoring | [`lightgbm_booster.rs`](../s2and_rust/src/lightgbm_booster.rs) |
 | Pair constraints | [`constraints.rs`](../s2and_rust/src/constraints.rs) |
-| Canonical name and surname rules | [`text.py`](../s2and/text.py) |
+| Canonical name and surname rules | [`text/canonical_names.py`](../s2and/text/canonical_names.py) |
 | Name-count index and producers | [`name_counts_index.py`](../s2and/name_counts_index.py), [intake count commands](../scripts/intake/counts/README.md) |
-| Name-conflict repair | [`name_conflict_repair.py`](../s2and/name_conflict_repair.py) |
-| Retained seed memberships | [`seed_merging.py`](../s2and/seed_merging.py) |
+| Name-conflict repair | [`corrections/name_conflict_repair.py`](../s2and/corrections/name_conflict_repair.py) |
+| Retained seed memberships | [`corrections/seed_merging.py`](../s2and/corrections/seed_merging.py) |
 | Linker ranker and gate fitting | [`ranker.py`](../s2and/incremental_linking_training/ranker.py), [`gate.py`](../s2and/incremental_linking_training/gate.py) |
 | Thread and memory budgets | [`thread_config.py`](../s2and/thread_config.py), [`memory_budget.py`](../s2and/memory_budget.py) |
 | Local and hosted CI policy | [`run_ci_locally.py`](../scripts/dev/run_ci_locally.py) |

@@ -14,8 +14,8 @@ import numpy as np
 from tqdm import tqdm
 
 from s2and import memory_budget
-from s2and.block_corrections import BlockCorrections, corrections_copy_codes
 from s2and.consts import DEFAULT_CHUNK_SIZE, LARGE_DISTANCE, LARGE_INTEGER
+from s2and.corrections.block_corrections import BlockCorrections, corrections_copy_codes
 from s2and.data import ANDData
 from s2and.feature_port import _get_rust_feature_data
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize

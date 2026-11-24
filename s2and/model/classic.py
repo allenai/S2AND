@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
-from s2and.block_corrections import average_linkage_cut, corrections_copy_codes, corrections_from_dataset
+from s2and.corrections.block_corrections import average_linkage_cut, corrections_copy_codes, corrections_from_dataset
+from s2and.corrections.profile_exclusions import (
+    evict_profile_exclusion_violations,
+    normalize_profile_exclusions,
+    validate_profile_exclusions,
+)
+from s2and.corrections.seed_merging import seed_disallow_adjacency
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.incremental_linking.policy import (
     NAME_COUNTS_MANIFEST_SHA256_FIELD,
@@ -21,13 +27,7 @@ from s2and.incremental_linking.policy import (
 from s2and.metrics import b3_precision_recall_fscore
 from s2and.model_pairwise import FastCluster, clone_cluster_model, intify
 from s2and.prediction_state import PredictionState
-from s2and.profile_exclusions import (
-    evict_profile_exclusion_violations,
-    normalize_profile_exclusions,
-    validate_profile_exclusions,
-)
 from s2and.runtime import RuntimeContext, build_runtime_context, dataset_stage_uses_rust, stage_uses_rust
-from s2and.seed_merging import seed_disallow_adjacency
 from s2and.supervision import normalize_partial_supervision, validate_seed_group_separations
 from s2and.thread_config import resolve_n_jobs
 

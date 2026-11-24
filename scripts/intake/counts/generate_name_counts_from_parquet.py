@@ -17,8 +17,8 @@ import pyarrow.parquet as pq
 
 import s2and.text as text_normalizer
 from s2and._sha256 import sha256_file
+from s2and.arrow_tables import _write_sorted_name_count_records
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
-from s2and.incremental_linking.feature_block_arrow import _write_sorted_name_count_records
 from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import load_s2and_rust_extension
 from s2and.text import canonicalize_name_parts, last_name_allows_joined_initials

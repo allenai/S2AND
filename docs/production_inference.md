@@ -271,7 +271,7 @@ the epsilon (EPS) search in `Clusterer.fit`. The dedicated
 `predict_eps_grid` and `predict_eps_grid_from_rust_featurizer` methods apply both
 corrections when eligible. Pass them matrices built from the same dataset or
 featurizer, free of caller supervision. See the correction order in
-[`s2and/block_corrections.py`](../s2and/block_corrections.py).
+[`s2and/corrections/block_corrections.py`](../s2and/corrections/block_corrections.py).
 
 ### ORCID name waiver
 
@@ -305,7 +305,7 @@ dtypes to contiguous `float64` as needed. Repair needs an exact
 `LARGE_DISTANCE` pair and skips matrices with NaN or any other distance above
 one. It can run during incremental altered-profile splitting and residual
 clustering. The removed `name_conflict_repair_*` settings raise `ValueError`.
-See [`s2and/name_conflict_repair.py`](../s2and/name_conflict_repair.py) for the
+See [`s2and/corrections/name_conflict_repair.py`](../s2and/corrections/name_conflict_repair.py) for the
 repair rounds and the joined-initials rule.
 
 ### ORCID joins
@@ -315,7 +315,7 @@ dominant ORCID in separate subblocks of one original block. The join requires
 sufficient ORCID coverage and compatible name evidence and respects seed
 disallows, profile exclusions, and `dont_merge_cluster_seeds`. Joined clusters
 can exceed the subblock size limit. `suppress_orcid` also disables the join.
-See [`s2and/orcid_join.py`](../s2and/orcid_join.py) for the evidence thresholds.
+See [`s2and/corrections/orcid_join.py`](../s2and/corrections/orcid_join.py) for the evidence thresholds.
 
 ### Year-gap split
 
@@ -329,7 +329,7 @@ The split requires a cluster model with a close-pair bonus and runs
 independently of name-conflict repair. During altered-profile pre-splitting,
 `incremental_dont_use_cluster_seeds=True` permits temporary cuts within a seed
 group. Incremental linking restores the original profile in its result. See
-[`s2and/year_gap_split.py`](../s2and/year_gap_split.py) for undated mentions and bridges.
+[`s2and/corrections/year_gap_split.py`](../s2and/corrections/year_gap_split.py) for undated mentions and bridges.
 
 ### Close-pair bonus
 

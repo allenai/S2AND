@@ -363,7 +363,7 @@ uv pip install --python $SmokePython `
 $env:S2AND_PATH_CONFIG = $PathConfig
 Push-Location $RunRoot
 uv run --no-project --python $SmokePython python `
-  "$Repo\scripts\verification\smoke_installed_incremental_arrow.py" `
+  "$Repo\scripts\release\verification\smoke_installed_incremental_arrow.py" `
   release-candidate `
   --model-dir "$RunRoot/complete/production_model_v1.3.1" `
   --data-root $PublicDataRoot `

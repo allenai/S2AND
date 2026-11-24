@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -365,3 +366,158 @@ def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Pat
     assert agreement["cohen_kappa"] is None
     assert agreement["decided_vs_abstain"] == 1
     assert agreement["agreement_including_abstentions"] == 0.5
+
+
+def _packet_roles(tmp_path: Path) -> Path:
+    identities = frozenset({"0000-0002-1694-233X", "0000-0001-5000-0007"})
+    payload = assign_block_roles([BlockSpec("a smith", 20, identities)], {"gate_thresh": 1})
+    path = tmp_path / "role_assignments.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _pair_control(source: str, *, same: bool, **metadata) -> dict:
+    left = {**_paper(1), "author_orcid": "0000-0002-1694-233X"}
+    right_orcid = left["author_orcid"] if same else "0000-0001-5000-0007"
+    return {
+        "source_id": source,
+        "block_key": "a smith",
+        "paper_a": left,
+        "paper_b": {**_paper(2), "author_orcid": right_orcid},
+        "metadata": metadata,
+    }
+
+
+@pytest.mark.parametrize("packet_type", ["pair", "linker"])
+def test_packet_controls_reject_truth_that_contradicts_verified_orcids(tmp_path: Path, packet_type: str) -> None:
+    roles = load_block_roles(_packet_roles(tmp_path))
+    pair = _pair_control("control", same=False, gold_label="same")
+    kwargs = {
+        "output_dir": tmp_path / "packet",
+        "block_roles": roles,
+        "allowed_roles": {"gate_thresh"},
+        "control_fraction": 0.5,
+    }
+    with pytest.raises(ValueError, match="contradict.*verified ORCIDs"):
+        if packet_type == "pair":
+            build_blind_pair_packets(items=[{**pair, "source_id": "natural"}], control_items=[pair], **kwargs)
+        else:
+            linker = {
+                "source_id": "control",
+                "block_key": "a smith",
+                "query": pair["paper_a"],
+                "candidates": [{"candidate_key": "different", "exemplars": [pair["paper_b"]]}],
+                "metadata": {"gold_candidate_keys": ["different"]},
+            }
+            build_blind_linker_packets(queries=[{**linker, "source_id": "natural"}], control_queries=[linker], **kwargs)
+
+
+@pytest.mark.parametrize("use_bands", [False, True])
+def test_packet_control_selection_balances_class_and_score_band(tmp_path: Path, use_bands: bool) -> None:
+    roles_path = _packet_roles(tmp_path)
+    items = [_pair_control(f"natural-{i}", same=True) for i in range(4)]
+    controls = [
+        _pair_control(f"control-{band}-{i}", same=i != 9, gold_label=int(i != 9), score_band_v14=band)
+        for band in ("low", "high")
+        for i in range(10)
+    ]
+    items_path, controls_path = tmp_path / "items.json", tmp_path / "controls.json"
+    items_path.write_text(json.dumps(items), encoding="utf-8")
+    controls_path.write_text(json.dumps(controls), encoding="utf-8")
+    directory, answer_key = tmp_path / "packet", tmp_path / "answer.json"
+    assert (
+        main(
+            [
+                "build",
+                "--packet-type",
+                "pair",
+                "--items-json",
+                str(items_path),
+                "--controls-json",
+                str(controls_path),
+                "--output-dir",
+                str(directory),
+                "--answer-key-path",
+                str(answer_key),
+                "--block-role-assignments",
+                str(roles_path),
+                "--allowed-role",
+                "gate_thresh",
+                "--control-fraction",
+                "0.5",
+                "--control-seed",
+                "12",
+                *(["--balance-controls-by-score-band"] if use_bands else []),
+            ]
+        )
+        == 0
+    )
+    rows = json.loads(answer_key.read_text(encoding="utf-8"))["items"]
+    selected = [item["metadata"] for item in rows if item["is_control"]]
+    assert Counter(row["gold_label"] for row in selected) == {0: 2, 1: 2}
+    if use_bands:
+        assert Counter((row["score_band_v14"], row["gold_label"]) for row in selected) == {
+            ("low", 0): 1,
+            ("low", 1): 1,
+            ("high", 0): 1,
+            ("high", 1): 1,
+        }
+        public = "".join(path.read_text(encoding="utf-8") for path in directory.rglob("*.jsonl"))
+        assert "score_band_v14" not in public
+
+
+def test_packet_build_cli_requires_frozen_roles(tmp_path: Path) -> None:
+    items_path = tmp_path / "items.json"
+    items_path.write_text(json.dumps([_pair_control("natural", same=True)]), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(["build", "--packet-type", "pair", "--items-json", str(items_path), "--output-dir", str(tmp_path / "out")])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("check", ["class_bar", "different_keys", "unresolved"])
+def test_judge_coverage_requires_matching_natural_keys(tmp_path: Path, check: str) -> None:
+    judges = []
+    for family in ("sol", "claude"):
+        verdict_path = tmp_path / f"{family}.jsonl"
+        key_path = tmp_path / f"{family}.json"
+        records = [
+            {
+                "item_id": f"control-{i}",
+                "source_id": f"control-{i}",
+                "block_key": "a smith",
+                "is_control": True,
+                "metadata": {"gold_label": int(i != 9)},
+            }
+            for i in range(10)
+        ]
+        records.extend(
+            {"item_id": key, "source_id": key, "block_key": "a smith", "is_control": False}
+            for key in (("item-1",) if check == "different_keys" and family == "claude" else ("item-1", "item-2"))
+        )
+        key_path.write_text(json.dumps({"packet_type": "pair", "shards": ["s"], "items": records}), encoding="utf-8")
+        verdict_path.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "item_id": row["item_id"],
+                        "verdict": "abstain" if family == "claude" and row["item_id"] == "item-2" else "same",
+                    }
+                )
+                + "\n"
+                for row in records
+            ),
+            encoding="utf-8",
+        )
+        judges.append((family, verdict_path, key_path))
+    if check == "different_keys":
+        with pytest.raises(ValueError, match="Natural keys differ.*claude is missing 1"):
+            score_judges(judges)
+        return
+    report = score_judges(judges)
+    if check == "class_bar":
+        metrics = report["judges"][0]["overall"]
+        assert metrics["control_request_accuracy"] == 0.9
+        assert metrics["lower_control_class_accuracy"] == 0.0
+        assert not metrics["passes_control_bar"]
+    else:
+        assert report["cross_family_agreement"][0]["unresolved_share"] == 0.5

@@ -109,25 +109,28 @@ Use ORCID Gold v2 and classic benchmarks for bulk pairwise training, ranker trai
 ### Non-negotiable packet rules (`scripts/production/data/review_packets.py`)
 - **Strict field allowlist:** Paper metadata only for pair packets (never predicted-cluster summaries, scores, ranks, split names, cluster IDs, or ORCIDs).
 - **Isolated passes across judge families** with independently randomized A/B or candidate order. Report agreement and Cohen's κ on jointly decided items, the jointly decided share, and missing verdicts.
-- **10–15% embedded ORCID gold controls** per packet (drop/re-examine below 90% control accuracy) + **10–20% cross-family model audit** on sealed test packets and classic benchmarks.
+- **10–15% embedded ORCID gold controls** per packet (re-examine when the family fails the 90% control bar) + **10–20% cross-family model audit** on sealed test packets and classic benchmarks.
 - **No "any abstain drops query" rule:** Never discard an entire 25-candidate query when a secondary candidate receives `abstain`.
 - **Automatic ORCID selection-bias logging:** Every gate/EPS evaluation logs linked Gold-ORCID share and linked median publication year alongside B3 metrics.
 
 Build controls with `review_packets.py build --block-role-assignments assignments.json --allowed-role gate_thresh`
 for a gate threshold packet. The allowed roles apply to regular items and controls. Include the scoring
 ORCIDs and any source `scored` flags on the private paper inputs. Controls require home-role evidence.
-Set `metadata.stratum` in every item and set control truth with `metadata.gold_label` (0/1) for pairs
-or `metadata.gold_candidate_keys` for linker packets. Keep each answer key private.
+The builder derives pair and linker control truth from the verified ORCIDs and checks any supplied truth.
+It balances same and different pair controls, or linkable and unlinkable linker requests, within available counts.
+Pass `--balance-controls-by-score-band` and set private `metadata.score_band_v14` on each eligible control
+to draw matched classes within supplied 1.4 score bands. Set `metadata.stratum` on every item.
+Keep each answer key private.
 
 Run `review_packets.py score --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json`.
 Each verdict row contains `item_id` and a pair `verdict` or a linker `candidate_verdicts` mapping from packet
 slot to verdict. Use `same`, `different`, or `insufficient_evidence`. The scorer aligns independent packet orders
 by private source and candidate IDs. A linker control request succeeds when every candidate verdict is correct.
-Report request accuracy, same and different control accuracy, and directional error rates by shard and stratum.
-Report paired coverage, agreement, and Cohen’s κ by task and stratum on natural items. Kappa uses jointly
-decided verdicts. The agreement measure that includes abstentions counts decided versus abstain as disagreement.
-
-
+The control bar requires at least 90% request accuracy and at least 90% accuracy in each class.
+The report includes overall, shard, and stratum accuracy and directional error rates.
+Judge families must receive the same natural source and candidate keys. The unresolved share counts natural
+judgments without matching decided verdicts, including missing verdicts. The report gives paired coverage,
+agreement, and Cohen’s κ by task and stratum. Kappa uses jointly decided verdicts.
 
 ### Score and sample by frozen role
 

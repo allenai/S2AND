@@ -268,15 +268,48 @@ def _select_controls(
     items_count: int,
     control_items: Sequence[Mapping[str, Any]],
     *,
+    packet_type: str,
     control_fraction: float,
     control_seed: int,
+    balance_by_score_band: bool,
 ) -> list[Mapping[str, Any]]:
-    if not control_items or control_fraction <= 0.0:
+    if not items_count or not control_items or control_fraction <= 0.0:
         return []
     rng = random.Random(control_seed)
-    desired = max(1, round(items_count * control_fraction / (1.0 - control_fraction)))
-    target = min(len(control_items), desired)
-    return rng.sample(list(control_items), target)
+    target = max(1, round(items_count * control_fraction / (1.0 - control_fraction)))
+    if balance_by_score_band and target < 2:
+        raise ValueError("Score-band balancing requires room for at least two controls")
+    by_class: dict[str, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
+    for item in control_items:
+        metadata = item.get("metadata", {})
+        band = metadata.get("score_band_v14") if balance_by_score_band else ""
+        if not isinstance(band, str) or (balance_by_score_band and not band.strip()):
+            raise ValueError("Score-band balancing requires metadata.score_band_v14 on every eligible control")
+        positive = (
+            metadata.get("gold_label") in (1, "same")
+            if packet_type == "pair"
+            else bool(metadata.get("gold_candidate_keys"))
+        )
+        by_class.setdefault(band, ([], []))[int(positive)].append(item)
+    for negative, positive in by_class.values():
+        rng.shuffle(negative)
+        rng.shuffle(positive)
+
+    pairs = [(negative, positive) for _, (negative, positive) in sorted(by_class.items()) if negative and positive]
+    if balance_by_score_band and not pairs:
+        raise ValueError("Score-band balancing requires both control classes in a shared score band")
+    selected: list[Mapping[str, Any]] = []
+    while pairs and len(selected) + 2 <= target:
+        for negative, positive in pairs:
+            if len(selected) + 2 > target:
+                break
+            selected.extend((negative.pop(), positive.pop()))
+        pairs = [(negative, positive) for negative, positive in pairs if negative and positive]
+    if not balance_by_score_band and len(selected) < target:
+        extra = max(by_class[""], key=len)
+        if extra:
+            selected.append(extra.pop())
+    return selected
 
 
 def _validate_packet_roles(
@@ -305,19 +338,46 @@ def _scored_controls(
         block = str(item["block_key"])
         if block_roles.role_for(block) not in allowed_roles:
             continue
+        candidates = item["candidates"] if packet_type == "linker" else ()
         if packet_type == "pair":
             papers = [item["paper_a"], item["paper_b"]]
         else:
-            papers = [item["query"], *(paper for cand in item["candidates"] for paper in cand["exemplars"])]
+            if not candidates or any(not cand["exemplars"] for cand in candidates):
+                continue
+            papers = [item["query"], *(paper for cand in candidates for paper in cand["exemplars"])]
         orcids = [normalize_orcid(str(paper.get("orcid") or paper.get("author_orcid") or "")) for paper in papers]
-        if all(
+        if not all(
             orcid
             and orcid not in EXCLUDED_ORCID_GROUPS
             and paper.get("scored", True) is True
             and block_roles.scores(block, orcid)
             for paper, orcid in zip(papers, orcids, strict=True)
         ):
-            result.append(item)
+            continue
+        metadata = dict(item.get("metadata", {}))
+        if packet_type == "pair":
+            gold = int(orcids[0] == orcids[1])
+            supplied = metadata.get("gold_label", gold)
+            if supplied not in (gold, "same" if gold else "different"):
+                raise ValueError(f"Control {item['source_id']!r} gold_label contradicts its verified ORCIDs")
+            metadata["gold_label"] = gold
+        else:
+            remaining_orcids = iter(orcids[1:])
+            gold_keys = []
+            for candidate in candidates:
+                identities = {next(remaining_orcids) for _ in candidate["exemplars"]}
+                if len(identities) != 1:
+                    break
+                if orcids[0] in identities:
+                    gold_keys.append(str(candidate["candidate_key"]))
+            else:
+                supplied_keys = metadata.get("gold_candidate_keys", gold_keys)
+                if not isinstance(supplied_keys, list) or set(supplied_keys) != set(gold_keys):
+                    raise ValueError(f"Control {item['source_id']!r} gold_candidate_keys contradict verified ORCIDs")
+                metadata["gold_candidate_keys"] = gold_keys
+                result.append({**item, "metadata": metadata})
+            continue
+        result.append({**item, "metadata": metadata})
     return result
 
 
@@ -385,6 +445,7 @@ def build_blind_pair_packets(
     seed: int = 20261123,
     control_seed: int | None = None,
     control_fraction: float = 0.12,
+    balance_controls_by_score_band: bool = False,
     max_items_per_shard: int = 40,
     max_bytes_per_shard: int = 180_000,
     max_abstract_chars: int = 1200,
@@ -409,7 +470,12 @@ def build_blind_pair_packets(
     _validate_packet_roles(items, block_roles, allowed_roles)
     eligible_controls = _scored_controls(control_items, block_roles, packet_type="pair", allowed_roles=allowed_roles)
     chosen_controls = _select_controls(
-        len(items), eligible_controls, control_fraction=control_fraction, control_seed=effective_control_seed
+        len(items),
+        eligible_controls,
+        packet_type="pair",
+        control_fraction=control_fraction,
+        control_seed=effective_control_seed,
+        balance_by_score_band=balance_controls_by_score_band,
     )
     combined = _stratified_interleave(
         [(False, item) for item in items],
@@ -501,6 +567,7 @@ def build_blind_linker_packets(
     seed: int = 20261123,
     control_seed: int | None = None,
     control_fraction: float = 0.12,
+    balance_controls_by_score_band: bool = False,
     max_items_per_shard: int = 25,
     max_bytes_per_shard: int = 180_000,
     max_abstract_chars: int = 900,
@@ -521,7 +588,12 @@ def build_blind_linker_packets(
         control_queries, block_roles, packet_type="linker", allowed_roles=allowed_roles
     )
     chosen_controls = _select_controls(
-        len(queries), eligible_controls, control_fraction=control_fraction, control_seed=effective_control_seed
+        len(queries),
+        eligible_controls,
+        packet_type="linker",
+        control_fraction=control_fraction,
+        control_seed=effective_control_seed,
+        balance_by_score_band=balance_controls_by_score_band,
     )
     combined = _stratified_interleave(
         [(False, q) for q in queries],
@@ -616,6 +688,7 @@ def build_blind_linker_packets(
     }
 
 
+_CONTROL_PASS_MINIMUM = 0.90
 _DECIDED = frozenset({"same", "different"})
 _VERDICTS = _DECIDED | {"insufficient_evidence", "cannot_tell", "abstain"}
 
@@ -633,6 +706,12 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_reques
     false_different = sum(verdict == "different" and truth == "same" for verdict, truth in controls)
     false_same_rate = _fraction(false_same, different)
     false_different_rate = _fraction(false_different, same)
+    same_accuracy = _fraction(sum(verdict == truth == "same" for verdict, truth in controls), same)
+    different_accuracy = _fraction(sum(verdict == truth == "different" for verdict, truth in controls), different)
+    lower_class_accuracy = (
+        min(same_accuracy, different_accuracy) if same_accuracy is not None and different_accuracy is not None else None
+    )
+    request_accuracy = _fraction(sum(control_requests), len(control_requests))
     return {
         "items": len(rows),
         "missing": sum(verdict is None for verdict, _ in rows),
@@ -641,11 +720,15 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_reques
         "controls": len(controls),
         "control_accuracy": _fraction(sum(verdict == truth for verdict, truth in controls), len(controls)),
         "control_requests": len(control_requests),
-        "control_request_accuracy": _fraction(sum(control_requests), len(control_requests)),
+        "control_request_accuracy": request_accuracy,
         "same_controls": same,
-        "same_control_accuracy": _fraction(sum(verdict == truth == "same" for verdict, truth in controls), same),
-        "different_control_accuracy": _fraction(
-            sum(verdict == truth == "different" for verdict, truth in controls), different
+        "same_control_accuracy": same_accuracy,
+        "different_control_accuracy": different_accuracy,
+        "lower_control_class_accuracy": lower_class_accuracy,
+        "passes_control_bar": (
+            lower_class_accuracy is not None
+            and request_accuracy is not None
+            and min(lower_class_accuracy, request_accuracy) >= _CONTROL_PASS_MINIMUM
         ),
         "different_controls": different,
         "false_same": false_same,
@@ -724,6 +807,10 @@ def _read_judge_verdicts(
             shard_controls[shard].append(control_success)
             stratum_controls[stratum].append(control_success)
     return {
+        "overall": _judge_metrics(
+            [row for rows in by_shard.values() for row in rows],
+            [success for outcomes in shard_controls.values() for success in outcomes],
+        ),
         "by_shard": {shard: _judge_metrics(rows, shard_controls[shard]) for shard, rows in sorted(by_shard.items())},
         "by_stratum": {
             stratum: _judge_metrics(rows, stratum_controls[stratum]) for stratum, rows in sorted(by_stratum.items())
@@ -746,6 +833,7 @@ def _paired_judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict
         "paired_verdict_share": _fraction(len(present), len(rows)),
         "both_decided": n,
         "both_decided_share": _fraction(n, len(rows)),
+        "unresolved_share": _fraction(len(rows) - matches, len(rows)),
         "agreement": _fraction(matches, n),
         "cohen_kappa": _fraction(matches * n - expected, n * n - expected),
         "decided_vs_abstain": len(present) - n - both_abstain,
@@ -778,12 +866,17 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
         if families[i] == families[j]:
             continue
         left, right = verdicts[i], verdicts[j]
+        left_natural = {key for key, (_, _, control) in left.items() if not control}
+        right_natural = {key for key, (_, _, control) in right.items() if not control}
+        if left_natural != right_natural:
+            raise ValueError(
+                f"Natural keys differ: {families[i]} is missing {len(right_natural - left_natural)}, "
+                f"{families[j]} is missing {len(left_natural - right_natural)}"
+            )
         by_task: dict[str, dict[str, list[tuple[str | None, str | None]]]] = defaultdict(lambda: defaultdict(list))
-        for key in left.keys() & right.keys():
-            stratum, a, control_a = left[key]
-            right_stratum, b, control_b = right[key]
-            if control_a or control_b:
-                continue
+        for key in sorted(left_natural):
+            stratum, a, _ = left[key]
+            right_stratum, b, _ = right[key]
             if stratum != right_stratum:
                 raise ValueError(f"Mismatched strata for jointly judged item {key!r}")
             by_task[key[0]][stratum].append((a, b))
@@ -815,13 +908,18 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--packet-type", choices=["pair", "linker"], required=True)
     build_p.add_argument("--items-json", type=Path, required=True)
     build_p.add_argument("--controls-json", type=Path, default=None)
-    build_p.add_argument("--block-role-assignments", type=Path)
-    build_p.add_argument("--allowed-role", action="append", default=[])
+    build_p.add_argument("--block-role-assignments", type=Path, required=True)
+    build_p.add_argument("--allowed-role", action="append", required=True)
     build_p.add_argument("--output-dir", type=Path, required=True)
     build_p.add_argument("--answer-key-path", type=Path, default=None)
     build_p.add_argument("--seed", type=int, default=20261123)
     build_p.add_argument("--control-seed", type=int, default=None)
     build_p.add_argument("--control-fraction", type=float, default=0.12)
+    build_p.add_argument(
+        "--balance-controls-by-score-band",
+        action="store_true",
+        help="Draw same/different or linkable/unlinkable controls within each metadata.score_band_v14 value.",
+    )
     build_p.add_argument("--max-items-per-shard", type=int, default=40)
 
     score_p = subparsers.add_parser("score", help="Score controls and agreement across judge families.")
@@ -851,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
 
     items = json.loads(args.items_json.read_text(encoding="utf-8"))
     controls = json.loads(args.controls_json.read_text(encoding="utf-8")) if args.controls_json else ()
-    block_roles = load_block_roles(args.block_role_assignments) if args.block_role_assignments else None
+    block_roles = load_block_roles(args.block_role_assignments)
     if args.packet_type == "pair":
         report = build_blind_pair_packets(
             items=items,
@@ -861,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             control_seed=args.control_seed,
             control_fraction=args.control_fraction,
+            balance_controls_by_score_band=args.balance_controls_by_score_band,
             max_items_per_shard=args.max_items_per_shard,
             block_roles=block_roles,
             allowed_roles=args.allowed_role,
@@ -874,6 +973,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             control_seed=args.control_seed,
             control_fraction=args.control_fraction,
+            balance_controls_by_score_band=args.balance_controls_by_score_band,
             max_items_per_shard=args.max_items_per_shard,
             block_roles=block_roles,
             allowed_roles=args.allowed_role,

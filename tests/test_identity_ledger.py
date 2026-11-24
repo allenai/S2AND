@@ -178,3 +178,38 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
         closure_mode="block_only",
     )
     assert allocation["unassigned"] == ["a block"]
+
+
+def test_eligibility_blocks_conflicting_and_cross_role_mentions(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.common.block_roles import load_block_roles
+    from scripts.common.identity_ledger import ledger_for_roles
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    output = tmp_path / "evidence"
+    build_identity_evidence(snapshot, gold, output)
+    evidence = output / "manifest.json"
+    source = tmp_path / "blocks.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
+    )
+    blocks = tmp_path / "freeze.parquet"
+    build_freeze_input(evidence, source, blocks)
+    frozen = tmp_path / "roles.json"
+    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"pairwise_train": 1, "final_test_a": 1})))
+    ledger = ledger_for_roles(evidence, load_block_roles(frozen))
+    assert ledger is not None
+    block = ledger.for_block("a lovelace")
+    assert not block.eligibility("1-0").fit_ok
+    assert not block.eligibility("3-0").fit_ok
+    for sid in ("2-0", "4-0"):
+        assert block.eligibility(sid).fit_ok
+        assert block.eligibility(sid).score_orcid is None
+    assert block.component_label(["1-0", "2-0"]) is None
+    assert not ledger.for_block("g hopper").scored()
+    with pytest.raises(ValueError, match="No identity evidence"):
+        block.eligibility("missing")

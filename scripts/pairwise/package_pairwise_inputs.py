@@ -17,13 +17,13 @@ if str(REPO_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
+from scripts.common.unknown_signatures import (  # noqa: E402
+    load_unknown_signatures,
+    resolve_unknown_signature_sidecar,
+)
 from scripts.linker.linker_source_bundle import (  # noqa: E402
     _dataset_manifests,
     _rebind_dataset_manifests,
-)
-from scripts.production.model.unknown_signatures import (  # noqa: E402
-    load_unknown_signatures,
-    resolve_unknown_signature_sidecar,
 )
 
 BENCHMARKS = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath")

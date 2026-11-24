@@ -2,7 +2,7 @@
 
 import pytest
 
-from scripts.production.model.augmented_leakage import (
+from scripts.pairwise.augmented_leakage import (
     require_declared_sources,
     require_training_members,
     source_members,

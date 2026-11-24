@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.pairwise.release_pairwise import _aggregate_b3, _b3_report
-from scripts.production.model.unknown_signatures import (
+from scripts.common.unknown_signatures import (
     augmented_unknown_ids,
     exclude_unknown_pairs,
     load_unknown_signatures,
     resolve_unknown_signature_sidecar,
 )
+from scripts.pairwise.release_pairwise import _aggregate_b3, _b3_report
 
 
 def test_unknown_sidecar_uses_label_directory_and_exact_bytes(tmp_path: Path) -> None:

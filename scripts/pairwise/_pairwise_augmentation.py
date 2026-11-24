@@ -26,16 +26,16 @@ sys.path.insert(0, str(REPO))
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.data import _map_fixed_pair_labels  # noqa: E402
 from s2and.text import normalize_text  # noqa: E402
+from scripts.common.unknown_signatures import (  # noqa: E402
+    load_unknown_signatures,
+    validate_unknown_filename,
+)
 from scripts.pairwise.prepare_pairwise_inputs import (  # noqa: E402
     DATASETS,
     dataset_for_split,
     members,
     read,
     write,
-)
-from scripts.production.model.unknown_signatures import (  # noqa: E402
-    load_unknown_signatures,
-    validate_unknown_filename,
 )
 
 

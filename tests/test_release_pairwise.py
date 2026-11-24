@@ -374,7 +374,7 @@ def test_eps_retains_unknown_inputs_scores_knowns_and_rejects_sidecar_drift(
     monkeypatch: pytest.MonkeyPatch,
     sidecar_change: str,
 ) -> None:
-    from scripts.production.model.plan_datasets import plan_unknown_signatures
+    from scripts.common.plan_datasets import plan_unknown_signatures
 
     actual_scorer = release_pairwise._B3Scorer
     model_plan = _arrow_model_plan(tmp_path, unknown=["s2"])

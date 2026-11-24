@@ -43,12 +43,7 @@ from s2and.production_training_contract import (  # noqa: E402
     load_packaged_artifact_authority,
     require_recorded_population,
 )
-from scripts.production.model.augmented_leakage import (  # noqa: E402
-    reject_heldout_members,
-    require_declared_sources,
-    source_members,
-)
-from scripts.production.model.plan_datasets import (  # noqa: E402
+from scripts.common.plan_datasets import (  # noqa: E402
     excluded_signature_ids,
     heldout_blocks,
     heldout_signature_ids,
@@ -58,10 +53,15 @@ from scripts.production.model.plan_datasets import (  # noqa: E402
     plan_unknown_signatures,
     require_arrow_plan,
 )
-from scripts.production.model.unknown_signatures import (  # noqa: E402
+from scripts.common.unknown_signatures import (  # noqa: E402
     augmented_unknown_ids,
     exclude_unknown_pairs,
     same_unknown_content,
+)
+from scripts.pairwise.augmented_leakage import (  # noqa: E402
+    reject_heldout_members,
+    require_declared_sources,
+    source_members,
 )
 
 

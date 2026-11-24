@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
+from scripts.common.unknown_signatures import load_unknown_signatures
 from scripts.pairwise.package_pairwise_inputs import package_pairwise_inputs
 from scripts.pairwise.prepare_pairwise_inputs import prepare_benchmark
-from scripts.production.model.unknown_signatures import load_unknown_signatures
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import (
     convert_release_arrow,

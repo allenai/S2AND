@@ -20,11 +20,11 @@ sys.path.insert(0, str(REPO))
 
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
-from scripts.intake.convert_to_arrow import join_canonical_benchmark_names  # noqa: E402
-from scripts.production.model.unknown_signatures import (  # noqa: E402
+from scripts.common.unknown_signatures import (  # noqa: E402
     load_unknown_signatures,
     validate_unknown_filename,
 )
+from scripts.intake.convert_to_arrow import join_canonical_benchmark_names  # noqa: E402
 
 DATASETS = ("aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath")
 

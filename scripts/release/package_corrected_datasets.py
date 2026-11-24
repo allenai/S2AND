@@ -28,6 +28,7 @@ from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa
     validate_source_bundle_support_files,
 )
 from s2and.production_training_contract import _unit_float, load_model_plan  # noqa: E402
+from scripts.common.unknown_signatures import load_unknown_signatures  # noqa: E402
 from scripts.intake.convert_to_arrow import _write_root_manifest  # noqa: E402
 from scripts.linker.linker_source_bundle import (  # noqa: E402
     _copy_arrow_root_without_name_counts,
@@ -40,7 +41,6 @@ from scripts.linker.linker_source_bundle import (  # noqa: E402
     _validate_root_name_counts_binding,
     validate_portable_source_bundle,
 )
-from scripts.production.model.unknown_signatures import load_unknown_signatures  # noqa: E402
 from scripts.release.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
 
 ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")

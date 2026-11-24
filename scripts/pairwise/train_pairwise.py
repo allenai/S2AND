@@ -52,22 +52,22 @@ from s2and.production_training_contract import (  # noqa: E402
     load_model_plan,
     load_packaged_artifact_authority,
 )
-from scripts.production.model.augmented_leakage import (  # noqa: E402
-    require_declared_sources,
-    require_training_members,
-    require_validation_members,
-    source_members,
-)
-from scripts.production.model.plan_datasets import (  # noqa: E402
+from scripts.common.plan_datasets import (  # noqa: E402
     development_split_members,
     load_development_dataset,
     open_plan_arrow,
     plan_unknown_signatures,
     require_arrow_plan,
 )
-from scripts.production.model.unknown_signatures import (  # noqa: E402
+from scripts.common.unknown_signatures import (  # noqa: E402
     augmented_unknown_ids,
     exclude_unknown_pairs,
+)
+from scripts.pairwise.augmented_leakage import (  # noqa: E402
+    require_declared_sources,
+    require_training_members,
+    require_validation_members,
+    source_members,
 )
 
 logger = logging.getLogger("s2and")

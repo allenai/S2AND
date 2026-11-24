@@ -9,11 +9,11 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
+from scripts.common.initial_query_sources import derived_query_id, load_initial_query_sources
 from scripts.linker.train_linker_and_finalize import (
     _copy_bundle_support_files,
     load_bundle,
 )
-from scripts.production.model.initial_query_sources import derived_query_id, load_initial_query_sources
 from tests.raw_arrow_helpers import write_ipc
 
 

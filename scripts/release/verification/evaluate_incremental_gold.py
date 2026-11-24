@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.production_model import load_production_model  # noqa: E402
-from scripts.production.model.unknown_signatures import load_unknown_signatures  # noqa: E402
+from scripts.common.unknown_signatures import load_unknown_signatures  # noqa: E402
 
 Context = Literal["positive", "author_absent"]
 Outcome = Literal["correct_link", "correct_abstain", "false_abstain", "false_link", "wrong_candidate"]

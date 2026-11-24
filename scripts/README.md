@@ -86,6 +86,7 @@ A dot means the file was directly in `scripts/`.
 | `plot_b3_eps_sweeps.py` | `eps_sweep` | [eps/plot_b3_eps_sweeps.py](eps/plot_b3_eps_sweeps.py) |
 | `sweep_eps_on_linking_gold.py` | `eps_sweep` | [eps/sweep_eps_on_linking_gold.py](eps/sweep_eps_on_linking_gold.py) |
 | `README.md` | `production` | [release/README.md](release/README.md) |
+| `__init__.py` | `production` | [common/__init__.py](common/__init__.py) |
 | `README.md` | `production/counts` | [intake/counts/README.md](intake/counts/README.md) |
 | `__init__.py` | `production/counts` | [intake/counts/__init__.py](intake/counts/__init__.py) |
 | `_run_support.py` | `production/counts` | [intake/counts/_run_support.py](intake/counts/_run_support.py) |
@@ -109,12 +110,17 @@ A dot means the file was directly in `scripts/`.
 | `review_packets.py` | `production/data` | [judging/review_packets.py](judging/review_packets.py) |
 | `write_release_bundles.py` | `production/data` | [release/write_release_bundles.py](release/write_release_bundles.py) |
 | `generate_canonical_name_tuples.py` | `production` | [intake/generate_canonical_name_tuples.py](intake/generate_canonical_name_tuples.py) |
+| `__init__.py` | `production/model` | [pairwise/__init__.py](pairwise/__init__.py) |
+| `augmented_leakage.py` | `production/model` | [pairwise/augmented_leakage.py](pairwise/augmented_leakage.py) |
+| `initial_query_sources.py` | `production/model` | [common/initial_query_sources.py](common/initial_query_sources.py) |
 | `linker_source_bundle.py` | `production/model` | [linker/linker_source_bundle.py](linker/linker_source_bundle.py) |
 | `pairwise_incumbent_h13.json` | `production/model` | [pairwise/pairwise_incumbent_h13.json](pairwise/pairwise_incumbent_h13.json) |
+| `plan_datasets.py` | `production/model` | [common/plan_datasets.py](common/plan_datasets.py) |
 | `rebind_name_counts_index.py` | `production/model` | [release/rebind_name_counts_index.py](release/rebind_name_counts_index.py) |
 | `release_pairwise.py` | `production/model` | [pairwise/release_pairwise.py](pairwise/release_pairwise.py) |
 | `train_linker_and_finalize.py` | `production/model` | [linker/train_linker_and_finalize.py](linker/train_linker_and_finalize.py) |
 | `train_pairwise.py` | `production/model` | [pairwise/train_pairwise.py](pairwise/train_pairwise.py) |
+| `unknown_signatures.py` | `production/model` | [common/unknown_signatures.py](common/unknown_signatures.py) |
 | `run_bounded.py` | `.` | [dev/run_bounded.py](dev/run_bounded.py) |
 | `run_ci_locally.py` | `.` | [dev/run_ci_locally.py](dev/run_ci_locally.py) |
 | `sync_feature_schema.py` | `.` | [dev/sync_feature_schema.py](dev/sync_feature_schema.py) |

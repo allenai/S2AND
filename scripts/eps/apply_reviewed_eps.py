@@ -32,6 +32,11 @@ from s2and.incremental_linking_training.classic import (
 from s2and.production_bundle import _staged_production_bundle
 from s2and.production_model import load_production_model
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key
+from scripts.common.initial_query_sources import (
+    MAP_SHA256_FIELD,
+    InitialQuerySources,
+    load_initial_query_sources,
+)
 from scripts.eps.common import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
@@ -46,11 +51,6 @@ from scripts.eps.orcid_b3 import (
     REFERENCE_POLICY,
     REFERENCE_POLICY_ALL_IDENTITIES,
     final_test_query_identities,
-)
-from scripts.production.model.initial_query_sources import (
-    MAP_SHA256_FIELD,
-    InitialQuerySources,
-    load_initial_query_sources,
 )
 
 TestIdentityLoader = Callable[[Path, str, InitialQuerySources], frozenset[str]]

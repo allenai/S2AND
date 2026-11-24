@@ -93,14 +93,14 @@ from s2and.production_training_contract import (  # noqa: E402
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles  # noqa: E402
-from scripts.eps.common import DISTANCE_POLICY_VERSION  # noqa: E402
-from scripts.linker.build_linker_task_tables import TASK_ROLES, read_seed_components  # noqa: E402
-from scripts.production.model.initial_query_sources import (  # noqa: E402
+from scripts.common.initial_query_sources import (  # noqa: E402
     MAP_RELATIVE_PATH,
     MAP_SHA256_FIELD,
     InitialQuerySources,
     load_initial_query_sources,
 )
+from scripts.eps.common import DISTANCE_POLICY_VERSION  # noqa: E402
+from scripts.linker.build_linker_task_tables import TASK_ROLES, read_seed_components  # noqa: E402
 
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 PRODUCTION_MAX_EXEMPLARS = 4

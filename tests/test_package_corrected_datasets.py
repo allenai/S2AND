@@ -13,10 +13,10 @@ from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.production_training_contract import load_model_plan
+from scripts.common.unknown_signatures import load_unknown_signatures
 from scripts.intake.convert_to_arrow import _write_root_manifest
 from scripts.linker.linker_source_bundle import validate_portable_source_bundle
 from scripts.pairwise.package_pairwise_inputs import package_pairwise_inputs
-from scripts.production.model.unknown_signatures import load_unknown_signatures
 from scripts.release.package_corrected_datasets import (
     DEFAULT_EPS_GRID,
     main,

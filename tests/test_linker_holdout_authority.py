@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 
 from s2and.incremental_linking_training import classic
+from scripts.common.initial_query_sources import InitialQuerySources
 from scripts.linker import train_linker_and_finalize as release
-from scripts.production.model.initial_query_sources import InitialQuerySources
 from tests.training_helpers import write_classic_tiny_bundle
 
 

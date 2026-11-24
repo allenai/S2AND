@@ -39,6 +39,7 @@ import pyarrow.ipc as ipc
 from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.block_corrections import arrow_small_block_signatures, year_gap_split_enabled
+from scripts.common.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
 from scripts.eps.common import (
     CLUSTERING_SOURCE,
     DEFAULT_OUTPUT_ROOT,
@@ -48,7 +49,6 @@ from scripts.eps.common import (
     sha1_text,
     write_json,
 )
-from scripts.production.model.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
 
 
 @dataclass(frozen=True)

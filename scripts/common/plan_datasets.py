@@ -18,7 +18,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_training import build_training_anddata_from_arrow
 from s2and.data import ANDData, _map_fixed_pair_labels
 from s2and.production_training_contract import EXCLUDED_SIGNATURES_ROLE, UNKNOWN_SIGNATURES_ROLE, ModelDataset
-from scripts.production.model.unknown_signatures import UnknownSignatures, load_declared_unknown_signatures
+from scripts.common.unknown_signatures import UnknownSignatures, load_declared_unknown_signatures
 
 # ANDData defaults; pair counts matter only where pairs are sampled for training.
 _DEFAULT_TRAIN_PAIRS_SIZE = 30_000

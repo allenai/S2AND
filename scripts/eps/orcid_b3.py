@@ -22,12 +22,12 @@ from s2and.incremental_linking_training.classic import (
 )
 from s2and.text import normalize_orcid
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key
-from scripts.intake.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
-from scripts.production.model.initial_query_sources import (
+from scripts.common.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
     load_initial_query_sources,
 )
+from scripts.intake.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
 
 # Selection references exclude final-test identities and reviewed ORCID errors.
 REFERENCE_POLICY = "final_test_orcid_groups_and_reviewed_error_records_excluded"

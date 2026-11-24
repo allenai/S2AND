@@ -63,7 +63,6 @@ ACTIVE_NESTED_SCRIPT_DIRS = [
     "scripts/judging",
     "scripts/linker",
     "scripts/pairwise",
-    "scripts/production",
     "scripts/release",
 ]
 TY_SCRIPT_EXTRA_IGNORES = [

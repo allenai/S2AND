@@ -184,7 +184,11 @@ def check_training_overlap(
         )
     if not any(shard["rows"] for shard in training):
         raise ValueError("The 1.4 training inventory is empty")
+    compared_positions = sum(shard["rows_with_paper_position"] for shard in training)
+    if compared_positions == 0:
+        raise ValueError("The 1.4 training inventory contains no comparable corpus positions")
     return {
+        "compared_corpus_positions": compared_positions,
         "block_role_assignments_sha256": roles.sha256,
         **(ledger.bindings if ledger is not None else {}),
         "benchmark_overlap": "unobservable",

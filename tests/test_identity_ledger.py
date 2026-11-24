@@ -321,3 +321,47 @@ def test_gate_arrival_order_uses_inserted_and_production_components(
         "3-0": "production b",
         "4-0": "production a",
     }
+
+
+def test_v14_inventory_includes_null_orcid_candidate_members(tmp_path: Path) -> None:
+    from scripts.intake.build_v14_training_inventory import build_training_inventory
+    from scripts.intake.requests_to_datasets import convert_requests
+
+    export = request_bundle(tmp_path / "raw", "h wang", [("10", GOLD), ("20", None), ("30", None), ("40", None)])
+    index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
+    root = tmp_path / "linker"
+    convert_requests(
+        [export],
+        root,
+        Path(index),
+        allowed_papers=frozenset({"10", "20", "30", "40"}),
+        abstract_allowed_papers=frozenset(),
+    )
+    train = root / "train.parquet"
+    pq.write_table(
+        pa.table({"dataset": ["h_wang"], "query_signature_id": ["10-0"], "candidate_component_key": ["used"]}), train
+    )
+    members = root / "members.parquet"
+    pq.write_table(
+        pa.table({"candidate_component_key": ["used", "used", "unused"], "signature_id": ["20-0", "30-0", "40-0"]}),
+        members,
+    )
+    (root / "bundle.json").write_text(
+        json.dumps(
+            {
+                "assets": {
+                    "featureless_rows": {"files": {"train_path": train.name}},
+                    "candidate_members": {"datasets": {"h_wang": members.name}},
+                }
+            }
+        )
+    )
+    gold = tmp_path / "gold.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": [" A_KHAN "], "corpus_paper_id": [99], "position": [0], "orcid": [DEPOSITED]}),
+        gold,
+    )
+    output = tmp_path / "inventory.parquet"
+    build_training_inventory(gold, [], output, linker_sources=[root])
+    observed = {row["signature_id"]: row["orcid"] for row in pq.read_table(output).to_pylist()}
+    assert observed == {"10-0": GOLD, "20-0": None, "30-0": None, "99-0": DEPOSITED}

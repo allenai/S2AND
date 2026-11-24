@@ -112,33 +112,3 @@ def tiny_logistic_gate_config(link: bool = True) -> dict[str, object]:
         missing_values=np.asarray([0.0], dtype=np.float64),
         calibration_mode="test",
     )
-
-
-def write_synthetic_linker_artifact(
-    pairwise_bundle: Path,
-    linker_dir: Path,
-    *,
-    expected_artifact_hashes: Mapping[str, str] | None = None,
-) -> Path:
-    """Write a synthetic promoted-linker artifact bound to ``pairwise_bundle`` and return its target JSON path."""
-    import json
-    from typing import Any
-
-    from s2and.incremental_linking.artifact import save_incremental_linking_artifact
-    from s2and.production_model import pairwise_bundle_binding
-
-    booster, _fixture = build_tiny_promoted_booster()
-    target_spec: dict[str, Any] = {}
-    save_incremental_linking_artifact(
-        booster,
-        linker_dir,
-        gate_config=tiny_logistic_gate_config(True),
-        target_spec=target_spec,
-        pairwise_bundle_binding=pairwise_bundle_binding(
-            pairwise_bundle,
-            expected_artifact_hashes=dict(expected_artifact_hashes) if expected_artifact_hashes is not None else None,
-        ),
-    )
-    target = linker_dir.parent / "target.json"
-    target.write_text(json.dumps(target_spec) + "\n", encoding="utf-8")
-    return target

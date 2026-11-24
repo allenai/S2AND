@@ -36,9 +36,9 @@ from scripts.common.arrow_roots import (  # noqa: E402
     reject_filesystem_links,
     resolved_manifest_artifact_path,
     validate_root_name_counts_binding,
+    write_root_manifest,  # noqa: E402
 )
-from scripts.intake.convert_to_arrow import write_root_manifest  # noqa: E402
-from scripts.release.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
+from scripts.common.release_root_checks import validate_release_root  # noqa: E402
 
 _RESERVED_SUPPORT_ROOT_NAMES = frozenset({"LICENSE.txt", "datasets", "manifest.json", "name_counts_index"})
 

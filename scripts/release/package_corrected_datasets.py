@@ -35,15 +35,15 @@ from scripts.common.arrow_roots import (  # noqa: E402
     rebind_dataset_manifests,
     reject_filesystem_links,
     validate_root_name_counts_binding,
+    write_root_manifest,  # noqa: E402
 )
+from scripts.common.release_root_checks import validate_release_root  # noqa: E402
 from scripts.common.unknown_signatures import load_unknown_signatures  # noqa: E402
-from scripts.intake.convert_to_arrow import write_root_manifest  # noqa: E402
 from scripts.linker.linker_source_bundle import (  # noqa: E402
     validate_bundle_paths,
     validate_label_replay_datasets,
     validate_portable_source_bundle,
 )
-from scripts.release.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
 
 ARROW_SOURCE_ROLES = ("signatures", "papers", "specter_embeddings")
 MODEL_ROLES = frozenset((*ARROW_SOURCE_ROLES, "clusters", "train_pairs", "val_pairs"))

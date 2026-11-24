@@ -82,6 +82,7 @@ Code that several stages import. Stage folders import from here, not from each o
 | `common/email_redaction.py` | Hash and scrub emails, and scan trees for plaintext emails; `intake/hash_release_emails.py` is its command line |
 | `common/initial_query_sources.py` | Verify derived query origins against the source signature tables |
 | `common/orcid_references.py` | `EXCLUDED_ORCID_GROUPS` and the external ORCID reference-label reader |
+| `common/release_root_checks.py` | `validate_release_root`, the local Arrow release-root check; `release/verification/validate_local_arrow_release.py` is its command line |
 | `common/plan_datasets.py` | Load model-plan datasets from the published Arrow data |
 | `common/unknown_signatures.py` | Read and validate unknown-signature lists beside source labels |
 

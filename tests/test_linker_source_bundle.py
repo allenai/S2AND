@@ -29,10 +29,10 @@ from s2and.incremental_linking_training.source_bundle_preflight import (
     preflight_source_rows,
     validate_source_label_tables,
 )
+from scripts.common.release_root_checks import validate_release_root
 from scripts.linker.linker_source_bundle import (
     assemble_source_bundle,
 )
-from scripts.release.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
 pytestmark = pytest.mark.tooling

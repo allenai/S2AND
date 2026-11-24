@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 from scipy.spatial.distance import squareform
 
-import s2and.model as model_module
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import read_profile_exclusions_arrow, write_profile_exclusions_arrow
-from s2and.model import Clusterer
+from s2and.model import Clusterer, classic
+from s2and.model import clusterer as clusterer_module
 from s2and.model_pairwise import FastCluster
 from s2and.profile_exclusions import (
     enforce_profile_exclusions_in_block,
@@ -135,7 +135,8 @@ def test_arrow_round_trip(tmp_path: Path) -> None:
 def test_predict_routes_evict_excluded_mention(route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Every pair is closer than eps, so the whole block merges unless the exclusion is honored.
     # The final pass is switched off, so only the block-level relink can produce the result.
-    monkeypatch.setattr(model_module, "evict_profile_exclusion_violations", lambda clusters, *_args: (clusters, 0))
+    monkeypatch.setattr(classic, "evict_profile_exclusion_violations", lambda clusters, *_args: (clusters, 0))
+    monkeypatch.setattr(clusterer_module, "evict_profile_exclusion_violations", lambda clusters, *_args: (clusters, 0))
     dataset = build_dummy_dataset("profile_exclusions")
     model = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),

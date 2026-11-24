@@ -579,7 +579,7 @@ and data that fails the hash check. New training contracts use the `1.4` set and
 verify its tuple hash against the canonical name-tuple artifact. A clusterer
 without a contract hash uses the `1.4` set for subblocking. See
 [the packaged count loader](../s2and/orcid_prefix_counts.py) and
-[`Clusterer._subblocking_prefix_counts`](../s2and/model.py).
+[`Clusterer._subblocking_prefix_counts`](../s2and/model/bulk.py).
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key

@@ -257,6 +257,7 @@ def test_nested_residual_prediction_views_the_attachment_block_featurizer(
 ) -> None:
     """Residual clustering in a pass views the block featurizer; clusters match a fresh build."""
     import s2and.model as model_module
+    from s2and.model import bulk, incremental
 
     dataset = build_dummy_dataset("prediction_params_arrow_residual_view")
     dataset.specter_embeddings = {str(paper_id): np.ones(768, dtype=np.float32) for paper_id in dataset.papers}
@@ -274,13 +275,14 @@ def test_nested_residual_prediction_views_the_attachment_block_featurizer(
         lambda *args, **kwargs: ({"full": ["0", "1"]}, {"initial": ["2", "3"]}, False),
     )
     fresh_builds: list[list[str]] = []
-    original_build = model_module.build_rust_featurizer_from_arrow_dataset
+    original_build = bulk.build_rust_featurizer_from_arrow_dataset
 
     def recording_build(arrow_dataset: Any, **kwargs: Any) -> Any:
         fresh_builds.append([str(signature_id) for signature_id in kwargs["signature_ids"]])
         return original_build(arrow_dataset, **kwargs)
 
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", recording_build)
+    monkeypatch.setattr(bulk, "build_rust_featurizer_from_arrow_dataset", recording_build)
+    monkeypatch.setattr(incremental, "build_rust_featurizer_from_arrow_dataset", recording_build)
 
     def complete_with_residuals(self: Clusterer, signatures: list[str], arrow_dataset: Any, **kwargs: Any):
         # Like the production request dataset, the residual step carries the pass's name tuples.
@@ -326,7 +328,7 @@ def test_nested_residual_prediction_views_the_attachment_block_featurizer(
 
 def test_bulk_clusters_hook_replaces_only_bulk_clustering(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Supplied bulk clusters skip bulk distances; planning and attachment run unchanged."""
-    import s2and.model as model_module
+    from s2and.model import bulk, incremental
 
     dataset = build_dummy_dataset("prediction_params_bulk_hook")
     dataset.specter_embeddings = {str(paper_id): np.ones(768, dtype=np.float32) for paper_id in dataset.papers}
@@ -344,13 +346,14 @@ def test_bulk_clusters_hook_replaces_only_bulk_clustering(monkeypatch: pytest.Mo
         lambda *args, **kwargs: ({"full": ["0", "1"]}, {"initial": ["2", "3"]}, False),
     )
     bulk_builds: list[list[str]] = []
-    original_build = model_module.build_rust_featurizer_from_arrow_dataset
+    original_build = bulk.build_rust_featurizer_from_arrow_dataset
 
     def recording_build(arrow_dataset: Any, **kwargs: Any) -> Any:
         bulk_builds.append([str(signature_id) for signature_id in kwargs["signature_ids"]])
         return original_build(arrow_dataset, **kwargs)
 
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", recording_build)
+    monkeypatch.setattr(bulk, "build_rust_featurizer_from_arrow_dataset", recording_build)
+    monkeypatch.setattr(incremental, "build_rust_featurizer_from_arrow_dataset", recording_build)
     computed_bulk: list[dict[str, list[str]]] = []
     original_bulk = Clusterer._predict_subblocked_multiple_letter_groups
 

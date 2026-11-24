@@ -8,12 +8,12 @@
 | Load and validate the model bundle | [`production_model.py`](../s2and/production_model.py) |
 | Check the request's name-count index against the bundle | [`incremental_linking/policy.py`](../s2and/incremental_linking/policy.py) (`require_arrow_name_counts_index_for_clusterer`) |
 | Bulk · Split oversized blocks | [`subblocking.py`](../s2and/subblocking.py) |
-| Bulk · Score pairs and cluster by average linkage | [`model.py`](../s2and/model.py) |
+| Bulk · Score pairs and cluster by average linkage | [`model/distances.py`](../s2and/model/distances.py) |
 | Bulk · Apply enabled cluster corrections inside each block | [`block_corrections.py`](../s2and/block_corrections.py) |
-| Bulk · Reunite no-middle-name pieces across subblocks | [`model.py`](../s2and/model.py) (`_reunite_no_middle_dead_ends`) |
-| Bulk · Attach initial-only groups | [`model.py`](../s2and/model.py) |
+| Bulk · Reunite no-middle-name pieces across subblocks | [`model/bulk.py`](../s2and/model/bulk.py) (`_reunite_no_middle_dead_ends`) |
+| Bulk · Attach initial-only groups | [`model/bulk.py`](../s2and/model/bulk.py) |
 | Bulk · Join clusters across subblocks by ORCID | [`orcid_join.py`](../s2and/orcid_join.py) |
-| Incremental · Set up required seed memberships and disallows | [`model.py`](../s2and/model.py) (`Clusterer.predict_incremental_from_arrow`), [`seed_merging.py`](../s2and/seed_merging.py), then [`incremental_linking/production.py`](../s2and/incremental_linking/production.py) |
+| Incremental · Set up required seed memberships and disallows | [`model/incremental.py`](../s2and/model/incremental.py) (`Clusterer.predict_incremental_from_arrow`), [`seed_merging.py`](../s2and/seed_merging.py), then [`incremental_linking/production.py`](../s2and/incremental_linking/production.py) |
 | Incremental · Retrieve candidate seed profiles | [`raw_candidate_planner.rs`](../s2and_rust/src/raw_candidate_planner.rs) |
 | Incremental · Score and rank candidates | [`incremental_linking/runtime.py`](../s2and/incremental_linking/runtime.py) |
 | Incremental · Gate the best link or abstain | [`incremental_linking/logistic_gate.py`](../s2and/incremental_linking/logistic_gate.py) |

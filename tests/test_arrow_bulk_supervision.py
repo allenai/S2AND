@@ -213,17 +213,18 @@ def test_bulk_context_survives_public_wrappers_and_is_isolated(tmp_path):
 def test_attach_name_check_covers_only_initial_only_attachment(tmp_path, monkeypatch):
     """Subblocked attachment exempts caller-required seeds; the public API stays unchanged."""
     import s2and.model as model_module
+    from s2and.model import incremental
 
     dataset = _dataset([("Ada", "", "Smith"), ("A", "", "Smith"), ("A", "", "Smith")], {})
     prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
     observed = []
-    original = model_module.predict_incremental_promoted_linker_from_arrow
+    original = incremental.predict_incremental_promoted_linker_from_arrow
 
     def capture(clusterer, block_signatures, request_dataset, **kwargs):
         observed.append(request_dataset.name_check_exempt_signature_ids)
         return original(clusterer, block_signatures, request_dataset, **kwargs)
 
-    monkeypatch.setattr(model_module, "predict_incremental_promoted_linker_from_arrow", capture)
+    monkeypatch.setattr(incremental, "predict_incremental_promoted_linker_from_arrow", capture)
     clusterer = _clusterer(0.9)
     attach_tiny_incremental_linker(clusterer, tmp_path / "linker")
     with ArrowDataset.open(tmp_path / "arrow") as arrow_dataset:

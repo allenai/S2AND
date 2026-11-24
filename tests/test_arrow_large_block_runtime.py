@@ -5,10 +5,9 @@ from typing import Any
 
 import pytest
 
-import s2and.model as model_module
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer
+from s2and.model import Clusterer, bulk, incremental
 from s2and.prediction_state import PredictionState
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
@@ -103,9 +102,10 @@ def patch_arrow_orchestration(monkeypatch: pytest.MonkeyPatch):
     """Install per-test orchestration fakes; each test owns its captures/oracles."""
 
     def install(native_subblocking, name_parts, featurizer, bulk_predict, incremental_predict):
-        monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", native_subblocking)
-        monkeypatch.setattr(model_module, "_load_arrow_canonical_name_parts", name_parts)
-        monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", featurizer)
+        monkeypatch.setattr(bulk, "_make_subblocks_with_telemetry_arrow_rust", native_subblocking)
+        monkeypatch.setattr(bulk, "_load_arrow_canonical_name_parts", name_parts)
+        monkeypatch.setattr(bulk, "build_rust_featurizer_from_arrow_dataset", featurizer)
+        monkeypatch.setattr(incremental, "build_rust_featurizer_from_arrow_dataset", featurizer)
         monkeypatch.setattr(Clusterer, "_predict_subblocked_multiple_letter_groups", bulk_predict)
         monkeypatch.setattr(Clusterer, "predict_incremental_from_arrow", incremental_predict)
 
@@ -274,7 +274,7 @@ def test_arrow_subblocking_avoids_generated_key_collisions(
         assert signature_ids == ["s1", "s2"]
         return {"x": ["s1"], "y": ["s2"]}, {}, {}
 
-    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+    monkeypatch.setattr(bulk, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
     write_minimal_arrow_prediction_bundle(tmp_path)
     arrow_dataset = ArrowDataset.open(tmp_path)
 
@@ -388,7 +388,7 @@ def test_large_arrow_block_rejects_native_subblock_over_threshold(
     write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
     arrow_dataset = ArrowDataset.open(tmp_path)
     monkeypatch.setattr(
-        model_module,
+        bulk,
         "_make_subblocks_with_telemetry_arrow_rust",
         lambda *_args, **_kwargs: ({"too_large": ["0", "1", "2", "3"]}, {}, {}),
     )
@@ -421,8 +421,9 @@ def test_large_arrow_block_rejects_oversized_explicit_seed_component_before_nati
         featurizer_called = True
         raise AssertionError("featurizer construction must not start")
 
-    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fail_native)
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fail_featurizer)
+    monkeypatch.setattr(bulk, "_make_subblocks_with_telemetry_arrow_rust", fail_native)
+    monkeypatch.setattr(bulk, "build_rust_featurizer_from_arrow_dataset", fail_featurizer)
+    monkeypatch.setattr(incremental, "build_rust_featurizer_from_arrow_dataset", fail_featurizer)
 
     with pytest.raises(
         ValueError,
@@ -447,7 +448,7 @@ def test_large_arrow_block_rejects_invalid_native_partition(
     write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
     arrow_dataset = ArrowDataset.open(tmp_path)
     monkeypatch.setattr(
-        model_module,
+        bulk,
         "build_rust_featurizer_from_arrow_dataset",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("featurizer construction must not start")),
     )
@@ -458,7 +459,7 @@ def test_large_arrow_block_rejects_invalid_native_partition(
     )
     for case_id, native_subblocks, expected_detail in cases:
         monkeypatch.setattr(
-            model_module,
+            bulk,
             "_make_subblocks_with_telemetry_arrow_rust",
             lambda *_args, _subblocks=native_subblocks, **_kwargs: (_subblocks, {}, {}),
         )

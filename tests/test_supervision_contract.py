@@ -74,7 +74,7 @@ def test_arrow_incremental_boundary_rejects_id_collisions_before_loading_data():
 @pytest.mark.parametrize("route", ["helper", "full"])
 def test_python_prediction_normalizes_supervision_once_per_request(route: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Nested blocks reuse validated overrides without caching later requests."""
-    import s2and.model as model_module
+    from s2and.model import classic, distances
     from tests.helpers import build_dummy_dataset
 
     _assert_conflicting_supervision_is_rejected("predict_helper" if route == "helper" else "predict")
@@ -85,13 +85,14 @@ def test_python_prediction_normalizes_supervision_once_per_request(route: str, m
     partial = {("1", "0"): 0.2, ("0", "1"): 0.2, ("3", "2"): 0.8}
     original = list(partial.items())
     normalization_calls = []
-    normalize = model_module.normalize_partial_supervision
+    normalize = classic.normalize_partial_supervision
 
     def record_normalization(supervision, **kwargs):
         normalization_calls.append(supervision)
         return normalize(supervision, **kwargs)
 
-    monkeypatch.setattr(model_module, "normalize_partial_supervision", record_normalization)
+    monkeypatch.setattr(classic, "normalize_partial_supervision", record_normalization)
+    monkeypatch.setattr(distances, "normalize_partial_supervision", record_normalization)
     method = clusterer.predict_helper if route == "helper" else clusterer.predict
 
     clusters, _ = method(blocks, dataset, partial_supervision=partial)

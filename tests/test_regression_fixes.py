@@ -13,7 +13,7 @@ from s2and.data import ANDData, _ordered_coauthors_for_signature
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.completion import first_initials, residual_first_initial_groups
 from s2and.incremental_linking.completion_metadata import SignatureFirstNames, SignatureOrcids
-from s2and.model import Clusterer
+from s2and.model import Clusterer, bulk, distances
 from s2and.runtime import RuntimeContext
 from s2and.sampling import sampling
 from tests.helpers import write_minimal_arrow_prediction_bundle
@@ -55,6 +55,8 @@ def test_cacheable_value_preserves_list_order_but_sorts_sets():
 
 
 def test_altered_presplit_cache_does_not_make_clusterer_unserializable() -> None:
+    assert pickle.loads(b"cs2and.model\nClusterer\n.") is Clusterer
+    assert Clusterer.predict_incremental_from_arrow.__module__ == "s2and.model"
     clusterer = object.__new__(Clusterer)
     model_module._put_altered_presplit_cache_entry(clusterer, ("state",), [["s1", "s2"]])
 
@@ -115,8 +117,8 @@ def test_python_predicted_batches_use_effective_pair_chunk_size(monkeypatch):
         return np.arange(len(features), dtype=np.float64), 0.0
 
     monkeypatch.setattr(Clusterer, "distance_matrix_helper", fake_distance_matrix_helper)
-    monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
-    monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
+    monkeypatch.setattr(distances, "many_pairs_featurize", fake_many_pairs_featurize)
+    monkeypatch.setattr(distances, "_predict_and_combine", fake_predict_and_combine)
 
     batches = list(
         clusterer._iter_python_predicted_distance_matrix_batches(
@@ -182,8 +184,8 @@ def test_fused_constraint_failure_propagates_with_offset(monkeypatch):
             return local_i.tolist(), local_j.tolist(), [None] * len(local_i)
         raise RuntimeError("fused failure")
 
-    monkeypatch.setattr(model_module, "_build_incremental_constraint_backend", fake_build_backend)
-    monkeypatch.setattr(model_module, "get_constraints_block_upper_triangle_indexed_rust", fake_constraints)
+    monkeypatch.setattr(distances, "_build_incremental_constraint_backend", fake_build_backend)
+    monkeypatch.setattr(distances, "get_constraints_block_upper_triangle_indexed_rust", fake_constraints)
 
     with pytest.raises(RuntimeError, match=r"block=block start_offset=2 pairs=2.*fused failure"):
         list(
@@ -207,7 +209,7 @@ def test_predict_from_arrow_rejects_disallows_with_precomputed_dists_before_buil
     def fake_build_from_arrow_dataset(*_args, **_kwargs):
         raise AssertionError("precomputed dists with disallows should be rejected before Rust featurizer build")
 
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_dataset", fake_build_from_arrow_dataset)
+    monkeypatch.setattr(bulk, "build_rust_featurizer_from_arrow_dataset", fake_build_from_arrow_dataset)
 
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
@@ -293,7 +295,7 @@ def test_make_distance_matrices_guards_allocation_before_pair_featurization(monk
     )
 
     monkeypatch.setattr(
-        model_module,
+        distances,
         "build_runtime_context",
         lambda _operation: RuntimeContext(
             operation="model_predict",
@@ -302,7 +304,7 @@ def test_make_distance_matrices_guards_allocation_before_pair_featurization(monk
         ),
     )
     monkeypatch.setattr(
-        model_module,
+        distances,
         "many_pairs_featurize",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("guard should run before pair featurization")),
     )
@@ -370,7 +372,7 @@ def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_orde
         batch_size=2,
     )
 
-    monkeypatch.setattr(model_module, "stage_uses_rust", lambda _runtime_context: False)
+    monkeypatch.setattr(distances, "stage_uses_rust", lambda _runtime_context: False)
 
     batches = [
         model_module._PredictedDistanceMatrixBatch(

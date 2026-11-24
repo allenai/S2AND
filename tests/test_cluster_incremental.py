@@ -30,7 +30,7 @@ from s2and.incremental_linking.retrieval import (
     RawArrowPlanBundle,
 )
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
-from s2and.model import Clusterer
+from s2and.model import Clusterer, bulk, incremental
 from s2and.prediction_state import PredictionState
 from s2and.runtime import build_runtime_context
 from tests.helpers import (
@@ -465,7 +465,7 @@ def test_predict_incremental_from_arrow_requires_explicit_seeds_and_loaded_artif
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_no_seeds")
     arrow_dataset = _minimal_arrow_dataset(tmp_path)
     monkeypatch.setattr(
-        model_module,
+        incremental,
         "predict_incremental_promoted_linker_from_arrow",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("promoted linker should not run")),
     )
@@ -525,10 +525,10 @@ def test_direct_arrow_incremental_loads_full_altered_profiles_and_only_orcids_fo
         )
         return {"clusters": {"0": ["3", "4"], "1": ["8", "5"]}}
 
-    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_signature_info)
-    monkeypatch.setattr(model_module, "_load_arrow_incremental_orcid_signature_info", fake_load_orcid_info)
+    monkeypatch.setattr(incremental, "_load_arrow_incremental_signature_info", fake_load_signature_info)
+    monkeypatch.setattr(incremental, "_load_arrow_incremental_orcid_signature_info", fake_load_orcid_info)
     monkeypatch.setattr(
-        model_module,
+        incremental,
         "predict_incremental_promoted_linker_from_arrow",
         fake_promoted_linker,
     )
@@ -623,7 +623,7 @@ def test_load_arrow_incremental_signature_info_uses_signature_batch_index(
     write_test_arrow_artifact_manifest(tmp_path, arrow_paths)
     arrow_dataset = ArrowDataset.open(tmp_path)
     with arrow_dataset.use() as lease:
-        signatures = model_module._load_arrow_incremental_signature_info(lease, ["s2", "s3"])
+        signatures = incremental._load_arrow_incremental_signature_info(lease, ["s2", "s3"])
 
         assert set(signatures) == {"s2", "s3"}
         assert signatures["s2"].paper_id == "p2"
@@ -634,7 +634,7 @@ def test_load_arrow_incremental_signature_info_uses_signature_batch_index(
         assert read_batch_indices == [1]
 
         # The ORCID loader reads its batches through the native index, not pyarrow.
-        orcid_signatures = model_module._load_arrow_incremental_orcid_signature_info(lease, ["s2"])
+        orcid_signatures = incremental._load_arrow_incremental_orcid_signature_info(lease, ["s2"])
         assert set(orcid_signatures) == {"s2"}
         assert orcid_signatures["s2"].paper_id is None
         assert orcid_signatures["s2"].author_info_first is None
@@ -659,7 +659,7 @@ def test_load_arrow_incremental_orcid_signature_info_accepts_missing_orcid_colum
     write_test_arrow_artifact_manifest(tmp_path, arrow_paths)
     arrow_dataset = ArrowDataset.open(tmp_path)
     with arrow_dataset.use() as lease:
-        assert model_module._load_arrow_incremental_orcid_signature_info(lease, ["query"]) == {}
+        assert incremental._load_arrow_incremental_orcid_signature_info(lease, ["query"]) == {}
 
 
 def test_load_arrow_incremental_orcid_signature_info_keeps_null_and_empty_values(tmp_path: Path) -> None:
@@ -687,7 +687,7 @@ def test_load_arrow_incremental_orcid_signature_info_keeps_null_and_empty_values
     write_test_arrow_artifact_manifest(tmp_path, arrow_paths)
     arrow_dataset = ArrowDataset.open(tmp_path)
     with arrow_dataset.use() as lease:
-        loaded = model_module._load_arrow_incremental_orcid_signature_info(
+        loaded = incremental._load_arrow_incremental_orcid_signature_info(
             lease, ["s_value", "missing", "s_null", "s_empty"], num_threads=2
         )
     # Arrow row order, nulls as None, empty strings kept, missing ids skipped.
@@ -1396,7 +1396,7 @@ def test_predict_from_arrow_uses_bound_name_counts_index(
         return object()
 
     monkeypatch.setattr(
-        model_module,
+        bulk,
         "build_rust_featurizer_from_arrow_dataset",
         fake_build_rust_featurizer_from_arrow_dataset,
     )

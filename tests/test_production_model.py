@@ -1526,7 +1526,7 @@ def test_contract_one_prediction_and_eps_replay_stamped_year(
     contract_one_inference, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import s2and.incremental_linking.runtime as linker_runtime
-    import s2and.model as model_module
+    from s2and.model import distances
     from scripts.eps import sweep_eps_on_linking_gold as sweep
 
     clusterer, arrow = contract_one_inference
@@ -1534,7 +1534,7 @@ def test_contract_one_prediction_and_eps_replay_stamped_year(
     blocks = {"a wang": pair_ids}
     year_diffs: list[float] = []
     row_years: list[int] = []
-    original_bulk_predict = model_module._predict_class0_with_runtime
+    original_bulk_predict = distances._predict_class0_with_runtime
     original_incremental_predict = linker_runtime.predict_pairwise_class0
     original_row_features = linker_runtime.build_promoted_non_pairwise_row_features_with_telemetry
 
@@ -1556,9 +1556,9 @@ def test_contract_one_prediction_and_eps_replay_stamped_year(
         return original_row_features(candidate_batch, signals, legacy_paper_years=legacy_paper_years)
 
     # Use the supported unfused scoring paths to observe the real native feature matrices.
-    monkeypatch.setattr(model_module, "_native_block_scorers", lambda *_: None)
+    monkeypatch.setattr(distances, "_native_block_scorers", lambda *_: None)
     monkeypatch.setattr(linker_runtime, "_FUSED_LINKER_SCORING", False)
-    monkeypatch.setattr(model_module, "_predict_class0_with_runtime", bulk_predict)
+    monkeypatch.setattr(distances, "_predict_class0_with_runtime", bulk_predict)
     monkeypatch.setattr(linker_runtime, "predict_pairwise_class0", incremental_predict)
     monkeypatch.setattr(linker_runtime, "build_promoted_non_pairwise_row_features_with_telemetry", record_row_features)
     clusters, _ = clusterer.predict_from_arrow(blocks, arrow, name_tuples=frozenset())
@@ -1667,6 +1667,7 @@ def test_contract_one_fused_distance_chunk_replays_stamped_year(
 ) -> None:
     import s2and.model as model_module
     from s2and.feature_port import _get_rust_feature_data
+    from s2and.model import distances
     from tests.helpers import build_arrow_training_dataset
     from tests.test_feature_port_parity import _load_dataset_from_dir
 
@@ -1689,13 +1690,13 @@ def test_contract_one_fused_distance_chunk_replays_stamped_year(
         block_signature_indices=[ids.index("0"), ids.index("2")],
     )
     observed: list[float] = []
-    original = model_module._predict_and_combine
+    original = distances._predict_and_combine
 
     def record(classifier, nameless, features, labels, nameless_features, *args, **kwargs):
         observed.extend(nameless_features[:, 0].tolist())
         return original(classifier, nameless, features, labels, nameless_features, *args, **kwargs)
 
-    monkeypatch.setattr(model_module, "_predict_and_combine", record)
+    monkeypatch.setattr(distances, "_predict_and_combine", record)
     clusterer._predict_distance_matrix_chunk(chunk, dataset, dataset.runtime_context, "stamped")
     assert observed == [50.0]
 
@@ -1703,22 +1704,22 @@ def test_contract_one_fused_distance_chunk_replays_stamped_year(
 def test_prebuilt_native_prediction_preserves_contract_one(
     contract_one_inference: tuple[Clusterer, ArrowDataset], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import s2and.model as model_module
     from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+    from s2and.model import distances
 
     clusterer, arrow = contract_one_inference
     ids = ["q1", "s1"]
     native = build_rust_featurizer_from_arrow_dataset(arrow, signature_ids=ids, name_tuples=frozenset(), num_threads=1)
     observed: list[float] = []
-    predict = model_module._predict_class0_with_runtime
+    predict = distances._predict_class0_with_runtime
 
     def record(classifier, features, **kwargs):
         if classifier is clusterer.nameless_classifier:
             observed.extend(features[:, 0].tolist())
         return predict(classifier, features, **kwargs)
 
-    monkeypatch.setattr(model_module, "_native_block_scorers", lambda *_: None)
-    monkeypatch.setattr(model_module, "_predict_class0_with_runtime", record)
+    monkeypatch.setattr(distances, "_native_block_scorers", lambda *_: None)
+    monkeypatch.setattr(distances, "_predict_class0_with_runtime", record)
     clusterer.predict_from_rust_featurizer({"a wang": ids}, native)
     assert observed == [50.0]
 

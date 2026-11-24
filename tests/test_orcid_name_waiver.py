@@ -13,6 +13,7 @@ from s2and.data import ANDData
 from s2and.feature_port import _get_rust_featurizer
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import DEFAULT_ORCID_NAME_WAIVER, Clusterer, FastCluster
+from s2and.model import distances as distance_module
 from s2and.production_model import NativeLightGBMBinaryClassifier
 from s2and.rust_calls import _get_constraint_labels_block_upper_triangle_indexed_rust
 from tests.helpers import build_arrow_training_dataset
@@ -210,7 +211,7 @@ def test_one_pass_fill_matches_the_chunked_route(
         )["block"]
 
     one_pass = distances()
-    monkeypatch.setattr(model_module, "_ONE_PASS_BLOCK_FILL", False)
+    monkeypatch.setattr(distance_module, "_ONE_PASS_BLOCK_FILL", False)
     np.testing.assert_array_equal(one_pass, distances())
     offset = A_FORM * len(ids) - A_FORM * (A_FORM + 1) // 2 + J_PLAIN - A_FORM - 1
     assert (one_pass[offset] == LARGE_DISTANCE) == (waiver is None)
@@ -226,9 +227,9 @@ def test_clusterer_passes_its_setting_to_block_constraints(monkeypatch: pytest.M
         seen.append(kwargs["orcid_name_waiver"])
         return np.zeros(max_pairs)
 
-    monkeypatch.setattr(model_module, "_get_constraint_labels_block_upper_triangle_indexed_rust", constraint_labels)
+    monkeypatch.setattr(distance_module, "_get_constraint_labels_block_upper_triangle_indexed_rust", constraint_labels)
     monkeypatch.setattr(
-        model_module,
+        distance_module,
         "_build_block_feature_matrices_indexed_rust",
         lambda _i, *, max_pairs, **_k: (np.zeros((max_pairs, 1)), None),
     )

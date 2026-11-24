@@ -16,6 +16,8 @@ from scripts.intake.prepare_identity_labels import (
     prepare_identity_labels,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _write_signatures_arrow(directory: Path, rows: list[dict]) -> Path:
     directory.mkdir(parents=True, exist_ok=True)

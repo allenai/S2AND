@@ -18,6 +18,8 @@ from scripts.release.verification.compare_full_predict_arrow_parity import (
     _write_raw_planner_indexes_and_layout,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _parity_argv(
     tmp_path,

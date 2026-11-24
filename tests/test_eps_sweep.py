@@ -21,6 +21,8 @@ from scripts.eps import common, sweep_eps_on_linking_gold
 from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
 from tests.model_helpers import ConstantDistanceClassifier
 
+pytestmark = pytest.mark.tooling
+
 
 def _cli(*extra: str, include_batching_threshold: bool = True) -> list[str]:
     return [

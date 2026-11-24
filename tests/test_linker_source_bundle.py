@@ -35,6 +35,8 @@ from scripts.linker.linker_source_bundle import (
 from scripts.release.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
+pytestmark = pytest.mark.tooling
+
 
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

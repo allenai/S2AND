@@ -17,6 +17,8 @@ from s2and.orcid_prefix_counts import LoadedOrcidPrefixCounts
 from s2and.production_training_contract import block_membership_sha256, load_model_plan
 from scripts.pairwise import release_pairwise
 
+pytestmark = pytest.mark.tooling
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()

@@ -24,6 +24,8 @@ from scripts.linker.train_linker_and_finalize import (
 )
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 
+pytestmark = pytest.mark.tooling
+
 
 @pytest.fixture
 def target_payload() -> dict[str, Any]:

@@ -16,6 +16,8 @@ from scripts.common.unknown_signatures import (
 )
 from scripts.pairwise.release_pairwise import _aggregate_b3, _b3_report
 
+pytestmark = pytest.mark.tooling
+
 
 def test_unknown_sidecar_uses_label_directory_and_exact_bytes(tmp_path: Path) -> None:
     labels = tmp_path / "labels"

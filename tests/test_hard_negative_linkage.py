@@ -17,6 +17,8 @@ from s2and.model_pairwise import FastCluster, constrained_linkage
 from scripts.eps import sweep_eps_on_linking_gold
 from tests.model_helpers import ConstantDistanceClassifier
 
+pytestmark = pytest.mark.tooling
+
 SIZE = 160
 EPS = 0.55
 

@@ -10,6 +10,8 @@ from s2and.arrow_inputs import ArrowDataset
 from scripts import tutorial_for_predicting_with_the_prod_model as tutorial
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
+pytestmark = pytest.mark.tooling
+
 
 def _load(monkeypatch: pytest.MonkeyPatch, clusterer: object) -> list[tuple[Path, int]]:
     from s2and import production_model

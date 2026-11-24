@@ -36,6 +36,8 @@ from tests.pairwise_release_helpers import (
     write_pairwise_dataset,
 )
 
+pytestmark = pytest.mark.tooling
+
 MAIN_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
 NAMELESS_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS))
 EPS_GRID = (0.05, 0.5, 0.95)

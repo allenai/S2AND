@@ -17,6 +17,14 @@ import pytest
 from tests.rust_build_freshness import duplicate_package_metadata_message, stale_rust_extension_message
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the marker here: a pyproject.toml edit would make uv rebuild the extension."""
+    config.addinivalue_line(
+        "markers",
+        'tooling: tests of scripts/ release, data-prep, training, and dev tooling; skip with -m "not tooling"',
+    )
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Stop before collection when package metadata or the native extension is stale."""
     message = duplicate_package_metadata_message() or stale_rust_extension_message()

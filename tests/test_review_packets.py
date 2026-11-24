@@ -18,6 +18,8 @@ from scripts.judging.review_packets import (
     validate_blind_packet_records,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _paper(idx: int, *, email: bool = False, text_orcid: bool = False) -> dict:
     return {

@@ -33,6 +33,8 @@ from tests.test_linker_source_bundle import (
 )
 from tests.test_package_pairwise_inputs import _write_prepared
 
+pytestmark = pytest.mark.tooling
+
 
 @pytest.fixture(scope="module")
 def _package_template(tmp_path_factory: pytest.TempPathFactory) -> Path:

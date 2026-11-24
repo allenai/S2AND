@@ -23,6 +23,8 @@ from scripts.linker import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 from tests.test_linker_source_bundle import _write_arrow_root, _write_linker_inputs, _write_singleton_orcid_views
 
+pytestmark = pytest.mark.tooling
+
 COMMON_TRAINING_ARGS = (
     "--source-bundle-root",
     "source-bundle",

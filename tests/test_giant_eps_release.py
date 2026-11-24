@@ -35,6 +35,8 @@ from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 from tests.raw_arrow_helpers import base_arrow_paths, write_ipc
 from tests.test_production_model import _write_synthetic_linker
 
+pytestmark = pytest.mark.tooling
+
 
 def _source_snapshot(root: Path, *, source: str = "q1", with_clone: bool = False) -> Path:
     dataset = root / "datasets" / "unit"

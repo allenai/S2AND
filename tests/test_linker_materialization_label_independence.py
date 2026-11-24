@@ -19,6 +19,8 @@ from s2and.runtime import build_runtime_context
 from scripts.linker import train_linker_and_finalize as materializer
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
+pytestmark = pytest.mark.tooling
+
 _MEMORY_BUDGET = 100_000_000
 
 

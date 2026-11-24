@@ -11,6 +11,8 @@ from s2and import memory_budget
 from scripts.release.verification import evaluate_incremental_gold as gold
 from scripts.release.verification import smoke_installed_incremental_arrow as smoke
 
+pytestmark = pytest.mark.tooling
+
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,8 @@ from s2and.incremental_linking.feature_block_arrow import write_name_counts_inde
 from scripts.release.verification import smoke_installed_incremental_arrow as smoke_module
 from tests.helpers import tiny_name_counts_tuple
 
+pytestmark = pytest.mark.tooling
+
 
 @pytest.fixture(autouse=True)
 def _stable_smoke_rss(monkeypatch: pytest.MonkeyPatch) -> None:

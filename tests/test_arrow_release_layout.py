@@ -21,6 +21,8 @@ from s2and.incremental_linking.feature_block import (
 from scripts.release.verification.validate_local_arrow_release import validate_release_root
 from tests.helpers import tiny_name_counts_tuple
 
+pytestmark = pytest.mark.tooling
+
 
 def _touch_json(path: Path, payload: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

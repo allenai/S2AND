@@ -31,6 +31,8 @@ from scripts.pairwise.prepare_pairwise_inputs import (
     write,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 @pytest.fixture
 def inputs(tmp_path: Path) -> tuple[Path, Path, Path]:

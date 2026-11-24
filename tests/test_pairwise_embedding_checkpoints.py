@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scripts.pairwise._pairwise_embeddings import CHECKPOINT_ROWS, checkpoint_due
+
+pytestmark = pytest.mark.tooling
 
 
 def _saved_rows(batch_size: int, rows: int, completed: int = 0) -> list[int]:

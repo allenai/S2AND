@@ -15,6 +15,8 @@ from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.name_tuple_artifact import load_name_tuple_artifact
 from scripts.intake import generate_canonical_name_tuples
 
+pytestmark = pytest.mark.tooling
+
 
 def test_checked_in_source_reproduces_canonical_name_tuples_byte_exactly(tmp_path: Path) -> None:
     source_path = Path(_PACKAGE_DATA_DIR) / "s2and_unnormalized_filtered_name_tuples.txt"

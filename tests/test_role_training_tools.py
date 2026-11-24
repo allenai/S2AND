@@ -15,6 +15,8 @@ from s2and.arrow_inputs import ArrowDataset
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.test_build_linker_task_tables import _ORCIDS, _OUTSIDE_HOME, _block_inputs
 
+pytestmark = pytest.mark.tooling
+
 
 def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> None:
     from scripts.eps import orcid_b3

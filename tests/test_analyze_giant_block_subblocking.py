@@ -9,6 +9,8 @@ import pytest
 from scripts.release.verification import analyze_giant_block_subblocking as analysis
 from tests.helpers import write_minimal_arrow_prediction_bundle
 
+pytestmark = pytest.mark.tooling
+
 
 def test_threshold_sweep_uses_native_subblocking_on_one_arrow_block(tmp_path: Path) -> None:
     write_minimal_arrow_prediction_bundle(tmp_path / "arrow", include_specter=True)

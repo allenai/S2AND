@@ -29,6 +29,8 @@ from scripts.linker.build_linker_task_tables import (
 from scripts.linker.train_linker_and_finalize import _materialize_frozen_linker_tasks
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 
+pytestmark = pytest.mark.tooling
+
 _OUTSIDE_HOME = "0000-0002-1694-233X"
 _ORCIDS = ("0000-0001-5000-0007", "0000-0002-9079-593X", "0000-0002-1825-0855")
 

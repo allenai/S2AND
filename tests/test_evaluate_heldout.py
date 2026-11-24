@@ -33,6 +33,8 @@ from tests.promoted_linking_helpers import (
     write_synthetic_pairwise_bundle,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _write(path: Path, payload: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)

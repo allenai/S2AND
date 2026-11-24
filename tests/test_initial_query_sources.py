@@ -16,6 +16,8 @@ from scripts.linker.train_linker_and_finalize import (
 )
 from tests.raw_arrow_helpers import write_ipc
 
+pytestmark = pytest.mark.tooling
+
 
 def _snapshot(root: Path, *, clones: bool = True) -> tuple[Path, list[dict[str, str]]]:
     dataset = root / "datasets" / "unit"

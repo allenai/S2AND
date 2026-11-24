@@ -20,6 +20,8 @@ from scripts.eps import apply_reviewed_eps as apply_eps
 from scripts.eps.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
 from scripts.linker import train_linker_and_finalize as promoted_train
 
+pytestmark = pytest.mark.tooling
+
 
 def _synthetic_gate_data() -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
     rng = np.random.default_rng(20261123)

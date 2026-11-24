@@ -24,6 +24,8 @@ from scripts.release.verification.verify_rust_distribution_licenses import LICEN
 from tests import shell_helpers
 from tests.shell_helpers import run_bash
 
+pytestmark = pytest.mark.tooling
+
 PACKAGE = "s2and"
 TUPLE_DATA_PATH = "s2and/data/s2and_name_tuples_canonical.txt"
 ORCID_DATA_PATH = "s2and/data/first_k_letter_counts_from_orcid.json"

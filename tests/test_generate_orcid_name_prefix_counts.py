@@ -18,6 +18,8 @@ from s2and.orcid_prefix_counts import (
 from scripts.intake.counts import generate_orcid_name_prefix_counts as generator
 from scripts.intake.counts._run_support import load_guardrails
 
+pytestmark = pytest.mark.tooling
+
 ORCID_1 = "0000-0000-0000-0000"
 NAME_TUPLES_PATH = Path(PROJECT_ROOT_PATH) / "s2and" / "data" / "s2and_name_tuples_canonical.txt"
 NAME_TUPLES_SHA256 = hashlib.sha256(NAME_TUPLES_PATH.read_bytes()).hexdigest()

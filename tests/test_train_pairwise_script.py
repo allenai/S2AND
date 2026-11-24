@@ -17,6 +17,8 @@ from s2and.orcid_prefix_counts import ORCID_PREFIX_DATA_FILENAME
 from scripts.pairwise import train_pairwise
 from tests.helpers import pairwise_training_args as _args
 
+pytestmark = pytest.mark.tooling
+
 
 def _artifact_authority(
     *,

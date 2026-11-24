@@ -17,6 +17,8 @@ from tests.pairwise_release_helpers import (
     write_pairwise_dataset,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _write_prepared(tmp_path: Path) -> Path:
     root = tmp_path / "prepared"

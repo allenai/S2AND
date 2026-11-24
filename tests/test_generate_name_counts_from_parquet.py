@@ -19,6 +19,8 @@ from s2and.name_counts_index import NameCountsIndex
 from scripts.intake.counts import generate_name_counts_from_parquet as producer
 from tests.name_count_oracle import build_name_count_dicts
 
+pytestmark = pytest.mark.tooling
+
 ROWS = [
     ("Ána", "García", 1),
     ("Ana", "Garcia", 2),

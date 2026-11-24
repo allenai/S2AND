@@ -8,6 +8,8 @@ from scripts.pairwise.augmented_leakage import (
     source_members,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def test_augmented_source_ids_preserve_separators_and_dataset_scope() -> None:
     members = source_members([("qian___id___suffix", "kisti___id___suffix")])

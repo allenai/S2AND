@@ -24,6 +24,8 @@ from scripts.release.write_release_bundles import write_release_bundles
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset
 
+pytestmark = pytest.mark.tooling
+
 
 def _write(path: Path, payload: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)

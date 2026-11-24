@@ -10,6 +10,8 @@ import pytest
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.helpers import write_arrow_tables_bundle
 
+pytestmark = pytest.mark.tooling
+
 
 @pytest.mark.parametrize("orcid_source", [None, "manifest", "arrow"])
 @pytest.mark.parametrize("signature_hit", [False, True])

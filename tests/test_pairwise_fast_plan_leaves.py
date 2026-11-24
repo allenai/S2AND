@@ -17,6 +17,8 @@ from s2and.model_pairwise import MAX_FAST_PLAN_LEAVES
 from scripts.pairwise import train_pairwise
 from tests.helpers import pairwise_training_args
 
+pytestmark = pytest.mark.tooling
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

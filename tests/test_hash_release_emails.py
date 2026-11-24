@@ -28,6 +28,8 @@ from scripts.intake.hash_release_emails import (
 )
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
+pytestmark = pytest.mark.tooling
+
 
 @pytest.mark.parametrize(
     "value",

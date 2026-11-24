@@ -18,6 +18,8 @@ from scripts.intake.hash_release_emails import (
     scan_tree_for_plaintext_emails,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def test_load_paper_id_set_rejects_false_and_non_bool_permission_maps(tmp_path: Path) -> None:
     bool_map = tmp_path / "perm.json"

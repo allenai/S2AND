@@ -19,6 +19,8 @@ import pytest
 from scripts.dev import run_bounded
 from scripts.dev.run_bounded import is_compiler_telemetry
 
+pytestmark = pytest.mark.tooling
+
 RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "dev" / "run_bounded.py"
 CHILD_PYTHON = getattr(sys, "_base_executable", sys.executable)
 

@@ -24,6 +24,8 @@ from tests.rust_build_freshness import (
     stale_rust_extension_message,
 )
 
+pytestmark = pytest.mark.tooling
+
 _TREE = {
     "Cargo.toml": b"[package]\n",
     "Cargo.lock": b"# lock\n",

@@ -21,6 +21,8 @@ from scripts.common.initial_query_sources import derived_query_id
 from scripts.linker import train_linker_and_finalize as trainer
 from tests.raw_arrow_helpers import base_arrow_paths, open_arrow_dataset, write_ipc
 
+pytestmark = pytest.mark.tooling
+
 
 def _context_paths(root: Path) -> dict[str, str]:
     paths = base_arrow_paths(root)

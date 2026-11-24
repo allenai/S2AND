@@ -18,6 +18,8 @@ from tests.helpers import (
     write_test_arrow_artifact_manifest,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _setup_profile_argv(tmp_path, **workload_overrides):
     model_dir = tmp_path / "model"

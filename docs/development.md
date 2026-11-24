@@ -17,6 +17,16 @@ uv run ruff format .
 uv run ty check s2and
 ```
 
+For a quick library check while you edit, skip the `tooling` tests. Those tests
+cover `scripts/` release, data-prep, training, and dev tooling, and take about
+two-thirds of the suite time. CI and the local CI wrapper still run every test.
+
+```bash
+uv run pytest -q -n auto --dist loadfile -m "not tooling"
+```
+
+Mark a new test file `pytestmark = pytest.mark.tooling` when it tests `scripts/` tooling.
+
 `ty` reads its defaults from `[tool.ty]` in `pyproject.toml`: Python 3.11, the
 `linux` platform used by the GitHub runners, and ignores for resolution and
 attribute diagnostics from optional and native modules that static-only

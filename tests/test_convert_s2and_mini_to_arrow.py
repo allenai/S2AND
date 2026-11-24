@@ -20,6 +20,8 @@ from s2and.incremental_linking.feature_block_arrow import write_name_counts_inde
 from scripts.intake.convert_to_arrow import RuntimeDatasetSources
 from tests.helpers import tiny_name_counts_tuple, write_test_arrow_artifact_manifest
 
+pytestmark = pytest.mark.tooling
+
 
 def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
     source_dir = tmp_path / "source" / dataset

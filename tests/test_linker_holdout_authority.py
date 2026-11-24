@@ -12,6 +12,8 @@ from scripts.common.initial_query_sources import InitialQuerySources
 from scripts.linker import train_linker_and_finalize as release
 from tests.training_helpers import write_classic_tiny_bundle
 
+pytestmark = pytest.mark.tooling
+
 
 def test_source_authority_projects_complete_identity_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     keys = (

@@ -18,6 +18,8 @@ from scripts.intake.assign_block_roles import (
     verify_role_assignments,
 )
 
+pytestmark = pytest.mark.tooling
+
 
 def _sample_blocks() -> list[BlockSpec]:
     valid_a = "0000-0002-1694-233X"

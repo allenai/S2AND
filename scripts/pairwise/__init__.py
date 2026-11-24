@@ -1,1 +1,1 @@
-"""Production model release scripts."""
+"""Pairwise model input preparation, training and release."""

@@ -21,7 +21,7 @@ from scripts.common.initial_query_sources import MAP_SHA256_FIELD, derived_query
 from scripts.eps import apply_reviewed_eps as apply_reviewed_eps_module
 from scripts.eps import orcid_b3, plot_b3_eps_sweeps, sweep_eps_on_linking_gold
 from scripts.eps.apply_reviewed_eps import apply_reviewed_eps
-from scripts.eps.common import (
+from scripts.eps.sweep_curves import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
     RELEASE_ROUTE,

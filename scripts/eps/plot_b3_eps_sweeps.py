@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.eps.common import read_singleton_inclusive_curve, read_sweep_curve  # noqa: E402
+from scripts.eps.sweep_curves import read_singleton_inclusive_curve, read_sweep_curve  # noqa: E402
 
 
 def plot(root: Path, datasets: Sequence[str], output: Path, reference_eps: float | None = None) -> Path:

@@ -17,7 +17,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, FastCluster
-from scripts.eps import common, sweep_eps_on_linking_gold
+from scripts.eps import sweep_curves, sweep_eps_on_linking_gold
 from tests.incremental_test_helpers import _dataset, prepare_seed_arrow_bundle
 from tests.model_helpers import ConstantDistanceClassifier
 
@@ -219,15 +219,15 @@ def test_eps_sweep_resolves_bound_model_and_arrow_inputs(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    assert common.arrow_dataset_dir(arrow_root, "dummy") == dataset_manifest.parent.resolve()
+    assert sweep_curves.arrow_dataset_dir(arrow_root, "dummy") == dataset_manifest.parent.resolve()
     with pytest.raises(ValueError, match="does not declare"):
-        common.arrow_dataset_dir(arrow_root, "other")
+        sweep_curves.arrow_dataset_dir(arrow_root, "other")
 
     undeclared_root = tmp_path / "undeclared"
     (undeclared_root / "dummy").mkdir(parents=True)
     (undeclared_root / "dummy" / "manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(FileNotFoundError):
-        common.arrow_dataset_dir(undeclared_root, "dummy")
+        sweep_curves.arrow_dataset_dir(undeclared_root, "dummy")
 
 
 def test_cli_enforces_production_route_and_compute_bounds(monkeypatch: pytest.MonkeyPatch) -> None:

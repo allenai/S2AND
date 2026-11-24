@@ -1,4 +1,4 @@
-"""Shared helpers for reusable EPS sweep scripts."""
+"""Read and write EPS sweep curves, plans and their shared constants."""
 
 from __future__ import annotations
 

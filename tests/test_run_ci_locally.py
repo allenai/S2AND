@@ -18,7 +18,7 @@ from s2and.incremental_linking.feature_block_arrow import write_name_counts_inde
 from s2and.production_bundle import _write_json
 from scripts.dev import run_ci_locally as run_ci
 from scripts.dev import sync_feature_schema, sync_version
-from scripts.eps.common import write_json
+from scripts.eps.sweep_curves import write_json
 from scripts.release.verification.verify_production_model_distributions import verify_production_model_distributions
 from scripts.release.verification.verify_rust_distribution_licenses import LICENSE_PATHS, verify_archive
 from tests import shell_helpers

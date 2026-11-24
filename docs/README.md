@@ -34,6 +34,7 @@ The [data guide](data.md) defines the shared local layout and update rules.
 
 ## Contributor guides
 
+- [Code map](code_map.md)
 - [Development and local CI](development.md)
 - [Bounded model runs](bounded_runs.md)
 - [Giant-block EPS review](eps_calibration.md)

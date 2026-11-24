@@ -122,6 +122,8 @@ See [subblocking](docs/subblocking.md), [threading](docs/threading.md), and [env
 
 ## Development
 
+Use the [code map](docs/code_map.md) to follow prediction requests and find the training scripts.
+
 Run the full CI checks with `uv run --no-project python scripts/dev/run_ci_locally.py`.
 
 The tests require the native extension from the development setup.

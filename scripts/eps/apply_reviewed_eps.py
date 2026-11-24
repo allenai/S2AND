@@ -98,7 +98,8 @@ def _require_test_separated_reference(
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
     if block_roles is not None:
         role_digest = stats.get(BLOCK_ROLE_SHA256_FIELD)
-        if (block_roles.closure_mode == "home_pool" or role_digest is not None) and role_digest != block_roles.sha256:
+        needs_digest = policy == REFERENCE_POLICY_ALL_IDENTITIES or block_roles.closure_mode == "home_pool"
+        if (needs_digest or role_digest is not None) and role_digest != block_roles.sha256:
             raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
         orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
         if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
@@ -231,6 +232,24 @@ def _validated_sweep_plans(
         diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)
         if not diagnostic["reference_coverage"].eq(1).all():
             raise ValueError(f"Incomplete singleton-inclusive ORCID reference coverage: {dataset}")
+        labels = pd.read_parquet(
+            sweep_root / dataset / "orcid_reference.parquet", columns=["signature_id", "orcid", "repeated"]
+        )
+        if (
+            labels.empty
+            or labels.isna().any().any()
+            or labels["signature_id"].duplicated().any()
+            or not pd.api.types.is_bool_dtype(labels["repeated"])
+            or not labels["repeated"].any()
+        ):
+            raise ValueError(f"Expected a nonempty scored EPS reference: {dataset}")
+        repeats = labels.groupby("orcid")["signature_id"].transform("size").gt(1)
+        if not labels["repeated"].eq(repeats).all():
+            raise ValueError(f"Invalid repeated identities in EPS reference: {dataset}")
+        for scores, count in ((curve, int(repeats.sum())), (diagnostic, len(labels))):
+            columns = ["reference_signatures", "scored_signatures"]
+            if not set(columns) <= set(scores.columns) or not scores[columns].eq(count).all().all():
+                raise ValueError(f"EPS curve counts do not match the scored reference: {dataset}")
         plans[dataset] = {
             "plan_sha256": sha256_file(plan_path),
             "scores_sha256": sha256_file(score_path),

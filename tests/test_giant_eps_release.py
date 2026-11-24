@@ -144,7 +144,15 @@ def _curve(
     write_json(dataset / "plan.json", plan)
     diagnostic = dataset / "eps_b3_with_singletons.tsv"
     pd.DataFrame(
-        {"eps": [0.55, 0.65], "precision": [0.9, 0.7], "recall": [0.8, 1], "f1": [0.85, 0.82], "reference_coverage": 1}
+        {
+            "eps": [0.55, 0.65],
+            "precision": [0.9, 0.7],
+            "recall": [0.8, 1],
+            "f1": [0.85, 0.82],
+            "reference_coverage": 1,
+            "reference_signatures": 2,
+            "scored_signatures": 2,
+        }
     ).to_csv(diagnostic, sep="\t", index=False)
     scores = dataset / "eps_b3.tsv"
     pd.DataFrame(
@@ -154,6 +162,8 @@ def _curve(
             "recall": [0.8, 1],
             "f1": [8 / 9, 8 / 9],
             "reference_coverage": [1, 1],
+            "reference_signatures": 2,
+            "scored_signatures": 2,
         }
     ).to_csv(scores, sep="\t", index=False)
     write_json(
@@ -732,7 +742,13 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
     def set_sweep(labels: dict[str, str], *, bind_manifest: bool) -> None:
-        pd.DataFrame({"signature_id": list(labels), "orcid": list(labels.values())}).to_parquet(reference_path)
+        pd.DataFrame(
+            {
+                "signature_id": list(labels),
+                "orcid": list(labels.values()),
+                "repeated": pd.Series([True] * len(labels), dtype=bool),
+            }
+        ).to_parquet(reference_path)
         plan["reference"] = {**reference.stats, "sha256": sha256_file(reference_path)}
         if not bind_manifest:
             del plan["reference"][orcid_b3.BLOCK_ROLE_SHA256_FIELD]
@@ -757,6 +773,9 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
         apply()
     set_sweep({**reference.with_singletons, "q1": shared}, bind_manifest=True)
     with pytest.raises(ValueError, match="outside its home role"):
+        apply()
+    set_sweep({}, bind_manifest=True)
+    with pytest.raises(ValueError, match="nonempty scored EPS reference"):
         apply()
     set_sweep(reference.with_singletons, bind_manifest=True)
     assert apply()["sweep_plans"]["unit"]["reference"][orcid_b3.BLOCK_ROLE_SHA256_FIELD] == block_roles.sha256
@@ -811,7 +830,15 @@ def _uneven_curve(tmp_path: Path, source: Path) -> None:
     """A sweep whose F1 is 2/3 at EPS 0.55 and 8/9 at 0.65."""
     dataset = _curve(tmp_path / "curves", sha256_file(source / "manifest.json"))
     pd.DataFrame(
-        {"eps": [0.55, 0.65], "precision": [1, 0.8], "recall": [0.5, 1], "f1": [2 / 3, 8 / 9], "reference_coverage": 1}
+        {
+            "eps": [0.55, 0.65],
+            "precision": [1, 0.8],
+            "recall": [0.5, 1],
+            "f1": [2 / 3, 8 / 9],
+            "reference_coverage": 1,
+            "reference_signatures": 2,
+            "scored_signatures": 2,
+        }
     ).to_csv(dataset / "eps_b3.tsv", sep="\t", index=False)
     summary = json.loads((dataset / "summary.json").read_text(encoding="utf-8"))
     write_json(dataset / "summary.json", summary | {"score_sha256": sha256_file(dataset / "eps_b3.tsv")})

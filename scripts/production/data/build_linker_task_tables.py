@@ -27,7 +27,7 @@ from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K  # noqa: E402
 from s2and.incremental_linking.feature_block_arrow import temporary_cluster_seed_sidecars  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
-from scripts.eps_sweep.orcid_b3 import load_external_reference_labels  # noqa: E402
+from scripts.eps_sweep.orcid_b3 import read_external_reference_identity_evidence  # noqa: E402
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
 from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
 
@@ -85,13 +85,14 @@ def _freeze_block_rows(
     seeds: Mapping[str, str],
     query_ids: Sequence[str],
     labels: Mapping[str, str],
+    identities: Mapping[str, str],
     holdout_fraction: float,
     seed: int,
     n_jobs: int,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     role = block_roles.role_for(block)
     signatures = _read_signatures(arrow, block)
-    if missing := (set(seeds) | set(query_ids) | set(labels)) - signatures.keys():
+    if missing := (set(seeds) | set(query_ids) | set(identities)) - signatures.keys():
         raise ValueError(f"{block!r} inputs reference missing signatures: {sorted(missing)[:5]}")
     if len(set(query_ids)) != len(query_ids) or set(query_ids) & seeds.keys():
         raise ValueError(f"Queries in {block!r} must be unique and absent from the pre-attachment seeds")
@@ -103,25 +104,29 @@ def _freeze_block_rows(
     queries = [query for query in query_ids if query in scored or role == "gate_thresh"]
     gold_by_component: dict[str, set[str]] = defaultdict(set)
     components_by_orcid: dict[str, set[str]] = defaultdict(set)
+    identities_by_component: dict[str, set[str]] = defaultdict(set)
     representatives: dict[str, str] = {}
     for sid, component in seeds.items():
         representatives.setdefault(component, sid)
         if sid in scored:
             gold_by_component[component].add(scored[sid])
-        # Use deposited ORCIDs for exclusion only, without treating them as gold.
-        for orcid in {labels.get(sid), signatures[sid][1]}:
+        # Keep masked and deposited identities for exclusion and seed purity checks.
+        for orcid in {identities.get(sid), signatures[sid][1]}:
             if orcid is not None:
                 components_by_orcid[orcid].add(component)
+                identities_by_component[component].add(orcid)
     safe_components: dict[str, set[str]] = defaultdict(set)
-    for component, identities in gold_by_component.items():
-        if len(identities) == 1:
-            safe_components[next(iter(identities))].add(component)
+    safe_targets: set[str] = set()
+    for component, gold in gold_by_component.items():
+        if len(gold) == 1 and gold == identities_by_component[component]:
+            safe_targets.add(component)
+            safe_components[next(iter(gold))].add(component)
     eligible_authors = {scored[q] for q in queries if q in scored and scored[q] in safe_components}
     ordered_authors = sorted(
         eligible_authors, key=lambda orcid: hashlib.sha256(f"{seed}:{block}:{orcid}".encode()).hexdigest()
     )
     heldout_authors = set(ordered_authors[: round(holdout_fraction * len(ordered_authors))])
-    counts: Counter[str] = Counter()
+    counts: Counter[str] = Counter(short_windows=0)
     rows = []
     if queries:
         with temporary_cluster_seed_sidecars(seeds, prefix="linker_tasks_") as paths:
@@ -162,10 +167,13 @@ def _freeze_block_rows(
                     for index, query in enumerate(batch):
                         expected = min(DEFAULT_RETRIEVAL_TOP_K, len(representatives) - len(removed[index]))
                         window = sorted(windows[index])
+                        size = len(window)
                         candidate_keys = {component for _, component, _ in window}
                         if (
-                            [rank for rank, _, _ in window] != list(range(1, expected + 1))
-                            or len(candidate_keys) != expected
+                            [rank for rank, _, _ in window] != list(range(1, size + 1))
+                            or size > expected
+                            or len(candidate_keys) != size
+                            or candidate_keys - representatives.keys()
                             or candidate_keys & removed[index]
                         ):
                             raise ValueError(f"Incomplete or invalid top-25 window for {block!r} query {query!r}")
@@ -174,8 +182,9 @@ def _freeze_block_rows(
                         natural_safe = safe_components.get(query_orcid or "", set())
                         is_heldout = query_orcid in heldout_authors
                         counts[view] += 1
-                        counts["empty_windows"] += expected == 0
-                        counts["full_windows"] += expected == DEFAULT_RETRIEVAL_TOP_K
+                        counts["empty_windows"] += size == 0
+                        counts["short_windows"] += 0 < size < DEFAULT_RETRIEVAL_TOP_K
+                        counts["full_windows"] += size == DEFAULT_RETRIEVAL_TOP_K
                         counts["whole_author_holdout"] += is_heldout
                         counts["unscored_queries"] += query_orcid is None
                         for rank, component, score in window:
@@ -191,7 +200,7 @@ def _freeze_block_rows(
                                     rank,
                                     score,
                                     int(component in natural_safe and not is_heldout),
-                                    query_orcid is not None and (is_heldout or bool(gold_by_component.get(component))),
+                                    query_orcid is not None and component in safe_targets,
                                     bool(natural_safe) and not is_heldout,
                                     query_orcid is not None,
                                     is_heldout,
@@ -244,6 +253,7 @@ def build_linker_task_tables(
                     not isinstance(query, str) or not query for query in query_ids
                 ):
                     raise ValueError(f"Expected real request signature IDs in {query_path}")
+                identities, labels = read_external_reference_identity_evidence(label_path)
                 with ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow:
                     frame, counts = _freeze_block_rows(
                         arrow,
@@ -251,7 +261,8 @@ def build_linker_task_tables(
                         block_roles=roles,
                         seeds=read_seed_components(seed_path),
                         query_ids=query_ids,
-                        labels=load_external_reference_labels(label_path),
+                        labels=labels,
+                        identities=identities,
                         holdout_fraction=0 if role == "gate_thresh" else holdout_fraction,
                         seed=seed,
                         n_jobs=n_jobs,

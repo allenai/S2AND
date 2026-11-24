@@ -65,6 +65,8 @@ deterministically in `linker_train` and `gate_fit` and excludes all components c
 signatures before native retrieval. It verifies contiguous top-25 ranks, or the full eligible set for smaller blocks.
 Pass the resulting `linker_tasks.json` to `train_linker_and_finalize.py --linker-task-manifest` along with the
 same `--block-role-assignments` file. The trainer checks table hashes and computes features on the frozen windows.
+Native retrieval can return fewer than 25 candidates. Keep those windows and record their counts.
+Use all known seed identities for whole-author exclusion and leave mixed or unresolved targets unscored.
 It fits the ranker and gate on their respective tables and leaves the sealed block halves outside those inputs.
 
 ## First 1.5 experiment order

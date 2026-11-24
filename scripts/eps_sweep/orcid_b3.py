@@ -41,6 +41,13 @@ def load_external_reference_labels(path: Path, *, dataset: str | None = None) ->
     If a ``dataset`` column is present and ``dataset`` is given, filters to rows matching
     that dataset (preventing signature-ID collisions across multi-block label files).
     """
+    return read_external_reference_identity_evidence(path, dataset=dataset, include_unscored=False)[1]
+
+
+def read_external_reference_identity_evidence(
+    path: Path, *, dataset: str | None = None, include_unscored: bool = True
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Read all known identities and the subset eligible to score."""
     if not path.is_file():
         raise FileNotFoundError(path)
     frame = pd.read_parquet(path)
@@ -50,21 +57,25 @@ def load_external_reference_labels(path: Path, *, dataset: str | None = None) ->
         raise ValueError(f"External reference labels missing required columns: {missing}")
     if dataset is not None and "dataset" in frame.columns:
         frame = frame[frame["dataset"].astype(str).eq(str(dataset))]
-    if "scored" in frame:
-        frame = frame[frame["scored"].eq(True).fillna(False)]
+    eligible = frame["scored"].eq(True).fillna(False) if "scored" in frame else [True] * len(frame)
+    identities: dict[str, str] = {}
     labels: dict[str, str] = {}
-    for signature_id, raw_orcid in zip(frame["signature_id"], frame["orcid"], strict=True):
+    for signature_id, raw_orcid, scored in zip(frame["signature_id"], frame["orcid"], eligible, strict=True):
+        if not scored and not include_unscored:
+            continue
         if signature_id is None or raw_orcid is None or pd.isna(signature_id) or pd.isna(raw_orcid):
             continue
         sid = str(signature_id)
         orcid = normalize_orcid(str(raw_orcid))
         if not sid or not orcid:
             continue
-        existing = labels.get(sid)
+        existing = identities.get(sid)
         if existing is not None and existing != orcid:
             raise ValueError(f"Conflicting external ORCID labels for signature_id={sid!r}: {existing} vs {orcid}")
-        labels[sid] = orcid
-    return labels
+        identities[sid] = orcid
+        if scored:
+            labels[sid] = orcid
+    return identities, labels
 
 
 @dataclass(frozen=True)

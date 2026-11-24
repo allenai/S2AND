@@ -9,12 +9,20 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
+from scripts.eps_sweep.orcid_b3 import read_external_reference_identity_evidence
 from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
 from scripts.production.data.block_roles import load_block_roles
-from scripts.production.data.build_linker_task_tables import TASK_MANIFEST, TASK_ROLES, build_linker_task_tables
+from scripts.production.data.build_linker_task_tables import (
+    TASK_MANIFEST,
+    TASK_ROLES,
+    _freeze_block_rows,
+    build_linker_task_tables,
+    read_seed_components,
+)
 from scripts.production.model.train_linker_and_finalize import _materialize_frozen_linker_tasks
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
 
@@ -27,7 +35,7 @@ class _Pairwise:
         return np.full(len(features), 0.8)
 
 
-def _block_inputs(root: Path, block: str, orcid: str) -> dict[str, str]:
+def _block_inputs(root: Path, block: str, orcid: str, *, recent_seeds: int = 29) -> dict[str, str]:
     root.mkdir()
     arrow_dir = root / "arrow"
     n_seeds = 29
@@ -67,7 +75,7 @@ def _block_inputs(root: Path, block: str, orcid: str) -> dict[str, str]:
                 "title": ["Graph models" if hit else "Genetics" for hit in matching],
                 "venue": ["Conf"] * size,
                 "journal_name": [""] * size,
-                "year": pa.array([2020] * size, type=pa.int64()),
+                "year": pa.array([2020] * (3 + recent_seeds) + [1900] * (n_seeds - recent_seeds), type=pa.int64()),
             }
         ),
         "paper_authors": pa.table(
@@ -180,4 +188,64 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
             n_jobs=1,
             total_ram_bytes=1_000_000_000,
             max_query_groups=None,
+        )
+
+
+@pytest.mark.parametrize("recent_seeds", [1, 3])
+def test_frozen_builder_keeps_native_short_windows(tmp_path: Path, recent_seeds: int) -> None:
+    block = "a ross"
+    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0], recent_seeds=recent_seeds)
+    rows, counts = _freeze_fixture(spec, block, holdout_fraction=0)
+    assert rows["retrieval_rank"].tolist() == list(range(1, recent_seeds + 1))
+    assert rows["candidate_component_key"].tolist() == [f"c{i:02}" for i in range(recent_seeds)]
+    assert counts["short_windows"] == 1
+
+
+def test_seed_identity_evidence_survives_scoring_masks(tmp_path: Path) -> None:
+    block = "a ross"
+    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
+    seeds = pd.read_parquet(spec["seeds"])
+    seeds.loc[seeds["signature_id"].eq("s03"), "component_key"] = "c00"
+    seeds.to_parquet(spec["seeds"], index=False)
+    natural, _ = _freeze_fixture(spec, block, holdout_fraction=0)
+    mixed = natural.loc[natural["candidate_component_key"].eq("c00")].iloc[0]
+    assert not mixed["candidate_gold_scored"]
+    assert mixed["label"] == 0
+
+    labels = pd.read_parquet(spec["labels"]).assign(scored=True)
+    labels.loc[len(labels)] = ["s04", _ORCIDS[0], False]
+    labels.to_parquet(spec["labels"], index=False)
+    heldout, _ = _freeze_fixture(spec, block, holdout_fraction=1)
+    assert heldout["whole_author_holdout"].all()
+    assert "c04" not in set(heldout["candidate_component_key"])
+    assert not heldout["candidate_gold_scored"].any()
+
+
+def _freeze_fixture(
+    spec: dict[str, str], block: str, *, holdout_fraction: float
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    path = Path(spec["labels"]).parent / "roles.json"
+    roles = assign_block_roles(
+        [
+            BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME})),
+            BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
+        ],
+        {"gate_fit": 1},
+        pinned_roles={block: "gate_fit", "sealed": "final_test_a"},
+        closure_mode="home_pool",
+    )
+    path.write_text(json.dumps(roles), encoding="utf-8")
+    identities, labels = read_external_reference_identity_evidence(Path(spec["labels"]))
+    with ArrowDataset.open(spec["arrow_dir"], require_specter=True, require_name_counts_index=True) as arrow:
+        return _freeze_block_rows(
+            arrow,
+            block=block,
+            block_roles=load_block_roles(path),
+            seeds=read_seed_components(Path(spec["seeds"])),
+            query_ids=["q_full"],
+            labels=labels,
+            identities=identities,
+            holdout_fraction=holdout_fraction,
+            seed=42,
+            n_jobs=1,
         )

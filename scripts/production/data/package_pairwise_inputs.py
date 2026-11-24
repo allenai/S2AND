@@ -37,8 +37,8 @@ def package_pairwise_inputs(
     release_version: str = "1.3",
 ) -> dict[str, Any]:
     """Preserve source bytes and bind both Arrow collections to a shared index."""
-    if not isinstance(release_version, str) or not release_version.strip():
-        raise ValueError(f"Require a nonempty release_version: {release_version!r}")
+    if not isinstance(release_version, str) or not release_version or release_version.strip() != release_version:
+        raise ValueError(f"Require a nonempty trimmed release_version: {release_version!r}")
     prepared = prepared_root.resolve()
     output = output_root.resolve()
     if output.exists():

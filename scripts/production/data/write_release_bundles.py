@@ -320,6 +320,7 @@ def write_release_bundles(
         findings = scan_tree_for_plaintext_emails(output_root)
         if findings:
             sample = ", ".join(f"{item['path']} ({item['location']})" for item in findings[:5])
+            shutil.rmtree(output_root)
             raise ValueError(f"Plaintext email scan found {len(findings)} match(es) in staged bundles: {sample}")
     bundles = (inference, dataset) if skip_source_bundle else (inference, dataset, source)
     bundle_files = {bundle.name: [path for path in bundle.rglob("*") if path.is_file()] for bundle in bundles}
@@ -343,9 +344,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Also scrub plaintext email mentions from affiliations, titles, and abstracts.",
     )
     parser.add_argument(
-        "--verify-no-plaintext-emails",
-        action="store_true",
-        help="Scan staged bundles and fail if any plaintext email remains.",
+        "--no-verify-no-plaintext-emails",
+        dest="verify_no_plaintext_emails",
+        action="store_false",
+        default=True,
+        help="Skip the default plaintext-email scan on staged bundles (not recommended for public releases).",
     )
     args = parser.parse_args(argv)
     print(

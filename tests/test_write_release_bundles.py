@@ -277,7 +277,9 @@ def test_bundles_support_skip_source_and_plaintext_email_verification(snapshot: 
     assert set(summary["files"]) == {"inference", "dataset"}
     assert not (out_skip / "source").exists()
 
-    # The fixture writes plaintext fixture emails into benchmarks/qian, so verification catches them.
+    # The fixture writes plaintext fixture emails into benchmarks/qian, so verification catches them
+    # and removes the staged directory on failure.
     out_verify = tmp_path / "verify_fail"
     with pytest.raises(ValueError, match="Plaintext email scan found"):
         write_release_bundles(snapshot, out_verify, skip_source_bundle=True, verify_no_plaintext_emails=True)
+    assert not out_verify.exists()

@@ -1,7 +1,7 @@
 """Hash public replay emails without changing their pairwise feature evidence.
 
 Also supports intake-once redaction of structured email fields and free-text
-email mentions (`affiliations`, `title`, `abstract`) across JSON and Arrow
+email mentions (``affiliations``, ``title``, ``abstract``) across JSON and Arrow
 trees, plus plaintext-email scanning of staged release bundles.
 """
 
@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,20 +21,32 @@ import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.feature_block_arrow import write_arrow_batch_lookup_index
-from s2and.text import email_prefix_suffix
+from s2and.text import DASH_CHARS, email_prefix_suffix
 
 # Legacy 1.4 giant dataset names kept for backwards compatibility; release hashing
 # discovers datasets dynamically from replay_manifest.json and dataset directories.
 GIANT_DATASETS = ("a_khan", "a_silva", "h_wang", "j_smith", "s_gupta", "s_lee", "s_park")
 EMAIL_REDACTED_TOKEN = "[EMAIL_REDACTED]"
 _HASHED_EMAIL = re.compile(r"[0-9a-f]{64}@[0-9a-f]{64}|(?:hmac-sha256|sha256):[0-9a-f]{64}")
-# Matches standard emails, Unicode-dash variants (\u2010-\u2015), and malformed "@." forms.
-_EMAIL_LOCAL_CHARS = r"A-Za-z0-9._%+\-\u2010-\u2015"
-_EMAIL_DOMAIN_CHARS = r"A-Za-z0-9.\-\u2010-\u2015"
+
+# Matches ASCII and internationalized emails, fullwidth @, Unicode dashes (DASH_CHARS + \u2015),
+# brace-grouped locals ({a,b}@domain), quoted locals ("a"@domain), and malformed "@." forms.
+_EXTRA_DASHES = re.escape(DASH_CHARS + "\u2015")
+_EMAIL_LOCAL_CHARS = rf"A-Za-z0-9\u00C0-\u024F._%+{_EXTRA_DASHES}"
+_EMAIL_DOMAIN_LABEL = rf"[A-Za-z0-9\u00C0-\u024F{_EXTRA_DASHES}]+"
+_AT_CHARS = r"[@\uFF20]"
 _PLAINTEXT_EMAIL_RE = re.compile(
-    rf"(?<![{_EMAIL_LOCAL_CHARS}])[{_EMAIL_LOCAL_CHARS}]+@\.?[{_EMAIL_DOMAIN_CHARS}]+\.[A-Za-z]{{2,}}(?![A-Za-z])"
+    rf"(?:"
+    rf"\{{[{_EMAIL_LOCAL_CHARS},\s]+\}}"
+    rf"|\"[^\s\"@]+\""
+    rf"|(?<![{_EMAIL_LOCAL_CHARS}])[{_EMAIL_LOCAL_CHARS}]+"
+    rf")"
+    rf"{_AT_CHARS}\.?(?:{_EMAIL_DOMAIN_LABEL}\.)+[A-Za-z\u00C0-\u024F]{{2,24}}(?![A-Za-z0-9\u00C0-\u024F])"
 )
-_TEXT_SCAN_SUFFIXES = frozenset({".json", ".jsonl", ".tsv", ".csv", ".txt"})
+# Avoid flagging chemical nanoparticle formulas like "Fe3O4@SiO2.The" in abstracts.
+_CHEMICAL_FORMULA_PREFIX_RE = re.compile(r"^[A-Z][a-z]?\d+(?:[A-Z][a-z]?\d*)*[@\uFF20](?:[A-Z][a-z]?\d*)+\.")
+_JSON_ESCAPED_AT_RE = re.compile(r"\\u0040|\\uff20", re.IGNORECASE)
+_TEXT_SCAN_SUFFIXES = frozenset({".json", ".jsonl", ".tsv", ".csv", ".txt", ".md", ".yaml", ".yml", ".html"})
 _TEXT_SCAN_CHUNK_CHARS = 2 * 1024 * 1024
 _TEXT_SCAN_OVERLAP_CHARS = 512
 
@@ -55,33 +68,60 @@ def hash_feature_email(value: str | None) -> str | None:
     return "@".join(hashlib.sha256(part.encode("utf-8")).hexdigest() for part in (local, domain))
 
 
+def _is_real_plaintext_email(token: str) -> bool:
+    if _HASHED_EMAIL.fullmatch(token):
+        return False
+    if _CHEMICAL_FORMULA_PREFIX_RE.match(token):
+        return False
+    return True
+
+
 def scrub_text_emails(value: str | None, *, replacement: str = EMAIL_REDACTED_TOKEN) -> str | None:
     """Replace plaintext email mentions in free text without touching existing hashes.
 
-    Handles standard ASCII addresses as well as Unicode-hyphen (U+2010..U+2015) and
-    malformed ``user@.domain.tld`` variants observed in paper metadata and affiliations.
+    Handles standard ASCII addresses, internationalized local/domain names, fullwidth
+    ``＠``, Unicode hyphens, brace-grouped lists (``{a,b}@uni.edu``), quoted locals,
+    and malformed ``user@.domain.tld`` variants.
     """
     if not value:
         return value
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(0)
-        return token if _HASHED_EMAIL.fullmatch(token) else replacement
+        return replacement if _is_real_plaintext_email(token) else token
 
     return _PLAINTEXT_EMAIL_RE.sub(_replace, value)
 
 
+def _find_plaintext_emails_with_offsets(text: str) -> list[tuple[int, int, str]]:
+    found: list[tuple[int, int, str]] = []
+    for match in _PLAINTEXT_EMAIL_RE.finditer(text):
+        token = match.group(0)
+        if _is_real_plaintext_email(token):
+            found.append((match.start(), match.end(), token))
+    return found
+
+
 def _find_plaintext_emails(text: str) -> list[str]:
-    return [
-        match.group(0) for match in _PLAINTEXT_EMAIL_RE.finditer(text) if not _HASHED_EMAIL.fullmatch(match.group(0))
-    ]
+    return [token for _, _, token in _find_plaintext_emails_with_offsets(text)]
+
+
+def _atomic_temp_path(target: Path, suffix: str = ".email_hashing.tmp") -> Path:
+    handle = tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.", suffix=suffix, delete=False)
+    temp_path = Path(handle.name)
+    handle.close()
+    return temp_path
 
 
 def _write_json(path: Path, payload: Any) -> None:
-    # Replace the directory entry because release staging may use hardlinks.
-    temporary = path.with_suffix(path.suffix + ".email_hashing.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
-    temporary.replace(path)
+    # Replace the directory entry atomically because release staging may use hardlinks.
+    temporary = _atomic_temp_path(path, suffix=".json.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        temporary.replace(path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _scrub_arrow_string_or_list(array: pa.Array, field: pa.Field) -> tuple[pa.Array, int]:
@@ -108,139 +148,158 @@ def _scrub_arrow_string_or_list(array: pa.Array, field: pa.Field) -> tuple[pa.Ar
 
 
 def _hash_arrow(path: Path, *, scrub_free_text: bool = False) -> int:
-    temporary = path.with_suffix(".email_hashing.tmp")
+    temporary = _atomic_temp_path(path)
     changed = 0
-    with pa.memory_map(str(path), "r") as source:
-        reader = pa.ipc.open_file(source)
-        email_column = reader.schema.get_field_index("author_email")
-        affiliation_columns = (
-            [
-                idx
-                for name in ("author_affiliations", "affiliations")
-                if (idx := reader.schema.get_field_index(name)) >= 0
-            ]
-            if scrub_free_text
-            else []
-        )
-        if email_column < 0 and not affiliation_columns:
-            return 0
-        with pa.OSFile(str(temporary), "wb") as sink, pa.ipc.new_file(sink, reader.schema) as writer:
-            for index in range(reader.num_record_batches):
-                batch = reader.get_batch(index)
-                if email_column >= 0:
-                    before = batch.column(email_column).to_pylist()
-                    after = [hash_feature_email(value) for value in before]
-                    changed += sum(a != b for a, b in zip(before, after, strict=True))
-                    batch = batch.set_column(
-                        email_column,
-                        reader.schema.field(email_column),
-                        pa.array(after, type=reader.schema.field(email_column).type),
-                    )
-                for col_idx in affiliation_columns:
-                    field = reader.schema.field(col_idx)
-                    cleaned_col, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
-                    changed += col_changed
-                    batch = batch.set_column(col_idx, field, cleaned_col)
-                writer.write_batch(batch)
-    if changed:
-        temporary.replace(path)
-    else:
-        temporary.unlink()
+    try:
+        with pa.memory_map(str(path), "r") as source:
+            reader = pa.ipc.open_file(source)
+            email_column = reader.schema.get_field_index("author_email")
+            affiliation_columns = (
+                [
+                    idx
+                    for name in ("author_affiliations", "affiliations")
+                    if (idx := reader.schema.get_field_index(name)) >= 0
+                ]
+                if scrub_free_text
+                else []
+            )
+            if email_column < 0 and not affiliation_columns:
+                temporary.unlink(missing_ok=True)
+                return 0
+            with pa.OSFile(str(temporary), "wb") as sink, pa.ipc.new_file(sink, reader.schema) as writer:
+                for index in range(reader.num_record_batches):
+                    batch = reader.get_batch(index)
+                    if email_column >= 0:
+                        before = batch.column(email_column).to_pylist()
+                        after = [hash_feature_email(value) for value in before]
+                        changed += sum(a != b for a, b in zip(before, after, strict=True))
+                        batch = batch.set_column(
+                            email_column,
+                            reader.schema.field(email_column),
+                            pa.array(after, type=reader.schema.field(email_column).type),
+                        )
+                    for col_idx in affiliation_columns:
+                        field = reader.schema.field(col_idx)
+                        cleaned_col, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
+                        changed += col_changed
+                        batch = batch.set_column(col_idx, field, cleaned_col)
+                    writer.write_batch(batch)
+        if changed:
+            temporary.replace(path)
+        else:
+            temporary.unlink(missing_ok=True)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return changed
 
 
 def _scrub_papers_arrow(path: Path) -> int:
-    temporary = path.with_suffix(".email_hashing.tmp")
+    temporary = _atomic_temp_path(path)
     changed = 0
-    with pa.memory_map(str(path), "r") as source:
-        reader = pa.ipc.open_file(source)
-        text_columns = [idx for name in ("title", "abstract") if (idx := reader.schema.get_field_index(name)) >= 0]
-        if not text_columns:
-            return 0
-        with pa.OSFile(str(temporary), "wb") as sink, pa.ipc.new_file(sink, reader.schema) as writer:
-            for index in range(reader.num_record_batches):
-                batch = reader.get_batch(index)
-                for col_idx in text_columns:
-                    field = reader.schema.field(col_idx)
-                    cleaned_col, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
-                    changed += col_changed
-                    batch = batch.set_column(col_idx, field, cleaned_col)
-                writer.write_batch(batch)
-    if changed:
-        temporary.replace(path)
-    else:
-        temporary.unlink()
+    try:
+        with pa.memory_map(str(path), "r") as source:
+            reader = pa.ipc.open_file(source)
+            text_columns = [idx for name in ("title", "abstract") if (idx := reader.schema.get_field_index(name)) >= 0]
+            if not text_columns:
+                temporary.unlink(missing_ok=True)
+                return 0
+            with pa.OSFile(str(temporary), "wb") as sink, pa.ipc.new_file(sink, reader.schema) as writer:
+                for index in range(reader.num_record_batches):
+                    batch = reader.get_batch(index)
+                    for col_idx in text_columns:
+                        field = reader.schema.field(col_idx)
+                        cleaned_col, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
+                        changed += col_changed
+                        batch = batch.set_column(col_idx, field, cleaned_col)
+                    writer.write_batch(batch)
+        if changed:
+            temporary.replace(path)
+        else:
+            temporary.unlink(missing_ok=True)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return changed
 
 
 def _hash_source_json(path: Path, *, scrub_free_text: bool = False) -> int:
     changed = 0
-    temporary = path.with_suffix(".email_hashing.tmp")
-    with path.open("rb") as source, temporary.open("x", encoding="utf-8", newline="\n") as output:
-        output.write("{")
-        first = True
-        for key, record in ijson.kvitems(source, "", use_float=True):
-            info = record["author_info"]
-            for field in ("email", "emails"):
-                if field not in info:
-                    continue
-                before = info[field]
-                after = (
-                    [hash_feature_email(value) for value in before]
-                    if isinstance(before, list)
-                    else hash_feature_email(before)
-                )
-                changed += before != after
-                info[field] = after
-            if scrub_free_text:
-                for field in ("affiliations", "affiliation"):
-                    if field not in info:
-                        continue
-                    before = info[field]
-                    if isinstance(before, list):
-                        after = [scrub_text_emails(v) if isinstance(v, str) else v for v in before]
-                    elif isinstance(before, str):
-                        after = scrub_text_emails(before)
-                    else:
-                        continue
-                    changed += before != after
-                    info[field] = after
-            if not first:
-                output.write(",")
-            first = False
-            output.write(json.dumps(key) + ":" + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-        output.write("}\n")
-    if changed:
-        temporary.replace(path)
-    else:
-        temporary.unlink()
+    temporary = _atomic_temp_path(path)
+    try:
+        with path.open("rb") as source, temporary.open("w", encoding="utf-8", newline="\n") as output:
+            output.write("{")
+            first = True
+            for key, record in ijson.kvitems(source, "", use_float=True):
+                if isinstance(record, dict) and isinstance(record.get("author_info"), dict):
+                    info = record["author_info"]
+                    for field in ("email", "emails"):
+                        if field not in info:
+                            continue
+                        before = info[field]
+                        after = (
+                            [hash_feature_email(value) for value in before]
+                            if isinstance(before, list)
+                            else hash_feature_email(before)
+                        )
+                        changed += before != after
+                        info[field] = after
+                    if scrub_free_text:
+                        for field in ("affiliations", "affiliation"):
+                            if field not in info:
+                                continue
+                            before = info[field]
+                            if isinstance(before, list):
+                                after = [scrub_text_emails(v) if isinstance(v, str) else v for v in before]
+                            elif isinstance(before, str):
+                                after = scrub_text_emails(before)
+                            else:
+                                continue
+                            changed += before != after
+                            info[field] = after
+                if not first:
+                    output.write(",")
+                first = False
+                output.write(json.dumps(key) + ":" + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            output.write("}\n")
+        if changed:
+            temporary.replace(path)
+        else:
+            temporary.unlink(missing_ok=True)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return changed
 
 
 def _scrub_papers_json(path: Path) -> int:
     changed = 0
-    temporary = path.with_suffix(".email_hashing.tmp")
-    with path.open("rb") as source, temporary.open("x", encoding="utf-8", newline="\n") as output:
-        output.write("{")
-        first = True
-        for key, record in ijson.kvitems(source, "", use_float=True):
-            if isinstance(record, dict):
-                for field in ("title", "abstract"):
-                    before = record.get(field)
-                    if isinstance(before, str):
-                        after = scrub_text_emails(before)
-                        if after != before:
-                            changed += 1
-                            record[field] = after
-            if not first:
-                output.write(",")
-            first = False
-            output.write(json.dumps(key) + ":" + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-        output.write("}\n")
-    if changed:
-        temporary.replace(path)
-    else:
-        temporary.unlink()
+    temporary = _atomic_temp_path(path)
+    try:
+        with path.open("rb") as source, temporary.open("w", encoding="utf-8", newline="\n") as output:
+            output.write("{")
+            first = True
+            for key, record in ijson.kvitems(source, "", use_float=True):
+                if isinstance(record, dict):
+                    for field in ("title", "abstract"):
+                        before = record.get(field)
+                        if isinstance(before, str):
+                            after = scrub_text_emails(before)
+                            if after != before:
+                                changed += 1
+                                record[field] = after
+                if not first:
+                    output.write(",")
+                first = False
+                output.write(json.dumps(key) + ":" + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            output.write("}\n")
+        if changed:
+            temporary.replace(path)
+        else:
+            temporary.unlink(missing_ok=True)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     return changed
 
 
@@ -256,7 +315,9 @@ def _refresh_arrow_dataset_manifest(directory: Path, *, signatures_changed: bool
         sig_path = directory / paths["signatures"]
         if "signatures_batch_index" in paths:
             index_path = directory / paths["signatures_batch_index"]
-            write_arrow_batch_lookup_index(sig_path, index_path, key_column="signature_id", table_name="signatures")
+            write_arrow_batch_lookup_index(
+                sig_path, index_path, key_column="signature_id", table_name="signatures", overwrite=True
+            )
             files["signatures_batch_index"] = {
                 "byte_count": index_path.stat().st_size,
                 "sha256": sha256_file(index_path),
@@ -265,11 +326,39 @@ def _refresh_arrow_dataset_manifest(directory: Path, *, signatures_changed: bool
         updated = True
     if papers_changed and "papers" in paths:
         papers_path = directory / paths["papers"]
+        if "papers_batch_index" in paths:
+            index_path = directory / paths["papers_batch_index"]
+            write_arrow_batch_lookup_index(
+                papers_path, index_path, key_column="paper_id", table_name="papers", overwrite=True
+            )
+            files["papers_batch_index"] = {
+                "byte_count": index_path.stat().st_size,
+                "sha256": sha256_file(index_path),
+            }
         files["papers"] = {"byte_count": papers_path.stat().st_size, "sha256": sha256_file(papers_path)}
         updated = True
     if updated:
         _write_json(manifest_path, manifest)
     return updated
+
+
+def _refresh_source_inventory(source_root: Path, modified_paths: list[Path]) -> None:
+    """Update SHA-256 entries in ``source/corrected_sources/manifest.json`` after source edits."""
+    inventory_path = source_root / "corrected_sources" / "manifest.json"
+    if not modified_paths or not inventory_path.is_file():
+        return
+    payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        return
+    dirty = False
+    for path in modified_paths:
+        rel = path.relative_to(source_root).as_posix()
+        if rel in files:
+            files[rel] = sha256_file(path)
+            dirty = True
+    if dirty:
+        _write_json(inventory_path, payload)
 
 
 def _discover_release_datasets(output_root: Path) -> tuple[str, ...]:
@@ -300,7 +389,8 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
 
     Hashes structured ``email`` / ``emails`` / ``author_email`` fields while preserving
     normalized pairwise equality, and optionally scrubs plaintext email mentions from
-    ``affiliations``, ``title``, and ``abstract``. Refreshes any sibling Arrow manifests.
+    ``affiliations``, ``title``, and ``abstract``. Refreshes any sibling Arrow manifests
+    and batch lookup indexes (both ``signatures_batch_index`` and ``papers_batch_index``).
     """
     source_root = source_root.resolve()
     counts = {
@@ -335,40 +425,86 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
     return counts
 
 
+def _type_contains_string(ftype: pa.DataType) -> bool:
+    if pa.types.is_string(ftype) or pa.types.is_large_string(ftype) or pa.types.is_string_view(ftype):
+        return True
+    if pa.types.is_dictionary(ftype):
+        return _type_contains_string(ftype.value_type)
+    if pa.types.is_list(ftype) or pa.types.is_large_list(ftype) or pa.types.is_fixed_size_list(ftype):
+        return _type_contains_string(ftype.value_type)
+    if pa.types.is_struct(ftype):
+        return any(_type_contains_string(field.type) for field in ftype)
+    if pa.types.is_map(ftype):
+        return _type_contains_string(ftype.key_type) or _type_contains_string(ftype.item_type)
+    return False
+
+
+def _scan_nested_python_value(
+    value: Any,
+    *,
+    rel_path: str,
+    location: str,
+    findings: list[dict[str, str]],
+    max_findings: int,
+) -> None:
+    if value is None or len(findings) >= max_findings:
+        return
+    if isinstance(value, str):
+        if "@" not in value and "\uff20" not in value:
+            return
+        for match in _find_plaintext_emails(value):
+            findings.append(
+                {
+                    "path": rel_path,
+                    "location": location,
+                    "match_sha256": hashlib.sha256(match.encode("utf-8")).hexdigest()[:12],
+                }
+            )
+            if len(findings) >= max_findings:
+                return
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _scan_nested_python_value(
+                item, rel_path=rel_path, location=location, findings=findings, max_findings=max_findings
+            )
+            if len(findings) >= max_findings:
+                return
+    elif isinstance(value, dict):
+        for nested in value.values():
+            _scan_nested_python_value(
+                nested, rel_path=rel_path, location=location, findings=findings, max_findings=max_findings
+            )
+            if len(findings) >= max_findings:
+                return
+
+
 def _scan_arrow_batch(batch: pa.RecordBatch, rel_path: str, findings: list[dict[str, str]], max_findings: int) -> None:
     for col_idx, field in enumerate(batch.schema):
         if len(findings) >= max_findings:
             return
-        ftype = field.type
-        is_str = pa.types.is_string(ftype) or pa.types.is_large_string(ftype)
-        is_list_str = (pa.types.is_list(ftype) or pa.types.is_large_list(ftype)) and (
-            pa.types.is_string(ftype.value_type) or pa.types.is_large_string(ftype.value_type)
-        )
-        if not (is_str or is_list_str):
+        if not _type_contains_string(field.type):
             continue
-        for value in batch.column(col_idx).to_pylist():
-            if value is None:
-                continue
-            items = [value] if is_str else value
-            for item in items:
-                if not isinstance(item, str) or "@" not in item:
-                    continue
-                for match in _find_plaintext_emails(item):
-                    findings.append(
-                        {
-                            "path": rel_path,
-                            "location": f"column:{field.name}",
-                            "match_sha256": hashlib.sha256(match.encode("utf-8")).hexdigest()[:12],
-                        }
-                    )
-                    if len(findings) >= max_findings:
-                        return
+        col = batch.column(col_idx)
+        # For dictionary-encoded string columns, scanning the unique dictionary is both faster and complete.
+        if pa.types.is_dictionary(field.type):
+            values = col.dictionary.to_pylist()
+        else:
+            values = col.to_pylist()
+        location = f"column:{field.name}"
+        for value in values:
+            _scan_nested_python_value(
+                value, rel_path=rel_path, location=location, findings=findings, max_findings=max_findings
+            )
+            if len(findings) >= max_findings:
+                return
 
 
 def scan_tree_for_plaintext_emails(root: Path, *, max_findings: int = 20) -> list[dict[str, str]]:
     """Scan JSON, text, Arrow, and Parquet files under ``root`` for plaintext emails.
 
-    Returns compact findings without leaking the raw email addresses.
+    Returns compact findings without leaking raw email addresses. Deduplicates chunk-overlap
+    matches, handles JSON-escaped ``\\u0040``, and recursively inspects nested Arrow types
+    (including ``dictionary``, ``string_view``, ``list<struct>``, and ``map``).
     """
     root = root.resolve()
     findings: list[dict[str, str]] = []
@@ -382,14 +518,29 @@ def scan_tree_for_plaintext_emails(root: Path, *, max_findings: int = 20) -> lis
         if suffix in _TEXT_SCAN_SUFFIXES:
             with path.open("r", encoding="utf-8", errors="ignore") as stream:
                 tail = ""
+                window_start_offset = 0
+                seen_spans: set[tuple[int, int]] = set()
                 chunk_index = 0
                 while len(findings) < max_findings:
                     chunk = stream.read(_TEXT_SCAN_CHUNK_CHARS)
                     if not chunk:
                         break
                     window = tail + chunk
-                    if "@" in window:
-                        for match in _find_plaintext_emails(window):
+                    if suffix in {".json", ".jsonl"} and (
+                        "\\u0040" in window or "\\u0040" in window.lower() or "\\uff20" in window.lower()
+                    ):
+                        scan_window = _JSON_ESCAPED_AT_RE.sub("@", window)
+                    else:
+                        scan_window = window
+                    if "@" in scan_window or "\uff20" in scan_window:
+                        for start, end, match in _find_plaintext_emails_with_offsets(scan_window):
+                            # Skip partial matches abutting the right boundary before next chunk is read.
+                            if len(chunk) == _TEXT_SCAN_CHUNK_CHARS and end == len(scan_window):
+                                continue
+                            abs_span = (window_start_offset + start, window_start_offset + end)
+                            if abs_span in seen_spans:
+                                continue
+                            seen_spans.add(abs_span)
                             findings.append(
                                 {
                                     "path": rel_path,
@@ -399,7 +550,9 @@ def scan_tree_for_plaintext_emails(root: Path, *, max_findings: int = 20) -> lis
                             )
                             if len(findings) >= max_findings:
                                 break
-                    tail = window[-_TEXT_SCAN_OVERLAP_CHARS:]
+                    next_tail_len = min(_TEXT_SCAN_OVERLAP_CHARS, len(window))
+                    window_start_offset += len(window) - next_tail_len
+                    tail = window[-next_tail_len:] if next_tail_len else ""
                     chunk_index += 1
         elif suffix == ".arrow":
             with pa.memory_map(str(path), "r") as source:
@@ -433,9 +586,11 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
     """
     report: dict[str, dict[str, int]] = {}
     dataset = output_root / "dataset"
+    source_root = output_root / "source"
     replay_path = dataset / "replay_manifest.json"
     replay: dict[str, Any] | None = None
     replay_dirty = False
+    modified_sources: list[Path] = []
     for name in _discover_release_datasets(output_root):
         directory = dataset / "datasets" / name
         if not directory.exists():
@@ -445,12 +600,16 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
         papers_changed = _scrub_papers_arrow(papers_arrow) if scrub_free_text and papers_arrow.is_file() else 0
         changed = sig_changed + papers_changed
 
-        source_dir = output_root / "source" / "corrected_replay" / "raw" / name
+        source_dir = source_root / "corrected_replay" / "raw" / name
         source = source_dir / "signatures.json"
-        source_changed = _hash_source_json(source, scrub_free_text=scrub_free_text) if source.exists() else 0
+        source_sig_changed = _hash_source_json(source, scrub_free_text=scrub_free_text) if source.exists() else 0
+        if source_sig_changed:
+            modified_sources.append(source)
         source_papers = source_dir / "papers.json"
-        if scrub_free_text and source_papers.is_file():
-            source_changed += _scrub_papers_json(source_papers)
+        source_papers_changed = _scrub_papers_json(source_papers) if scrub_free_text and source_papers.is_file() else 0
+        if source_papers_changed:
+            modified_sources.append(source_papers)
+        source_changed = source_sig_changed + source_papers_changed
 
         report[name] = {"arrow_values": changed, "source_fields": source_changed}
         if not changed:
@@ -464,6 +623,8 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
             if isinstance(replay.get("dataset_manifests"), dict) and name in replay["dataset_manifests"]:
                 replay["dataset_manifests"][name]["sha256"] = sha256_file(directory / "manifest.json")
                 replay_dirty = True
+    if modified_sources:
+        _refresh_source_inventory(source_root, modified_sources)
     if replay is not None and replay_dirty:
         _write_json(replay_path, replay)
         public_path = dataset / "manifest.json"

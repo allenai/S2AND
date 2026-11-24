@@ -115,7 +115,7 @@ def _copy_corrected_sources(
 
 
 def _copy_current_tree(source: Path, destination: Path, *, snapshot: Path, inventory: dict[str, str]) -> None:
-    files = sorted(path for path in source.rglob("*") if path.is_file())
+    files = sorted(path for path in source.rglob("*") if path.is_file() and path.suffix != ".lock")
     if not files:
         raise ValueError(f"Current replay source contains no files: {source}")
     for file in files:
@@ -268,7 +268,18 @@ def package_corrected_datasets(
         index, context="corrected dataset package", producer_hint="pass the common index", verify=True
     )
     inputs = _read_json(pairwise / "inputs.json")
+    if release_version is not None and (
+        not isinstance(release_version, str) or not release_version or release_version.strip() != release_version
+    ):
+        raise ValueError(f"Require a nonempty trimmed release_version: {release_version!r}")
     version = inputs["release_version"] if release_version is None else release_version
+    if not isinstance(version, str) or not version or version.strip() != version:
+        raise ValueError(f"Require a nonempty trimmed release_version in pairwise inputs: {version!r}")
+    if release_version is not None and inputs["release_version"] != release_version:
+        raise ValueError(
+            f"Pairwise inputs release_version {inputs['release_version']!r} differs from "
+            f"--release-version {release_version!r}"
+        )
     public_manifests, _old_replays, public_version = read_arrow_collection_root(public / "manifest.json")
     if public_version is not None and public_version != version:
         raise ValueError("Public data and pairwise release versions differ")

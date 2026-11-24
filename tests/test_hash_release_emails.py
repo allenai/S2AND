@@ -141,17 +141,27 @@ def test_hashing_preserves_native_pairwise_and_incremental_aggregates(tmp_path: 
 def test_scrub_text_emails_handles_unicode_dashes_and_malformed_at_dot() -> None:
     hashed = hash_feature_email("alice@example.org")
     assert hashed is not None
-    text = f"Contact first\u2010last@uni\u2013dept.edu or odd@.mail.example.org; already hashed {hashed} stays intact."
+    text = (
+        f"Contact first\u2010last@uni\u2013dept.edu, odd@.mail.example.org, "
+        f'josé@uni.es, {{john,mary}}@uni.edu, user\uff20universität.de, "j.doe"@mit.edu; '
+        f"chemical Fe3O4@SiO2.The and already hashed {hashed} stay intact."
+    )
     scrubbed = scrub_text_emails(text)
     assert scrubbed is not None
     assert "first\u2010last@" not in scrubbed
     assert "odd@.mail.example.org" not in scrubbed
-    assert scrubbed.count(EMAIL_REDACTED_TOKEN) == 2
+    assert "josé@uni.es" not in scrubbed
+    assert "{john,mary}@uni.edu" not in scrubbed
+    assert "user\uff20universität.de" not in scrubbed
+    assert '"j.doe"@mit.edu' not in scrubbed
+    assert scrubbed.count(EMAIL_REDACTED_TOKEN) == 6
+    assert "Fe3O4@SiO2.The" in scrubbed
     assert hashed in scrubbed
 
 
 def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_path: Path) -> None:
-    # Non-hardcoded dataset name (not in legacy 7-giant list) is discovered and redacted.
+    # Non-hardcoded dataset name (not in legacy 7-giant list) is discovered and redacted,
+    # including rebuilding papers_batch_index and refreshing source inventory!
     dataset_dir = tmp_path / "dataset" / "datasets" / "b_chen"
     dataset_dir.mkdir(parents=True)
     sig_table = pa.table(
@@ -166,14 +176,30 @@ def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_pat
         pa.ipc.new_file(sink, sig_table.schema) as writer,
     ):
         writer.write_table(sig_table)
+    sig_idx = dataset_dir / "signatures.signatures_batch_index.bin"
+    write_arrow_batch_lookup_index(dataset_dir / "signatures.arrow", sig_idx, key_column="signature_id")
+
     papers_table = pa.table({"paper_id": ["p1"], "title": ["Study"], "abstract": ["Write to foo@.bar.edu"]})
     with (
         pa.OSFile(str(dataset_dir / "papers.arrow"), "wb") as sink,
         pa.ipc.new_file(sink, papers_table.schema) as writer,
     ):
         writer.write_table(papers_table)
+    papers_idx = dataset_dir / "papers.papers_batch_index.bin"
+    write_arrow_batch_lookup_index(dataset_dir / "papers.arrow", papers_idx, key_column="paper_id", table_name="papers")
+
     (dataset_dir / "manifest.json").write_text(
-        json.dumps({"paths": {"signatures": "signatures.arrow", "papers": "papers.arrow"}, "files": {}}),
+        json.dumps(
+            {
+                "paths": {
+                    "signatures": "signatures.arrow",
+                    "signatures_batch_index": sig_idx.name,
+                    "papers": "papers.arrow",
+                    "papers_batch_index": papers_idx.name,
+                },
+                "files": {},
+            }
+        ),
         encoding="utf-8",
     )
     (tmp_path / "dataset" / "replay_manifest.json").write_text(
@@ -184,24 +210,66 @@ def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_pat
     )
     raw_dir = tmp_path / "source" / "corrected_replay" / "raw" / "b_chen"
     raw_dir.mkdir(parents=True)
-    (raw_dir / "signatures.json").write_text(
+    raw_sigs = raw_dir / "signatures.json"
+    raw_papers = raw_dir / "papers.json"
+    raw_sigs.write_text(
         json.dumps(
             {"s1": {"author_info": {"email": "b.chen@example.org", "affiliations": ["mail: b.chen@example.org"]}}}
         ),
         encoding="utf-8",
     )
-    (raw_dir / "papers.json").write_text(
+    raw_papers.write_text(
         json.dumps({"p1": {"title": "Email x@y.org", "abstract": "Plain abstract"}}), encoding="utf-8"
+    )
+    inv_path = tmp_path / "source" / "corrected_sources" / "manifest.json"
+    inv_path.parent.mkdir(parents=True)
+    inv_path.write_text(
+        json.dumps(
+            {
+                "files": {
+                    "corrected_replay/raw/b_chen/signatures.json": sha256_file(raw_sigs),
+                    "corrected_replay/raw/b_chen/papers.json": sha256_file(raw_papers),
+                }
+            }
+        ),
+        encoding="utf-8",
     )
 
     findings_before = scan_tree_for_plaintext_emails(tmp_path)
     assert len(findings_before) >= 4
-    # Findings must not leak raw plaintext addresses.
     assert "b.chen@example.org" not in json.dumps(findings_before)
 
     report = hash_release_emails(tmp_path, scrub_free_text=True)
     assert report == {"b_chen": {"arrow_values": 3, "source_fields": 3}}
     assert scan_tree_for_plaintext_emails(tmp_path) == []
+
+    # Verify papers_batch_index was rebuilt and is NOT stale!
+    _, papers_metrics = write_arrow_batch_lookup_index(
+        dataset_dir / "papers.arrow", papers_idx, key_column="paper_id", table_name="papers", overwrite=False
+    )
+    assert papers_metrics["reused"]
+    refreshed_manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert refreshed_manifest["files"]["papers_batch_index"]["sha256"] == sha256_file(papers_idx)
+    inv_after = json.loads(inv_path.read_text(encoding="utf-8"))["files"]
+    assert inv_after["corrected_replay/raw/b_chen/papers.json"] == sha256_file(raw_papers)
+
+    # Scanner catches JSON-escaped \u0040, dictionary<*, string>, and list<struct> Arrow columns.
+    probe = tmp_path / "scan_probe"
+    probe.mkdir()
+    (probe / "escaped.json").write_text('{"note": "alice\\u0040example.org"}\n', encoding="utf-8")
+    nested_table = pa.table(
+        {
+            "dict_col": pa.array(["bob@example.org"]).dictionary_encode(),
+            "struct_list": pa.array([[{"author": "carol@example.org"}]]),
+        }
+    )
+    with (
+        pa.OSFile(str(probe / "nested.arrow"), "wb") as sink,
+        pa.ipc.new_file(sink, nested_table.schema) as writer,
+    ):
+        writer.write_table(nested_table)
+    probe_findings = scan_tree_for_plaintext_emails(probe)
+    assert len(probe_findings) == 3
 
     # Standalone intake-once redaction also handles *_signatures.json / *_papers.json trees.
     intake = tmp_path / "intake"

@@ -521,3 +521,22 @@ def test_judge_coverage_requires_matching_natural_keys(tmp_path: Path, check: st
         assert not metrics["passes_control_bar"]
     else:
         assert report["cross_family_agreement"][0]["unresolved_share"] == 0.5
+
+
+def test_paired_judges_reject_inconsistent_strata(tmp_path: Path) -> None:
+    judges = []
+    for family, stratum in (("left", "small"), ("right", "giant")):
+        record = {
+            "item_id": "1",
+            "source_id": "source",
+            "block_key": "a smith",
+            "is_control": False,
+            "metadata": {"stratum": stratum},
+        }
+        key = tmp_path / f"{family}.json"
+        key.write_text(json.dumps({"packet_type": "pair", "shards": ["s"], "items": [record]}))
+        verdict = tmp_path / f"{family}.jsonl"
+        verdict.write_text(json.dumps({"item_id": "1", "verdict": "same"}) + "\n")
+        judges.append((family, verdict, key))
+    with pytest.raises(ValueError, match="Mismatched strata"):
+        score_judges(judges)

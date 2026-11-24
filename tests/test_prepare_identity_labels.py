@@ -384,3 +384,26 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     assert audit["repeated_orcids"] == 1
     assert audit["verification_mode"] == "position_block_and_name"
     assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 4
+
+
+def test_duplicate_verified_labels_keep_any_scored_evidence(tmp_path: Path) -> None:
+    orcid = "0000-0002-1694-233X"
+    arrow = tmp_path / "a_ross"
+    _write_signatures_arrow(
+        arrow,
+        [
+            {
+                "signature_id": "s1",
+                "paper_id": "1",
+                "author_position": 0,
+                "author_block": "a ross",
+                "author_orcid": orcid,
+            }
+        ],
+    )
+    gold = tmp_path / "gold.parquet"
+    row = {"paper_id": "1", "position": 0, "orcid": orcid, "block_key": "a ross"}
+    pd.DataFrame([{**row, "scored": False}, {**row, "scored": True}]).to_parquet(gold)
+    output = tmp_path / "labels.parquet"
+    prepare_identity_labels(arrow, gold, output)
+    assert pd.read_parquet(output)[["signature_id", "scored"]].values.tolist() == [["s1", True]]

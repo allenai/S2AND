@@ -29,8 +29,8 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
             BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME})),
             BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
         ],
-        {"dev_test": 1, "final_test_a": 1},
-        pinned_roles={block: "dev_test", "sealed": "final_test_a"},
+        {"eps_cal": 1, "final_test_a": 1},
+        pinned_roles={block: "eps_cal", "sealed": "final_test_a"},
         closure_mode="home_pool",
         pinned_home_roles={_OUTSIDE_HOME: "final_test_a"},
     )
@@ -42,7 +42,7 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
             tmp_path,
             block,
             roles_path=roles_path,
-            role="dev_test",
+            role="eps_cal",
             assignments=assignments,
             eps=0.38,
         )
@@ -130,6 +130,17 @@ def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with ArrowDataset.open(spec["arrow_dir"]) as arrow:
+        with pytest.raises(ValueError, match="Unmatched external ORCID labels.*1"):
+            score_block_role(
+                arrow,
+                tmp_path,
+                block,
+                roles_path=roles_path,
+                role="dev_test",
+                assignments={"q_full": "one"},
+                eps=0.38,
+                external_labels={"q_full": _ORCIDS[0], "absent": _ORCIDS[0]},
+            )
         with pytest.raises(ValueError, match="Incomplete ORCID reference coverage.*missing 6"):
             score_block_role(
                 arrow,

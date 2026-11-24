@@ -319,6 +319,8 @@ def score_block_role(
         block_roles=roles,
         require_repeated=False,
     )
+    if unmatched := reference.stats.get("external_labels_unmatched", 0):
+        raise ValueError(f"Unmatched external ORCID labels for {block!r}: {unmatched}")
     if missing := reference.with_singletons.keys() - assignments.keys():
         raise ValueError(f"Incomplete ORCID reference coverage for {block!r}: missing {len(missing)} assignments")
     return {

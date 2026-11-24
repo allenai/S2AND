@@ -2095,8 +2095,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             fixed_ranker_bundle, expected_ranker_sha256
         )
         fixed_booster = (ranker_path, expected_ranker_sha256)
-        if fixed_ranker.num_feature() != len(target["features"]):
-            raise ValueError("Fixed ranker feature count does not match the target")
     linker_legacy_paper_years = linker_feature_contract == LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
     if linker_legacy_paper_years and frozen_manifest is not None:
         raise ValueError("Contract-1 fixed ranker requires legacy calibration; frozen task windows use contract 2")

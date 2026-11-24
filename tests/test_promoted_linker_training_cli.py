@@ -731,8 +731,10 @@ def _fixed_ranker_source_fixture(tmp_path: Path) -> Path:
     return source
 
 
-@pytest.mark.parametrize("check", ["run", "contract", "opt_in", "source_manifest"])
-def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(tmp_path: Path, check: str) -> None:
+@pytest.mark.parametrize("check", ["run", "contract", "opt_in", "source_manifest", "legacy_frozen"])
+def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
+    tmp_path: Path, check: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from s2and._sha256 import sha256_file
     from s2and.production_model import load_production_model
 
@@ -761,6 +763,23 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(tmp_path: Path, 
             *([] if check == "opt_in" else ["--use-legacy-gate-calibration"]),
         ]
     )
+    if check == "legacy_frozen":
+        from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
+
+        roles = tmp_path / "roles.json"
+        roles.write_text(json.dumps(assign_block_roles([BlockSpec("a ross", 1, frozenset())], {"gate_fit": 1})))
+        args.use_legacy_gate_calibration = False
+        args.linker_task_manifest = tmp_path / "frozen.json"
+        args.block_role_assignments = roles
+
+        def reject_task_read(*args, **kwargs):
+            pytest.fail("contract-1 ranker reached frozen task materialization")
+
+        monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", reject_task_read)
+        with pytest.raises(ValueError, match="Contract-1 fixed ranker requires legacy calibration"):
+            promoted_train.run(args)
+        assert not output.exists()
+        return
     if check == "opt_in":
         try:
             with pytest.raises(ValueError, match="requires --use-legacy-gate-calibration"):
@@ -792,3 +811,22 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(tmp_path: Path, 
         reloaded = load_production_model(complete).incremental_linker_artifact
         assert reloaded is not None and reloaded.feature_contract_version == 1
         assert report["artifact_summary"]["gate_config"]["training_summary"]["calibration_queries"] == 2
+
+
+def test_fixed_ranker_publication_rechecks_booster_bytes(tmp_path: Path) -> None:
+    from s2and.incremental_linking.artifact import save_incremental_linking_artifact
+    from tests.promoted_linking_helpers import tiny_logistic_gate_config
+
+    _, fixed, digest = _fixed_ranker_fixture(tmp_path)
+    source = fixed / "incremental_linker" / "booster.lgb"
+    output = tmp_path / "new-artifact"
+    with pytest.raises(ValueError, match="SHA-256 changed before publication"):
+        save_incremental_linking_artifact(
+            None,
+            output,
+            fixed_booster=(source, digest[::-1]),
+            gate_config=tiny_logistic_gate_config(),
+            target_spec={},
+            pairwise_bundle_binding={"source": "fixture"},
+        )
+    assert not output.exists()

@@ -33,8 +33,12 @@ REFERENCE_POLICY_ALL_IDENTITIES = "all_reference_identities_block_disjoint"
 ORCID_ERROR_RECORDS = "orcid_error_query_signatures.json"
 
 
-def load_external_reference_labels(path: Path) -> dict[str, str]:
-    """Load verified external (signature_id, orcid) reference labels from parquet."""
+def load_external_reference_labels(path: Path, *, dataset: str | None = None) -> dict[str, str]:
+    """Load verified external (signature_id, orcid) reference labels from parquet.
+
+    If a ``dataset`` column is present and ``dataset`` is given, filters to rows matching
+    that dataset (preventing signature-ID collisions across multi-block label files).
+    """
     if not path.is_file():
         raise FileNotFoundError(path)
     frame = pd.read_parquet(path)
@@ -42,6 +46,8 @@ def load_external_reference_labels(path: Path) -> dict[str, str]:
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"External reference labels missing required columns: {missing}")
+    if dataset is not None and "dataset" in frame.columns:
+        frame = frame[frame["dataset"].astype(str).eq(str(dataset))]
     labels: dict[str, str] = {}
     for signature_id, raw_orcid in zip(frame["signature_id"], frame["orcid"], strict=True):
         if signature_id is None or raw_orcid is None or pd.isna(signature_id) or pd.isna(raw_orcid):
@@ -160,23 +166,32 @@ def read_reference(
     clones = frozenset(origins)
     with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
         with pa.PythonFile(infile, mode="r") as source:
-            columns = ["signature_id"] if external_labels is not None else ["signature_id", "author_orcid"]
-            table = ipc.open_file(source).read_all().select(columns)
+            reader = ipc.open_file(source)
+            has_arrow_orcid = "author_orcid" in reader.schema.names
+            columns = ["signature_id", "author_orcid"] if has_arrow_orcid else ["signature_id"]
+            table = reader.read_all().select(columns)
     rows = table.to_pydict()
+    sig_ids = [str(sid) for sid in rows["signature_id"]]
+    arrow_orcids = rows["author_orcid"] if has_arrow_orcid else [None] * len(sig_ids)
     candidates: dict[str, str] = {}
+    arrow_identity_map: dict[str, str] = {}
     excluded_rows = 0
     excluded_errors = 0
-    raw_orcids = (
-        [external_labels.get(str(sid)) for sid in rows["signature_id"]]
-        if external_labels is not None
-        else rows["author_orcid"]
-    )
-    for signature_id, raw_orcid in zip(rows["signature_id"], raw_orcids, strict=True):
-        signature_id = str(signature_id)
+    matched_external = 0
+    for signature_id, raw_arrow_orcid in zip(sig_ids, arrow_orcids, strict=True):
         if signature_id.startswith("visibleq:") and signature_id not in clones:
             raise ValueError("Derived query copies require their source map in the snapshot")
-        if signature_id in clones or raw_orcid is None:
+        if signature_id in clones:
             continue
+        if raw_arrow_orcid is not None:
+            norm_arrow = normalize_orcid(raw_arrow_orcid)
+            if norm_arrow and norm_arrow not in EXCLUDED_ORCID_GROUPS:
+                arrow_identity_map[signature_id] = norm_arrow
+        raw_orcid = external_labels.get(signature_id) if external_labels is not None else raw_arrow_orcid
+        if raw_orcid is None:
+            continue
+        if external_labels is not None:
+            matched_external += 1
         orcid = normalize_orcid(raw_orcid)
         if orcid in EXCLUDED_ORCID_GROUPS:
             excluded_rows += 1
@@ -184,11 +199,21 @@ def read_reference(
             excluded_errors += bool(orcid)
         elif orcid:
             candidates[signature_id] = orcid
-    test_groups = (
-        set()
-        if allow_all_identities
-        else {candidates[signature] for signature in test_identities if signature in candidates}
-    )
+    # Resolve final-test identities from BOTH external labels AND Arrow author_orcid so an
+    # unlabeled final-test record sharing an Arrow ORCID with dev records cannot leak its author group.
+    if allow_all_identities:
+        test_groups: set[str] = set()
+    else:
+        test_groups = set()
+        for signature in test_identities:
+            if signature in candidates:
+                test_groups.add(candidates[signature])
+            if signature in arrow_identity_map:
+                test_groups.add(arrow_identity_map[signature])
+            if external_labels is not None and signature in external_labels:
+                ext_orcid = normalize_orcid(external_labels[signature])
+                if ext_orcid and ext_orcid not in EXCLUDED_ORCID_GROUPS:
+                    test_groups.add(ext_orcid)
     with_singletons = {signature: orcid for signature, orcid in candidates.items() if orcid not in test_groups}
     counts = Counter(with_singletons.values())
     repeated = {signature: orcid for signature, orcid in with_singletons.items() if counts[orcid] >= 2}
@@ -197,6 +222,13 @@ def read_reference(
     if not repeated:
         raise ValueError(f"No repeated ORCID references for dataset={dataset}")
     excluded_fraction = (len(candidates) - len(with_singletons)) / len(candidates) if candidates else 0.0
+    extra_external_stats: dict[str, Any] = {}
+    if external_labels is not None:
+        extra_external_stats = {
+            "external_labels_total": len(external_labels),
+            "external_labels_matched": matched_external,
+            "external_labels_unmatched": max(0, len(external_labels) - matched_external),
+        }
     return OrcidReference(
         repeated=repeated,
         with_singletons=with_singletons,
@@ -205,6 +237,7 @@ def read_reference(
             "reference_kind": "repeated_orcid_identity",
             "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES if allow_all_identities else REFERENCE_POLICY,
             "reference_source": "external_labels" if external_labels is not None else "arrow_author_orcid",
+            **extra_external_stats,
             MAP_SHA256_FIELD: query_sources.sha256,
             "reference_signatures": len(repeated),
             "reference_groups": len(set(repeated.values())),

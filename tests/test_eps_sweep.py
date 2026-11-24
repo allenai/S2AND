@@ -430,8 +430,12 @@ def test_distance_cache_key_reuses_pairwise_across_linker_and_eps_variants(tmp_p
     def write_bundle(root: Path, *, pairwise_bytes: bytes, linker_bytes: bytes, eps: float) -> Path:
         (root / "pairwise").mkdir(parents=True)
         (root / "incremental_linker").mkdir(parents=True)
+        (root / "reproducibility").mkdir(parents=True)
         (root / "pairwise" / "main.lgb").write_bytes(pairwise_bytes)
         (root / "incremental_linker" / "linker.lgb").write_bytes(linker_bytes)
+        (root / "reproducibility" / "incremental_linker_training_target.json").write_text(
+            json.dumps({"linker_len": len(linker_bytes)}), encoding="utf-8"
+        )
         (root / "clusterer.json").write_text(
             json.dumps(
                 {
@@ -466,13 +470,15 @@ def test_distance_cache_key_reuses_pairwise_across_linker_and_eps_variants(tmp_p
     meta_a = meta(bundle_a)
     meta_b = meta(bundle_b)
     meta_c = meta(bundle_c)
+    # Pairwise fingerprint matches across linker/reproducibility/EPS variants, while full model_sha256 differs.
     assert meta_a["pairwise_model_sha256"] == meta_b["pairwise_model_sha256"]
+    assert meta_a["model_sha256"] != meta_b["model_sha256"]
     assert meta_a["pairwise_model_sha256"] != meta_c["pairwise_model_sha256"]
 
     cache_path = tmp_path / "cache.pkl"
     with cache_path.open("wb") as outfile:
         pickle.dump({"metadata": meta_a, "dist": [0.25]}, outfile)
-    # Linker/EPS variant at a different path reuses the cached pairwise distance matrix.
+    # Linker/EPS/target variant at a different path reuses the cached pairwise distance matrix.
     assert sweep_eps_on_linking_gold._load_cached_distance(cache_path, meta_b) == [0.25]
     # Changing pairwise booster invalidates the cache.
     with pytest.raises(ValueError, match="pairwise_model_sha256"):
@@ -488,23 +494,38 @@ def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
     with pa.OSFile(raw["signatures"], "rb") as source:
         table = pa.ipc.open_file(source).read_all()
     rows = table.to_pylist()
-    # Wipe author_orcid in Arrow so labels must come from the external parquet.
-    for row in rows:
-        row["author_orcid"] = None
+    valid = "0000-0002-1694-233X"
+    # Regression test (Astra #3): rows[0], rows[1], rows[2] share valid Arrow ORCID; external labels
+    # only cover rows[0] and rows[1], omitting final-test rows[2].
+    rows[0]["author_orcid"] = valid
+    rows[1]["author_orcid"] = valid
+    rows[2]["author_orcid"] = valid
     paths = write_arrow_tables_bundle(tmp_path / "raw", {"signatures": pa.Table.from_pylist(rows, schema=table.schema)})
     write_test_arrow_artifact_manifest(tmp_path / "raw", {**raw, **paths})
 
-    valid = "0000-0002-1694-233X"
     labels_path = tmp_path / "gold_orcid.parquet"
     pd.DataFrame(
         {
             "signature_id": [rows[0]["signature_id"], rows[1]["signature_id"]],
             "orcid": [f"https://orcid.org/{valid}", valid],
+            "dataset": ["unit", "unit"],
         }
     ).to_parquet(labels_path, index=False)
-    external = orcid_b3.load_external_reference_labels(labels_path)
+    external = orcid_b3.load_external_reference_labels(labels_path, dataset="unit")
 
     with ArrowDataset.open(Path(paths["signatures"]).parent) as dataset:
+        # Even though rows[2] is omitted from external_labels, its Arrow ORCID excludes the whole group!
+        with pytest.raises(ValueError, match="No repeated ORCID references"):
+            orcid_b3.read_reference(
+                dataset,
+                tmp_path,
+                "unit",
+                test_identities=frozenset({rows[2]["signature_id"]}),
+                error_records=frozenset(),
+                external_labels=external,
+                allow_all_identities=False,
+            )
+
         ref = orcid_b3.read_reference(
             dataset,
             tmp_path,
@@ -517,6 +538,7 @@ def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
         assert ref.repeated == {rows[0]["signature_id"]: valid, rows[1]["signature_id"]: valid}
         assert ref.stats["reference_policy"] == orcid_b3.REFERENCE_POLICY_ALL_IDENTITIES
         assert ref.stats["reference_source"] == "external_labels"
+        assert ref.stats["external_labels_matched"] == 2
         with pytest.raises(ValueError, match="allow_all_identities"):
             orcid_b3.read_reference(
                 dataset,

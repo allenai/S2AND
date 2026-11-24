@@ -535,24 +535,31 @@ def test_threads_budget_and_git_head_recorded_in_run_and_result(tmp_path: Path) 
     code = (
         "import json, os; from pathlib import Path; "
         "Path('env.json').write_text(json.dumps({k: os.environ.get(k) for k in "
-        "['RAYON_NUM_THREADS','POLARS_MAX_THREADS','S2AND_NUM_THREADS','LOKY_MAX_CPU_COUNT',"
-        "'OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','PYARROW_IO_THREAD_COUNT']}))"
+        "['OMP_NUM_THREADS','RAYON_NUM_THREADS','POLARS_MAX_THREADS','LOKY_MAX_CPU_COUNT',"
+        "'OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS']}))"
     )
     args = arguments(output, code)
-    args[0:0] = ["--threads", "4", "--min-free-gib", "0.001", "--expected-output", "env.json"]
+    args[0:0] = ["--threads", "2", "--min-free-gib", "0.001", "--expected-output", "env.json"]
     process = start(args, tmp_path)
     finish(process)
     assert process.returncode == 0
     observed = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
-    for primary in ("RAYON_NUM_THREADS", "POLARS_MAX_THREADS", "S2AND_NUM_THREADS", "LOKY_MAX_CPU_COUNT"):
-        assert observed[primary] == "4"
-    for secondary in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "PYARROW_IO_THREAD_COUNT"):
+    for primary in ("OMP_NUM_THREADS", "RAYON_NUM_THREADS", "POLARS_MAX_THREADS", "LOKY_MAX_CPU_COUNT"):
+        assert observed[primary] == "2"
+    for secondary in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         assert observed[secondary] == "1"
     result = json.loads((output / "result.json").read_text(encoding="utf-8"))
-    assert result["thread_budget"]["allocated_threads"] == 4
+    assert result["thread_budget"]["allocated_threads"] == 2
     assert result["cpu_capacity"]["logical_cpus"] >= 1
     assert result["disk_free_bytes_at_start"] > 0
     assert "git_head" in result
+
+    # Reject over-budget --threads unless --allow-over-budget is explicitly given.
+    with pytest.raises(ValueError, match="exceeds available budget"):
+        run_bounded.build_thread_environment(1000)
+    env_override, _ = run_bounded.build_thread_environment(2, omp_threads=1, allow_over_budget=True)
+    assert env_override["OMP_NUM_THREADS"] == "1"
+    assert env_override["RAYON_NUM_THREADS"] == "2"
 
 
 def test_min_free_gib_blocks_launch_when_insufficient(tmp_path: Path) -> None:

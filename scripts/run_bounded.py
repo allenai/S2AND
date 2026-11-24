@@ -45,19 +45,18 @@ TELEMETRY_GRACE_SECONDS = 10.0
 # by itself after its last client, so the runner tolerates it but never stops it.
 CONSOLE_HOST = PureWindowsPath(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "conhost.exe")
 PRIMARY_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
     "RAYON_NUM_THREADS",
     "POLARS_MAX_THREADS",
-    "S2AND_NUM_THREADS",
     "LOKY_MAX_CPU_COUNT",
 )
 SECONDARY_THREAD_ENV_VARS = (
-    "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
-    "PYARROW_IO_THREAD_COUNT",
 )
+RESERVED_LOGICAL_CPUS = 2
 
 
 def utc_now() -> str:
@@ -75,25 +74,41 @@ def detect_cpu_capacity() -> dict[str, int]:
             affinity_cpus = len(affinity)
     except (AttributeError, NotImplementedError, psutil.Error, OSError):
         pass
+    effective = int(min(logical_cpus, affinity_cpus))
     return {
         "logical_cpus": int(logical_cpus),
         "affinity_cpus": int(affinity_cpus),
-        "effective_cpus": int(min(logical_cpus, affinity_cpus)),
+        "effective_cpus": effective,
+        "max_recommended_threads": max(1, effective - RESERVED_LOGICAL_CPUS),
     }
 
 
 def build_thread_environment(
-    threads: int, base_env: Mapping[str, str] | None = None
+    threads: int,
+    base_env: Mapping[str, str] | None = None,
+    *,
+    omp_threads: int | None = None,
+    allow_over_budget: bool = False,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Build a child environment applying one compute-thread budget and 1-thread secondary pools."""
+    """Build a child environment applying one compute-thread budget and 1-thread secondary BLAS pools."""
     if threads <= 0:
         raise ValueError("--threads must be a positive integer")
+    if omp_threads is not None and omp_threads <= 0:
+        raise ValueError("--omp-threads must be a positive integer")
+    capacity = detect_cpu_capacity()
+    if not allow_over_budget and threads > capacity["max_recommended_threads"]:
+        raise ValueError(
+            f"--threads {threads} exceeds available budget {capacity['max_recommended_threads']} "
+            f"(effective_cpus={capacity['effective_cpus']}, reserve={RESERVED_LOGICAL_CPUS}); "
+            "pass --allow-over-budget to override"
+        )
     env = dict(os.environ if base_env is None else base_env)
     primary = {name: str(threads) for name in PRIMARY_THREAD_ENV_VARS}
+    if omp_threads is not None:
+        primary["OMP_NUM_THREADS"] = str(omp_threads)
     secondary = {name: "1" for name in SECONDARY_THREAD_ENV_VARS}
     env.update(primary)
     env.update(secondary)
-    capacity = detect_cpu_capacity()
     record: dict[str, Any] = {
         **capacity,
         "allocated_threads": int(threads),
@@ -110,18 +125,29 @@ def _existing_ancestor(path: Path) -> Path:
     return current
 
 
-def check_min_free_disk(target: Path, min_free_gib: float | None) -> int:
-    """Return free bytes on the volume of ``target`` and enforce ``min_free_gib`` if set."""
-    anchor = _existing_ancestor(target)
-    free_bytes = int(shutil.disk_usage(anchor).free)
-    if min_free_gib is not None:
-        required_bytes = int(min_free_gib * 1024**3)
-        if free_bytes < required_bytes:
-            raise OSError(
-                f"Insufficient free disk space under {anchor}: "
-                f"{free_bytes / 1024**3:.2f} GiB free < {min_free_gib:.2f} GiB required"
-            )
-    return free_bytes
+def check_min_free_disk(targets: Path | list[Path], min_free_gib: float | None) -> int:
+    """Return minimum free bytes across target volumes and enforce ``min_free_gib`` if set."""
+    paths = [targets] if isinstance(targets, Path) else list(targets)
+    checked_roots: set[str] = set()
+    min_free: int | None = None
+    for target in paths:
+        anchor = _existing_ancestor(target)
+        # Deduplicate by drive/mount anchor while still checking cross-volume expected outputs.
+        root_key = anchor.drive.casefold() if anchor.drive else str(anchor)
+        if root_key in checked_roots:
+            continue
+        checked_roots.add(root_key)
+        free_bytes = int(shutil.disk_usage(anchor).free)
+        if min_free is None or free_bytes < min_free:
+            min_free = free_bytes
+        if min_free_gib is not None:
+            required_bytes = int(min_free_gib * 1024**3)
+            if free_bytes < required_bytes:
+                raise OSError(
+                    f"Insufficient free disk space under {anchor}: "
+                    f"{free_bytes / 1024**3:.2f} GiB free < {min_free_gib:.2f} GiB required"
+                )
+    return 0 if min_free is None else min_free
 
 
 def detect_git_head(cwd: Path | None = None) -> str | None:
@@ -453,12 +479,16 @@ def supervise(args: argparse.Namespace) -> int:
         if path.parent == output and os.path.normcase(path.name) in RECORD_NAMES:
             raise ValueError(f"An expected output cannot be a runner record: {path}")
     threads = getattr(args, "threads", None)
+    omp_threads = getattr(args, "omp_threads", None)
+    allow_over_budget = bool(getattr(args, "allow_over_budget", False))
     min_free_gib = getattr(args, "min_free_gib", None)
-    disk_free_bytes_at_start = check_min_free_disk(output, min_free_gib)
+    disk_free_bytes_at_start = check_min_free_disk([output, *expected], min_free_gib)
     child_env: dict[str, str] | None = None
     thread_budget: dict[str, Any] | None = None
     if threads is not None:
-        child_env, thread_budget = build_thread_environment(threads)
+        child_env, thread_budget = build_thread_environment(
+            threads, omp_threads=omp_threads, allow_over_budget=allow_over_budget
+        )
     output.mkdir(parents=True, exist_ok=False)
     telemetry = Telemetry(output)
     child = None
@@ -604,13 +634,24 @@ def main() -> int:
         "--threads",
         type=int,
         default=None,
-        help="Apply a primary compute-thread budget and set secondary BLAS/OMP/Arrow pools to 1.",
+        help="Apply a primary compute-thread budget (OpenMP, Rayon, Polars, Loky) and set secondary BLAS pools to 1.",
+    )
+    parser.add_argument(
+        "--omp-threads",
+        type=int,
+        default=None,
+        help="Optional override for OMP_NUM_THREADS when --threads is set (e.g. 1 for Rust-only jobs).",
+    )
+    parser.add_argument(
+        "--allow-over-budget",
+        action="store_true",
+        help="Allow --threads above effective_cpus - 2.",
     )
     parser.add_argument(
         "--min-free-gib",
         type=float,
         default=None,
-        help="Fail before launch if free disk space on the output volume is below this threshold.",
+        help="Fail before launch if free disk space on the output or expected-output volumes is below this threshold.",
     )
     parser.add_argument("--expected-output", type=Path, action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -624,6 +665,8 @@ def main() -> int:
         parser.error("Resource limits must be finite and greater than zero")
     if args.threads is not None and args.threads <= 0:
         parser.error("--threads must be greater than zero")
+    if args.omp_threads is not None and args.omp_threads <= 0:
+        parser.error("--omp-threads must be greater than zero")
     if not args.command or args.command[0] != "--" or len(args.command) < 2:
         parser.error("A command must follow --")
     try:

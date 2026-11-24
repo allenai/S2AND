@@ -40,7 +40,12 @@ from scripts.eps_sweep.common import (
     read_sweep_curve,
     write_json,
 )
-from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY, final_test_query_identities
+from scripts.eps_sweep.orcid_b3 import (
+    REFERENCE_POLICY,
+    REFERENCE_POLICY_ALL_IDENTITIES,
+    final_test_query_identities,
+)
+from scripts.production.data.prepare_identity_labels import normalize_block_key
 from scripts.production.model.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
@@ -50,16 +55,47 @@ from scripts.production.model.initial_query_sources import (
 TestIdentityLoader = Callable[[Path, str, InitialQuerySources], frozenset[str]]
 
 
+def _load_verified_eps_cal_blocks(assignments_path: Path) -> tuple[frozenset[str], str]:
+    """Load an ``assign_block_roles.py`` manifest and verify zero cross-role ORCID overlap."""
+    payload = json.loads(assignments_path.read_text(encoding="utf-8"))
+    verification = payload.get("verification")
+    if not isinstance(verification, dict) or verification.get("cross_role_orcid_overlap") != 0:
+        raise ValueError(f"Block role manifest {assignments_path} does not certify zero cross-role ORCID overlap")
+    roles = payload.get("roles")
+    if not isinstance(roles, dict) or "eps_cal" not in roles:
+        raise ValueError(f"Block role manifest {assignments_path} missing roles.eps_cal")
+    eps_cal = frozenset(normalize_block_key(block) for block in roles["eps_cal"])
+    final_test = frozenset(normalize_block_key(block) for block in roles.get("final_test", ()))
+    if eps_cal & final_test:
+        raise ValueError(f"Block role manifest {assignments_path} overlaps eps_cal and final_test")
+    if not eps_cal:
+        raise ValueError(f"Block role manifest {assignments_path} has an empty eps_cal pool")
+    return eps_cal, sha256_file(assignments_path)
+
+
 def _require_test_separated_reference(
     sweep_root: Path,
     dataset: str,
     plan: dict[str, Any],
     test_identities: TestIdentityLoader,
     query_sources: InitialQuerySources,
+    *,
+    verified_eps_cal_blocks: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Recheck that the reference used for the curve contains no final-test record."""
     stats = plan.get("reference")
-    if not isinstance(stats, dict) or stats.get("reference_policy") != REFERENCE_POLICY:
+    if not isinstance(stats, dict):
+        raise ValueError(f"The EPS reference does not exclude final-test identities: {dataset}")
+    policy = stats.get("reference_policy")
+    if policy == REFERENCE_POLICY_ALL_IDENTITIES:
+        if verified_eps_cal_blocks is None:
+            raise ValueError(
+                f"Block-disjoint policy {REFERENCE_POLICY_ALL_IDENTITIES!r} "
+                f"requires --block-role-assignments: {dataset}"
+            )
+        if normalize_block_key(dataset) not in verified_eps_cal_blocks:
+            raise ValueError(f"Dataset {dataset!r} is not in the verified eps_cal block pool")
+    elif policy != REFERENCE_POLICY:
         raise ValueError(f"The EPS reference does not exclude final-test identities: {dataset}")
     snapshot_root = Path(plan["arrow_root"])
     expected_digest = plan.get(MAP_SHA256_FIELD)
@@ -68,9 +104,10 @@ def _require_test_separated_reference(
     reference_path = sweep_root / dataset / "orcid_reference.parquet"
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
-    reference = set(pd.read_parquet(reference_path, columns=["signature_id"])["signature_id"].astype(str))
-    if overlap := reference & test_identities(snapshot_root, dataset, query_sources):
-        raise ValueError(f"The EPS reference contains final-test records: {dataset} {sorted(overlap)[:5]}")
+    if policy == REFERENCE_POLICY:
+        reference = set(pd.read_parquet(reference_path, columns=["signature_id"])["signature_id"].astype(str))
+        if overlap := reference & test_identities(snapshot_root, dataset, query_sources):
+            raise ValueError(f"The EPS reference contains final-test records: {dataset} {sorted(overlap)[:5]}")
     return stats
 
 
@@ -112,8 +149,13 @@ def _validated_sweep_plans(
     source_hash: str,
     expected_batching_threshold: int,
     test_identities: TestIdentityLoader,
+    *,
+    block_role_assignments: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
+    verified_eps_cal: frozenset[str] | None = None
+    if block_role_assignments is not None:
+        verified_eps_cal, _ = _load_verified_eps_cal_blocks(block_role_assignments)
     folders = {path.name for path in sweep_root.iterdir() if path.is_dir()}
     if ignored := sorted(folders - set(datasets)):
         print(f"Ignoring EPS sweep folders outside --datasets: {ignored}", file=sys.stderr)
@@ -166,12 +208,21 @@ def _validated_sweep_plans(
         plan_snapshot = Path(plan["arrow_root"]).resolve()
         if query_sources is None:
             snapshot_root = plan_snapshot
-            release_datasets = _release_datasets_from_snapshot(snapshot_root)
-            if sorted(datasets) != release_datasets:
-                raise ValueError(
-                    "Release EPS review --datasets must match the snapshot's calibration assignments outside "
-                    f"s2and_eval: expected {release_datasets}, found {sorted(datasets)}"
-                )
+            if verified_eps_cal is not None:
+                requested_norm = {normalize_block_key(d) for d in datasets}
+                if requested_norm != verified_eps_cal:
+                    raise ValueError(
+                        "Block-disjoint EPS review --datasets must match the verified eps_cal pool: "
+                        f"expected {sorted(verified_eps_cal)}, found {sorted(requested_norm)}"
+                    )
+                release_datasets = sorted(datasets)
+            else:
+                release_datasets = _release_datasets_from_snapshot(snapshot_root)
+                if sorted(datasets) != release_datasets:
+                    raise ValueError(
+                        "Release EPS review --datasets must match the snapshot's calibration assignments outside "
+                        f"s2and_eval: expected {release_datasets}, found {sorted(datasets)}"
+                    )
             query_sources = load_initial_query_sources(
                 snapshot_root, dataset_names=release_datasets, expected_sha256=plan.get(MAP_SHA256_FIELD)
             )
@@ -180,7 +231,14 @@ def _validated_sweep_plans(
                 "Release EPS sweep plans must use one snapshot: "
                 f"{dataset} uses {plan_snapshot}, expected {snapshot_root}"
             )
-        reference = _require_test_separated_reference(sweep_root, dataset, plan, test_identities, query_sources)
+        reference = _require_test_separated_reference(
+            sweep_root,
+            dataset,
+            plan,
+            test_identities,
+            query_sources,
+            verified_eps_cal_blocks=verified_eps_cal,
+        )
         diagnostic = read_singleton_inclusive_curve(sweep_root, dataset, plan)
         if not diagnostic["reference_coverage"].eq(1).all():
             raise ValueError(f"Incomplete singleton-inclusive ORCID reference coverage: {dataset}")
@@ -263,6 +321,7 @@ def apply_reviewed_eps(
     close_pair: tuple[float, float] | None = None,
     release_version: str | None = None,
     precision_f1_tolerance: float | None = None,
+    block_role_assignments: Path | None = None,
 ) -> dict[str, Any]:
     """Write a fresh complete model with the reviewed EPS and preserve all trained artifact bytes.
 
@@ -307,7 +366,13 @@ def apply_reviewed_eps(
         if expected_batching_threshold is None or expected_batching_threshold <= 0:
             raise ValueError("A sweep review needs a positive --expected-batching-threshold")
         plans = _validated_sweep_plans(
-            sweep_root, datasets, eps, source_hash, expected_batching_threshold, test_identities
+            sweep_root,
+            datasets,
+            eps,
+            source_hash,
+            expected_batching_threshold,
+            test_identities,
+            block_role_assignments=block_role_assignments,
         )
     giant_f1_tolerance = (
         None
@@ -384,6 +449,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             "this below the best swept F1."
         ),
     )
+    parser.add_argument(
+        "--block-role-assignments",
+        type=Path,
+        default=None,
+        help="Optional verified assign_block_roles.py assignments.json authorizing block-disjoint eps_cal sweeps.",
+    )
     parser.add_argument("--review-note", required=True)
     parser.add_argument("--output-report", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -399,6 +470,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         release_version=args.release_version,
         precision_f1_tolerance=args.precision_f1_tolerance,
         expected_batching_threshold=args.expected_batching_threshold,
+        block_role_assignments=args.block_role_assignments,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

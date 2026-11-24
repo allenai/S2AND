@@ -549,8 +549,9 @@ def _cache_metadata(
     }
 
 
-def _is_linker_artifact_relpath(rel_path: str) -> bool:
-    return rel_path.split("/", 1)[0] == "incremental_linker"
+def _is_non_pairwise_bundle_relpath(rel_path: str) -> bool:
+    top = rel_path.split("/", 1)[0]
+    return top in {"incremental_linker", "reproducibility"}
 
 
 def _canonical_pairwise_clusterer_bytes(clusterer_path: Path) -> bytes:
@@ -578,8 +579,9 @@ def _canonical_pairwise_clusterer_bytes(clusterer_path: Path) -> bytes:
 def _pairwise_model_sha256(model_path: Path) -> str | None:
     """Hash only the pairwise-distance-determining parts of a model bundle.
 
-    Allows linker, gate, and EPS variants sharing identical pairwise boosters and
-    clusterer feature contracts to reuse cached pairwise distance matrices.
+    Excludes ``incremental_linker/``, ``reproducibility/``, and top-level ``manifest.json``
+    (for directory bundles containing ``pairwise/``) so linker, gate, target-spec, and EPS
+    variants sharing identical pairwise boosters reuse cached pairwise distance matrices.
     """
     if not model_path.exists():
         return None
@@ -590,11 +592,9 @@ def _pairwise_model_sha256(model_path: Path) -> str | None:
     has_pairwise_dir = (model_path / "pairwise").is_dir()
     for child in sorted(candidate for candidate in model_path.rglob("*") if candidate.is_file()):
         rel_path = child.relative_to(model_path).as_posix()
-        if _is_linker_artifact_relpath(rel_path):
+        if _is_non_pairwise_bundle_relpath(rel_path):
             continue
         if has_pairwise_dir and rel_path == "manifest.json":
-            # Top-level manifest hashes incremental_linker and EPS-mutated clusterer.json;
-            # pairwise files and canonical clusterer settings are hashed directly below.
             continue
         rel_bytes = rel_path.encode("utf-8")
         digest.update(len(rel_bytes).to_bytes(8, "little", signed=False))
@@ -622,8 +622,6 @@ def _path_stat_cache_key(path: Path) -> tuple[Any, ...]:
         entries: list[tuple[str, int, int]] = []
         for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
             rel_path = child.relative_to(path).as_posix()
-            if _is_linker_artifact_relpath(rel_path):
-                continue
             child_stat = child.stat()
             entries.append(
                 (
@@ -643,8 +641,6 @@ def _hash_directory(path: Path) -> tuple[int, int, str]:
     max_mtime_ns = int(path.stat().st_mtime_ns)
     for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
         rel_path = child.relative_to(path).as_posix()
-        if _is_linker_artifact_relpath(rel_path):
-            continue
         child_stat = child.stat()
         total_size += int(child_stat.st_size)
         max_mtime_ns = max(max_mtime_ns, int(child_stat.st_mtime_ns))
@@ -707,6 +703,8 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
     with path.open("rb") as infile:
         payload = pickle.load(infile)
     metadata = dict(payload.get("metadata", {}))
+    if not expected_metadata.get("pairwise_model_sha256"):
+        raise ValueError(f"Distance cache validation requires a non-null pairwise_model_sha256 for {path}")
     for key in [
         "dataset",
         "pairwise_model_sha256",
@@ -1329,7 +1327,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
             allow_all = bool(getattr(args, "allow_all_reference_identities", False))
             external_path = getattr(args, "reference_labels", None)
-            external_labels = load_external_reference_labels(external_path) if external_path is not None else None
+            external_labels = (
+                load_external_reference_labels(external_path, dataset=args.dataset)
+                if external_path is not None
+                else None
+            )
             test_identities = (
                 frozenset() if allow_all else final_test_query_identities(snapshot_root, args.dataset, query_sources)
             )
@@ -1350,7 +1352,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             identity_reference = reference.repeated
             diagnostic_reference = reference.with_singletons
-            reference_stats = reference.stats
+            reference_stats = dict(reference.stats)
+            if external_path is not None:
+                reference_stats["reference_labels_path"] = str(external_path.resolve())
+                reference_stats["reference_labels_sha256"] = _hash_file(external_path)
             args._excluded_signature_ids = reference.excluded_copies
             # The singleton-inclusive reference contains the repeated one, so one plan covers both curves.
             gold = planning_targets(args.dataset, diagnostic_reference)

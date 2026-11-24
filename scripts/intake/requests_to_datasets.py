@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import tarfile
@@ -11,22 +12,34 @@ from collections.abc import Collection, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TypedDict
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from s2and._atomic_io import exclusive_file_lock
 from s2and._sha256 import sha256_file
-from s2and.arrow_inputs import ArrowDataset, build_arrow_artifact_manifest, write_arrow_artifact_manifest
+from s2and.arrow_inputs import (
+    ArrowDataset,
+    build_arrow_artifact_manifest,
+    require_name_counts_index_artifact,
+    write_arrow_artifact_manifest,
+)
 from s2and.arrow_schema import validate_arrow_file_schema
 from s2and.arrow_tables import write_raw_arrow_batch_lookup_indexes
 from scripts.common.arrow_roots import (
+    _replace_json,
     generic_dataset_manifests,
     read_json_object,
     resolved_manifest_artifact_path,
     write_root_manifest,
 )
 from scripts.common.block_roles import normalize_block_key
+from scripts.common.email_redaction import redact_source_tree, scan_tree_for_plaintext_emails
+from scripts.intake.gate_public_snapshot import REDACTED_ABSTRACT_MARKER, load_paper_id_set
 
 REQUEST_SUFFIX = ".arrow.tar.gz"
 DATASET_TABLES = ("signatures", "papers", "paper_authors", "specter")
 SOURCE_RECORD = "request_source.json"
+SNAPSHOT_BINDING = "intake_manifest.json"
 
 
 class IntakeResult(TypedDict):
@@ -74,55 +87,142 @@ def _open_dataset(root: Path) -> None:
         pass
 
 
-def convert_requests(bundles: Sequence[Path], root: Path, name_counts_index: Path) -> dict[str, IntakeResult]:
+def _scan_dataset(root: Path) -> None:
+    if scan_tree_for_plaintext_emails(root, max_findings=1):
+        raise ValueError(f"Plaintext email remains in snapshot dataset: {root.name}")
+
+
+def _validate_block(path: Path, name: str) -> None:
+    with pa.memory_map(str(path), "r") as source:
+        reader = pa.ipc.open_file(source)
+        keys = {
+            normalize_block_key(value)
+            for batch in range(reader.num_record_batches)
+            for value in pc.unique(reader.get_batch(batch).column("author_block")).to_pylist()
+        }
+    if keys != {normalize_block_key(name)}:
+        raise ValueError(f"Bundle {name!r} does not match its author_block values: {sorted(keys)}")
+
+
+def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowed: frozenset[str]) -> None:
+    paper_ids = pa.array(sorted(allowed), type=pa.string())
+    abstract_ids = pa.array(sorted(abstract_allowed), type=pa.string())
+    for name, filename in paths.items():
+        path = Path(filename)
+        gated = path.with_suffix(".gated")
+        with pa.memory_map(filename, "r") as source:
+            reader = pa.ipc.open_file(source)
+            with pa.OSFile(str(gated), "wb") as output, pa.ipc.new_file(output, reader.schema) as writer:
+                for index in range(reader.num_record_batches):
+                    batch = reader.get_batch(index)
+                    batch = batch.filter(pc.is_in(batch.column("paper_id"), value_set=paper_ids))
+                    if name == "papers" and "abstract" in batch.schema.names:
+                        field = batch.schema.get_field_index("abstract")
+                        values = batch.column(field)
+                        redact = pc.and_kleene(
+                            pc.invert(pc.is_in(batch.column("paper_id"), value_set=abstract_ids)),
+                            pc.not_equal(values, ""),
+                        )
+                        batch = batch.set_column(
+                            field, "abstract", pc.if_else(redact, REDACTED_ABSTRACT_MARKER, values)
+                        )
+                    writer.write_batch(batch)
+        gated.replace(path)
+
+
+def _permission_digest(papers: frozenset[str]) -> str:
+    return hashlib.sha256(json.dumps(sorted(papers), separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def convert_requests(
+    bundles: Sequence[Path],
+    root: Path,
+    name_counts_index: Path,
+    *,
+    allowed_papers: frozenset[str],
+    abstract_allowed_papers: frozenset[str],
+) -> dict[str, IntakeResult]:
     """Validate and publish a collection of request datasets, reusing completed blocks."""
     by_name = {request_dataset_name(bundle): bundle for bundle in bundles}
     if not by_name or len(by_name) != len(bundles):
         raise ValueError("Supply at least one request bundle and no duplicate block names")
     root, name_counts_index = root.resolve(), name_counts_index.resolve()
-    with exclusive_file_lock(root / ".intake.lock"):
-        return _convert_datasets(by_name, root, name_counts_index)
-
-
-def _convert_datasets(by_name: dict[str, Path], root: Path, name_counts_index: Path) -> dict[str, IntakeResult]:
     index_digest = sha256_file(name_counts_index / "manifest.json")
+    binding: dict[str, object] = {
+        "name_counts_index_sha256": index_digest,
+        "permission_sha256": {
+            "s2ag": _permission_digest(allowed_papers),
+            "abstracts": _permission_digest(abstract_allowed_papers),
+        },
+    }
+    with exclusive_file_lock(root / ".intake.lock"):
+        snapshot_binding = root / SNAPSHOT_BINDING
+        if snapshot_binding.exists() or (root / "manifest.json").exists():
+            if read_json_object(snapshot_binding) != binding:
+                raise ValueError("Existing snapshot has different name-counts index or paper permissions")
+        else:
+            _replace_json(snapshot_binding, binding)
+        require_name_counts_index_artifact(
+            name_counts_index, context="request intake", producer_hint="Supply the production index", verify=True
+        )
+        return _convert_datasets(by_name, root, name_counts_index, binding, allowed_papers, abstract_allowed_papers)
+
+
+def _convert_datasets(
+    by_name: dict[str, Path],
+    root: Path,
+    name_counts_index: Path,
+    binding: dict[str, object],
+    allowed_papers: frozenset[str],
+    abstract_allowed_papers: frozenset[str],
+) -> dict[str, IntakeResult]:
     datasets = root / "datasets"
     datasets.mkdir(parents=True, exist_ok=True)
     published = generic_dataset_manifests(root) if (root / "manifest.json").exists() else {}
     manifests = {name: path.relative_to(root).as_posix() for name, path in published.items()}
-    for path in published.values():
+
+    def verify_retained(manifest: Path) -> dict[str, str]:
+        record = read_json_object(manifest.parent / SOURCE_RECORD)
+        if any(record.get(key) != value for key, value in binding.items()) or record.get(
+            "dataset_manifest_sha256"
+        ) != sha256_file(manifest):
+            raise ValueError(f"Existing dataset has different inputs or manifest: {manifest.parent}")
         index = resolved_manifest_artifact_path(
-            path, read_json_object(path)["paths"]["name_counts_index"], key="name_counts_index"
+            manifest, read_json_object(manifest)["paths"]["name_counts_index"], key="name_counts_index"
         )
         if index != name_counts_index:
-            raise ValueError(f"Existing dataset uses a different name-counts index: {path}")
+            raise ValueError(f"Existing dataset uses a different name-counts index: {manifest}")
+        _open_dataset(manifest.parent)
+        _scan_dataset(manifest.parent)
+        return record
 
+    retained = {name: verify_retained(path) for name, path in published.items()}
     results: dict[str, IntakeResult] = {}
     for name, bundle in sorted(by_name.items()):
         target = datasets / name
         manifest = target / "manifest.json"
         digest = sha256_file(bundle)
-        record = {"source_bundle_sha256": digest, "name_counts_index_sha256": index_digest}
+        record = {**binding, "source_bundle_sha256": digest}
         reused = target.exists()
         if reused:
-            if read_json_object(target / SOURCE_RECORD) != {**record, "dataset_manifest_sha256": sha256_file(manifest)}:
-                raise ValueError(f"Existing dataset has different inputs or manifest: {target}")
-            index = resolved_manifest_artifact_path(
-                manifest, read_json_object(manifest)["paths"]["name_counts_index"], key="name_counts_index"
-            )
-            if index != name_counts_index:
-                raise ValueError(f"Existing dataset uses a different name-counts index: {target}")
-            _open_dataset(target)
+            prior = retained[name] if name in retained else verify_retained(manifest)
+            if prior["source_bundle_sha256"] != digest:
+                raise ValueError(f"Existing dataset has a different source bundle: {target}")
         else:
-            staging = Path(tempfile.mkdtemp(dir=datasets, prefix=f".{name}."))
-            paths = extract_request_tables(bundle, staging, DATASET_TABLES)
-            paths, _ = write_raw_arrow_batch_lookup_indexes(paths, staging)
-            paths["name_counts_index"] = str(name_counts_index)
-            staged_manifest = write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, staging), staging)
-            _open_dataset(staging)
-            record["dataset_manifest_sha256"] = sha256_file(staged_manifest)
-            (staging / SOURCE_RECORD).write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
-            staging.rename(target)
+            with tempfile.TemporaryDirectory(dir=datasets, prefix=f".{name}.") as temp:
+                staging = Path(temp)
+                paths = extract_request_tables(bundle, staging, DATASET_TABLES)
+                _validate_block(Path(paths["signatures"]), name)
+                _gate_tables(paths, allowed_papers, abstract_allowed_papers)
+                redact_source_tree(staging)
+                _scan_dataset(staging)
+                paths, _ = write_raw_arrow_batch_lookup_indexes(paths, staging)
+                paths["name_counts_index"] = str(name_counts_index)
+                staged_manifest = write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, staging), staging)
+                _open_dataset(staging)
+                record["dataset_manifest_sha256"] = sha256_file(staged_manifest)
+                _replace_json(staging / SOURCE_RECORD, record)
+                staging.rename(target)
         manifests[name] = manifest.relative_to(root).as_posix()
         results[name] = {"source_bundle_sha256": digest, "reused": reused}
 
@@ -136,11 +236,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("requests", nargs="+", type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--name-counts-index", required=True, type=Path)
+    parser.add_argument("--allowed-papers", required=True, type=Path)
+    parser.add_argument("--abstract-allowed-papers", required=True, type=Path)
     args = parser.parse_args(argv)
     bundles = args.requests
     if len(bundles) == 1 and bundles[0].is_dir():
         bundles = sorted(bundles[0].glob(f"*{REQUEST_SUFFIX}"))
-    print(json.dumps(convert_requests(bundles, args.output_root, args.name_counts_index), sort_keys=True))
+    results = convert_requests(
+        bundles,
+        args.output_root,
+        args.name_counts_index,
+        allowed_papers=load_paper_id_set(args.allowed_papers),
+        abstract_allowed_papers=load_paper_id_set(args.abstract_allowed_papers),
+    )
+    print(json.dumps(results, sort_keys=True))
     return 0
 
 

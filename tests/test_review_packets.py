@@ -12,6 +12,7 @@ from scripts.production.data.review_packets import (
     build_blind_linker_packets,
     build_blind_pair_packets,
     main,
+    sanitize_paper_item,
     score_judges,
     validate_blind_packet_records,
 )
@@ -35,6 +36,16 @@ def _paper(idx: int, *, email: bool = False, text_orcid: bool = False) -> dict:
         "cluster_summary": "LEAK",
         "score": 0.99,
     }
+
+
+@pytest.mark.parametrize("year", [1601, " 1800 "])
+def test_blind_review_hides_corpus_placeholder_years(year: int | str) -> None:
+    record = {"item_id": "test", "block_key": "a smith", "paper_a": {"year": year}, "paper_b": {"year": 1801}}
+    assert validate_blind_packet_records([record], packet_type="pair")
+    record["paper_a"] = sanitize_paper_item(record["paper_a"])
+    assert record["paper_a"] == {"year": None}
+    assert sanitize_paper_item(record["paper_b"]) == {"year": 1801}
+    assert validate_blind_packet_records([record], packet_type="pair") == []
 
 
 def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_controls(tmp_path: Path) -> None:

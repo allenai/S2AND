@@ -37,7 +37,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from s2and.consts import YEAR_DIFF_CAP
+from s2and.consts import PLACEHOLDER_YEARS, YEAR_DIFF_CAP, normalize_paper_year
 from s2and.pair_codes import code_tiles
 
 logger = logging.getLogger("s2and")
@@ -45,13 +45,10 @@ logger = logging.getLogger("s2and")
 # A surname block under this many mentions is small: there a shared first name bridges a gap.
 SMALL_SURNAME_BLOCK = 11
 
-# Years the corpus gives papers whose year it does not know; the split treats them as undated.
-PLACEHOLDER_YEARS = frozenset({1601, 1800})
-
 
 def split_years(years: Mapping[str, int]) -> dict[str, int]:
     """Return the years that date a mention for the split: above zero and not a placeholder."""
-    return {signature_id: year for signature_id, year in years.items() if year > 0 and year not in PLACEHOLDER_YEARS}
+    return {signature_id: year for signature_id, year in years.items() if normalize_paper_year(year) is not None}
 
 
 def _has_close_pair(codes: np.ndarray, block_width: int, a: np.ndarray, b: np.ndarray, close_code: int) -> bool:

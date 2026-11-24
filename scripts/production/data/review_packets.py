@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS  # noqa: E402
 from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
@@ -148,9 +149,9 @@ def sanitize_paper_item(raw: Mapping[str, Any], *, max_abstract_chars: int = 120
                 clean[key] = []
         elif key == "year":
             if isinstance(value, int) and not isinstance(value, bool):
-                clean[key] = value
+                clean[key] = normalize_paper_year(value)
             elif isinstance(value, str) and value.strip().isdigit():
-                clean[key] = int(value.strip())
+                clean[key] = normalize_paper_year(int(value.strip()))
             else:
                 clean[key] = None
         elif isinstance(value, str):
@@ -199,6 +200,8 @@ def _validate_paper_item(item: Any, *, prefix: str, violations: list[str]) -> No
         elif key == "year":
             if val is not None and (isinstance(val, bool) or not isinstance(val, int)):
                 violations.append(f"{prefix}.year: must be an integer or None")
+            elif val in PLACEHOLDER_YEARS:
+                violations.append(f"{prefix}.year: replace a corpus placeholder with None")
         elif val is not None and not isinstance(val, str):
             violations.append(f"{prefix}.{key}: must be a plain string or None")
     _scan_blind_value(item, path=prefix, violations=violations, allow_nested_dicts=True)

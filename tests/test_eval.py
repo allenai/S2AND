@@ -202,7 +202,7 @@ def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:
     )
     paper = SimpleNamespace(
         authors=[SimpleNamespace(author_name="Alice Smith")],
-        year=2020,
+        year=1601,
         has_abstract=False,
         venue="",
         journal_name="",
@@ -219,6 +219,8 @@ def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:
 
     assert result.homonymity_f1 == {0: [0.7]}
     assert result.synonymity_f1 == {0: [0.7]}
+    assert result.year_f1 == {0: [0.7]}
+    assert result.signature_lookup[0]["year"] is None
 
 
 class TestShapIntegration(unittest.TestCase):

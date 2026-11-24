@@ -2111,7 +2111,8 @@ impl RustFeaturizer {
                             raw_venue: raw_paper.venue.clone(),
                             raw_journal: raw_paper.journal_name.clone(),
                             raw_authors,
-                            year: raw_paper.year.filter(|year| *year > 0),
+                            // Preserve source stamps for the historical year-gap placement rule.
+                            year: raw_paper.year,
                             has_abstract: raw_paper.has_abstract,
                             predicted_language,
                             language_reliability,
@@ -2920,8 +2921,7 @@ impl RustFeaturizer {
         (full_first_names, orcids)
     }
 
-    /// Paper year per signature, for years above zero, as the featurizer reads years.
-    /// The year-gap split after name-conflict repair needs them.
+    /// Source year per signature for the year-gap split, including stamps on undated papers.
     fn signature_years(&self) -> Vec<(String, i64)> {
         self.signature_id_order()
             .iter()

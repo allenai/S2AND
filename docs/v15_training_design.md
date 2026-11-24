@@ -28,6 +28,13 @@ All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s
 
 ### Freeze roles and join gold
 
+Treat 1601 and 1800 as missing publication years when mining, labeling, or scoring pairs.
+Pairwise year distance is missing if either paper has a placeholder. Retrieval omits placeholders from
+candidate dates and year filters. Linker and gate year features use the existing missing-value behavior.
+The source Arrow year stays available for provenance and the year-gap split's historical placement rule.
+Rebuild feature tables and EPS distance caches created before this policy. EPS records distance policy 14.
+The Arrow schema, feature names, and model bundle formats are unchanged.
+
 Pass `--blocks` a JSON list or Parquet table with `block_key`, `signature_count`, `orcids` and `split`.
 Supply `size_band` and `script_region` (or separate `script` and `region`) to define strata.
 An explicit `stratum` overrides those fields. Otherwise, size defaults to the ≤1k, 1k–15k and >15k bands.

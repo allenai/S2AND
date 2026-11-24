@@ -17,6 +17,7 @@ from s2and.consts import (
     LARGE_INTEGER,
     NUMPY_NAN,
     YEAR_DIFF_CAP,
+    normalize_paper_year,
 )
 from s2and.data import ANDData, _resolve_signature_splits
 from s2and.feature_schema import (
@@ -625,8 +626,8 @@ def _single_pair_featurize(
     features.append(
         np.minimum(
             diff(
-                paper_1.year if paper_1.year is not None and paper_1.year > 0 else None,
-                paper_2.year if paper_2.year is not None and paper_2.year > 0 else None,
+                normalize_paper_year(paper_1.year),
+                normalize_paper_year(paper_2.year),
             ),
             YEAR_DIFF_CAP,
         )

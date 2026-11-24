@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import s2and.featurizer as featurizer_mod
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, PROJECT_ROOT_PATH
+from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, PLACEHOLDER_YEARS, PROJECT_ROOT_PATH, YEAR_DIFF_CAP
 from s2and.data import ANDData
 from s2and.feature_port import (
     _get_rust_featurizer,
@@ -353,6 +353,24 @@ def test_indexed_pair_matrix_rust_parity(source_dataset, arrow_dataset, sample_p
             assert equalish(ref_val, got_val), (
                 f"Featurize pair mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
             )
+
+
+@pytest.mark.parametrize("year", [*sorted(PLACEHOLDER_YEARS), 1600, 1602, 1799, 1801, 2005, None, 0])
+def test_python_and_rust_pair_years_treat_corpus_placeholders_as_missing(tmp_path, year):
+    dataset = _load_dataset_from_dir(os.path.join(PROJECT_ROOT_PATH, "tests", "dummy"), "year_diff_parity")
+    left, right = "0", "2"
+    for signature, new_year in ((left, year), (right, 2010)):
+        paper_id = str(dataset.signatures[signature].paper_id)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=new_year)
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
+    year_idx = featurizer_mod.FeaturizationInfo(["year_diff"]).selected_feature_indices()[0]
+    expected = (
+        np.nan if year is None or year == 0 or year in PLACEHOLDER_YEARS else min(abs(year - 2010), YEAR_DIFF_CAP)
+    )
+    python_features, _ = _single_pair_featurize((left, right), dataset=dataset)
+    np.testing.assert_equal(python_features[year_idx], expected)
+    for first, second in ((left, right), (right, left)):
+        np.testing.assert_equal(_featurize_pair_indexed_rust(arrow_dataset, first, second)[year_idx], expected)
 
 
 def test_language_reliability_min_is_pair_order_invariant_in_python_and_rust(tmp_path):

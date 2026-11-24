@@ -1,4 +1,5 @@
 use super::*;
+use crate::features::{normalize_paper_year, PLACEHOLDER_YEARS};
 use crate::retrieval_overlap::{
     component_overlap, overlap_scores, ComponentOverlap, OverlapIndex, PreparedQuery,
 };
@@ -206,7 +207,7 @@ pub(crate) fn year_signal_value(
     year: Option<i64>,
     field_name: &str,
 ) -> Result<(i32, u8), RetrievalError> {
-    let Some(value) = year else {
+    let Some(value) = year.filter(|value| !PLACEHOLDER_YEARS.contains(value)) else {
         return Ok((i32::MIN, 1));
     };
     let converted = validate_row_signal_year(value, field_name)?;
@@ -1390,20 +1391,20 @@ pub(crate) fn first_name_score_mode(
 }
 
 pub(crate) fn year_score(query_year: Option<i64>, summary: &RetrievalSummaryData) -> f64 {
-    let Some(query_year_value) = query_year else {
-        return 0.0;
-    };
-    let Some(year_mean) = summary.year_mean else {
+    let (Some(query_year_value), Some(year_min), Some(year_max), Some(year_mean)) = (
+        normalize_paper_year(query_year),
+        normalize_paper_year(summary.year_min),
+        normalize_paper_year(summary.year_max),
+        summary.year_mean,
+    ) else {
         return 0.0;
     };
     let distance = ((query_year_value as f64) - year_mean).abs();
     let mut score = (1.0 - (distance / RETRIEVAL_YEAR_SCORE_DECAY_YEARS)).max(0.0);
-    if let (Some(year_min), Some(year_max)) = (summary.year_min, summary.year_max) {
-        if query_year_value < year_min.saturating_sub(RETRIEVAL_YEAR_SCORE_RANGE_GAP)
-            || query_year_value > year_max.saturating_add(RETRIEVAL_YEAR_SCORE_RANGE_GAP)
-        {
-            score -= RETRIEVAL_YEAR_SCORE_RANGE_PENALTY;
-        }
+    if query_year_value < year_min.saturating_sub(RETRIEVAL_YEAR_SCORE_RANGE_GAP)
+        || query_year_value > year_max.saturating_add(RETRIEVAL_YEAR_SCORE_RANGE_GAP)
+    {
+        score -= RETRIEVAL_YEAR_SCORE_RANGE_PENALTY;
     }
     score
 }
@@ -1432,10 +1433,11 @@ pub(crate) fn has_impossible_year_conflict(
     summary: &RetrievalSummaryData,
     max_year_gap: i64,
 ) -> bool {
-    let Some(query_year_value) = query_year else {
-        return false;
-    };
-    let (Some(year_min), Some(year_max)) = (summary.year_min, summary.year_max) else {
+    let (Some(query_year_value), Some(year_min), Some(year_max)) = (
+        normalize_paper_year(query_year),
+        normalize_paper_year(summary.year_min),
+        normalize_paper_year(summary.year_max),
+    ) else {
         return false;
     };
     query_year_value < year_min.saturating_sub(max_year_gap)

@@ -2,7 +2,7 @@ use crate::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::constraints::same_prefix_tokens;
-use crate::features::{compute_name_counts_data, word_ngrams_counter};
+use crate::features::{compute_name_counts_data, normalize_paper_year, word_ngrams_counter};
 use crate::name_counts::{NameCountsData, RawNameCountMaps};
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::readers::{
@@ -81,7 +81,7 @@ pub(crate) fn build_raw_arrow_feature(
         (
             term_set_from_normalized_text(&normalized_venue),
             term_set_from_normalized_text(&normalized_title),
-            paper_data.year.filter(|year| *year > 0),
+            normalize_paper_year(paper_data.year),
         )
     } else {
         (HashSet::default(), HashSet::default(), None)

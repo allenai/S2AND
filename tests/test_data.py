@@ -13,6 +13,25 @@ from s2and.data import ANDData
 from tests.helpers import build_dummy_dataset, tiny_name_counts_index
 
 
+def test_time_split_groups_placeholder_years_with_missing_dates() -> None:
+    dataset = build_dummy_dataset("time_split")
+    dataset.unit_of_data_split = "time"
+    ids = list(dataset.signatures)
+    dataset.train_ratio = 1 / len(ids)
+    dataset.val_ratio = 1 / len(ids)
+    dataset.test_ratio = 1 - 2 / len(ids)
+    years = [1800, 1799, None, *([2010] * (len(ids) - 3))]
+    for signature, year in zip(ids, years, strict=True):
+        paper_id = str(dataset.signatures[signature].paper_id)
+        dataset.papers[paper_id] = dataset.papers[paper_id]._replace(year=year)
+
+    train, val, test = dataset.split_cluster_signatures()
+
+    assert [sid for block in train.values() for sid in block] == [ids[0]]
+    assert [sid for block in val.values() for sid in block] == [ids[2]]
+    assert {sid for block in test.values() for sid in block} == set(ids) - {ids[0], ids[2]}
+
+
 @pytest.mark.parametrize(
     "seeds, expected",
     [

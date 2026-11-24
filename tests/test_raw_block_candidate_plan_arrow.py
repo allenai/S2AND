@@ -13,6 +13,7 @@ import pytest
 
 import s2and.incremental_linking.retrieval as retrieval_module
 from s2and.arrow_inputs import ArrowDataset
+from s2and.consts import PLACEHOLDER_YEARS
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
@@ -337,6 +338,33 @@ def test_raw_arrow_candidate_planner_rejects_out_of_range_seed_year(tmp_path: Pa
 
     with pytest.raises(ValueError, match="raw Arrow summary year is outside the supported i32 range"):
         _raw_candidate_planner_from_query_signatures(paths, ["q1"])
+
+
+@pytest.mark.parametrize("stamp", sorted(PLACEHOLDER_YEARS))
+@pytest.mark.parametrize("affected_index", [0, 1])
+def test_raw_arrow_retrieval_matches_null_years_for_query_or_seed_stamps(
+    tmp_path: Path, stamp: int, affected_index: int
+) -> None:
+    stamped = [2020, 2015, 2010]
+    stamped[affected_index] = stamp
+    missing: list[int | None] = list(stamped)
+    missing[affected_index] = None
+    raw = _raw_candidate_plan_arrow(base_arrow_paths(tmp_path / "stamped", years=list(stamped)), ["q1"])
+    expected = _raw_candidate_plan_arrow(base_arrow_paths(tmp_path / "missing", years=missing), ["q1"])
+    _assert_raw_candidate_plans_equal(raw, expected)
+
+    labeled = native_labeled_plan(
+        base_arrow_paths(tmp_path / "labeled", years=list(stamped)),
+        row_query_signature_ids=["q1"],
+        row_query_views=["full"],
+        row_query_group_ids=["q1"],
+        row_component_keys=["c_match"],
+        stored_retrieval_ranks=[1],
+        component_members={"c_match": ("s1", "s2")},
+    )
+    assert labeled["row_candidate_year_min"].tolist() == [2010]
+    assert labeled["row_candidate_year_max"].tolist() == [2010 if affected_index == 1 else 2015]
+    assert labeled["row_query_year_missing"].tolist() == [int(affected_index == 0)]
 
 
 def test_raw_arrow_candidate_planner_matches_one_shot_plan(tmp_path: Path) -> None:

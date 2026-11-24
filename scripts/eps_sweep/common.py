@@ -34,8 +34,9 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # that share a first name; 10: the bridge counts the surname block, not the clustered unit,
 # and a 1601 or 1800 stamp follows the part whose years span it; 11: the repair's
 # three-cluster extension is removed (later rounds join the third cluster);
-# 12: guarded ORCID joins within blocks and across Arrow subblocks.
-DISTANCE_POLICY_VERSION = 13
+# 12–13: guarded ORCID joins within blocks and across Arrow subblocks.
+# 14: treat corpus placeholder years as missing when computing features and ranking candidates.
+DISTANCE_POLICY_VERSION = 14
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

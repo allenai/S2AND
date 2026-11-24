@@ -48,6 +48,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
+from s2and.consts import normalize_paper_year  # noqa: E402
 
 
 def _read_columns(arrow_dataset: ArrowDataset, table_name: str, columns: Sequence[str]) -> Any:
@@ -122,7 +123,7 @@ def seed_profiles_before_year(
     }
     seeds = {}
     for signature_id in signature_ids:
-        year = paper_year.get(signature_paper[signature_id])
+        year = normalize_paper_year(paper_year.get(signature_paper[signature_id]))
         if signature_id in labels and year is not None and year < before_year:
             seeds[signature_id] = labels[signature_id]
     return seeds

@@ -24,6 +24,7 @@ from sklearn.metrics import (
 )
 from tqdm import tqdm
 
+from s2and.consts import normalize_paper_year
 from s2and.data import _assemble_full_name, _resolve_signature_splits
 from s2and.featurizer import many_pairs_featurize
 from s2and.metrics import (
@@ -360,8 +361,8 @@ def facet_eval(
             _signature_dict["estimated_ethnicity"] = signature.author_info_estimated_ethnicity
 
         author_num_f1[len(paper.authors)].append(f1)
-        year_key: int = paper.year if paper.year is not None else 0
-        year_f1[year_key].append(f1)
+        year = normalize_paper_year(paper.year)
+        year_f1[year or 0].append(f1)
         cluster_len_f1[cluster_len_dict[cluster_id]].append(f1)
 
         # full first-name
@@ -434,7 +435,7 @@ def facet_eval(
         _signature_dict["recall"] = r
         _signature_dict["f1"] = f1
         _signature_dict["#authors"] = len(paper.authors)
-        _signature_dict["year"] = paper.year
+        _signature_dict["year"] = year
         _signature_dict["cluster size"] = cluster_len_dict[cluster_id]
 
         signature_lookup.append(_signature_dict)

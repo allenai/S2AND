@@ -828,8 +828,15 @@ pub(crate) fn email_pair_parts(
     Some((email_parts(e1)?, email_parts(e2)?))
 }
 
+pub(crate) const PLACEHOLDER_YEARS: [i64; 2] = [1601, 1800];
+
+pub(crate) fn normalize_paper_year(year: Option<i64>) -> Option<i64> {
+    year.filter(|year| *year > 0 && !PLACEHOLDER_YEARS.contains(year))
+}
+
 pub(crate) fn year_diff(year1: Option<i64>, year2: Option<i64>) -> f64 {
-    let (Some(y1_raw), Some(y2_raw)) = (year1, year2) else {
+    let (Some(y1_raw), Some(y2_raw)) = (normalize_paper_year(year1), normalize_paper_year(year2))
+    else {
         return f64::NAN;
     };
     let y1 = y1_raw as f64;

@@ -6,7 +6,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from s2and._sha256 import sha256_file
@@ -35,6 +35,9 @@ class BlockRoles:
     sha256: str
     closure_mode: str
     block_orcids: dict[str, frozenset[str]]
+    identity_roles: dict[str, frozenset[str]] = field(default_factory=dict)
+    evidence_sha256: str | None = None
+    snapshot_sha256: str | None = None
 
     def role_for(self, block_key: str) -> str:
         """Return the assigned role or reject an unassigned block."""
@@ -48,6 +51,8 @@ class BlockRoles:
         role = self.role_for(block_key)
         if orcid not in self.block_orcids[normalize_block_key(block_key)]:
             raise ValueError(f"ORCID {orcid!r} is absent from frozen block {block_key!r}")
+        if self.evidence_sha256 is not None:
+            return self.identity_roles[orcid] == {role}
         return in_orcid_home_role(orcid, role, self.orcid_home_role)
 
 
@@ -71,6 +76,8 @@ def load_block_roles(path: Path) -> BlockRoles:
             by_block[key] = role
     if "block_to_role" in payload and payload["block_to_role"] != by_block:
         raise ValueError(f"Inconsistent block_to_role and roles in {path}")
+    if payload.get("format_version") == 2:
+        return _load_evidence_roles(path, payload, by_block)
     mode = payload.get("closure_mode", verification.get("closure_mode", "strict"))
     if mode not in {"strict", "home_pool"}:
         raise ValueError(f"Invalid closure_mode in {path}")
@@ -102,3 +109,29 @@ def load_block_roles(path: Path) -> BlockRoles:
     ):
         raise ValueError(f"ORCID home roles do not match frozen block ORCIDs in {path}")
     return BlockRoles(by_block, homes, sha256_file(path), mode, block_orcids)
+
+
+def _load_evidence_roles(path: Path, payload: dict, by_block: dict[str, str]) -> BlockRoles:
+    block_orcids = {}
+    roles_by_orcid: dict[str, set[str]] = defaultdict(set)
+    if (
+        set(payload["block_orcids"]) != set(payload["evidence_blocks"])
+        or by_block.keys() - payload["block_orcids"].keys()
+    ):
+        raise ValueError(f"Frozen roles and evidence do not cover the same exported blocks: {path}")
+    for block, orcids in payload["block_orcids"].items():
+        if not isinstance(orcids, list) or any(normalize_orcid(orcid) != orcid for orcid in orcids):
+            raise ValueError(f"Invalid frozen ORCID list for {block!r} in {path}")
+        block_orcids[block] = frozenset(orcids)
+        for orcid in orcids:
+            roles_by_orcid[orcid].add(by_block.get(block, "unassigned"))
+    return BlockRoles(
+        by_block,
+        {},
+        sha256_file(path),
+        "block_only",
+        block_orcids,
+        {orcid: frozenset(roles) for orcid, roles in roles_by_orcid.items()},
+        payload["identity_evidence_sha256"],
+        payload["snapshot_sha256"],
+    )

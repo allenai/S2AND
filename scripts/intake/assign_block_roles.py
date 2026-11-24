@@ -32,13 +32,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and.text import normalize_orcid  # noqa: E402
+from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     FINAL_TEST_ROLES,
     in_orcid_home_role,
     load_block_roles,
     normalize_block_key,
 )
+from scripts.common.identity_ledger import (  # noqa: E402
+    EVIDENCE_SHA256_FIELD,
+    evidence_identities,
+    load_identity_evidence,
+)
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.intake.build_freeze_input import mention_counts  # noqa: E402
 
 PERMANENT_EXCLUDED_BLOCKS = frozenset({"f matsen"})
 LEGACY_DEV_TEST_BLOCKS = frozenset(
@@ -144,7 +151,7 @@ def verify_role_assignments(
     *,
     excluded_blocks: Collection[str] = PERMANENT_EXCLUDED_BLOCKS,
     dev_test_blocks: Collection[str] = LEGACY_DEV_TEST_BLOCKS,
-    closure_mode: Literal["strict", "home_pool"] = "strict",
+    closure_mode: Literal["strict", "home_pool", "block_only"] = "strict",
     enforce_source_splits: bool = False,
     orcid_home_role: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -192,6 +199,8 @@ def verify_role_assignments(
     )
     raw_overlap = {orcid for orcid, count in raw_counts.items() if count > 1}
     scored_overlap = {orcid for orcid, count in scored_counts.items() if count > 1}
+    if closure_mode == "block_only":
+        scored_overlap = set()
     if scored_overlap or (closure_mode == "strict" and raw_overlap):
         raise ValueError(f"ORCID overlap across roles: {sorted(scored_overlap or raw_overlap)[:5]}")
 
@@ -337,7 +346,14 @@ def _allocate_sealed_pairs(
             counts[role, by_key[key].stratum] += 1
 
     # Cover feasible rare strata before spending proportional quotas.
-    for stratum in sorted(strata, key=lambda value: (sizes[value], value)):
+    for stratum in sorted(
+        strata,
+        key=lambda value: (
+            len(strata[value]) == 1 and all(not counts[role, value] for role in FINAL_TEST_ROLES),
+            sizes[value],
+            value,
+        ),
+    ):
         queue = strata[stratum]
         missing = [role for role in FINAL_TEST_ROLES if not counts[role, stratum]]
         if len(queue) == 1 and len(missing) == 2:
@@ -380,7 +396,7 @@ def assign_block_roles(
     pinned_roles: Mapping[str, str] | None = None,
     pinned_home_roles: Mapping[str, str] | None = None,
     excluded_blocks: Collection[str] = (),
-    closure_mode: Literal["strict", "home_pool"] = "strict",
+    closure_mode: Literal["strict", "home_pool", "block_only"] = "strict",
     enforce_source_splits: bool = False,
     require_pinned_present: bool = False,
 ) -> dict[str, Any]:
@@ -472,7 +488,7 @@ def assign_block_roles(
 
     if closure_mode == "strict":
         components = build_orcid_components(active_blocks)
-    elif closure_mode == "home_pool":
+    elif closure_mode in {"home_pool", "block_only"}:
         components = [(block.block_key,) for block in sorted(active_blocks, key=lambda b: b.block_key)]
     else:
         raise ValueError(f"Unsupported closure_mode: {closure_mode!r}")
@@ -523,7 +539,7 @@ def assign_block_roles(
         }
         for role in target_order
     }
-    if all(role in role_targets for role in FINAL_TEST_ROLES):
+    if closure_mode != "block_only" and all(role in role_targets for role in FINAL_TEST_ROLES):
         sealed_counts = Counter(
             block.stratum
             for block in active_blocks
@@ -729,6 +745,112 @@ def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockS
     return specs
 
 
+def freeze_identity_roles(
+    blocks_path: Path,
+    evidence_path: Path,
+    targets: Mapping[str, int],
+    *,
+    prior_path: Path | None = None,
+    extra_pins: Mapping[str, str] | None = None,
+    dev_test_blocks: Collection[str] = (),
+    excluded_blocks: Collection[str] = (),
+    seed: int = 20261123,
+) -> dict[str, Any]:
+    """Freeze only exported blocks and discard every cross-role identity from scoring."""
+    import pyarrow.parquet as pq
+
+    evidence = load_identity_evidence(evidence_path)
+    metadata = pq.read_schema(blocks_path).metadata or {}
+    for digest_field, digest in {
+        EVIDENCE_SHA256_FIELD: evidence.sha256,
+        "snapshot_sha256": evidence.snapshot_sha256,
+        "intake_sha256": evidence.intake_sha256,
+    }.items():
+        if metadata.get(digest_field.encode()) != digest.encode():
+            raise ValueError(f"Freeze input {digest_field} does not match the identity evidence")
+    blocks = load_blocks(blocks_path, require_orcid_lists=True)
+    if {block.block_key for block in blocks} != evidence.blocks.keys():
+        raise ValueError("Freeze input must cover exactly the exported blocks")
+    evidence_blocks = {block: entry["sha256"] for block, entry in evidence.blocks.items()}
+    prior = read_json_object(prior_path) if prior_path else None
+    pins: dict[str, str] = {}
+    prior_exclusions: list[str] = []
+    if prior_path is not None and prior is not None:
+        if prior.get("format_version") != 2 or prior.get("intake_sha256") != evidence.intake_sha256:
+            raise ValueError("Re-freeze requires a prior ledger-backed manifest from the same intake")
+        if any(evidence_blocks.get(block) != digest for block, digest in prior["evidence_blocks"].items()):
+            raise ValueError("Prior evidence partitions changed or are missing")
+        pins.update(load_block_roles(prior_path).block_to_role)
+        prior_exclusions = prior["excluded_blocks"]
+    extra = {normalize_block_key(block): role for block, role in (extra_pins or {}).items()}
+    if len(extra) != len(extra_pins or {}):
+        raise ValueError("Duplicate normalized keys in --extra-pins-json")
+    if prior is not None and extra.keys() & prior["evidence_blocks"].keys():
+        raise ValueError("Extra pins may only name new exported blocks")
+    pins.update(extra)
+    roles = assign_block_roles(
+        blocks,
+        targets,
+        seed=seed,
+        extra_dev_test_blocks=dev_test_blocks,
+        pinned_roles=pins,
+        excluded_blocks=(*prior_exclusions, *excluded_blocks),
+        closure_mode="block_only",
+        enforce_source_splits=True,
+        require_pinned_present=True,
+    )
+    mapping = roles["block_to_role"]
+    identity_roles: dict[str, set[str]] = defaultdict(set)
+    for block in blocks:
+        for orcid in block.orcids:
+            identity_roles[orcid].add(mapping.get(block.block_key, "unassigned"))
+    cross_role = {orcid for orcid, assigned in identity_roles.items() if len(assigned) > 1}
+    identities_by_role: dict[str, set[str]] = defaultdict(set)
+    mentions_by_role: Counter[str] = Counter()
+    for block in blocks:
+        key = block.block_key
+        evidence_rows = evidence.read_block(key)
+        counts = mention_counts(evidence_rows)
+        if (
+            counts != block.orcid_mention_counts
+            or set(counts) != block.orcids
+            or len(evidence_rows) != block.signature_count
+        ):
+            raise ValueError(f"Freeze input differs from the exported identity evidence for {key!r}")
+        role = mapping.get(key, "unassigned")
+        identities_by_role[role].update(cross_role & counts.keys())
+        if cross_role & counts.keys():
+            mentions_by_role[role] += len(
+                {
+                    (row["corpus_paper_id"], row["position"])
+                    for row in evidence_rows.values()
+                    if not row["excluded"]
+                    and not row["reviewed_error"]
+                    and not evidence_identities(row).isdisjoint(cross_role)
+                }
+            )
+    for key in ("closure_mode", "cross_block_components", "component_size_summary", "orcid_home_role"):
+        roles.pop(key)
+    roles["verification"].pop("closure_mode")
+    roles["verification"]["raw_cross_role_orcid_overlap"] = len(cross_role)
+    roles["verification"]["cross_role_identities_by_role"] = {
+        role: len(identities_by_role[role]) for role in (*VALID_ROLES, "unassigned")
+    }
+    roles["verification"]["cross_role_mentions_by_role"] = {
+        role: mentions_by_role[role] for role in (*VALID_ROLES, "unassigned")
+    }
+    return {
+        **roles,
+        "format_version": 2,
+        EVIDENCE_SHA256_FIELD: evidence.sha256,
+        "snapshot_sha256": evidence.snapshot_sha256,
+        "intake_sha256": evidence.intake_sha256,
+        "evidence_blocks": evidence_blocks,
+        "block_orcids": {block.block_key: sorted(block.orcids) for block in blocks},
+        "block_source_splits": {block.block_key: block.source_split for block in blocks},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -738,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="JSON or Parquet with block_key, signature_count, orcids, size/script/region bands, and split.",
     )
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--targets-json", type=Path, required=True, help="JSON dict of {role: target_block_count}.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261123)
@@ -759,64 +882,80 @@ def main(argv: list[str] | None = None) -> int:
     if out_json.exists() and not args.overwrite:
         raise FileExistsError(f"Refusing to overwrite existing {out_json}; pass --overwrite or use a fresh directory")
 
-    pinned_roles: dict[str, str] | None = None
-    pinned_home_roles: dict[str, str] | None = None
-    excluded_blocks = list(args.exclude_blocks)
-    if args.pinned_roles_json is not None:
-        raw_pins = json.loads(args.pinned_roles_json.read_text(encoding="utf-8"))
-        if isinstance(raw_pins, dict) and isinstance(raw_pins.get("block_to_role"), dict):
-            prior = load_block_roles(args.pinned_roles_json)
-            pinned_roles = prior.block_to_role
-            pinned_home_roles = {
-                orcid: prior.orcid_home_role.get(orcid, pinned_roles[block])
-                for block, orcids in prior.block_orcids.items()
-                for orcid in orcids
-            }
-            prior_exclusions = raw_pins.get("excluded_blocks", [])
-            if not isinstance(prior_exclusions, list) or any(not isinstance(block, str) for block in prior_exclusions):
-                raise ValueError(f"Expected an excluded block list in {args.pinned_roles_json}")
-            excluded_blocks.extend(prior_exclusions)
-        elif isinstance(raw_pins, dict):
-            if args.closure_mode == "home_pool":
-                raise ValueError(
-                    "Use prior assignments.json for --pinned-roles-json under home_pool. "
-                    "Add pins with --extra-pins-json."
-                )
-            pinned_roles = raw_pins
-        else:
-            raise ValueError(f"Expected JSON mapping in {args.pinned_roles_json}")
+    if args.identity_evidence:
+        if out_json.exists() and args.pinned_roles_json is None:
+            raise ValueError("Pass the prior assignments.json when re-freezing")
+        result = freeze_identity_roles(
+            args.blocks,
+            args.identity_evidence,
+            read_json_object(args.targets_json),
+            prior_path=args.pinned_roles_json,
+            extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
+            dev_test_blocks=args.dev_test_blocks,
+            excluded_blocks=args.exclude_blocks,
+            seed=args.seed,
+        )
+    else:
+        pinned_roles: dict[str, str] | None = None
+        pinned_home_roles: dict[str, str] | None = None
+        excluded_blocks = list(args.exclude_blocks)
+        if args.pinned_roles_json is not None:
+            raw_pins = json.loads(args.pinned_roles_json.read_text(encoding="utf-8"))
+            if isinstance(raw_pins, dict) and isinstance(raw_pins.get("block_to_role"), dict):
+                prior = load_block_roles(args.pinned_roles_json)
+                pinned_roles = prior.block_to_role
+                pinned_home_roles = {
+                    orcid: prior.orcid_home_role.get(orcid, pinned_roles[block])
+                    for block, orcids in prior.block_orcids.items()
+                    for orcid in orcids
+                }
+                prior_exclusions = raw_pins.get("excluded_blocks", [])
+                if not isinstance(prior_exclusions, list) or any(
+                    not isinstance(block, str) for block in prior_exclusions
+                ):
+                    raise ValueError(f"Expected an excluded block list in {args.pinned_roles_json}")
+                excluded_blocks.extend(prior_exclusions)
+            elif isinstance(raw_pins, dict):
+                if args.closure_mode == "home_pool":
+                    raise ValueError(
+                        "Use prior assignments.json for --pinned-roles-json under home_pool. "
+                        "Add pins with --extra-pins-json."
+                    )
+                pinned_roles = raw_pins
+            else:
+                raise ValueError(f"Expected JSON mapping in {args.pinned_roles_json}")
 
-    if args.closure_mode == "home_pool" and out_json.exists() and pinned_home_roles is None:
-        raise ValueError("Pass the prior assignments.json when re-freezing home_pool")
-    if args.extra_pins_json is not None:
-        raw_extra = json.loads(args.extra_pins_json.read_text(encoding="utf-8"))
-        if not isinstance(raw_extra, dict):
-            raise ValueError(f"Expected JSON mapping in {args.extra_pins_json}")
-        extra = {normalize_block_key(key): role for key, role in raw_extra.items()}
-        if len(extra) != len(raw_extra):
-            raise ValueError("Duplicate normalized keys in --extra-pins-json")
-        pinned_roles = dict(pinned_roles or {})
-        for key, role in extra.items():
-            if key in pinned_roles and pinned_roles[key] != role:
-                raise ValueError(f"New pin conflicts with the frozen role for {key!r}")
-            pinned_roles[key] = role
+        if args.closure_mode == "home_pool" and out_json.exists() and pinned_home_roles is None:
+            raise ValueError("Pass the prior assignments.json when re-freezing home_pool")
+        if args.extra_pins_json is not None:
+            raw_extra = json.loads(args.extra_pins_json.read_text(encoding="utf-8"))
+            if not isinstance(raw_extra, dict):
+                raise ValueError(f"Expected JSON mapping in {args.extra_pins_json}")
+            extra = {normalize_block_key(key): role for key, role in raw_extra.items()}
+            if len(extra) != len(raw_extra):
+                raise ValueError("Duplicate normalized keys in --extra-pins-json")
+            pinned_roles = dict(pinned_roles or {})
+            for key, role in extra.items():
+                if key in pinned_roles and pinned_roles[key] != role:
+                    raise ValueError(f"New pin conflicts with the frozen role for {key!r}")
+                pinned_roles[key] = role
 
-    blocks = load_blocks(args.blocks, require_orcid_lists=True)
-    targets = json.loads(args.targets_json.read_text(encoding="utf-8"))
-    result = assign_block_roles(
-        blocks,
-        targets,
-        seed=args.seed,
-        extra_dev_test_blocks=args.dev_test_blocks,
-        pinned_roles=pinned_roles,
-        pinned_home_roles=pinned_home_roles,
-        excluded_blocks=excluded_blocks,
-        closure_mode=args.closure_mode,
-        enforce_source_splits=args.enforce_source_splits,
-        require_pinned_present=pinned_roles is not None,
-    )
+        blocks = load_blocks(args.blocks, require_orcid_lists=True)
+        targets = json.loads(args.targets_json.read_text(encoding="utf-8"))
+        result = assign_block_roles(
+            blocks,
+            targets,
+            seed=args.seed,
+            extra_dev_test_blocks=args.dev_test_blocks,
+            pinned_roles=pinned_roles,
+            pinned_home_roles=pinned_home_roles,
+            excluded_blocks=excluded_blocks,
+            closure_mode=args.closure_mode,
+            enforce_source_splits=args.enforce_source_splits,
+            require_pinned_present=pinned_roles is not None,
+        )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    _replace_json(out_json, result)
     with (args.output_dir / "assignments.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["block_key", "role"])
@@ -824,7 +963,13 @@ def main(argv: list[str] | None = None) -> int:
             writer.writerow([key, role])
     print(
         json.dumps(
-            {**result["verification"], "stratum_shortfalls": result["stratum_shortfalls"]}, indent=2, sort_keys=True
+            {
+                **result["verification"],
+                "shortfalls": result["shortfalls"],
+                "stratum_shortfalls": result["stratum_shortfalls"],
+            },
+            indent=2,
+            sort_keys=True,
         )
     )
     return 0

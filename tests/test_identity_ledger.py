@@ -131,3 +131,50 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
     assert first["stratum"] == "tiny"
     assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 2, GOLD: 2}
     assert second["source_split"] == "holdout"
+
+
+def test_freeze_masks_shared_identities_and_reserves_both_halves(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.common.block_roles import load_block_roles
+    from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles, freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "evidence"
+    build_identity_evidence(snapshot, gold, evidence)
+    source = tmp_path / "blocks.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["holdout", "development"]}), source
+    )
+    blocks = tmp_path / "freeze-input.parquet"
+    build_freeze_input(evidence / "manifest.json", source, blocks)
+    targets = {"pairwise_train": 1, "final_test_a": 1}
+    frozen = freeze_identity_roles(blocks, evidence / "manifest.json", targets)
+    manifest = tmp_path / "assignments.json"
+    manifest.write_text(json.dumps(frozen))
+    roles = load_block_roles(manifest)
+    assert not roles.scores("a lovelace", GOLD)
+    assert not roles.scores("g hopper", GOLD)
+    assert roles.scores("a lovelace", DEPOSITED)
+    assert "orcid_home_role" not in frozen
+    assert frozen["verification"]["cross_role_mentions_by_role"]["pairwise_train"] == 2
+    with pytest.raises(ValueError, match="new exported blocks"):
+        freeze_identity_roles(
+            blocks,
+            evidence / "manifest.json",
+            targets,
+            prior_path=manifest,
+            extra_pins={"a lovelace": "pairwise_train"},
+        )
+    allocation = assign_block_roles(
+        [
+            BlockSpec("a block", 1, stratum="singleton"),
+            BlockSpec("b block", 1, stratum="paired"),
+            BlockSpec("c block", 1, stratum="paired"),
+        ],
+        {"final_test": 2},
+        closure_mode="block_only",
+    )
+    assert allocation["unassigned"] == ["a block"]

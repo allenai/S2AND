@@ -12,22 +12,28 @@ from scripts.production.data.assign_block_roles import (
 
 
 def _sample_blocks() -> list[BlockSpec]:
+    valid_a = "0000-0002-1694-233X"
+    valid_b = "0000-0001-5000-0007"
+    excluded_shared = "0000-0002-1825-0097"  # In EXCLUDED_ORCID_GROUPS -> must NOT link blocks!
     blocks = [
-        BlockSpec("f_matsen", 1200, frozenset({"o_matsen"}), "small"),
-        BlockSpec("a_khan", 25000, frozenset({"o_khan_1", "o_shared_dev"}), "large"),
-        # Shares o_shared_dev with a_khan -> must follow a_khan into dev_test!
-        BlockSpec("b_linked_to_khan", 5000, frozenset({"o_shared_dev", "o_b1"}), "medium"),
-        # Pair of non-dev blocks sharing o_cross -> must land in the same pool!
-        BlockSpec("c_pair_1", 4000, frozenset({"o_cross", "o_c1"}), "medium"),
-        BlockSpec("c_pair_2", 3500, frozenset({"o_cross", "o_c2"}), "medium"),
+        # Real space-separated gold keys!
+        BlockSpec("f matsen", 1200, frozenset({valid_a}), "small", "holdout"),
+        BlockSpec("a khan", 25000, frozenset({valid_a, excluded_shared}), "large", "development"),
+        BlockSpec("s feldman", 8000, frozenset(), "medium", "development"),
+        # Shares valid_a with a khan (via HTTPS URL form) -> must follow a khan into dev_test!
+        BlockSpec("b linked", 5000, frozenset({f"https://orcid.org/{valid_a}"}), "medium", "development"),
+        # Pair of non-dev blocks sharing valid_b -> must land in the same pool!
+        BlockSpec("c pair 1", 4000, frozenset({valid_b, excluded_shared}), "medium", "development"),
+        BlockSpec("c pair 2", 3500, frozenset({valid_b}), "medium", "development"),
     ]
-    for i in range(18):
+    for i in range(20):
         stratum = ("large", "medium", "small")[i % 3]
-        blocks.append(BlockSpec(f"blk_{i:02d}", 1000 + i * 500, frozenset({f"o_blk_{i}"}), stratum))
+        split = "holdout" if i < 6 else "development"
+        blocks.append(BlockSpec(f"blk {i:02d}", 1000 + i * 500, frozenset(), stratum, split))
     return blocks
 
 
-def test_assign_block_roles_closes_orcids_excludes_f_matsen_and_pins_dev_test() -> None:
+def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overflow() -> None:
     blocks = _sample_blocks()
     targets = {
         "final_test": 4,
@@ -38,46 +44,86 @@ def test_assign_block_roles_closes_orcids_excludes_f_matsen_and_pins_dev_test() 
         "pairwise_val": 2,
         "pairwise_train": 3,
     }
-    res1 = assign_block_roles(blocks, targets, seed=42, extra_dev_test_blocks={"blk_00"})
-    res2 = assign_block_roles(blocks, targets, seed=42, extra_dev_test_blocks={"blk_00"})
+    res1 = assign_block_roles(
+        blocks,
+        targets,
+        seed=42,
+        extra_dev_test_blocks={"blk_06"},
+        enforce_source_splits=True,
+    )
+    res2 = assign_block_roles(
+        blocks,
+        targets,
+        seed=42,
+        extra_dev_test_blocks={"blk_06"},
+        enforce_source_splits=True,
+    )
     assert res1 == res2
 
     mapping = res1["block_to_role"]
     for excluded in PERMANENT_EXCLUDED_BLOCKS:
         assert excluded not in mapping
-    assert res1["excluded_blocks"] == ["f_matsen"]
+    assert res1["excluded_blocks"] == ["f matsen"]
 
-    # Legacy giant and its ORCID-linked neighbor must both be in dev_test.
-    assert mapping["a_khan"] == "dev_test"
-    assert mapping["b_linked_to_khan"] == "dev_test"
-    assert mapping["blk_00"] == "dev_test"
-    # Cross-block ORCID pair must receive the exact same role.
-    assert mapping["c_pair_1"] == mapping["c_pair_2"]
+    # Legacy giants (space-separated) including s feldman and ORCID-linked b linked all go to dev_test.
+    assert mapping["a khan"] == "dev_test"
+    assert mapping["s feldman"] == "dev_test"
+    assert mapping["b linked"] == "dev_test"
+    assert mapping["blk 06"] == "dev_test"
+    # Cross-block ORCID pair must receive the exact same role (and NOT be dragged to dev_test by excluded_shared!).
+    assert mapping["c pair 1"] == mapping["c pair 2"]
+    assert mapping["c pair 1"] != "dev_test"
+    # final_test receives ONLY holdout blocks and does NOT absorb overflow.
+    assert len(res1["roles"]["final_test"]) == 4
+    assert len(res1["unassigned"]) > 0
     assert res1["verification"]["cross_role_orcid_overlap"] == 0
-    assert ["c_pair_1", "c_pair_2"] in res1["cross_block_components"]
 
 
-def test_assign_block_roles_rejects_conflicting_pins_across_shared_orcid() -> None:
+def test_assign_block_roles_balances_strata_without_aliasing() -> None:
+    # Regression test (Astra #13 & Fable #2): 4 A-stratum + 4 B-stratum blocks across 2 equal roles
+    # must give 2 A + 2 B to each role (never 4 A to one and 4 B to the other!).
     blocks = [
-        BlockSpec("a_khan", 10000, frozenset({"o_shared"})),
-        BlockSpec("new_block", 5000, frozenset({"o_shared"})),
+        *[BlockSpec(f"a_{i}", 1000, frozenset(), "A") for i in range(4)],
+        *[BlockSpec(f"b_{i}", 1000, frozenset(), "B") for i in range(4)],
+    ]
+    res = assign_block_roles(blocks, {"final_test": 4, "gate_fit": 4}, seed=7)
+    for role in ("final_test", "gate_fit"):
+        assigned = res["roles"][role]
+        assert len(assigned) == 4
+        assert sum(k.startswith("a ") for k in assigned) == 2
+        assert sum(k.startswith("b ") for k in assigned) == 2
+
+
+def test_home_pool_mode_avoids_mega_component_percolation() -> None:
+    shared_orcid = "0000-0002-1694-233X"
+    blocks = [
+        BlockSpec("a khan", 20000, frozenset({shared_orcid}), "large"),
+        BlockSpec("blk 1", 10000, frozenset({shared_orcid}), "large"),
+        BlockSpec("blk 2", 10000, frozenset({shared_orcid}), "large"),
+    ]
+    res = assign_block_roles(blocks, {"eps_cal": 2}, seed=1, closure_mode="home_pool")
+    assert res["block_to_role"]["a khan"] == "dev_test"
+    assert res["block_to_role"]["blk 1"] == "eps_cal"
+    assert res["block_to_role"]["blk 2"] == "eps_cal"
+    assert shared_orcid in res["orcid_home_role"]
+
+
+def test_assign_block_roles_rejects_conflicting_pins_and_verify_catches_leaks() -> None:
+    shared = "0000-0002-1694-233X"
+    blocks = [
+        BlockSpec("a khan", 10000, frozenset({shared})),
+        BlockSpec("new block", 5000, frozenset({shared})),
     ]
     with pytest.raises(ValueError, match="conflicting pinned roles"):
-        assign_block_roles(
-            blocks,
-            {"final_test": 1},
-            pinned_roles={"new_block": "final_test"},
-        )
+        assign_block_roles(blocks, {"final_test": 1}, pinned_roles={"new_block": "final_test"})
 
-
-def test_verify_role_assignments_catches_orcid_leak_and_legacy_violation() -> None:
     legacy = sorted(LEGACY_DEV_TEST_BLOCKS)[0]
-    blocks = [
-        BlockSpec("x1", 100, frozenset({"o1"})),
-        BlockSpec("x2", 100, frozenset({"o1"})),
-        BlockSpec(legacy, 100, frozenset({"o2"})),
+    verify_blocks = [
+        BlockSpec("x1", 100, frozenset({shared})),
+        BlockSpec("x2", 100, frozenset({shared})),
+        BlockSpec(legacy, 100, frozenset()),
     ]
     with pytest.raises(ValueError, match="ORCID overlap"):
-        verify_role_assignments(blocks, {"x1": "pairwise_train", "x2": "final_test", legacy: "dev_test"})
+        verify_role_assignments(verify_blocks, {"x1": "pairwise_train", "x2": "final_test", legacy: "dev_test"})
     with pytest.raises(ValueError, match="must be assigned to 'dev_test'"):
-        verify_role_assignments(blocks, {"x1": "pairwise_train", "x2": "pairwise_train", legacy: "final_test"})
+        verify_role_assignments(verify_blocks, {"x1": "pairwise_train", "x2": "pairwise_train", legacy: "final_test"})

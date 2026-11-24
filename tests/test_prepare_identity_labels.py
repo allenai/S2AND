@@ -28,6 +28,9 @@ def test_normalize_block_key_and_name_compatibility() -> None:
     assert normalize_block_key("a   khan") == "a khan"
     assert names_are_compatible("Alice", "M", "Smith", "A", None, "Smith")
     assert names_are_compatible("A", None, "Smith", "Alice", "Marie", "Smith")
+    assert names_are_compatible("Jean-Luc", None, "Ou Yang", "Jean", None, "Ouyang")
+    assert names_are_compatible("Hans", None, "Mueller", "Hans", None, "Muller")
+    assert not names_are_compatible("Alice", "M", "Smith", "Alice", "K", "Smith")
     assert not names_are_compatible("Alice", None, "Smith", "Bob", None, "Smith")
     assert not names_are_compatible("Alice", None, "Smith", "Alice", None, "Jones")
 
@@ -39,7 +42,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
         [
             {
                 "signature_id": "s_ok1",
-                "paper_id": "p1",
+                "paper_id": "101",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -48,7 +51,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_ok2",
-                "paper_id": "p2",
+                "paper_id": "102",
                 "author_position": 1,
                 "author_block": "a smith",
                 "author_first": "A",
@@ -57,7 +60,25 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_unscored",
-                "paper_id": "p3",
+                "paper_id": "103",
+                "author_position": 0,
+                "author_block": "a smith",
+                "author_first": "Alice",
+                "author_middle": "",
+                "author_last": "Smith",
+            },
+            {
+                "signature_id": "s_null_scored",
+                "paper_id": "1031",
+                "author_position": 0,
+                "author_block": "a smith",
+                "author_first": "Alice",
+                "author_middle": "",
+                "author_last": "Smith",
+            },
+            {
+                "signature_id": "s_wrong_split",
+                "paper_id": "1032",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -66,7 +87,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_wrong_block",
-                "paper_id": "p4",
+                "paper_id": "104",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -75,7 +96,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_wrong_name",
-                "paper_id": "p5",
+                "paper_id": "105",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -84,7 +105,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_dup_block_1",
-                "paper_id": "p6",
+                "paper_id": "106",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -93,7 +114,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_dup_block_2",
-                "paper_id": "p6",
+                "paper_id": "106",
                 "author_position": 2,
                 "author_block": "a smith",
                 "author_first": "Alan",
@@ -102,7 +123,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_excluded_orcid",
-                "paper_id": "p7",
+                "paper_id": "107",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -111,7 +132,7 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_reviewed_err",
-                "paper_id": "p8",
+                "paper_id": "108",
                 "author_position": 0,
                 "author_block": "a smith",
                 "author_first": "Alice",
@@ -120,8 +141,17 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
             },
             {
                 "signature_id": "s_conflict",
-                "paper_id": "p9",
+                "paper_id": "109",
                 "author_position": 0,
+                "author_block": "a smith",
+                "author_first": "Alice",
+                "author_middle": "",
+                "author_last": "Smith",
+            },
+            {
+                "signature_id": "s_frac_pos",
+                "paper_id": "110",
+                "author_position": 1,
                 "author_block": "a smith",
                 "author_first": "Alice",
                 "author_middle": "",
@@ -133,102 +163,138 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     valid_orcid = "0000-0002-1694-233X"
     other_orcid = "0000-0001-5000-0007"
     gold_path = tmp_path / "gold.parquet"
+    # Test int64 corpus_paper_id (matching real orcid-blocks-v2), nullable scored, split, and float position!
     pd.DataFrame(
         [
-            # Two valid matches for same ORCID (repeated identity).
             {
-                "corpus_paper_id": "p1",
-                "position": 0,
+                "corpus_paper_id": 101,
+                "position": 0.0,
                 "orcid": f"https://orcid.org/{valid_orcid}",
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
             {
-                "corpus_paper_id": "p2",
-                "position": 1,
+                "corpus_paper_id": 102,
+                "position": 1.0,
                 "orcid": valid_orcid,
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Unscored row dropped.
             {
-                "corpus_paper_id": "p3",
-                "position": 0,
+                "corpus_paper_id": 103,
+                "position": 0.0,
                 "orcid": valid_orcid,
                 "scored": False,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Block mismatch dropped.
+            # Null scored must be rejected (not admitted via bool(nan) == True).
             {
-                "corpus_paper_id": "p4",
-                "position": 0,
+                "corpus_paper_id": 1031,
+                "position": 0.0,
+                "orcid": valid_orcid,
+                "scored": None,
+                "split": "development",
+                "cluster_block_key": "a_smith",
+                "author_first": "Alice",
+                "author_last": "Smith",
+            },
+            # Wrong split must be rejected when expected_split="development".
+            {
+                "corpus_paper_id": 1032,
+                "position": 0.0,
                 "orcid": valid_orcid,
                 "scored": True,
+                "split": "holdout",
+                "cluster_block_key": "a_smith",
+                "author_first": "Alice",
+                "author_last": "Smith",
+            },
+            {
+                "corpus_paper_id": 104,
+                "position": 0.0,
+                "orcid": valid_orcid,
+                "scored": True,
+                "split": "development",
                 "cluster_block_key": "b_jones",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Name mismatch dropped.
             {
-                "corpus_paper_id": "p5",
-                "position": 0,
+                "corpus_paper_id": 105,
+                "position": 0.0,
                 "orcid": valid_orcid,
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Bob",
                 "author_last": "Smith",
             },
-            # Ambiguous two-author same-block paper dropped.
             {
-                "corpus_paper_id": "p6",
-                "position": 0,
+                "corpus_paper_id": 106,
+                "position": 0.0,
                 "orcid": valid_orcid,
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Shared/excluded ORCID group dropped.
             {
-                "corpus_paper_id": "p7",
-                "position": 0,
+                "corpus_paper_id": 107,
+                "position": 0.0,
                 "orcid": "0000-0002-1825-0097",
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Reviewed wrong-ORCID signature dropped.
             {
-                "corpus_paper_id": "p8",
-                "position": 0,
+                "corpus_paper_id": 108,
+                "position": 0.0,
                 "orcid": other_orcid,
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
-            # Two conflicting gold ORCIDs for the same (paper, position) dropped.
             {
-                "corpus_paper_id": "p9",
-                "position": 0,
+                "corpus_paper_id": 109,
+                "position": 0.0,
                 "orcid": valid_orcid,
                 "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
             },
             {
-                "corpus_paper_id": "p9",
-                "position": 0,
+                "corpus_paper_id": 109,
+                "position": 0.0,
                 "orcid": other_orcid,
                 "scored": True,
+                "split": "development",
+                "cluster_block_key": "a_smith",
+                "author_first": "Alice",
+                "author_last": "Smith",
+            },
+            # Fractional position 1.9 must NOT truncate to 1!
+            {
+                "corpus_paper_id": 110,
+                "position": 1.9,
+                "orcid": valid_orcid,
+                "scored": True,
+                "split": "development",
                 "cluster_block_key": "a_smith",
                 "author_first": "Alice",
                 "author_last": "Smith",
@@ -244,12 +310,16 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
         out_parquet,
         audit_json_path=audit_json,
         error_signature_ids={"s_reviewed_err"},
+        expected_split="development",
     )
 
     verified = pd.read_parquet(out_parquet)
     assert verified["signature_id"].tolist() == ["s_ok1", "s_ok2"]
     assert verified["orcid"].tolist() == [valid_orcid, valid_orcid]
-    assert audit["dropped_unscored"] == 1
+    assert verified["split"].tolist() == ["development", "development"]
+    assert audit["dropped_wrong_split"] == 1
+    assert audit["dropped_unscored"] == 2
+    assert audit["dropped_invalid_position"] == 1
     assert audit["dropped_block_key_mismatch"] == 1
     assert audit["dropped_name_mismatch"] == 1
     assert audit["dropped_ambiguous_paper_block"] == 1
@@ -258,4 +328,5 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     assert audit["dropped_conflicting_gold_rows"] == 2
     assert audit["verified_rows"] == 2
     assert audit["repeated_orcids"] == 1
+    assert audit["verification_mode"] == "position_block_and_name"
     assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 2

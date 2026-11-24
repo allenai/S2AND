@@ -69,6 +69,22 @@ Use [the data guide](../docs/data.md) to download them.
 | `dev/run_bounded.py` | Run one long model job with RAM, deadline, `--threads`, `--min-free-gib`, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
 | `dev/sync_feature_schema.py` | Regenerate the Rust feature-column constants from `s2and/feature_schema.py`; CI runs it with `--check` |
 
+### Shared helpers (`common/`)
+
+Code that several stages import. Stage folders import from here, not from each other's private helpers.
+
+| Module | What it holds |
+|---|---|
+| `common/arrow_conversion_helpers.py` | Convert `ANDData`-like inputs directly to Arrow |
+| `common/arrow_roots.py` | Read, copy and rebind Arrow collection roots; check their name-count index binding |
+| `common/block_roles.py` | Read frozen block roles and apply their ORCID scoring policy |
+| `common/distance_policy.py` | `DISTANCE_POLICY_VERSION`, which EPS curves and linker task tables record |
+| `common/email_redaction.py` | Hash and scrub emails, and scan trees for plaintext emails; `intake/hash_release_emails.py` is its command line |
+| `common/initial_query_sources.py` | Verify derived query origins against the source signature tables |
+| `common/orcid_references.py` | `EXCLUDED_ORCID_GROUPS` and the external ORCID reference-label reader |
+| `common/plan_datasets.py` | Load model-plan datasets from the published Arrow data |
+| `common/unknown_signatures.py` | Read and validate unknown-signature lists beside source labels |
+
 ## Moved files
 
 Look up a former path to find its current location.
@@ -80,7 +96,7 @@ Look up a former path to find its current location.
 | `scripts/convert_to_arrow.py` | [intake/convert_to_arrow.py](intake/convert_to_arrow.py) |
 | `scripts/eps_sweep/__init__.py` | [eps/__init__.py](eps/__init__.py) |
 | `scripts/eps_sweep/apply_reviewed_eps.py` | [eps/apply_reviewed_eps.py](eps/apply_reviewed_eps.py) |
-| `scripts/eps_sweep/common.py` | [eps/common.py](eps/common.py) |
+| `scripts/eps_sweep/common.py` | [eps/sweep_curves.py](eps/sweep_curves.py) |
 | `scripts/eps_sweep/orcid_b3.py` | [eps/orcid_b3.py](eps/orcid_b3.py) |
 | `scripts/eps_sweep/plot_b3_eps_sweeps.py` | [eps/plot_b3_eps_sweeps.py](eps/plot_b3_eps_sweeps.py) |
 | `scripts/eps_sweep/sweep_eps_on_linking_gold.py` | [eps/sweep_eps_on_linking_gold.py](eps/sweep_eps_on_linking_gold.py) |

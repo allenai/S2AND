@@ -166,7 +166,7 @@ def _manifest_bindings(
     return bindings
 
 
-def _write_root_manifest(
+def write_root_manifest(
     output_root: Path,
     *,
     dataset_manifests: Mapping[str, str],
@@ -217,7 +217,7 @@ def _upsert_root_manifest(output_root: Path, *, dataset_name: str, dataset_dir: 
             dataset_dir / "manifest.json",
             output_root,
         )
-        _write_root_manifest(
+        write_root_manifest(
             output_root,
             dataset_manifests=dataset_manifests,
         )

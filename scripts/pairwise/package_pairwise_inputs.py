@@ -17,13 +17,13 @@ if str(REPO_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.arrow_provenance import verify_conversion_provenance  # noqa: E402
+from scripts.common.arrow_roots import (  # noqa: E402
+    generic_dataset_manifests,
+    rebind_dataset_manifests,
+)
 from scripts.common.unknown_signatures import (  # noqa: E402
     load_unknown_signatures,
     resolve_unknown_signature_sidecar,
-)
-from scripts.linker.linker_source_bundle import (  # noqa: E402
-    _dataset_manifests,
-    _rebind_dataset_manifests,
 )
 
 BENCHMARKS = ("aminer", "arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath")
@@ -57,7 +57,7 @@ def package_pairwise_inputs(
     }
     expected_datasets = set(datasets) | {"augmented"}
     for source in arrow_sources.values():
-        if set(_dataset_manifests(source)) != expected_datasets:
+        if set(generic_dataset_manifests(source)) != expected_datasets:
             raise ValueError(f"Arrow dataset population differs: {source}")
         if output.is_relative_to(source):
             raise ValueError("Output must remain outside source Arrow collections")
@@ -128,7 +128,7 @@ def package_pairwise_inputs(
     for mode, source in arrow_sources.items():
         destination = output / "arrow" / source.name
         shutil.copytree(source, destination)
-        _rebind_dataset_manifests(destination, name_counts_index=output / "name_counts_index")
+        rebind_dataset_manifests(destination, name_counts_index=output / "name_counts_index")
         for name in (*datasets, "augmented"):
             digests = {role: sources[mode][name][role]["sha256"] for role in shared_roles}
             verify_conversion_provenance(destination / name, expected_source_sha256=digests)

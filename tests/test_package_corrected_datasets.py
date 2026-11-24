@@ -14,7 +14,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.production_training_contract import load_model_plan
 from scripts.common.unknown_signatures import load_unknown_signatures
-from scripts.intake.convert_to_arrow import _write_root_manifest
+from scripts.intake.convert_to_arrow import write_root_manifest
 from scripts.linker.linker_source_bundle import validate_portable_source_bundle
 from scripts.pairwise.package_pairwise_inputs import package_pairwise_inputs
 from scripts.release.package_corrected_datasets import (
@@ -47,7 +47,7 @@ def _package_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     write_pairwise_dataset(corrected, "patents")
     public = tmp_path / "public"
     _write_arrow_root(public, dataset="qian", replay=False, name_counts_source=pairwise / "name_counts_index")
-    _write_root_manifest(public, dataset_manifests={"qian": "qian/manifest.json"}, release_version="1.3")
+    write_root_manifest(public, dataset_manifests={"qian": "qian/manifest.json"}, release_version="1.3")
     linker = tmp_path / "linker"
     _write_arrow_root(linker, dataset="qian", replay=True, name_counts_source=pairwise / "name_counts_index")
     _write_linker_inputs(linker, leak=False, dataset="qian")

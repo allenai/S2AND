@@ -158,6 +158,9 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
     roles_path, inputs_path, output = tmp_path / "roles.json", tmp_path / "inputs.json", tmp_path / "tasks"
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")
     inputs_path.write_text(json.dumps(inputs), encoding="utf-8")
+    subset = build_linker_task_tables(roles_path, inputs_path, tmp_path / "subset", blocks=["B_ROSS"])
+    assert set(subset["tables"]) == {"gate_fit"}
+    assert set(subset["tables"]["gate_fit"]["blocks"]) == {"b ross"}
     manifest = build_linker_task_tables(roles_path, inputs_path, output, holdout_fraction=1)
     assert manifest["distance_policy_version"] == DISTANCE_POLICY_VERSION
     assert manifest["s2and_version"] == __version__

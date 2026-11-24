@@ -68,15 +68,22 @@ def read_seed_components(path: Path) -> dict[str, str]:
 
 
 def _read_signatures(arrow: ArrowDataset, block: str) -> dict[str, tuple[str, str | None]]:
-    with arrow.use() as lease, lease.open_file("signatures") as infile, pa.PythonFile(infile, mode="r") as source:
-        rows = ipc.open_file(source).read_all().to_pylist()
     signatures: dict[str, tuple[str, str | None]] = {}
-    for row in rows:
-        sid = row["signature_id"]
-        if sid.startswith("visibleq:") or normalize_block_key(row["author_block"]) != block or sid in signatures:
-            raise ValueError(f"Expected unique real signatures from {block!r}, found {sid!r}")
-        orcid = normalize_orcid(row.get("author_orcid") or "")
-        signatures[sid] = (row.get("author_middle") or "", orcid)
+    with arrow.use() as lease, lease.open_file("signatures") as infile, pa.PythonFile(infile, mode="r") as source:
+        reader = ipc.open_file(source)
+        columns = ["signature_id", "author_block", "author_middle", "author_orcid"]
+        columns = [name for name in columns if name in reader.schema.names]
+        for index in range(reader.num_record_batches):
+            for row in reader.get_batch(index).select(columns).to_pylist():
+                sid = row["signature_id"]
+                if (
+                    sid.startswith("visibleq:")
+                    or normalize_block_key(row["author_block"]) != block
+                    or sid in signatures
+                ):
+                    raise ValueError(f"Expected unique real signatures from {block!r}, found {sid!r}")
+                orcid = normalize_orcid(row.get("author_orcid") or "")
+                signatures[sid] = (row.get("author_middle") or "", orcid)
     return signatures
 
 
@@ -223,6 +230,7 @@ def build_linker_task_tables(
     holdout_fraction: float = 1 / 3,
     seed: int = 20261123,
     n_jobs: int = 1,
+    blocks: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Build and audit split candidate tables from frozen roles and request inputs."""
     if not math.isfinite(holdout_fraction) or not 0 <= holdout_fraction <= 1 or n_jobs < 1:
@@ -233,6 +241,12 @@ def build_linker_task_tables(
     if len(inputs) != len(by_block):
         raise ValueError("Duplicate normalized block keys in linker inputs")
     required = {block for block, role in roles.block_to_role.items() if role in TASK_ROLES}
+    if blocks is not None:
+        requested = {normalize_block_key(block) for block in blocks}
+        if not requested or len(requested) != len(blocks) or requested - required:
+            raise ValueError("Select unique frozen linker task blocks")
+        by_block = {block: spec for block, spec in by_block.items() if block in requested}
+        required = requested
     if set(by_block) != required:
         raise ValueError(
             f"Linker inputs must match frozen task roles: missing={sorted(required - by_block.keys())}, "
@@ -241,11 +255,14 @@ def build_linker_task_tables(
     tables: dict[str, Any] = {}
     output_dir.mkdir(parents=True, exist_ok=False)
     for role in TASK_ROLES:
-        blocks = {}
+        role_blocks = sorted(key for key in by_block if roles.role_for(key) == role)
+        if blocks is not None and not role_blocks:
+            continue
+        block_records = {}
         role_path = output_dir / f"{role}.parquet"
         writer = None
         try:
-            for block in sorted(key for key in by_block if roles.role_for(key) == role):
+            for block in role_blocks:
                 spec = by_block[block]
                 arrow_dir, seed_path, label_path, query_path = (
                     (inputs_path.parent / str(spec[field])).resolve()
@@ -270,7 +287,7 @@ def build_linker_task_tables(
                         seed=seed,
                         n_jobs=n_jobs,
                     )
-                    blocks[block] = {
+                    block_records[block] = {
                         "arrow_dir": str(arrow_dir),
                         "arrow_generation_id": arrow.generation_id,
                         "seeds": str(seed_path),
@@ -287,7 +304,7 @@ def build_linker_task_tables(
                 writer.close()
         if not role_path.is_file():
             raise ValueError(f"No candidate rows in frozen role {role!r}")
-        tables[role] = {"path": role_path.name, "sha256": sha256_file(role_path), "blocks": blocks}
+        tables[role] = {"path": role_path.name, "sha256": sha256_file(role_path), "blocks": block_records}
     manifest = {
         "block_role_assignments_sha256": roles.sha256,
         "distance_policy_version": DISTANCE_POLICY_VERSION,
@@ -307,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--block-role-assignments", required=True, type=Path)
     parser.add_argument("--block-inputs", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--blocks", nargs="+", help="Build only these frozen task blocks.")
     parser.add_argument("--holdout-fraction", type=float, default=1 / 3)
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--n-jobs", type=int, default=1)
@@ -318,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         holdout_fraction=args.holdout_fraction,
         seed=args.seed,
         n_jobs=args.n_jobs,
+        blocks=args.blocks,
     )
     print(
         json.dumps(

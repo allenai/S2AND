@@ -578,3 +578,47 @@ def test_distance_cache_rejects_a_different_pairwise_contract(tmp_path: Path) ->
     current = sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["1", "2"], "generation")
     with pytest.raises(ValueError, match="pairwise_model_sha256"):
         sweep_eps_on_linking_gold._load_cached_distance(cache, current)
+
+
+def test_eps_sweep_rejects_sealed_dataset_before_reference_collection(tmp_path, monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    from scripts.eps_sweep import orcid_b3
+
+    roles = tmp_path / "roles.json"
+    roles.write_text(
+        json.dumps(
+            {
+                "roles": {"final_test_a": ["dummy"]},
+                "block_orcids": {"dummy": []},
+                "verification": {"cross_role_orcid_overlap": 0},
+            }
+        )
+    )
+    args = sweep_eps_on_linking_gold.parse_args(
+        _cli(
+            "--score-mode",
+            "orcid-b3",
+            "--allow-all-reference-identities",
+            "--block-role-assignments",
+            str(roles),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--arrow-root",
+            str(tmp_path),
+            "--n-jobs",
+            "1",
+        )
+    )
+    sources = SimpleNamespace(validate_arrow_dataset=lambda *_: None)
+    monkeypatch.setattr(sweep_eps_on_linking_gold, "load_initial_query_sources", lambda *a, **kw: sources)
+    monkeypatch.setattr(sweep_eps_on_linking_gold, "arrow_dataset_dir", lambda *_: tmp_path)
+    monkeypatch.setattr(ArrowDataset, "open", lambda *a, **kw: nullcontext(object()))
+    monkeypatch.setattr("s2and.production_model.load_production_model", lambda _: SimpleNamespace())
+
+    def reject_read(*args, **kwargs):
+        pytest.fail("sealed identities reached reference collection")
+
+    monkeypatch.setattr(orcid_b3, "read_reference", reject_read)
+    with pytest.raises(ValueError, match="not in the frozen eps_cal pool"):
+        sweep_eps_on_linking_gold.run(args)

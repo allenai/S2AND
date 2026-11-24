@@ -153,3 +153,27 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str
             "eligible_pairs": 435,
             "sampled_pairs": 435,
         }
+
+
+def test_role_b3_scores_singleton_only_reference(tmp_path: Path) -> None:
+    from scripts.eps_sweep.orcid_b3 import score_block_role
+
+    block = "a ross"
+    identity = _ORCIDS[0]
+    spec = _block_inputs(tmp_path / "block", block, identity)
+    roles = tmp_path / "roles.json"
+    roles.write_text(json.dumps(assign_block_roles([BlockSpec(block, 32, frozenset({identity}))], {"dev_test": 1})))
+    with ArrowDataset.open(spec["arrow_dir"]) as arrow:
+        result = score_block_role(
+            arrow,
+            tmp_path,
+            block,
+            roles_path=roles,
+            role="dev_test",
+            assignments={"q_full": "c"},
+            eps=0.38,
+            external_labels={"q_full": identity},
+        )
+    assert result["with_singletons"]["scored_signatures"] == 1
+    assert result["with_singletons"]["f1"] == 1.0
+    assert result["repeated"] is None

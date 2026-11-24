@@ -64,6 +64,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
 
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--arrow-root", type=Path, required=True)
     parser.add_argument(
@@ -1088,6 +1089,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             model_eps = float(best_params["eps"])
 
         from scripts.common.block_roles import load_block_roles
+        from scripts.common.identity_ledger import ledger_for_roles
         from scripts.eps.orcid_b3 import (
             ORCID_ERROR_RECORDS,
             final_test_query_identities,
@@ -1101,6 +1103,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         allow_all = bool(getattr(args, "allow_all_reference_identities", False))
         roles_path = getattr(args, "block_role_assignments", None)
         block_roles = load_block_roles(roles_path) if roles_path is not None else None
+        ledger = ledger_for_roles(getattr(args, "identity_evidence", None), block_roles)
         if block_roles is not None and block_roles.role_for(args.dataset) != "eps_cal":
             raise ValueError(f"Dataset {args.dataset!r} is not in the frozen eps_cal pool")
         external_path = getattr(args, "reference_labels", None)
@@ -1125,6 +1128,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             external_labels=external_labels,
             allow_all_identities=allow_all,
             block_roles=block_roles,
+            ledger=ledger,
         )
         identity_reference = reference.repeated
         diagnostic_reference = reference.with_singletons
@@ -1153,6 +1157,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["model_manifest_sha256"] = _hash_file(args.model_path / "manifest.json")
         plan["score_mode"] = args.score_mode
         plan["reference"] = reference_stats
+        if ledger is not None:
+            plan.update(ledger.bindings)
         plan[MAP_SHA256_FIELD] = query_sources.sha256
         plan["limited_run"] = args.max_subblocks is not None
         plan["gold_selection"] = dict.fromkeys(("task_splits", "max_queries_per_dataset", "target_kind"))

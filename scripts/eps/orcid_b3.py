@@ -22,6 +22,7 @@ from s2and.incremental_linking_training.classic import (
 )
 from s2and.text import normalize_orcid
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key
+from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
@@ -134,6 +135,7 @@ def read_reference(
     allow_all_identities: bool = False,
     block_roles: BlockRoles | None = None,
     require_repeated: bool = True,
+    ledger: IdentityLedger | None = None,
 ) -> OrcidReference:
     """Build ORCID references outside final-test identities (or all identities for block-disjoint pools).
 
@@ -142,6 +144,33 @@ def read_reference(
     ``external_labels`` is supplied, verified ``(signature_id, orcid)`` pairs are read
     from that mapping instead of the Arrow ``author_orcid`` column.
     """
+    if ledger is not None:
+        if external_labels is not None or not allow_all_identities or test_identities:
+            raise ValueError("Ledger references require block-disjoint scoring without external labels")
+        eligible = ledger.for_block(dataset, dataset_dir=arrow_dataset.root)
+        labels = eligible.scored()
+        counts = Counter(labels.values())
+        repeated = {sid: orcid for sid, orcid in labels.items() if counts[orcid] >= 2}
+        if require_repeated and not repeated:
+            raise ValueError(f"No repeated ORCID references for dataset={dataset}")
+        return OrcidReference(
+            repeated=repeated,
+            with_singletons=labels,
+            excluded_copies=frozenset(),
+            stats={
+                "reference_kind": "repeated_orcid_identity",
+                "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES,
+                "reference_source": "identity_ledger",
+                **ledger.bindings,
+                MAP_SHA256_FIELD: query_sources.sha256 if query_sources is not None else None,
+                "reference_signatures": len(repeated),
+                "reference_groups": len(set(repeated.values())),
+                "singleton_inclusive_signatures": len(labels),
+                "singleton_inclusive_groups": len(counts),
+                "final_test_identities": 0,
+                "final_test_reference_overlap": 0,
+            },
+        )
     if allow_all_identities and test_identities:
         raise ValueError("allow_all_identities cannot be set when test_identities is non-empty")
     if block_roles is not None:
@@ -298,9 +327,11 @@ def score_block_role(
     assignments: Mapping[str, str],
     eps: float,
     external_labels: Mapping[str, str] | None = None,
+    identity_evidence: Path | None = None,
 ) -> dict[str, Any]:
-    """Score B3 on the frozen home-role reference for one assigned block."""
+    """Score B3 on the frozen role reference for one assigned block."""
     roles = load_block_roles(roles_path)
+    ledger = ledger_for_roles(identity_evidence, roles)
     if roles.role_for(block) != role:
         raise ValueError(f"Block {block!r} is outside role {role!r}")
     if not snapshot_root.is_dir():
@@ -318,6 +349,7 @@ def score_block_role(
         allow_all_identities=True,
         block_roles=roles,
         require_repeated=False,
+        ledger=ledger,
     )
     if unmatched := reference.stats.get("external_labels_unmatched", 0):
         raise ValueError(f"Unmatched external ORCID labels for {block!r}: {unmatched}")
@@ -335,6 +367,7 @@ def score_block_role(
 def main(argv: list[str] | None = None) -> int:
     """Score stored assignments against a frozen-role reference."""
     parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
     parser.add_argument("--role", required=True)
     parser.add_argument("--block", required=True)
@@ -358,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             role=args.role,
             assignments=assignments,
             eps=args.eps,
+            identity_evidence=args.identity_evidence,
             external_labels=(
                 load_external_reference_labels(args.external_labels, dataset=args.block)
                 if args.external_labels

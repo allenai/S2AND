@@ -213,3 +213,49 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     assert not ledger.for_block("g hopper").scored()
     with pytest.raises(ValueError, match="No identity evidence"):
         block.eligibility("missing")
+
+
+def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    import csv
+
+    from s2and._sha256 import sha256_file
+    from scripts.common.block_roles import load_block_roles
+    from scripts.common.identity_ledger import ledger_for_roles
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+    from scripts.pairwise.mine_pairwise_pairs import BlockInput, mine_pairs
+
+    snapshot, gold = evidence_inputs
+    directory = tmp_path / "identity"
+    build_identity_evidence(snapshot, gold, directory)
+    evidence = directory / "manifest.json"
+    source = tmp_path / "blocks.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
+    )
+    blocks = tmp_path / "freeze-input.parquet"
+    build_freeze_input(evidence, source, blocks)
+    role_path = tmp_path / "roles.json"
+    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"pairwise_train": 1, "final_test_a": 1})))
+    ledger = ledger_for_roles(evidence, load_block_roles(role_path))
+    assert ledger is not None
+    assignment_root = tmp_path / "assignments"
+    assignment_root.mkdir()
+    assignments = assignment_root / "assignments.parquet"
+    pq.write_table(pa.table({"signature_id": ["2-0", "4-0"], "cluster_id": ["a", "b"]}), assignments)
+    manifest = assignment_root / "manifest.json"
+    record = {"binding": ledger.bindings, "files": {assignments.name: sha256_file(assignments)}}
+    manifest.write_text(json.dumps(record))
+    specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
+    output = tmp_path / "pairs.csv"
+    assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 1
+    with output.open(newline="", encoding="utf-8") as source_file:
+        (row,) = csv.DictReader(source_file)
+    assert {row["signature_id_1"], row["signature_id_2"]} == {"2-0", "4-0"}
+    record["binding"]["block_role_assignments_sha256"] = "old"
+    manifest.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="does not match"):
+        mine_pairs(role_path, specs, tmp_path / "stale.csv", per_block=1, identity_evidence=evidence)

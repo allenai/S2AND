@@ -25,6 +25,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import load_block_roles, normalize_block_key
+from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 
 Pair = tuple[str, str]
@@ -33,7 +34,7 @@ Pair = tuple[str, str]
 @dataclass(frozen=True)
 class BlockInput:
     arrow_dir: Path
-    labels: Path
+    labels: Path | None
     assignments: Path
 
 
@@ -66,6 +67,8 @@ def _eligible_mentions(
     spec: BlockInput, block: str, frozen_orcids: frozenset[str], homes: Mapping[str, str]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
     deposited = _mention_orcids(spec.arrow_dir, block)
+    if spec.labels is None:
+        raise ValueError("Legacy pairwise inputs require labels")
     identities, scored = read_external_reference_identity_evidence(spec.labels, require_scored=True)
     if unknown := identities.keys() - deposited.keys():
         raise ValueError(f"Joined labels contain signatures outside {block!r}: {sorted(unknown)[:5]}")
@@ -87,6 +90,28 @@ def _eligible_mentions(
     if components.keys() != deposited.keys():
         raise ValueError(f"Expected 1.4 assignments for every real signature in {block!r}")
     return eligible, labels, components, len(deposited) - len(eligible)
+
+
+def _ledger_mentions(
+    ledger: IdentityLedger, spec: BlockInput, block: str
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
+    view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
+    manifest = read_json_object(spec.assignments.parent / "manifest.json")
+    ledger.require_bindings(manifest["binding"], context=f"{block} pairwise assignments")
+    if manifest["files"].get(spec.assignments.name) != sha256_file(spec.assignments):
+        raise ValueError(f"Assignment digest mismatch: {spec.assignments}")
+    decisions = {sid: view.eligibility(sid) for sid in view.rows}
+    eligible = {
+        sid: next(iter(decision.identities), f"signature:{sid}")
+        for sid, decision in decisions.items()
+        if decision.fit_ok
+    }
+    gold = {sid: decision.score_orcid for sid, decision in decisions.items() if decision.score_orcid is not None}
+    rows = pq.read_table(spec.assignments, columns=["signature_id", "cluster_id"]).to_pylist()
+    components = {row["signature_id"]: row["cluster_id"] for row in rows}
+    if len(components) != len(rows) or components.keys() != eligible.keys() or not all(components.values()):
+        raise ValueError(f"Expected assignments for every eligible pairwise signature in {block!r}")
+    return eligible, gold, components, len(view.rows) - len(eligible)
 
 
 @dataclass
@@ -176,6 +201,7 @@ def mine_pairs(
     output_path: Path,
     *,
     per_block: int,
+    identity_evidence: Path | None = None,
     per_identity: int = 25,
     seed: int = 20261123,
 ) -> int:
@@ -183,6 +209,7 @@ def mine_pairs(
     if min(per_block, per_identity) <= 0:
         raise ValueError("Pair caps must be positive")
     roles = load_block_roles(roles_path)
+    ledger = ledger_for_roles(identity_evidence, roles)
     normalized = {normalize_block_key(block): spec for block, spec in blocks.items()}
     if not normalized or len(normalized) != len(blocks):
         raise ValueError("Expected at least one block and no duplicate normalized keys")
@@ -202,7 +229,11 @@ def mine_pairs(
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []
     for block, spec in sorted(normalized.items()):
-        identities, gold, clusters, excluded = _eligible_mentions(spec, block, roles.block_orcids[block], homes)
+        identities, gold, clusters, excluded = (
+            _ledger_mentions(ledger, spec, block)
+            if ledger is not None
+            else _eligible_mentions(spec, block, roles.block_orcids[block], homes)
+        )
         signatures = sorted(identities)
         labeled = sorted(gold)
         false_merges = _grouped_frame(labeled, clusters, gold)
@@ -238,7 +269,8 @@ def mine_pairs(
         counts[block] = {
             "eligible_signatures": len(signatures),
             "excluded_non_home_signatures": excluded,
-            "labels_sha256": sha256_file(spec.labels),
+            "ineligible_signatures": excluded,
+            "labels_sha256": sha256_file(spec.labels) if spec.labels is not None else None,
             "assignments_sha256": sha256_file(spec.assignments),
             "strata": stratum_counts,
         }
@@ -251,6 +283,7 @@ def mine_pairs(
         json.dump(
             {
                 "block_role_assignments_sha256": roles.sha256,
+                **(ledger.bindings if ledger is not None else {}),
                 "seed": seed,
                 "role": "pairwise_train",
                 "pairs_per_block_per_stratum": per_block,
@@ -270,6 +303,7 @@ def mine_pairs(
 def main(argv: list[str] | None = None) -> int:
     """Sample pairs from frozen training blocks and their stored 1.4 assignments."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
     parser.add_argument(
         "--blocks-json", type=Path, required=True, help="Map block keys to arrow_dir, labels and assignments."
@@ -282,7 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     raw = read_json_object(args.blocks_json)
     blocks = {
         block: BlockInput(
-            **{field: args.blocks_json.parent / spec[field] for field in ("arrow_dir", "labels", "assignments")}
+            arrow_dir=args.blocks_json.parent / spec["arrow_dir"],
+            labels=args.blocks_json.parent / spec["labels"] if "labels" in spec else None,
+            assignments=args.blocks_json.parent / spec["assignments"],
         )
         for block, spec in raw.items()
     }
@@ -291,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
         blocks,
         args.output,
         per_block=args.pairs_per_block,
+        identity_evidence=args.identity_evidence,
         per_identity=args.pairs_per_identity,
         seed=args.seed,
     )

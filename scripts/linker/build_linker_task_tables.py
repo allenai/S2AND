@@ -27,8 +27,10 @@ from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K  # noqa: E402
 from s2and.incremental_linking.feature_block_arrow import temporary_cluster_seed_sidecars  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
+from scripts.common.arrow_roots import read_json_object  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
+from scripts.common.identity_ledger import BlockEligibility, ledger_for_roles  # noqa: E402
 from scripts.common.orcid_references import (  # noqa: E402
     EXCLUDED_ORCID_GROUPS,
     read_external_reference_identity_evidence,
@@ -96,6 +98,7 @@ def _freeze_block_rows(
     query_ids: Sequence[str],
     labels: Mapping[str, str],
     identities: Mapping[str, str],
+    eligibility: BlockEligibility | None = None,
     holdout_fraction: float,
     seed: int,
     n_jobs: int,
@@ -106,31 +109,49 @@ def _freeze_block_rows(
         raise ValueError(f"{block!r} inputs reference missing signatures: {sorted(missing)[:5]}")
     if len(set(query_ids)) != len(query_ids) or set(query_ids) & seeds.keys():
         raise ValueError(f"Queries in {block!r} must be unique and absent from the pre-attachment seeds")
-    scored = {
-        sid: orcid
-        for sid, orcid in labels.items()
-        if orcid not in EXCLUDED_ORCID_GROUPS and block_roles.scores(block, orcid)
-    }
+    scored = {}
+    if eligibility is None:
+        scored = {
+            sid: orcid
+            for sid, orcid in labels.items()
+            if orcid not in EXCLUDED_ORCID_GROUPS and block_roles.scores(block, orcid)
+        }
+    else:
+        eligibility.require_signatures(signatures.keys())
+        if role != "gate_thresh":
+            scored = eligibility.scored()
+        if any(not eligibility.eligibility(sid).fit_ok for sid in query_ids):
+            raise ValueError(f"Ineligible query in {block!r}")
+        if role != "gate_thresh" and any(not eligibility.eligibility(sid).fit_ok for sid in seeds):
+            raise ValueError(f"Ineligible fitting seed in {block!r}")
     queries = [query for query in query_ids if query in scored or role == "gate_thresh"]
-    gold_by_component: dict[str, set[str]] = defaultdict(set)
+    members: dict[str, list[str]] = defaultdict(list)
     components_by_orcid: dict[str, set[str]] = defaultdict(set)
     identities_by_component: dict[str, set[str]] = defaultdict(set)
-    representatives: dict[str, str] = {}
     for sid, component in seeds.items():
-        representatives.setdefault(component, sid)
-        if sid in scored:
-            gold_by_component[component].add(scored[sid])
-        # Keep masked and deposited identities for exclusion and seed purity checks.
-        for orcid in {identities.get(sid), signatures[sid][1]}:
+        members[component].append(sid)
+        evidence_ids = (
+            eligibility.eligibility(sid).identities
+            if eligibility is not None
+            else {identities.get(sid), signatures[sid][1]}
+        )
+        for orcid in evidence_ids:
             if orcid is not None:
                 components_by_orcid[orcid].add(component)
                 identities_by_component[component].add(orcid)
+    representatives = {component: signatures[0] for component, signatures in members.items()}
     safe_components: dict[str, set[str]] = defaultdict(set)
     safe_targets: set[str] = set()
-    for component, gold in gold_by_component.items():
-        if len(gold) == 1 and gold == identities_by_component[component]:
-            safe_targets.add(component)
-            safe_components[next(iter(gold))].add(component)
+    if role != "gate_thresh" or eligibility is None:
+        for component, component_members in members.items():
+            if eligibility is None:
+                gold = {scored[sid] for sid in component_members if sid in scored}
+                label = next(iter(gold)) if len(gold) == 1 and gold == identities_by_component[component] else None
+            else:
+                label = eligibility.component_label(component_members)
+            if label is not None:
+                safe_targets.add(component)
+                safe_components[label].add(component)
     eligible_authors = {scored[q] for q in queries if q in scored and scored[q] in safe_components}
     ordered_authors = sorted(
         eligible_authors, key=lambda orcid: hashlib.sha256(f"{seed}:{block}:{orcid}".encode()).hexdigest()
@@ -231,11 +252,13 @@ def build_linker_task_tables(
     seed: int = 20261123,
     n_jobs: int = 1,
     blocks: Sequence[str] | None = None,
+    identity_evidence: Path | None = None,
 ) -> dict[str, Any]:
     """Build and audit split candidate tables from frozen roles and request inputs."""
     if not math.isfinite(holdout_fraction) or not 0 <= holdout_fraction <= 1 or n_jobs < 1:
         raise ValueError("Expected a holdout fraction in [0, 1] and at least one planner thread")
     roles = load_block_roles(roles_path)
+    ledger = ledger_for_roles(identity_evidence, roles)
     inputs = json.loads(inputs_path.read_text(encoding="utf-8"))
     by_block = {normalize_block_key(key): spec for key, spec in inputs.items()}
     if len(inputs) != len(by_block):
@@ -264,16 +287,26 @@ def build_linker_task_tables(
         try:
             for block in role_blocks:
                 spec = by_block[block]
-                arrow_dir, seed_path, label_path, query_path = (
-                    (inputs_path.parent / str(spec[field])).resolve()
-                    for field in ("arrow_dir", "seeds", "labels", "queries")
+                arrow_dir, seed_path, query_path = (
+                    (inputs_path.parent / str(spec[field])).resolve() for field in ("arrow_dir", "seeds", "queries")
                 )
                 query_ids = json.loads(query_path.read_text(encoding="utf-8"))
                 if not isinstance(query_ids, list) or any(
                     not isinstance(query, str) or not query for query in query_ids
                 ):
                     raise ValueError(f"Expected real request signature IDs in {query_path}")
-                identities, labels = read_external_reference_identity_evidence(label_path, require_scored=True)
+                eligibility = None
+                identities, labels = {}, {}
+                if ledger is None:
+                    label_path = (inputs_path.parent / str(spec["labels"])).resolve()
+                    identities, labels = read_external_reference_identity_evidence(label_path, require_scored=True)
+                else:
+                    eligibility = ledger.for_block(block, dataset_dir=arrow_dir)
+                    input_manifest = read_json_object(inputs_path.parent / spec["input_manifest"])
+                    ledger.require_bindings(input_manifest["binding"], context=f"{block} linker inputs")
+                    for path in (seed_path, query_path):
+                        if input_manifest["files"].get(path.name) != sha256_file(path):
+                            raise ValueError(f"Linker input digest mismatch: {path}")
                 with ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow:
                     frame, counts = _freeze_block_rows(
                         arrow,
@@ -283,6 +316,7 @@ def build_linker_task_tables(
                         query_ids=query_ids,
                         labels=labels,
                         identities=identities,
+                        eligibility=eligibility,
                         holdout_fraction=0 if role == "gate_thresh" else holdout_fraction,
                         seed=seed,
                         n_jobs=n_jobs,
@@ -307,6 +341,7 @@ def build_linker_task_tables(
         tables[role] = {"path": role_path.name, "sha256": sha256_file(role_path), "blocks": block_records}
     manifest = {
         "block_role_assignments_sha256": roles.sha256,
+        **(ledger.bindings if ledger is not None else {}),
         "distance_policy_version": DISTANCE_POLICY_VERSION,
         "s2and_version": __version__,
         "retrieval_top_k": DEFAULT_RETRIEVAL_TOP_K,
@@ -321,6 +356,7 @@ def build_linker_task_tables(
 def main(argv: list[str] | None = None) -> int:
     """Build frozen linker tables from the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", required=True, type=Path)
     parser.add_argument("--block-inputs", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -337,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         n_jobs=args.n_jobs,
         blocks=args.blocks,
+        identity_evidence=args.identity_evidence,
     )
     print(
         json.dumps(

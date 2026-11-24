@@ -1,6 +1,6 @@
 """Leak-proof blind review packet builder and validator for Sol 6.2 manual labeling.
 
-Enforces strict field allowlists (raw paper metadata only — never ``signature_id``,
+Enforces strict field allowlists (raw paper metadata only Ã¢â‚¬â€ never ``signature_id``,
 ``paper_id``, ``author_id``, predicted cluster summaries, ORCIDs, scores, ranks, model
 names, or ground-truth flags), flattens author lists to plain strings, scrubs incidental
 ORCIDs and emails, requires a fresh packet directory with the private answer key stored
@@ -29,6 +29,12 @@ from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
 from scripts.common.email_redaction import find_plaintext_emails, scrub_text_emails  # noqa: E402
+from scripts.common.identity_ledger import (  # noqa: E402
+    EVIDENCE_SHA256_FIELD,
+    BlockEligibility,
+    IdentityLedger,
+    ledger_for_roles,
+)
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
 
 ORCID_REDACTED_TOKEN = "[ORCID_REDACTED]"
@@ -327,14 +333,39 @@ def _validate_packet_roles(
                 raise ValueError(f"Block {block!r} is outside the allowed packet roles")
 
 
+def _require_ledger_packet_roles(roles: BlockRoles | None, ledger: IdentityLedger | None) -> None:
+    if roles is not None and roles.evidence_sha256 is not None and (ledger is None or ledger.roles != roles):
+        raise ValueError("Packet roles do not match the identity ledger")
+
+
+def _validate_natural_items(
+    items: Sequence[Mapping[str, Any]], ledger: IdentityLedger | None, packet_type: str
+) -> None:
+    if ledger is None:
+        return
+    views: dict[str, BlockEligibility] = {}
+    for item in items:
+        block = normalize_block_key(item["block_key"])
+        if block not in views:
+            views[block] = ledger.for_block(block)
+        if packet_type == "pair":
+            papers = [item["paper_a"], item["paper_b"]]
+        else:
+            papers = [item["query"], *(paper for candidate in item["candidates"] for paper in candidate["exemplars"])]
+        if any(not views[block].eligibility(str(paper["signature_id"])).fit_ok for paper in papers):
+            raise ValueError(f"Natural judging item {item['source_id']!r} contains an ineligible signature")
+
+
 def _scored_controls(
     items: Sequence[Mapping[str, Any]],
     block_roles: BlockRoles | None,
     *,
     packet_type: str,
     allowed_roles: Collection[str],
+    ledger: IdentityLedger | None = None,
 ) -> list[Mapping[str, Any]]:
     result = []
+    views: dict[str, BlockEligibility] = {}
     for item in items:
         block = str(item["block_key"])
         if block_roles is not None and block_roles.role_for(block) not in allowed_roles:
@@ -346,15 +377,33 @@ def _scored_controls(
             if not candidates or any(not cand["exemplars"] for cand in candidates):
                 continue
             papers = [item["query"], *(paper for cand in candidates for paper in cand["exemplars"])]
-        orcids = [normalize_orcid(str(paper.get("orcid") or paper.get("author_orcid") or "")) for paper in papers]
-        if not all(
-            orcid
-            and orcid not in EXCLUDED_ORCID_GROUPS
-            and paper.get("scored", True) is True
-            and (block_roles is None or block_roles.scores(block, orcid))
-            for paper, orcid in zip(papers, orcids, strict=True)
-        ):
-            continue
+        if ledger is None:
+            orcids = [normalize_orcid(str(paper.get("orcid") or paper.get("author_orcid") or "")) for paper in papers]
+            if not all(
+                orcid
+                and orcid not in EXCLUDED_ORCID_GROUPS
+                and paper.get("scored", True) is True
+                and (block_roles is None or block_roles.scores(block, orcid))
+                for paper, orcid in zip(papers, orcids, strict=True)
+            ):
+                continue
+        else:
+            key = normalize_block_key(block)
+            if key not in views:
+                views[key] = ledger.for_block(key)
+            view = views[key]
+            orcids = [view.eligibility(str(paper["signature_id"])).score_orcid for paper in papers]
+            if not all(orcids):
+                continue
+            if any(
+                not isinstance(candidate.get("member_signature_ids"), list)
+                or not {str(paper["signature_id"]) for paper in candidate["exemplars"]}.issubset(
+                    candidate["member_signature_ids"]
+                )
+                or view.component_label(candidate["member_signature_ids"]) is None
+                for candidate in candidates
+            ):
+                continue
         metadata = dict(item.get("metadata", {}))
         if packet_type == "pair":
             gold = int(orcids[0] == orcids[1])
@@ -452,6 +501,7 @@ def build_blind_pair_packets(
     max_abstract_chars: int = 1200,
     block_roles: BlockRoles | None = None,
     allowed_roles: Collection[str] = (),
+    ledger: IdentityLedger | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked, order-randomized blind pair packets plus a separate private answer key.
 
@@ -469,7 +519,11 @@ def build_blind_pair_packets(
 
     effective_control_seed = seed if control_seed is None else control_seed
     _validate_packet_roles(items, block_roles, allowed_roles)
-    eligible_controls = _scored_controls(control_items, block_roles, packet_type="pair", allowed_roles=allowed_roles)
+    _require_ledger_packet_roles(block_roles, ledger)
+    _validate_natural_items(items, ledger, "pair")
+    eligible_controls = _scored_controls(
+        control_items, block_roles, packet_type="pair", allowed_roles=allowed_roles, ledger=ledger
+    )
     chosen_controls = _select_controls(
         len(items),
         eligible_controls,
@@ -537,6 +591,7 @@ def build_blind_pair_packets(
             next(key_items)["shard"] = shard_paths[-1]
 
     key_payload = {
+        **(ledger.bindings if ledger is not None else {}),
         "packet_type": "pair",
         "order_seed": int(seed),
         "control_seed": int(effective_control_seed),
@@ -548,6 +603,7 @@ def build_blind_pair_packets(
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(json.dumps(key_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return {
+        **(ledger.bindings if ledger is not None else {}),
         "packet_type": "pair",
         "output_dir": str(output_dir),
         "answer_key_path": str(key_path),
@@ -574,6 +630,7 @@ def build_blind_linker_packets(
     max_abstract_chars: int = 900,
     block_roles: BlockRoles | None = None,
     allowed_roles: Collection[str] = (),
+    ledger: IdentityLedger | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked blind linker candidate packets with shuffled neutral candidate slots."""
     if not 0.0 <= control_fraction <= 0.5:
@@ -585,8 +642,10 @@ def build_blind_linker_packets(
 
     effective_control_seed = seed if control_seed is None else control_seed
     _validate_packet_roles(queries, block_roles, allowed_roles)
+    _require_ledger_packet_roles(block_roles, ledger)
+    _validate_natural_items(queries, ledger, "linker")
     eligible_controls = _scored_controls(
-        control_queries, block_roles, packet_type="linker", allowed_roles=allowed_roles
+        control_queries, block_roles, packet_type="linker", allowed_roles=allowed_roles, ledger=ledger
     )
     chosen_controls = _select_controls(
         len(queries),
@@ -667,6 +726,7 @@ def build_blind_linker_packets(
             next(key_items)["shard"] = shard_paths[-1]
 
     key_payload = {
+        **(ledger.bindings if ledger is not None else {}),
         "packet_type": "linker",
         "order_seed": int(seed),
         "control_seed": int(effective_control_seed),
@@ -678,6 +738,7 @@ def build_blind_linker_packets(
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(json.dumps(key_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return {
+        **(ledger.bindings if ledger is not None else {}),
         "packet_type": "linker",
         "output_dir": str(output_dir),
         "answer_key_path": str(key_path),
@@ -887,7 +948,7 @@ def _paired_judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict
     }
 
 
-def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
+def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLedger | None = None) -> dict[str, Any]:
     """Score JSONL verdicts and pairwise agreement across judge families.
 
     Args:
@@ -905,6 +966,11 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
     verdicts = []
     requests = []
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
+        key = json.loads(key_path.read_text(encoding="utf-8"))
+        if ledger is not None:
+            ledger.require_bindings(key, context=f"{family} judging key")
+        elif EVIDENCE_SHA256_FIELD in key:
+            raise ValueError("Ledger-backed judging keys require frozen roles and identity evidence")
         report, aligned, natural_requests = _read_judge_verdicts(verdict_path, key_path)
         reports.append({"family": family, "verdicts": str(verdict_path), **report})
         verdicts.append(aligned)
@@ -959,7 +1025,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
                 },
             }
         )
-    return {"judges": reports, "cross_family_agreement": agreement}
+    return {**(ledger.bindings if ledger is not None else {}), "judges": reports, "cross_family_agreement": agreement}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -974,6 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--packet-type", choices=["pair", "linker"], required=True)
     build_p.add_argument("--items-json", type=Path, required=True)
     build_p.add_argument("--controls-json", type=Path, default=None)
+    build_p.add_argument("--identity-evidence", type=Path)
     build_p.add_argument("--block-role-assignments", type=Path, required=True)
     build_p.add_argument("--allowed-role", action="append", required=True)
     build_p.add_argument("--output-dir", type=Path, required=True)
@@ -992,11 +1059,17 @@ def main(argv: list[str] | None = None) -> int:
     score_p.add_argument(
         "--judge", action="append", nargs=3, metavar=("FAMILY", "VERDICTS", "ANSWER_KEY"), required=True
     )
+    score_p.add_argument("--identity-evidence", type=Path)
+    score_p.add_argument("--block-role-assignments", type=Path)
     score_p.add_argument("--output-json", type=Path)
 
     args = parser.parse_args(argv)
     if args.command == "score":
-        report = score_judges([(family, Path(verdicts), Path(key)) for family, verdicts, key in args.judge])
+        roles = load_block_roles(args.block_role_assignments) if args.block_role_assignments else None
+        report = score_judges(
+            [(family, Path(verdicts), Path(key)) for family, verdicts, key in args.judge],
+            ledger=ledger_for_roles(args.identity_evidence, roles),
+        )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if args.output_json is not None:
             args.output_json.write_text(rendered, encoding="utf-8")
@@ -1016,6 +1089,7 @@ def main(argv: list[str] | None = None) -> int:
     items = json.loads(args.items_json.read_text(encoding="utf-8"))
     controls = json.loads(args.controls_json.read_text(encoding="utf-8")) if args.controls_json else ()
     block_roles = load_block_roles(args.block_role_assignments)
+    ledger = ledger_for_roles(args.identity_evidence, block_roles)
     if args.packet_type == "pair":
         report = build_blind_pair_packets(
             items=items,
@@ -1029,6 +1103,7 @@ def main(argv: list[str] | None = None) -> int:
             max_items_per_shard=args.max_items_per_shard,
             block_roles=block_roles,
             allowed_roles=args.allowed_role,
+            ledger=ledger,
         )
     else:
         report = build_blind_linker_packets(
@@ -1043,6 +1118,7 @@ def main(argv: list[str] | None = None) -> int:
             max_items_per_shard=args.max_items_per_shard,
             block_roles=block_roles,
             allowed_roles=args.allowed_role,
+            ledger=ledger,
         )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

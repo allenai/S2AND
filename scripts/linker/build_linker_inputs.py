@@ -20,6 +20,7 @@ from s2and.arrow_tables import read_cluster_seeds_arrow
 from s2and.production_model import load_production_model
 from scripts.common.arrow_roots import _replace_json, read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import load_block_roles, normalize_block_key
+from scripts.common.identity_ledger import ledger_for_roles
 from scripts.common.orcid_references import read_external_reference_identity_evidence
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
 from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
@@ -48,6 +49,7 @@ def build_linker_inputs(
     output_dir: Path,
     model_path: Path,
     *,
+    identity_evidence: Path | None = None,
     queries_per_block: int = 300,
     seed: int = 20261123,
     n_jobs: int = 1,
@@ -56,6 +58,7 @@ def build_linker_inputs(
     if min(queries_per_block, n_jobs) < 1:
         raise ValueError("Expected positive query and thread counts")
     roles = load_block_roles(roles_path)
+    ledger = ledger_for_roles(identity_evidence, roles)
     raw = read_json_object(blocks_path)
     blocks = {normalize_block_key(block): spec for block, spec in raw.items()}
     if not blocks or len(blocks) != len(raw):
@@ -72,7 +75,7 @@ def build_linker_inputs(
             raise ValueError(f"{block!r} cannot supply linker or mining inputs from role {role!r}")
         name = block.replace(" ", "_")
         arrow_dir = (blocks_path.parent / spec["arrow_dir"]).resolve()
-        label_path = (blocks_path.parent / spec["labels"]).resolve()
+        label_path = (blocks_path.parent / spec["labels"]).resolve() if ledger is None else None
         request = (
             (blocks_path.parent / spec["incremental_request"]).resolve() if "incremental_request" in spec else None
         )
@@ -96,7 +99,8 @@ def build_linker_inputs(
                 "index_sha256": sha256_file(index_path / "manifest.json"),
                 "model_sha256": model_digest,
                 "roles_sha256": roles.sha256,
-                "labels_sha256": sha256_file(label_path),
+                **(ledger.bindings if ledger is not None else {}),
+                "labels_sha256": sha256_file(label_path) if label_path is not None else None,
                 "request_sha256": sha256_file(request) if request is not None else None,
                 "queries_per_block": queries_per_block,
                 "seed": seed,
@@ -110,21 +114,34 @@ def build_linker_inputs(
                     raise ValueError(f"Existing linker inputs have changed: {target}")
             else:
                 signatures = _read_signatures(arrow, block)
-                identities, scored = read_external_reference_identity_evidence(label_path, require_scored=True)
-                if missing := identities.keys() - signatures.keys():
-                    raise ValueError(f"{block!r} labels contain unknown signatures: {sorted(missing)[:5]}")
+                if ledger is None:
+                    assert label_path is not None
+                    identities, scored = read_external_reference_identity_evidence(label_path, require_scored=True)
+                    if missing := identities.keys() - signatures.keys():
+                        raise ValueError(f"{block!r} labels contain unknown signatures: {sorted(missing)[:5]}")
+                    eligible = signatures.keys()
+                    scored = {sid: orcid for sid, orcid in scored.items() if roles.scores(block, orcid)}
+                else:
+                    view = ledger.for_block(block, dataset_dir=arrow_dir)
+                    view.require_signatures(signatures.keys())
+                    decisions = {sid: view.eligibility(sid) for sid in signatures}
+                    eligible = {sid for sid, decision in decisions.items() if decision.fit_ok}
+                    scored = {
+                        sid: decision.score_orcid
+                        for sid, decision in decisions.items()
+                        if decision.score_orcid is not None
+                    }
                 queries = []
                 if role in TASK_ROLES:
                     if request:
-                        queries = _request_queries(request)
+                        queries = [sid for sid in _request_queries(request) if ledger is None or sid in eligible]
                     else:
                         queries = sorted(
-                            (sid for sid, orcid in scored.items() if roles.scores(block, orcid)),
-                            key=lambda sid: (hashlib.sha256(f"{seed}:{block}:{sid}".encode()).digest(), sid),
+                            scored, key=lambda sid: (hashlib.sha256(f"{seed}:{block}:{sid}".encode()).digest(), sid)
                         )[:queries_per_block]
                     if not queries or len(set(queries)) != len(queries) or set(queries) - signatures.keys():
                         raise ValueError(f"{block!r} needs unique, real query signatures from its full dataset")
-                remaining = sorted(signatures.keys() - set(queries))
+                remaining = sorted((signatures.keys() if role == "gate_thresh" else eligible) - set(queries))
                 if not remaining:
                     raise ValueError(f"No seed signatures remain in {block!r}")
                 if model is None:
@@ -158,7 +175,8 @@ def build_linker_inputs(
                 entries = read_json_object(inputs_path) if inputs_path.is_file() else {}
                 entries[block] = {
                     "arrow_dir": str(arrow_dir),
-                    "labels": str(label_path),
+                    **({"labels": str(label_path)} if label_path is not None else {}),
+                    "input_manifest": str(target / "manifest.json"),
                     "seeds": str(assigned),
                     "queries": str(query_path),
                 }
@@ -169,6 +187,7 @@ def build_linker_inputs(
 def main(argv: list[str] | None = None) -> int:
     """Build task inputs or full 1.4 assignments for pairwise training blocks."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", required=True, type=Path)
     parser.add_argument(
         "--blocks-json",
@@ -187,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         args.blocks_json,
         args.output_dir,
         args.model_path,
+        identity_evidence=args.identity_evidence,
         queries_per_block=args.queries_per_block,
         seed=args.seed,
         n_jobs=args.n_jobs,

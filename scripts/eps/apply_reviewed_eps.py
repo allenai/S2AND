@@ -32,6 +32,7 @@ from s2and.incremental_linking_training.classic import (
 from s2and.production_bundle import _staged_production_bundle
 from s2and.production_model import load_production_model
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key
+from scripts.common.identity_ledger import ledger_for_roles
 from scripts.common.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
@@ -151,6 +152,7 @@ def _validated_sweep_plans(
     test_identities: TestIdentityLoader,
     *,
     block_role_assignments: Path | None = None,
+    identity_evidence: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Reject stale, bounded, partial, or test-overlapping snapshot curves."""
     verified_eps_cal: frozenset[str] | None = None
@@ -158,6 +160,7 @@ def _validated_sweep_plans(
     if block_role_assignments is not None:
         block_roles = load_block_roles(block_role_assignments)
         verified_eps_cal = _eps_cal_blocks(block_roles)
+    ledger = ledger_for_roles(identity_evidence, block_roles)
     folders = {path.name for path in sweep_root.iterdir() if path.is_dir()}
     if ignored := sorted(folders - set(datasets)):
         print(f"Ignoring EPS sweep folders outside --datasets: {ignored}", file=sys.stderr)
@@ -169,6 +172,9 @@ def _validated_sweep_plans(
     for dataset in datasets:
         plan_path = sweep_root / dataset / "plan.json"
         plan, curve = read_sweep_curve(sweep_root, dataset)
+        if ledger is not None:
+            ledger.require_bindings(plan, context=f"{dataset} EPS sweep")
+            ledger.require_bindings(plan["reference"], context=f"{dataset} EPS reference")
         if plan["model_manifest_sha256"] != source_hash:
             raise ValueError(f"The EPS sweep uses a different model: {dataset}")
         if plan["limited_run"]:
@@ -243,6 +249,10 @@ def _validated_sweep_plans(
             or not labels["repeated"].any()
         ):
             raise ValueError(f"Expected a nonempty scored EPS reference: {dataset}")
+        if ledger is not None:
+            expected = ledger.for_block(dataset, dataset_dir=Path(plan["arrow_manifest"]).parent).scored()
+            if dict(zip(labels["signature_id"], labels["orcid"], strict=True)) != expected:
+                raise ValueError(f"EPS reference labels differ from the identity ledger: {dataset}")
         repeats = labels.groupby("orcid")["signature_id"].transform("size").gt(1)
         if not labels["repeated"].eq(repeats).all():
             raise ValueError(f"Invalid repeated identities in EPS reference: {dataset}")
@@ -255,6 +265,7 @@ def _validated_sweep_plans(
             "scores_sha256": sha256_file(score_path),
             "singleton_inclusive_scores_sha256": sha256_file(sweep_root / dataset / SINGLETON_INCLUSIVE_CURVE),
             "score_mode": plan["score_mode"],
+            **({"identity_bindings": ledger.bindings} if ledger is not None else {}),
             "reference": reference,
         }
     return plans
@@ -330,6 +341,7 @@ def apply_reviewed_eps(
     release_version: str | None = None,
     precision_f1_tolerance: float | None = None,
     block_role_assignments: Path | None = None,
+    identity_evidence: Path | None = None,
 ) -> dict[str, Any]:
     """Write a fresh complete model with the reviewed EPS and preserve all trained artifact bytes.
 
@@ -381,6 +393,7 @@ def apply_reviewed_eps(
             expected_batching_threshold,
             test_identities,
             block_role_assignments=block_role_assignments,
+            identity_evidence=identity_evidence,
         )
     giant_f1_tolerance = (
         None
@@ -410,6 +423,7 @@ def apply_reviewed_eps(
                 raise RuntimeError(f"EPS review changes a trained artifact: {relative}")
         load_production_model(staging)
     report = {
+        **(next(iter(plans.values()))["identity_bindings"] if plans and identity_evidence is not None else {}),
         "source_manifest_sha256": source_hash,
         "output_manifest_sha256": sha256_file(output / "manifest.json"),
         "source_eps": previous_eps,
@@ -429,6 +443,7 @@ def apply_reviewed_eps(
 def main(argv: Sequence[str] | None = None) -> None:
     """Apply the explicit human choice after review of complete curves."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--source-model", type=Path, required=True)
     parser.add_argument("--output-model", type=Path, required=True)
     parser.add_argument(
@@ -479,6 +494,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         precision_f1_tolerance=args.precision_f1_tolerance,
         expected_batching_threshold=args.expected_batching_threshold,
         block_role_assignments=args.block_role_assignments,
+        identity_evidence=args.identity_evidence,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

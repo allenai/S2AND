@@ -137,6 +137,7 @@ def _read_arrow_signatures(arrow_dir: Path) -> pd.DataFrame:
             "author_first",
             "author_middle",
             "author_last",
+            "author_orcid",
         )
         if col in table.column_names
     ]
@@ -144,6 +145,60 @@ def _read_arrow_signatures(arrow_dir: Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Arrow signatures table missing required columns: {missing}")
     return table.select(want).to_pandas()
+
+
+class SignatureJoin:
+    """Verify a corpus author position against one Arrow block."""
+
+    def __init__(self, sigs: pd.DataFrame) -> None:
+        sigs["signature_id"] = sigs["signature_id"].astype(str)
+        sigs["paper_id_norm"] = sigs["paper_id"].map(_normalize_paper_id)
+        sigs["pos_norm"] = sigs["author_position"].map(_strict_nonneg_int)
+        sigs["block_norm"] = sigs["author_block"].map(normalize_block_key)
+        self.rows: list[dict[str, Any]] = sigs.to_dict(orient="records")
+        self.paper_blocks = Counter((row["paper_id_norm"], row["block_norm"]) for row in self.rows)
+        self.positions: dict[tuple[str, int], dict[str, Any]] = {}
+        self.ambiguous: set[tuple[str, int]] = set()
+        for row in self.rows:
+            pid, pos = row["paper_id_norm"], row["pos_norm"]
+            if pid is None or pd.isna(pos):
+                continue
+            key = (pid, int(pos))
+            if key in self.positions:
+                self.ambiguous.add(key)
+            else:
+                self.positions[key] = row
+
+    def match(
+        self, paper_id: str, position: int, block: str, names: tuple[str | None, str | None, str | None]
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Return a verified signature row or its audit reason."""
+        key = (paper_id, position)
+        if key in self.ambiguous:
+            return None, "dropped_ambiguous_arrow_position"
+        row = self.positions.get(key)
+        if row is None:
+            return None, "dropped_unmatched_paper_position"
+        if self.paper_blocks[paper_id, row["block_norm"]] > 1:
+            return None, "dropped_ambiguous_paper_block"
+        if block and block != row["block_norm"]:
+            return None, "dropped_block_key_mismatch"
+        if not names_are_compatible(
+            _optional_str(row.get("author_first")),
+            _optional_str(row.get("author_middle")),
+            _optional_str(row.get("author_last")),
+            *names,
+        ):
+            return None, "dropped_name_mismatch"
+        return row, ""
+
+
+def canonical_gold_block_filter(block_col: str, blocks: Collection[str]) -> ds.Expression:
+    """Select canonical ASCII keys and Unicode spellings for exact Python normalization."""
+    raw_key = ds.field(block_col)
+    ascii_key = pc.ascii_lower(pc.utf8_trim(raw_key, characters=" \t\n\v\f\r\x1c\x1d\x1e\x1f"))
+    ascii_key = pc.replace_substring_regex(ascii_key, pattern=r"[\s_\x0B\x1C-\x1F]+", replacement=" ")
+    return ascii_key.isin(sorted(blocks)) | pc.match_substring_regex(raw_key, pattern=r"[^\x00-\x7F]")
 
 
 def prepare_identity_labels(
@@ -181,27 +236,7 @@ def prepare_identity_labels(
     error_set = {str(sid) for sid in error_signature_ids}
 
     sigs = _read_arrow_signatures(arrow_dir)
-    sigs["signature_id"] = sigs["signature_id"].astype(str)
-    sigs["paper_id_norm"] = sigs["paper_id"].map(_normalize_paper_id)
-    sigs["pos_norm"] = sigs["author_position"].map(_strict_nonneg_int)
-    sigs["block_norm"] = sigs["author_block"].map(normalize_block_key)
-
-    paper_block_counts = Counter(zip(sigs["paper_id_norm"], sigs["block_norm"], strict=True))
-    paper_pos_counts = Counter(
-        (pid, int(pos))
-        for pid, pos in zip(sigs["paper_id_norm"], sigs["pos_norm"], strict=True)
-        if pid is not None and pos is not None and not pd.isna(pos)
-    )
-    sig_by_paper_pos: dict[tuple[str, int], dict[str, Any]] = {}
-    for row in sigs.to_dict(orient="records"):
-        pid = row["paper_id_norm"]
-        pos = row["pos_norm"]
-        if pid is None or pos is None or pd.isna(pos):
-            continue
-        key = (str(pid), int(pos))
-        if paper_pos_counts[key] == 1:
-            sig_by_paper_pos[key] = row
-
+    join = SignatureJoin(sigs)
     arrow_paper_ids = {str(pid) for pid in sigs["paper_id_norm"].dropna().unique()}
     arrow_blocks_norm = {str(b) for b in sigs["block_norm"].unique() if b}
     if block_roles is not None:
@@ -238,13 +273,7 @@ def prepare_identity_labels(
     dataset_reader = ds.dataset(gold_path, format="parquet")
     filter_expr = None
     if block_col is not None and arrow_blocks_norm:
-        # Match ASCII keys in Arrow and normalize Unicode candidates with Python's exact rules.
-        raw_key = ds.field(block_col)
-        ascii_key = pc.ascii_lower(pc.utf8_trim(raw_key, characters=" \t\n\v\f\r\x1c\x1d\x1e\x1f"))
-        ascii_key = pc.replace_substring_regex(ascii_key, pattern=r"[\s_\x0B\x1C-\x1F]+", replacement=" ")
-        candidates = ascii_key.isin(sorted(arrow_blocks_norm)) | pc.match_substring_regex(
-            raw_key, pattern=r"[^\x00-\x7F]"
-        )
+        candidates = canonical_gold_block_filter(block_col, arrow_blocks_norm)
         spellings = {
             raw
             for batch in dataset_reader.to_batches(columns=[block_col], filter=candidates, batch_size=65_536)
@@ -321,33 +350,20 @@ def prepare_identity_labels(
             if pid is None:
                 audit["dropped_unmatched_paper_position"] += 1
                 continue
-            key = (pid, pos)
-            if paper_pos_counts.get(key, 0) > 1:
-                audit["dropped_ambiguous_arrow_position"] += 1
-                continue
-            sig_row = sig_by_paper_pos.get(key)
-            if sig_row is None:
-                audit["dropped_unmatched_paper_position"] += 1
-                continue
-            if paper_block_counts.get((pid, str(sig_row["block_norm"])), 0) > 1:
-                audit["dropped_ambiguous_paper_block"] += 1
-                continue
-            if block_col is not None:
-                gold_block = normalize_block_key(_optional_str(cols[block_col][i]))
-                if gold_block and gold_block != str(sig_row["block_norm"]):
-                    audit["dropped_block_key_mismatch"] += 1
-                    continue
-            if name_columns_present:
-                if not names_are_compatible(
-                    _optional_str(sig_row.get("author_first")),
-                    _optional_str(sig_row.get("author_middle")),
-                    _optional_str(sig_row.get("author_last")),
+            gold_block = normalize_block_key(_optional_str(cols[block_col][i])) if block_col else ""
+            sig_row, error = join.match(
+                pid,
+                pos,
+                gold_block,
+                (
                     _optional_str(cols[first_col][i]) if first_col else None,
                     _optional_str(cols[middle_col][i]) if middle_col else None,
                     _optional_str(cols[last_col][i]) if last_col else None,
-                ):
-                    audit["dropped_name_mismatch"] += 1
-                    continue
+                ),
+            )
+            if sig_row is None:
+                audit[error] += 1
+                continue
             sid = str(sig_row["signature_id"])
             if sid in error_set:
                 audit["dropped_reviewed_error_signature"] += 1

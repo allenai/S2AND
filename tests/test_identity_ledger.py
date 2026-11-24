@@ -1,0 +1,113 @@
+import json
+import tarfile
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from s2and.arrow_tables import write_name_counts_index
+from tests.helpers import write_arrow_tables_bundle
+
+pytestmark = pytest.mark.tooling
+GOLD = "0000-0002-1825-0097"
+DEPOSITED = "0000-0001-5109-3700"
+
+
+def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    name = block.replace(" ", "_")
+    first, last = block.split()
+    papers = [paper for paper, _ in rows]
+    author = f"{first} {last}"
+    directory = root / name
+    write_arrow_tables_bundle(
+        directory,
+        {
+            "signatures": pa.table(
+                {
+                    "signature_id": [f"{paper}-0" for paper in papers],
+                    "paper_id": papers,
+                    "author_position": [0] * len(papers),
+                    "author_first": [first] * len(papers),
+                    "author_middle": [""] * len(papers),
+                    "author_last": [last] * len(papers),
+                    "author_suffix": [""] * len(papers),
+                    "author_affiliations": pa.array([[]] * len(papers), type=pa.list_(pa.string())),
+                    "author_block": [block] * len(papers),
+                    "author_orcid": pa.array([orcid for _, orcid in rows], type=pa.string()),
+                }
+            ),
+            "papers": pa.table(
+                {
+                    "paper_id": papers,
+                    "title": ["Study"] * len(papers),
+                    "venue": [""] * len(papers),
+                    "journal_name": [""] * len(papers),
+                }
+            ),
+            "paper_authors": pa.table(
+                {"paper_id": papers, "position": [0] * len(papers), "author_name": [author] * len(papers)}
+            ),
+            "specter": pa.table(
+                {"paper_id": papers, "embedding": pa.array([[1.0, 0.0]] * len(papers), type=pa.list_(pa.float32(), 2))}
+            ),
+        },
+    )
+    path = root / f"{name}.arrow.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        for arrow in directory.glob("*.arrow"):
+            archive.add(arrow, arcname=arrow.name)
+    return path
+
+
+@pytest.fixture
+def evidence_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    from scripts.intake.requests_to_datasets import convert_requests
+
+    first = request_bundle(tmp_path, "a lovelace", [("1", DEPOSITED), ("2", DEPOSITED), ("3", None), ("4", None)])
+    second = request_bundle(tmp_path, "g hopper", [("5", None)])
+    index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
+    snapshot = tmp_path / "snapshot"
+    convert_requests(
+        [first, second], snapshot, Path(index), allowed_papers=frozenset("12345"), abstract_allowed_papers=frozenset()
+    )
+    gold = tmp_path / "gold.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "cluster_block_key": ["A_Lovelace", "a lovelace", "g hopper", "a lovelace"],
+                "corpus_paper_id": [1, 3, 5, 4],
+                "position": [0, 0, 0, 0],
+                "orcid": [GOLD] * 4,
+                "split": ["development", "development", "holdout", "development"],
+                "scored": [True, False, True, True],
+                "author_last": ["Lovelace", "Lovelace", "Hopper", "Wrong"],
+            }
+        ),
+        gold,
+    )
+    return snapshot, gold
+
+
+def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
+    from scripts.common.identity_ledger import load_identity_evidence
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    output = tmp_path / "evidence"
+    result = build_identity_evidence(snapshot, gold, output, {"g hopper": ["5-0"]})
+    ledger = load_identity_evidence(output / "manifest.json")
+    rows = ledger.read_block("a_lovelace")
+    assert rows["1-0"]["gold"] == [{"orcid": GOLD, "scored": True, "split": "development"}]
+    assert rows["1-0"]["evidence_state"] == "conflict"
+    assert rows["2-0"]["deposited_orcid"] == DEPOSITED
+    assert rows["2-0"]["gold"] == []
+    assert rows["3-0"]["gold"] == [{"orcid": GOLD, "scored": False, "split": "development"}]
+    assert rows["4-0"]["evidence_state"] == "none"
+    assert result["audit"]["a lovelace"]["dropped_name_mismatch"] == 1
+    assert ledger.read_block("g hopper")["5-0"]["reviewed_error"]
+    partition = output / json.loads((output / "manifest.json").read_text())["blocks"]["a lovelace"]["path"]
+    partition.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        ledger.read_block("a lovelace")

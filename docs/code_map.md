@@ -47,7 +47,7 @@
 | Name-count index and producers | [`name_counts_index.py`](../s2and/name_counts_index.py), [intake count commands](../scripts/intake/counts/README.md) |
 | Name-conflict repair | [`corrections/name_conflict_repair.py`](../s2and/corrections/name_conflict_repair.py) |
 | Retained seed memberships | [`corrections/seed_merging.py`](../s2and/corrections/seed_merging.py) |
-| Linker ranker and gate fitting | [`ranker.py`](../s2and/incremental_linking_training/ranker.py), [`gate.py`](../s2and/incremental_linking_training/gate.py) |
+| Linker ranker and gate fitting | [`fit.py`](../s2and/incremental_linking_training/fit.py) runs it, using [`ranker.py`](../s2and/incremental_linking_training/ranker.py), [`gate.py`](../s2and/incremental_linking_training/gate.py) and [`evaluate.py`](../s2and/incremental_linking_training/evaluate.py) |
 | Thread and memory budgets | [`thread_config.py`](../s2and/thread_config.py), [`memory_budget.py`](../s2and/memory_budget.py) |
 | Local and hosted CI policy | [`run_ci_locally.py`](../scripts/dev/run_ci_locally.py) |
 

@@ -25,9 +25,8 @@ import pyarrow.ipc as pa_ipc
 from lightgbm import Booster
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
-    if str(extra_path) not in sys.path:
-        sys.path.insert(0, str(extra_path))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from s2and import __version__, feature_port  # noqa: E402
 from s2and._sha256 import sha256_file  # noqa: E402
@@ -72,7 +71,7 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
 )
 from s2and.incremental_linking_training.data_loading import load_clusterer  # noqa: E402
 from s2and.incremental_linking_training.evaluate import evaluate_linker  # noqa: E402
-from s2and.incremental_linking_training.ranker import fit_linker  # noqa: E402
+from s2and.incremental_linking_training.fit import fit_linker  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
     preflight_source_rows,
     read_source_parquet_rows,
@@ -93,13 +92,13 @@ from s2and.production_training_contract import (  # noqa: E402
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles  # noqa: E402
+from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.common.initial_query_sources import (  # noqa: E402
     MAP_RELATIVE_PATH,
     MAP_SHA256_FIELD,
     InitialQuerySources,
     load_initial_query_sources,
 )
-from scripts.eps.common import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.linker.build_linker_task_tables import TASK_ROLES, read_seed_components  # noqa: E402
 
 # Keep the pre-split names importable from this command module.

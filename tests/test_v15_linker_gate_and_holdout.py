@@ -8,8 +8,7 @@ import pandas as pd
 import pytest
 
 from s2and.incremental_linking_training import classic as classic_training
-from s2and.incremental_linking_training import evaluate
-from s2and.incremental_linking_training import ranker as ranker_module
+from s2and.incremental_linking_training import fit as fit_module
 from s2and.incremental_linking_training.classic import (
     _fit_promoted_logistic_gate,
     _promoted_stratified_gate_spec,
@@ -197,7 +196,7 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
             positive = np.asarray(features)[:, 0]
             return np.column_stack((1 - positive, positive))
 
-    monkeypatch.setattr(ranker_module, "_build_classic_classifier", lambda *_args, **_kwargs: Ranker())
+    monkeypatch.setattr(fit_module, "_build_classic_classifier", lambda *_args, **_kwargs: Ranker())
     gate = {"false_abstain_weight": configured_weight} if configured_weight is not None else {}
     bundle = classic_training.OfficialBundle(
         root=tmp_path,
@@ -321,9 +320,9 @@ def test_fixed_ranker_accepts_legacy_calibration_splits(tmp_path: Path, monkeypa
     def no_fit(*_args, **_kwargs):
         pytest.fail("The legacy calibration arm tried fitting a new ranker")
 
-    monkeypatch.setattr(evaluate, "_score_classic_stratified_rows", score_source)
-    monkeypatch.setattr(evaluate, "_classic_internal_eval", lambda *_args: {})
-    monkeypatch.setattr(ranker_module, "_build_classic_classifier", no_fit)
+    monkeypatch.setattr(fit_module, "_score_classic_stratified_rows", score_source)
+    monkeypatch.setattr(fit_module, "_classic_internal_eval", lambda *_args: {})
+    monkeypatch.setattr(fit_module, "_build_classic_classifier", no_fit)
     bundle = classic_training.OfficialBundle(
         root=tmp_path,
         bundle_name="fixture",

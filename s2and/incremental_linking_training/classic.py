@@ -81,6 +81,7 @@ from .evaluate import _validate_stratified_split_assignments as _validate_strati
 from .evaluate import _validate_unique_stratified_candidate_rows as _validate_unique_stratified_candidate_rows
 from .evaluate import _write_query_predictions as _write_query_predictions
 from .evaluate import evaluate_linker as evaluate_linker
+from .fit import fit_linker as fit_linker
 from .gate import _FALSE_ABSTAIN_REPORT_WEIGHTS as _FALSE_ABSTAIN_REPORT_WEIGHTS
 from .gate import _GATE_BUCKETS as _GATE_BUCKETS
 from .gate import _MISSING_LOGISTIC_CLASS_LOGIT as _MISSING_LOGISTIC_CLASS_LOGIT
@@ -116,7 +117,6 @@ from .ranker import _filter_candidate_rows_to_retrieval_top_k as _filter_candida
 from .ranker import _resolve_classic_monotone_constraints as _resolve_classic_monotone_constraints
 from .ranker import _score_query_choices as _score_query_choices
 from .ranker import _validate_classic_feature_inputs as _validate_classic_feature_inputs
-from .ranker import fit_linker as fit_linker
 from .source_bundle import ClassicHoldoutIdentities as ClassicHoldoutIdentities
 from .source_bundle import OfficialBundle as OfficialBundle
 from .source_bundle import _apply_classic_train_holdout_filter as _apply_classic_train_holdout_filter

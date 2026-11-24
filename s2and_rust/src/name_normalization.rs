@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn public_prefixes_match_python_source() {
-        let python_source = include_str!("../../s2and/text.py");
+        let python_source = include_str!("../../s2and/text/normalize.py");
         let prefix_literal = python_source
             .split_once("NAME_PREFIXES = {")
             .expect("Python prefix set")

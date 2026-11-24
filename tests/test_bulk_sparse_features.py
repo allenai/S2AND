@@ -200,9 +200,7 @@ def test_fused_block_scoring_matches_feature_matrix_path(
     # Small tiles cross tile edges inside the 7-signature block.
     one_pass = []
     for row_band, column_block in ((2, 3), (32, 64)):
-        monkeypatch.setattr(
-            model_module, "_one_pass_tile_overrides", {"row_band": row_band, "column_block": column_block}
-        )
+        monkeypatch.setattr(distances, "_one_pass_tile_overrides", {"row_band": row_band, "column_block": column_block})
         one_pass.append(
             clusterer._make_distance_matrices_from_verified_rust_featurizer({"block": ids}, native_features, **kwargs)
         )

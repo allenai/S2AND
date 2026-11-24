@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Collection
 from pathlib import Path
@@ -58,3 +59,23 @@ def load_guardrails(path: Path | None, *, fields: Collection[str]) -> dict[str, 
         if isinstance(item, bool) or not isinstance(item, int) or item < 1:
             raise ValueError(f"guardrail {field!r} must be a positive integer")
     return value
+
+
+def normalizer_sha256() -> str:
+    """Hash every source file of the `s2and.text` package.
+
+    The name normalizer spans several modules. Hashing only the package
+    initializer would let a resume reuse counts built with older rules.
+
+    Returns:
+        A hex SHA-256 over each module's relative path and bytes, in path order.
+    """
+    import s2and.text as text_package
+
+    root = Path(text_package.__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        # Length prefixes keep file boundaries unambiguous.
+        for part in (path.relative_to(root).as_posix().encode("utf-8"), path.read_bytes()):
+            digest.update(len(part).to_bytes(8, "big") + part)
+    return digest.hexdigest()

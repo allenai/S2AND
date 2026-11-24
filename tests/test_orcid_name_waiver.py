@@ -234,7 +234,7 @@ def test_clusterer_passes_its_setting_to_block_constraints(monkeypatch: pytest.M
         lambda _i, *, max_pairs, **_k: (np.zeros((max_pairs, 1)), None),
     )
     monkeypatch.setattr(
-        model_module, "_predict_and_combine", lambda _c, _n, _f, labels, *_a, **_k: (np.zeros(len(labels)), 0.0)
+        distance_module, "_predict_and_combine", lambda _c, _n, _f, labels, *_a, **_k: (np.zeros(len(labels)), 0.0)
     )
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),

@@ -9,7 +9,6 @@ A complete local resume needs no AWS SDK or credentials.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import re
@@ -22,6 +21,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from s2and._sha256 import sha256_file
+
+from ._run_support import normalizer_sha256
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
@@ -112,12 +113,9 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
     source_sql = (
         f"SELECT first_name, last_name, count(*) AS mention_count\nFROM {table}\nGROUP BY first_name, last_name"
     )
-    normalizer_spec = importlib.util.find_spec("s2and.text")
-    if normalizer_spec is None or normalizer_spec.origin is None:
-        raise RuntimeError("Cannot locate the production name normalizer")
     return {
         "source_unit": "author_table_row",
-        "normalizer_sha256": sha256_file(Path(normalizer_spec.origin)),
+        "normalizer_sha256": normalizer_sha256(),
         "source_sql": source_sql,
         "population_audit_sql": (
             f"SELECT sum(author_rows) AS author_rows, count(*) AS raw_groups FROM "
@@ -295,11 +293,9 @@ def _aws_clients(args: argparse.Namespace, session: Any) -> tuple[Any, Any]:
 def execute_export(args: argparse.Namespace, run_plan: dict[str, Any], *, session: Any = None) -> dict[str, Any]:
     """Resume one bounded Athena export and the existing canonical producer."""
     os.environ.update(run_plan["thread_environment"])
-    import s2and.text as text_normalizer
-
     from .generate_name_counts_from_parquet import build_name_counts_from_parquet
 
-    if sha256_file(Path(text_normalizer.__file__)) != run_plan["normalizer_sha256"]:
+    if normalizer_sha256() != run_plan["normalizer_sha256"]:
         raise ValueError("Name normalizer changes after the plan")
     output = args.output_dir.resolve()
     record_path = output / "export.json"

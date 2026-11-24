@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn mixed_case_non_initials_match_python_source() {
-        let python_source = include_str!("../../s2and/text.py");
+        let python_source = include_str!("../../s2and/text/canonical_names.py");
         let literal = python_source
             .split_once("_MIXED_CASE_NON_INITIALS = frozenset(")
             .expect("Python non-initials set")

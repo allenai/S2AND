@@ -102,6 +102,10 @@ from scripts.common.initial_query_sources import (  # noqa: E402
 from scripts.eps.common import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.linker.build_linker_task_tables import TASK_ROLES, read_seed_components  # noqa: E402
 
+# Keep the pre-split names importable from this command module.
+evaluate_classic = evaluate_linker
+fit_classic = fit_linker
+
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 PRODUCTION_MAX_EXEMPLARS = 4
 PRODUCTION_PAIRWISE_MODEL_NAN_POLICY = "preserve"

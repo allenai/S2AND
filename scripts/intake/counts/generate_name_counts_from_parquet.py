@@ -15,7 +15,6 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import s2and.text as text_normalizer
 from s2and._sha256 import sha256_file
 from s2and.arrow_tables import _write_sorted_name_count_records
 from s2and.consts import PUBLIC_DATA_FORMAT_VERSION
@@ -23,7 +22,7 @@ from s2and.name_counts_index import NameCountsIndex
 from s2and.runtime import load_s2and_rust_extension
 from s2and.text import canonicalize_name_parts, last_name_allows_joined_initials
 
-from ._run_support import emit_jsonl, validate_input_file
+from ._run_support import emit_jsonl, normalizer_sha256, validate_input_file
 
 KINDS = ("first", "last", "first_last", "last_first_initial")
 _BATCH_ROWS = 100_000
@@ -166,7 +165,7 @@ def build_name_counts_from_parquet(
     identity = {
         "source_manifest_sha256": sha256_file(manifest),
         "producer_sha256": sha256_file(Path(__file__)),
-        "normalizer_sha256": sha256_file(Path(text_normalizer.__file__)),
+        "normalizer_sha256": normalizer_sha256(),
         "expected_source_rows": expected_source_rows,
         "expected_source_mentions": expected_source_mentions,
     }

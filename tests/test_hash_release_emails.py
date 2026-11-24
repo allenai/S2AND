@@ -20,6 +20,7 @@ from s2and.incremental_linking.feature_block_arrow import write_arrow_batch_look
 from s2and.text import email_prefix_suffix
 from scripts.common.email_redaction import (
     EMAIL_REDACTED_TOKEN,
+    find_plaintext_emails,
     hash_feature_email,
     hash_release_emails,
     redact_source_tree,
@@ -159,6 +160,26 @@ def test_scrub_text_emails_handles_unicode_dashes_and_malformed_at_dot() -> None
     assert scrubbed.count(EMAIL_REDACTED_TOKEN) == 6
     assert "Fe3O4@SiO2.The" in scrubbed
     assert hashed in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("prefix", "address", "affiliation_id"),
+    [
+        ("Xxxxxxxxxxx ", "x.xxxxxxxxx@xxx.xx", "60032882"),
+        ("Xxxxxxxxxxx ", "x.xxxxxxxxx@xxx.xx", "60032882"),
+        ("xx, Xxxxxxx ", "xxxxxxxxx.xxxxx@xxx-xxxxxxx.xx", "60028229"),
+        ("xx, Xxxxxxx ", "x.xxxxx@xxx-xxx.xx", "60010750"),
+        ("xx, Xxxxxxx ", "x.xxxxx@xxx-xxx.xx", "60010750"),
+        ("xx, Xxxxxxx ", "x.xxxxx@xxx-xxx.xx", "60010750"),
+        ("Xxxxxxxxxxx ", "xxxxxx.xxxxxxxxx@xxx.xx", "60012614"),
+    ],
+    ids=["287947975-0", "289458341-1", "286214046-3", "279001215-0", "279001275-1", "279001287-1", "286770593-6"],
+)
+def test_affiliation_email_followed_by_id(prefix: str, address: str, affiliation_id: str) -> None:
+    # Mask the source addresses while preserving the seven missed cells' structure.
+    cell = f"{prefix}{address}{affiliation_id}"
+    assert find_plaintext_emails(cell) == [address]
+    assert scrub_text_emails(cell) == f"{prefix}{EMAIL_REDACTED_TOKEN}{affiliation_id}"
 
 
 def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_path: Path) -> None:

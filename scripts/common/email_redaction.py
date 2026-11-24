@@ -35,7 +35,7 @@ _PLAINTEXT_EMAIL_RE = re.compile(
     rf"|\"[^\s\"@]+\""
     rf"|(?<![{_EMAIL_LOCAL_CHARS}])[{_EMAIL_LOCAL_CHARS}]+"
     rf")"
-    rf"{_AT_CHARS}\.?(?:{_EMAIL_DOMAIN_LABEL}\.)+[A-Za-z\u00C0-\u024F]{{2,24}}(?![A-Za-z0-9\u00C0-\u024F])"
+    rf"{_AT_CHARS}\.?(?:{_EMAIL_DOMAIN_LABEL}\.)+[A-Za-z\u00C0-\u024F]{{2,24}}(?![A-Za-z\u00C0-\u024F])"
 )
 # Avoid flagging chemical nanoparticle formulas like "Fe3O4@SiO2.The" in abstracts.
 _CHEMICAL_FORMULA_PREFIX_RE = re.compile(r"^[A-Z][a-z]?\d+(?:[A-Z][a-z]?\d*)*[@\uFF20](?:[A-Z][a-z]?\d*)+\.")

@@ -543,6 +543,8 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
             raise ValueError("classic.promoted_stratified_gate.fit_splits must be a subset of calibration_splits")
         out["fit_splits"] = fit_splits
     if validation_splits_raw is not None:
+        if fit_splits_raw is None:
+            raise ValueError("classic.promoted_stratified_gate.validation_splits requires explicit fit_splits")
         if isinstance(validation_splits_raw, str) or not isinstance(validation_splits_raw, Sequence):
             raise ValueError("classic.promoted_stratified_gate.validation_splits must be a sequence of split names")
         val_splits = [str(s).strip() for s in validation_splits_raw]
@@ -552,9 +554,18 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
             raise ValueError(
                 "classic.promoted_stratified_gate.validation_splits must be a subset of calibration_splits"
             )
-        if fit_splits_raw is not None and set(out["fit_splits"]).intersection(val_splits):
+        if set(out["fit_splits"]).intersection(val_splits):
             raise ValueError("classic.promoted_stratified_gate fit_splits and validation_splits must be disjoint")
         out["validation_splits"] = val_splits
+    tune_weights = out.get("tune_false_abstain_weights")
+    if tune_weights is not None:
+        if validation_splits_raw is None:
+            raise ValueError("classic.promoted_stratified_gate.tune_false_abstain_weights requires validation_splits")
+        if isinstance(tune_weights, str) or not isinstance(tune_weights, Sequence) or not tune_weights:
+            raise ValueError(
+                "classic.promoted_stratified_gate.tune_false_abstain_weights must be a nonempty sequence of floats"
+            )
+        out["tune_false_abstain_weights"] = [float(w) for w in tune_weights]
     return out
 
 
@@ -1136,17 +1147,23 @@ def _fit_promoted_logistic_gate(
     resolved_error_weights = dict(LOGISTIC_GATE_ERROR_WEIGHTS if error_weights is None else error_weights)
     training_summary: dict[str, Any] = {
         "calibration_splits": [str(split) for split in calibration_splits],
-        "fit_splits": list(active_fit_splits),
-        "validation_splits": list(active_val_splits),
         "selection_feature_count": int(selection_feature_count),
         "selection_c": float(selection_c),
         "final_c": float(final_c),
         "all_feature_count": int(len(all_feature_names)),
         "selected_feature_count": int(len(selected_feature_names)),
         "calibration_queries": int(calibration_mask.sum()),
-        "fit_queries": int(fit_mask.sum()),
-        "validation_queries": int(val_mask.sum()) if val_mask is not None else 0,
     }
+    # Preserve exact 1.4 metadata keys when fit_splits/validation_splits are not separated.
+    if fit_splits is not None or validation_splits is not None:
+        training_summary.update(
+            {
+                "fit_splits": list(active_fit_splits),
+                "validation_splits": list(active_val_splits),
+                "fit_queries": int(fit_mask.sum()),
+                "validation_queries": int(val_mask.sum()) if val_mask is not None else 0,
+            }
+        )
     gate_config = logistic_gate_config(
         feature_names=selected_feature_names,
         weights=weights,
@@ -1157,9 +1174,10 @@ def _fit_promoted_logistic_gate(
         training_summary=training_summary,
     )
     gate = load_logistic_gate_config(gate_config)
+    eval_cal_mask = fit_mask if val_mask is not None else calibration_mask
     calibration_predictions = _apply_logistic_gate_predictions(
-        choices[calibration_mask].copy(),
-        gate.predict_link(selected_matrix[calibration_mask]),
+        choices[eval_cal_mask].copy(),
+        gate.predict_link(selected_matrix[eval_cal_mask]),
     )
     validation_metrics = None
     if val_mask is not None:
@@ -1199,44 +1217,93 @@ def select_logistic_gate_error_weights(
     choices: pd.DataFrame,
     probabilities: np.ndarray,
     *,
-    false_abstain_weights: Sequence[float] = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0),
+    false_abstain_weights: Sequence[float] = (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50),
 ) -> dict[str, Any]:
     """Tune the logistic gate ``false_abstain`` decision weight on held-out validation rows.
 
-    Keeps the fitted logistic probabilities fixed and sweeps ``error_weights["false_abstain"]``
-    out-of-sample on ``choices`` (e.g. the 1.5 ``gate_thresh`` split), selecting the weight
-    that minimizes ``weighted_average_error`` (tie-breaking on higher ``balanced_accuracy``).
+    Computes the gate feature matrix and class probabilities once, then sweeps
+    ``error_weights["false_abstain"]`` (always including the base weight) out-of-sample on
+    ``choices`` (e.g. the 1.5 ``gate_thresh`` split). Selects the weight minimizing the fixed
+    production ``weighted_average_error`` (tie-breaking on higher ``balanced_accuracy``, then
+    proximity to the base ``false_abstain`` weight).
     """
+    if choices.empty or candidate_rows.empty:
+        raise ValueError("select_logistic_gate_error_weights requires non-empty validation choices and candidate_rows")
     if not false_abstain_weights:
         raise ValueError("false_abstain_weights must be nonempty")
-    sweep: list[dict[str, Any]] = []
-    best_config: dict[str, Any] | None = None
-    best_key: tuple[float, float, float] | None = None
     base_weights = dict(base_gate_config.get("error_weights", LOGISTIC_GATE_ERROR_WEIGHTS))
-    for w_fa in false_abstain_weights:
+    base_fa = float(base_weights.get("false_abstain", LOGISTIC_GATE_ERROR_WEIGHTS["false_abstain"]))
+    candidate_grid: list[float] = []
+    for w_fa in (*false_abstain_weights, base_fa):
         w_val = float(w_fa)
         if not np.isfinite(w_val) or w_val <= 0:
             raise ValueError(f"false_abstain weight must be finite and positive, got {w_fa!r}")
-        trial_config = copy.deepcopy(dict(base_gate_config))
-        trial_config["error_weights"] = {**base_weights, "false_abstain": w_val}
-        gate = load_logistic_gate_config(trial_config)
-        preds = _apply_promoted_logistic_gate_to_candidate_rows(candidate_rows, choices.copy(), probabilities, gate)
+        if not any(np.isclose(w_val, existing, rtol=0.0, atol=1e-12) for existing in candidate_grid):
+            candidate_grid.append(w_val)
+    candidate_grid.sort()
+
+    base_gate = load_logistic_gate_config(base_gate_config)
+    matrix, query_rows = build_logistic_gate_matrix(
+        base_gate.feature_names,
+        query_indices=candidate_rows["query_group_id"].astype(str).to_numpy(),
+        probabilities=probabilities,
+        feature_values=feature_values_from_candidate_frame(candidate_rows),
+        retrieval_ranks=candidate_rows["retrieval_rank"].to_numpy() if "retrieval_rank" in candidate_rows else None,
+        component_keys=(
+            candidate_rows["candidate_component_key"].astype(str).to_numpy()
+            if "candidate_component_key" in candidate_rows
+            else None
+        ),
+    )
+    if len(matrix) != len(choices):
+        raise ValueError(f"logistic gate query matrix mismatch: {len(matrix)} != {len(choices)}")
+    matrix_query_ids = candidate_rows["query_group_id"].astype(str).to_numpy()[query_rows.best_rows]
+    choice_query_ids = choices["query_case_id"].astype(str).to_numpy()
+    if not np.array_equal(matrix_query_ids, choice_query_ids):
+        raise ValueError("logistic gate query order mismatch between candidate rows and choices")
+
+    # Compute class probabilities once; mirror NumpyLogisticGate.predict_link exactly.
+    class_proba = base_gate.predict_proba(matrix)
+    w_fl = float(base_weights["false_link"])
+    w_wc = float(base_weights["wrong_candidate_link"])
+    link_cost = w_fl * class_proba[:, 0] + w_wc * class_proba[:, 1]
+    safe_prob = class_proba[:, 1] + class_proba[:, 2]
+
+    sweep: list[dict[str, Any]] = []
+    best_config: dict[str, Any] | None = None
+    best_key: tuple[float, float, float] | None = None
+    for w_val in candidate_grid:
+        abstain_cost = w_val * safe_prob
+        link = link_cost < abstain_cost
+        preds = _apply_logistic_gate_predictions(choices.copy(), link)
         metrics = _summarize_predictions(preds)
         sweep.append({"false_abstain_weight": w_val, "metrics": metrics})
         key = (
             float(metrics["weighted_average_error"]),
             -float(metrics["balanced_accuracy"]),
-            abs(w_val - 1.0),
+            abs(w_val - base_fa),
         )
         if best_key is None or key < best_key:
             best_key = key
-            best_config = trial_config
+            best_config = copy.deepcopy(dict(base_gate_config))
+            best_config["error_weights"] = {**base_weights, "false_abstain": w_val}
     assert best_config is not None
     return {
         "gate_config": best_config,
         "selected_false_abstain_weight": float(best_config["error_weights"]["false_abstain"]),
         "sweep": sweep,
     }
+
+
+_STALE_POST_RETRIEVAL_FEATURE_PREFIXES = ("pw_",)
+_STALE_POST_RETRIEVAL_FEATURE_COLUMNS = frozenset(
+    {
+        "retrieval_reciprocal_rank",
+        "same_dominant_first_as_best_top5",
+        "same_family_as_heuristic_choice",
+        "sparse_relative_winner_score",
+    }
+)
 
 
 def build_whole_author_holdout_rows(
@@ -1247,17 +1314,29 @@ def build_whole_author_holdout_rows(
     holdout_query_ids: Sequence[str] | set[str] | frozenset[str],
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Synthesize realistic ``no_safe`` abstention queries via whole-author holdout.
+    """Synthesize realistic ``no_safe`` abstention queries via whole-author holdout on featureless rows.
 
-    For each query in ``holdout_query_ids``, removes every candidate component containing
-    any signature of that query's author, sets ``label = 0`` on all remaining candidates,
-    re-indexes ``retrieval_rank`` consecutively starting at 1, and truncates to
-    ``retrieval_top_k``. Held-out queries left with zero candidates are dropped.
+    Must be called on **featureless** pre-materialization candidate tables (ideally retrieved
+    deeper than ``retrieval_top_k`` so dropped author clusters are backfilled up to
+    ``retrieval_top_k``). Rejects already-featurized tables (which would leave rank/list-relative
+    features stale), requires complete ``component_to_authors`` and ``holdout_query_ids``
+    coverage, and verifies that no original ``label == 1`` row survives author removal.
     """
     required = {"query_group_id", "candidate_component_key", "retrieval_rank", "label"}
     missing = sorted(required - set(candidate_rows.columns))
     if missing:
         raise ValueError(f"candidate_rows missing required columns for whole-author holdout: {missing}")
+    featurized_cols = sorted(
+        col
+        for col in candidate_rows.columns
+        if col in _STALE_POST_RETRIEVAL_FEATURE_COLUMNS
+        or any(col.startswith(prefix) for prefix in _STALE_POST_RETRIEVAL_FEATURE_PREFIXES)
+    )
+    if featurized_cols:
+        raise ValueError(
+            "build_whole_author_holdout_rows must run on featureless pre-materialization rows, "
+            f"found materialized features: {featurized_cols[:5]}"
+        )
     holdout_set = {str(qid) for qid in holdout_query_ids}
     if not holdout_set:
         return candidate_rows.copy(), {
@@ -1268,8 +1347,15 @@ def build_whole_author_holdout_rows(
         }
 
     qids = candidate_rows["query_group_id"].astype(str)
-    untouched = candidate_rows.loc[~qids.isin(holdout_set)].copy()
-    target_rows = candidate_rows.loc[qids.isin(holdout_set)].copy()
+    present_qids = set(qids.unique())
+    missing_requested = sorted(holdout_set - present_qids)
+    if missing_requested:
+        raise KeyError(f"Requested holdout_query_ids absent from candidate_rows: {missing_requested[:5]}")
+
+    work = candidate_rows.copy()
+    work["_orig_pos"] = np.arange(len(work), dtype=np.int64)
+    untouched = work.loc[~qids.isin(holdout_set)].copy()
+    target_rows = work.loc[qids.isin(holdout_set)].copy()
 
     kept_parts: list[pd.DataFrame] = [untouched]
     retained = 0
@@ -1279,14 +1365,28 @@ def build_whole_author_holdout_rows(
         author = query_to_author.get(str(qid))
         if author is None:
             raise KeyError(f"Missing author mapping for holdout query_group_id={qid!r}")
-        keep_mask = [
-            author not in component_to_authors.get(str(comp_key), ())
-            for comp_key in group["candidate_component_key"].astype(str)
-        ]
+        comp_keys = group["candidate_component_key"].astype(str).tolist()
+        unmapped_comps = sorted({ck for ck in comp_keys if ck not in component_to_authors})
+        if unmapped_comps:
+            raise KeyError(
+                f"Holdout query {qid!r} references candidate_component_key(s) missing from "
+                f"component_to_authors: {unmapped_comps[:5]}"
+            )
+        keep_mask = [author not in component_to_authors[ck] for ck in comp_keys]
         removed = int(len(keep_mask) - sum(keep_mask))
         author_rows_removed += removed
+        surviving = group.loc[keep_mask].copy()
+        if (pd.to_numeric(surviving["label"], errors="coerce").fillna(0) == 1).any():
+            raise ValueError(
+                f"Holdout query {qid!r} still has a label==1 candidate after removing author {author!r}; "
+                "component_to_authors is incomplete or inconsistent with labels"
+            )
+        surviving["_rank_num"] = pd.to_numeric(surviving["retrieval_rank"], errors="raise")
         filtered = (
-            group.loc[keep_mask].sort_values("retrieval_rank", kind="mergesort").head(int(retrieval_top_k)).copy()
+            surviving.sort_values(["_rank_num", "_orig_pos"], kind="mergesort")
+            .head(int(retrieval_top_k))
+            .drop(columns=["_rank_num"])
+            .copy()
         )
         if filtered.empty:
             dropped_empty += 1
@@ -1296,9 +1396,14 @@ def build_whole_author_holdout_rows(
         kept_parts.append(filtered)
         retained += 1
 
-    combined = pd.concat(kept_parts, ignore_index=True)
+    combined = (
+        pd.concat(kept_parts, ignore_index=True)
+        .sort_values("_orig_pos", kind="mergesort")
+        .drop(columns=["_orig_pos"])
+        .reset_index(drop=True)
+    )
     return combined, {
-        "holdout_queries_requested": int(target_rows["query_group_id"].astype(str).nunique()),
+        "holdout_queries_requested": len(holdout_set),
         "holdout_queries_retained": retained,
         "holdout_queries_dropped_empty": dropped_empty,
         "author_rows_removed": author_rows_removed,
@@ -2166,6 +2271,21 @@ def fit_classic(
         validation_splits=promoted_gate_config.get("validation_splits"),
     )
     logistic_gate_config = dict(selected_gate_result["gate_config"])
+    tune_fa_grid = promoted_gate_config.get("tune_false_abstain_weights")
+    fa_tuning_result: dict[str, Any] | None = None
+    if tune_fa_grid is not None:
+        val_splits = tuple(str(s) for s in promoted_gate_config["validation_splits"])
+        val_choice_mask = stratified_scores.choices["split"].astype(str).isin(val_splits).to_numpy(dtype=bool)
+        val_qids = set(stratified_scores.choices.loc[val_choice_mask, "query_case_id"].astype(str))
+        val_row_mask = stratified_scores.rows["query_group_id"].astype(str).isin(val_qids).to_numpy(dtype=bool)
+        fa_tuning_result = select_logistic_gate_error_weights(
+            logistic_gate_config,
+            stratified_scores.rows.loc[val_row_mask].reset_index(drop=True),
+            stratified_scores.choices.loc[val_choice_mask].reset_index(drop=True),
+            stratified_scores.probabilities[val_row_mask],
+            false_abstain_weights=tune_fa_grid,
+        )
+        logistic_gate_config = dict(fa_tuning_result["gate_config"])
     calibration_metrics = {
         "split": calibration_split_label,
         **dict(selected_gate_result["calibration_metrics"]),
@@ -2184,7 +2304,7 @@ def fit_classic(
         "mode": _PROMOTED_LOGISTIC_GATE_MODE,
         "calibration_splits": list(calibration_splits),
         "test_split": str(promoted_gate_config["test_split"]),
-        "error_weights": dict(LOGISTIC_GATE_ERROR_WEIGHTS),
+        "error_weights": dict(logistic_gate_config["error_weights"]),
         "selected_gate": {
             "model_type": str(logistic_gate_config["model_type"]),
             "feature_count": int(len(logistic_gate_config["feature_names"])),
@@ -2195,6 +2315,14 @@ def fit_classic(
         "validation_metrics": (
             dict(selected_gate_result["validation_metrics"])
             if selected_gate_result.get("validation_metrics") is not None
+            else None
+        ),
+        "false_abstain_tuning": (
+            {
+                "selected_false_abstain_weight": fa_tuning_result["selected_false_abstain_weight"],
+                "trial_count": len(fa_tuning_result["sweep"]),
+            }
+            if fa_tuning_result is not None
             else None
         ),
         "calibration_split_metrics": {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,8 @@ from s2and.incremental_linking_training.classic import (
     build_whole_author_holdout_rows,
     select_logistic_gate_error_weights,
 )
+from scripts.eps_sweep import apply_reviewed_eps as apply_eps
+from scripts.eps_sweep.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
 from scripts.production.model import train_linker_and_finalize as promoted_train
 
 
@@ -72,6 +75,7 @@ def test_promoted_stratified_gate_spec_validates_fit_and_validation_splits() -> 
             "calibration_splits": ["calibration_fit", "calibration_check"],
             "fit_splits": ["calibration_fit"],
             "validation_splits": ["calibration_check"],
+            "tune_false_abstain_weights": [0.20, 0.25, 0.30],
             "test_split": "test",
         }
     }
@@ -79,17 +83,31 @@ def test_promoted_stratified_gate_spec_validates_fit_and_validation_splits() -> 
     assert parsed is not None
     assert parsed["fit_splits"] == ["calibration_fit"]
     assert parsed["validation_splits"] == ["calibration_check"]
+    assert parsed["tune_false_abstain_weights"] == [0.20, 0.25, 0.30]
 
-    overlap_spec = {
-        "promoted_stratified_gate": {
-            "calibration_splits": ["calibration_fit", "calibration_check"],
-            "fit_splits": ["calibration_fit"],
-            "validation_splits": ["calibration_fit"],
-            "test_split": "test",
-        }
-    }
+    # validation_splits without fit_splits must fail early in the parser!
+    with pytest.raises(ValueError, match="requires explicit fit_splits"):
+        _promoted_stratified_gate_spec(
+            {
+                "promoted_stratified_gate": {
+                    "calibration_splits": ["calibration_fit", "calibration_check"],
+                    "validation_splits": ["calibration_check"],
+                    "test_split": "test",
+                }
+            }
+        )
+
     with pytest.raises(ValueError, match="must be disjoint"):
-        _promoted_stratified_gate_spec(overlap_spec)
+        _promoted_stratified_gate_spec(
+            {
+                "promoted_stratified_gate": {
+                    "calibration_splits": ["calibration_fit", "calibration_check"],
+                    "fit_splits": ["calibration_fit"],
+                    "validation_splits": ["calibration_fit"],
+                    "test_split": "test",
+                }
+            }
+        )
 
 
 def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa() -> None:
@@ -126,7 +144,7 @@ def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa(
     assert res1["gate_config"]["weights"] == res2["gate_config"]["weights"]
     assert res1["gate_config"]["bias"] == res2["gate_config"]["bias"]
 
-    # Out-of-sample false_abstain weight sweep on calibration_check.
+    # Default grid includes the production 0.25 baseline and rejects empty choices.
     val_qids = set(choices.loc[val_mask, "query_case_id"].astype(str))
     row_val_mask = rows["query_group_id"].astype(str).isin(val_qids).to_numpy()
     tuned = select_logistic_gate_error_weights(
@@ -134,30 +152,29 @@ def test_fit_promoted_logistic_gate_separates_fit_and_validation_and_tunes_w_fa(
         rows.loc[row_val_mask].reset_index(drop=True),
         choices.loc[val_mask].reset_index(drop=True),
         probs[row_val_mask],
-        false_abstain_weights=(0.5, 1.0, 2.0),
     )
-    assert tuned["selected_false_abstain_weight"] in (0.5, 1.0, 2.0)
-    assert len(tuned["sweep"]) == 3
+    swept_weights = [trial["false_abstain_weight"] for trial in tuned["sweep"]]
+    assert 0.25 in swept_weights
+    with pytest.raises(ValueError, match="non-empty"):
+        select_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
 
 
-def test_build_whole_author_holdout_rows_removes_all_author_fragments_and_reranks() -> None:
+def test_build_whole_author_holdout_rows_guards_membership_features_and_labels() -> None:
     rows = pd.DataFrame(
         [
-            # q1 (author A1) will be held out: c1 and c3 both contain A1 -> both removed; c2, c4 remain reranked 1..2.
-            {"query_group_id": "q1", "candidate_component_key": "c1", "retrieval_rank": 1, "label": 1},
-            {"query_group_id": "q1", "candidate_component_key": "c2", "retrieval_rank": 2, "label": 0},
-            {"query_group_id": "q1", "candidate_component_key": "c3", "retrieval_rank": 3, "label": 1},
-            {"query_group_id": "q1", "candidate_component_key": "c4", "retrieval_rank": 4, "label": 0},
-            # q2 (author A2) will be held out and has ONLY A2's cluster -> dropped as empty.
-            {"query_group_id": "q2", "candidate_component_key": "c5", "retrieval_rank": 1, "label": 1},
-            # q3 is NOT held out -> untouched.
-            {"query_group_id": "q3", "candidate_component_key": "c6", "retrieval_rank": 1, "label": 1},
+            {"query_group_id": "q1", "candidate_component_key": "c1", "retrieval_rank": "1", "label": 1},
+            {"query_group_id": "q1", "candidate_component_key": "c2", "retrieval_rank": "2", "label": 0},
+            {"query_group_id": "q1", "candidate_component_key": "c3", "retrieval_rank": "10", "label": 1},
+            {"query_group_id": "q1", "candidate_component_key": "c4", "retrieval_rank": "3", "label": 0},
+            {"query_group_id": "q2", "candidate_component_key": "c5", "retrieval_rank": "1", "label": 1},
+            {"query_group_id": "q3", "candidate_component_key": "c6", "retrieval_rank": "1", "label": 1},
         ]
     )
+    membership = {"c1": {"A1"}, "c2": {"A9"}, "c3": {"A1", "A8"}, "c4": {"A7"}, "c5": {"A2"}, "c6": {"A3"}}
     out, summary = build_whole_author_holdout_rows(
         rows,
         query_to_author={"q1": "A1", "q2": "A2", "q3": "A3"},
-        component_to_authors={"c1": {"A1"}, "c2": {"A9"}, "c3": {"A1", "A8"}, "c4": {"A7"}, "c5": {"A2"}, "c6": {"A3"}},
+        component_to_authors=membership,
         holdout_query_ids={"q1", "q2"},
         retrieval_top_k=5,
     )
@@ -171,56 +188,83 @@ def test_build_whole_author_holdout_rows_removes_all_author_fragments_and_rerank
     assert q1["candidate_component_key"].tolist() == ["c2", "c4"]
     assert q1["retrieval_rank"].tolist() == [1, 2]
     assert q1["label"].tolist() == [0, 0]
-    assert "q2" not in set(out["query_group_id"])
-    q3 = out[out["query_group_id"] == "q3"]
-    assert q3["label"].tolist() == [1]
+
+    # Rejects missing component_to_authors key (never silently manufactures false negatives!).
+    with pytest.raises(KeyError, match="missing from component_to_authors"):
+        build_whole_author_holdout_rows(
+            rows,
+            query_to_author={"q1": "A1"},
+            component_to_authors={"c2": {"A9"}},
+            holdout_query_ids={"q1"},
+        )
+    # Rejects incomplete membership where a label==1 row survives author removal.
+    with pytest.raises(ValueError, match="still has a label==1"):
+        build_whole_author_holdout_rows(
+            rows,
+            query_to_author={"q1": "A1"},
+            component_to_authors={"c1": set(), "c2": set(), "c3": set(), "c4": set()},
+            holdout_query_ids={"q1"},
+        )
+    # Rejects materialized feature frames.
+    with pytest.raises(ValueError, match="featureless pre-materialization"):
+        build_whole_author_holdout_rows(
+            rows.assign(pw_mean_prob=0.5),
+            query_to_author={"q1": "A1"},
+            component_to_authors=membership,
+            holdout_query_ids={"q1"},
+        )
+    # Rejects missing requested holdout query IDs.
+    with pytest.raises(KeyError, match="absent from candidate_rows"):
+        build_whole_author_holdout_rows(
+            rows,
+            query_to_author={"q_missing": "A9"},
+            component_to_authors=membership,
+            holdout_query_ids={"q_missing"},
+        )
 
 
-def test_smoke_mode_helpers_and_cli_arg(tmp_path: Path) -> None:
-    labels = pd.DataFrame(
-        {
-            "query_group_id": [f"q{i}" for i in range(10) for _ in range(2)],
-            "label": [1 if (i % 2 == 0 and j == 0) else 0 for i in range(10) for j in range(2)],
-        }
-    )
-    sampled = promoted_train._sample_query_groups_for_smoke(labels, max_query_groups=4)  # noqa: SLF001
-    assert sampled["query_group_id"].nunique() == 4
-    # Preserves both positive-bearing and all-negative queries.
-    has_pos = sampled.groupby("query_group_id")["label"].max() > 0
-    assert int(has_pos.sum()) == 2
-    assert int((~has_pos).sum()) == 2
-
+def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path: Path) -> None:
     assignments_path = tmp_path / "assignments.csv"
+    # 3 splits x 10 rows = 30 rows for one source_key, with string "True"/"False" booleans!
     pd.DataFrame(
         {
-            "query_group_id": [f"q{i}" for i in range(8)],
-            "source_key": ["s2and_eval"] * 8,
-            "split": ["calibration_fit"] * 4 + ["test"] * 4,
-            "has_positive_candidate": [True, True, False, False, True, True, False, False],
+            "query_group_id": [f"q{i:02d}" for i in range(30)],
+            "source_key": ["s2and_eval"] * 30,
+            "split": ["calibration_fit"] * 10 + ["calibration_check"] * 10 + ["test"] * 10,
+            "has_positive_candidate": ["True" if i % 2 == 0 else "False" for i in range(30)],
         }
     ).to_csv(assignments_path, index=False)
-    by_source = promoted_train._subset_smoke_assignments_file(assignments_path, max_query_groups=2)  # noqa: SLF001
+    by_source = promoted_train._subset_smoke_assignments_file(assignments_path, max_query_groups=6)  # noqa: SLF001
+    # Total per source_key is capped at 6 (2 per split), NOT 18!
+    assert len(by_source["s2and_eval"]) == 6
     reloaded = pd.read_csv(assignments_path)
-    assert len(reloaded) == 4
-    assert len(by_source["s2and_eval"]) == 4
+    for _split, grp in reloaded.groupby("split"):
+        assert len(grp) == 2
+        flags = promoted_train._parse_bool_flag(grp["has_positive_candidate"])  # noqa: SLF001
+        assert int(flags.sum()) == 1
+        assert int((~flags).sum()) == 1
 
-    parser = promoted_train.build_parser()
-    parsed = parser.parse_args(
-        [
-            "--source-bundle-root",
-            "src",
-            "--output-dir",
-            "out",
-            "--pairwise-model-path",
-            "pw",
-            "--target-json",
-            "t.json",
-            "--name-counts-index-root",
-            "nci",
-            "--n-jobs",
-            "2",
-            "--max-query-groups-per-table",
-            "25",
-        ]
+    # Verify apply_reviewed_eps block-role manifest verifier accepts clean eps_cal and rejects bad manifests.
+    role_manifest = tmp_path / "assignments.json"
+    role_manifest.write_text(
+        json.dumps(
+            {
+                "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test": ["c_park"]},
+                "verification": {"cross_role_orcid_overlap": 0},
+            }
+        ),
+        encoding="utf-8",
     )
-    assert parsed.max_query_groups_per_table == 25
+    eps_cal, _ = apply_eps._load_verified_eps_cal_blocks(role_manifest)  # noqa: SLF001
+    assert eps_cal == frozenset({"a smith", "b lee"})
+
+    # Rejects block-disjoint policy when no role manifest is provided.
+    with pytest.raises(ValueError, match="requires --block-role-assignments"):
+        apply_eps._require_test_separated_reference(  # noqa: SLF001
+            tmp_path,
+            "a_smith",
+            {"reference": {"reference_policy": REFERENCE_POLICY_ALL_IDENTITIES}, "arrow_root": str(tmp_path)},
+            lambda *_a: frozenset(),
+            None,  # type: ignore[arg-type]
+            verified_eps_cal_blocks=None,
+        )

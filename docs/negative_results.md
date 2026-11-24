@@ -110,7 +110,7 @@ A plain refit moves F1 by up to 0.4 points per dataset and 0.07 pooled across gi
 | Stripping final-test ORCID groups from the same-block giant EPS reference | 2026-11-23 | Removed 103,391 of 152,819 ORCID signatures (67.7%) and 552 of 582 authors with ≥50 records (94.8%), shifting dev EPS (0.40) away from all-author (0.38) and prolific-author (0.48) optima |
 | Query-level linker splits inside giant blocks with zero giant `no_safe` negatives | 2026-11-23 | 86–97% of giant test queries targeted clusters also positive in training, and 0 of 8,471 giant test queries were `no_safe`, hiding both unseen-author overfitting and the giant false-link rate |
 | Including predicted-cluster summaries in blind pair judging packets | 2026-11-23 | Leaked whether the model merged or split every pair in Batch 1 (invalidating 100 error judgments); paper-only packets restored 20/20 ORCID control accuracy |
-| Dropping an entire 25-candidate reviewed query on a single `abstain` verdict | 2026-11-23 | Lost 683 of 717 reviewed Stage 4h queries (~33% per-candidate abstain rate compounds over 25 candidates); judge only targeted candidates or resolve abstains without discarding the query |
+| Dropping an entire reviewed query on a single `abstain` verdict | 2026-11-23 | Lost 683 of 717 reviewed Stage 4h queries (95.3%) when any candidate in a multi-candidate query received `abstain` (~33% of candidate verdicts were `abstain`); judge only targeted candidates or resolve abstains without discarding the query |
 | Under-sizing raw paper-only model-disagreement judging packets | 2026-11-23 | 103 of 200 blind disagreement pairs in Batches 2–4 (51.5%) were "can't tell"; sample roughly 2× the desired decisive count |
 
 ## Speed

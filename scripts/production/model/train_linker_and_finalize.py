@@ -1319,23 +1319,48 @@ def _sample_query_groups_for_smoke(labels: pd.DataFrame, max_query_groups: int) 
     return labels.loc[query_ids.isin(selected_set)].reset_index(drop=True)
 
 
+def _parse_bool_flag(series: pd.Series) -> pd.Series:
+    """Safely parse boolean columns that may arrive as strings ('True'/'False'/'0'/'1')."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False)
+    normalized = series.astype(str).str.strip().str.lower()
+    return normalized.isin({"true", "1", "yes", "t"})
+
+
 def _subset_smoke_assignments_file(assignments_path: Path, max_query_groups: int) -> dict[str, set[str]]:
-    """Cap a staged assignments.csv to at most ``max_query_groups`` per (source_key, split)."""
+    """Cap a staged assignments.csv to at most ``max_query_groups`` total queries per ``source_key``.
+
+    Distributes each ``source_key``'s budget across its splits while preserving positive and
+    negative query balance within every split.
+    """
+    if max_query_groups <= 0:
+        raise ValueError("max_query_groups must be > 0")
     assignments = pd.read_csv(assignments_path)
     kept_frames: list[pd.DataFrame] = []
-    for _group_key, group in assignments.groupby(["source_key", "split"], sort=True):
-        if len(group) <= max_query_groups:
-            kept_frames.append(group)
+    for _source_key, source_group in assignments.groupby("source_key", sort=True):
+        splits = sorted(source_group["split"].astype(str).unique())
+        if len(source_group) <= max_query_groups:
+            kept_frames.append(source_group)
             continue
-        if "has_positive_candidate" in group.columns and max_query_groups >= 2:
-            pos = group[group["has_positive_candidate"].astype(bool)].sort_values("query_group_id")
-            neg = group[~group["has_positive_candidate"].astype(bool)].sort_values("query_group_id")
-            n_pos = min(len(pos), (max_query_groups + 1) // 2)
-            n_neg = min(len(neg), max_query_groups - n_pos)
-            n_pos = min(len(pos), max_query_groups - n_neg)
-            kept_frames.append(pd.concat([pos.head(n_pos), neg.head(n_neg)], ignore_index=True))
-        else:
-            kept_frames.append(group.sort_values("query_group_id").head(max_query_groups))
+        # Distribute max_query_groups across splits (at least 1 per split when budget permits).
+        base_quota = max(1, max_query_groups // len(splits))
+        remainder = max(0, max_query_groups - base_quota * len(splits))
+        for idx, split_name in enumerate(splits):
+            quota = base_quota + (1 if idx < remainder else 0)
+            split_group = source_group[source_group["split"].astype(str).eq(split_name)]
+            if len(split_group) <= quota:
+                kept_frames.append(split_group)
+                continue
+            if "has_positive_candidate" in split_group.columns and quota >= 2:
+                flags = _parse_bool_flag(split_group["has_positive_candidate"])
+                pos = split_group[flags].sort_values("query_group_id")
+                neg = split_group[~flags].sort_values("query_group_id")
+                n_pos = min(len(pos), (quota + 1) // 2)
+                n_neg = min(len(neg), quota - n_pos)
+                n_pos = min(len(pos), quota - n_neg)
+                kept_frames.append(pd.concat([pos.head(n_pos), neg.head(n_neg)], ignore_index=True))
+            else:
+                kept_frames.append(split_group.sort_values("query_group_id").head(quota))
     subset = pd.concat(kept_frames, ignore_index=True)
     subset.to_csv(assignments_path, index=False)
     by_source: dict[str, set[str]] = {}
@@ -1370,12 +1395,30 @@ def _materialize_arrow_rust_feature_bundle(
     if not isinstance(classic_spec, Mapping):
         raise ValueError("Source bundle models.classic must be an object")
     smoke_source_queries: dict[str, set[str]] | None = None
+    smoke_table_to_source_key: dict[str, str] = {}
+    smoke_internal_eval_base_groups: set[str] = set()
     if max_query_groups_per_table is not None:
         split_spec = classic_spec.get("stratified_eval_test_split")
-        if isinstance(split_spec, Mapping) and split_spec.get("assignments_path"):
-            staged_assignments = output_bundle_root / str(split_spec["assignments_path"])
-            if staged_assignments.is_file():
-                smoke_source_queries = _subset_smoke_assignments_file(staged_assignments, max_query_groups_per_table)
+        if not isinstance(split_spec, Mapping) or not split_spec.get("assignments_path"):
+            raise ValueError("Smoke mode requires classic.stratified_eval_test_split.assignments_path")
+        staged_assignments = output_bundle_root / str(split_spec["assignments_path"])
+        if not staged_assignments.is_file():
+            raise FileNotFoundError(f"Smoke mode staged assignments file missing: {staged_assignments}")
+        smoke_source_queries = _subset_smoke_assignments_file(staged_assignments, max_query_groups_per_table)
+        all_keys = source_featureless_table_keys(source_bundle)
+        path_to_tkey = {
+            source_bundle_asset_file(source_bundle, "featureless_rows", tk).resolve(): tk for tk in all_keys
+        }
+        for source_spec in _classic_stratified_eval_source_specs(dict(classic_spec)):
+            if source_spec["source_kind"] == "calibration_source":
+                continue
+            tk = path_to_tkey.get(_resolve_path(source_bundle, source_spec["path"]).resolve())
+            if tk is not None:
+                smoke_table_to_source_key[tk] = str(source_spec["source_key"])
+        internal_path_rel = classic_spec.get("classic_gate_internal_eval_base_groups_path")
+        if internal_path_rel:
+            internal_path = _resolve_path(source_bundle, str(internal_path_rel))
+            smoke_internal_eval_base_groups = set(pd.read_csv(internal_path)["base_group_id"].astype(str))
     retrieval_top_k = int(classic_spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
     selected_keys = list(dict.fromkeys(table_keys))
     materialized_keys: list[str] = []
@@ -1427,9 +1470,11 @@ def _materialize_arrow_rust_feature_bundle(
         )
         table_query_ids = None if query_ids_by_table is None else query_ids_by_table.get(table_key)
         if smoke_source_queries is not None and table_key not in {"train_path", "classic_gate_source_path"}:
-            # Keep only query groups retained in the smoke-subsetted assignments.csv.
-            all_smoke_ids = set().union(*smoke_source_queries.values()) if smoke_source_queries else set()
-            table_query_ids = all_smoke_ids if table_query_ids is None else (table_query_ids & all_smoke_ids)
+            # Filter strictly by this table's own source_key in the smoke-subsetted assignments.csv.
+            src_key = smoke_table_to_source_key.get(table_key)
+            if src_key is not None:
+                smoke_ids = smoke_source_queries.get(src_key, set())
+                table_query_ids = smoke_ids if table_query_ids is None else (table_query_ids & smoke_ids)
         labels = read_source_parquet_rows(
             labels_path,
             query_ids=table_query_ids,
@@ -1438,8 +1483,6 @@ def _materialize_arrow_rust_feature_bundle(
             labels,
             context=f"arrow-rust:{table_key}",
         )
-        if max_query_groups_per_table is not None and table_key in {"train_path", "classic_gate_source_path"}:
-            labels = _sample_query_groups_for_smoke(labels, max_query_groups_per_table)
         if table_key == "train_path" and holdout_identities is not None:
             labels, holdout_summary = _apply_classic_train_holdout_filter(
                 labels,
@@ -1451,6 +1494,30 @@ def _materialize_arrow_rust_feature_bundle(
             label_filtering_summary["train_holdout"] = holdout_summary
             if labels.empty:
                 raise ValueError("No training rows remain after holdout exclusion before materialization")
+        if max_query_groups_per_table is not None:
+            if table_key == "train_path":
+                labels = _sample_query_groups_for_smoke(labels, max_query_groups_per_table)
+            elif table_key == "classic_gate_source_path":
+                required_qids = set().union(*smoke_source_queries.values()) if smoke_source_queries else set()
+                must_keep = labels["query_group_id"].astype(str).isin(required_qids)
+                if smoke_internal_eval_base_groups and "base_group_id" in labels.columns:
+                    internal_qids = sorted(
+                        labels.loc[
+                            labels["base_group_id"].astype(str).isin(smoke_internal_eval_base_groups),
+                            "query_group_id",
+                        ]
+                        .astype(str)
+                        .unique()
+                    )[: max(2, max_query_groups_per_table // 4)]
+                    must_keep = must_keep | labels["query_group_id"].astype(str).isin(internal_qids)
+                kept_required = labels.loc[must_keep]
+                remaining_budget = max(0, max_query_groups_per_table - kept_required["query_group_id"].nunique())
+                extra = (
+                    _sample_query_groups_for_smoke(labels.loc[~must_keep], remaining_budget)
+                    if remaining_budget > 0
+                    else labels.iloc[:0]
+                )
+                labels = pd.concat([kept_required, extra], ignore_index=True)
         if labels.empty:
             label_filtering_summary["retrieval_window"] = {
                 "retrieval_top_k": retrieval_top_k,
@@ -1909,6 +1976,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         artifact_dir = work_dir / LINKER_STAGING_DIRNAME
         feature_bundle_root = work_dir / "training_features"
         max_query_groups = getattr(args, "max_query_groups_per_table", None)
+        if max_query_groups is not None:
+            # Never publish a normal production_model_vX bundle from a smoke run.
+            complete_model_dir = output_dir / "smoke_model_DO_NOT_SHIP"
         feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
             source_bundle=source_bundle,
             output_bundle_root=feature_bundle_root,
@@ -1955,6 +2025,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             target_json=Path(args.target_json),
             expected_artifact_hashes=artifact_hashes,
         )
+        if max_query_groups is not None:
+            _write_json(
+                complete_model_dir / "SMOKE_MODE_DO_NOT_SHIP.json",
+                {"smoke_mode": True, "max_query_groups_per_table": int(max_query_groups)},
+            )
         complete_model = load_production_model(
             complete_model_dir,
             expected_artifact_hashes=artifact_hashes,

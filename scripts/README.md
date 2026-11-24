@@ -13,7 +13,7 @@ Follow the [release process](../docs/release.md) for production runs.
 | `production/data/prepare_pairwise_inputs.py` | Prepare corrected benchmark splits (`benchmarks`), generate omission variants (`augmentation`), and attach vectors and verify populations (`finalize`) |
 | `production/data/package_pairwise_inputs.py` | Copy prepared pairwise sources and Arrow data into one portable directory |
 | `production/data/package_corrected_datasets.py` | Package the final corrected records, pairwise populations, and complete incremental tasks with one common index |
-| `production/data/write_release_bundles.py` | Write the published `inference`, `dataset`, and `source` bundles from the prepared snapshot |
+| `production/data/write_release_bundles.py` | Write the published `inference`, `dataset`, and optional `source` (`--skip-source-bundle`) bundles from the prepared snapshot, scanning for plaintext emails by default |
 | `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
 | `production/model/release_pairwise.py` | Validation-only EPS calibration (`calibrate-eps`) and outer-test evaluation (`evaluate-heldout`) |
 | `production/model/rebind_name_counts_index.py` | Bind a copy of a complete model to a rebuilt `name_counts_index/` without refitting |
@@ -74,7 +74,7 @@ Use [the data guide](../docs/data.md) to download them.
 |---|---|
 | `run_ci_locally.py` | Shared hosted/local CI policy. With no argument it runs both jobs; pass `lint` or `typecheck-and-test` to run one job. |
 | `sync_version.py` | Sync `VERSION` into Python/Rust manifests and lockfiles |
-| `run_bounded.py` | Run one long model job with RAM, deadline, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
+| `run_bounded.py` | Run one long model job with RAM, deadline, `--threads`, `--min-free-gib`, and expected-output limits and durable run records; see [bounded model runs](../docs/development.md#bounded-model-runs) |
 | `sync_feature_schema.py` | Regenerate the Rust feature-column constants from `s2and/feature_schema.py`; CI runs it with `--check` |
 
 ### Retired historical scripts

@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from s2and.text import normalize_orcid
+from scripts.common.block_roles import normalize_block_key
 
 # The September 25 review identifies mixed identities under these ORCIDs.
 # Exclude whole groups because the review does not establish each row's owner.
@@ -50,7 +51,7 @@ def read_external_reference_identity_evidence(
     if missing:
         raise ValueError(f"External reference labels missing required columns: {missing}")
     if dataset is not None and "dataset" in frame.columns:
-        frame = frame[frame["dataset"].astype(str).eq(str(dataset))]
+        frame = frame[frame["dataset"].astype(str).map(normalize_block_key).eq(normalize_block_key(dataset))]
     eligible = frame["scored"].eq(True).fillna(False) if "scored" in frame else [True] * len(frame)
     identities: dict[str, str] = {}
     labels: dict[str, str] = {}

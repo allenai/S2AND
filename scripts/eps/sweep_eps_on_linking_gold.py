@@ -72,7 +72,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--score-mode", choices=["orcid-b3"], default="orcid-b3")
-    parser.add_argument("--block-role-assignments", type=Path, help="Apply frozen eps_cal ORCID home roles.")
+    parser.add_argument("--block-role-assignments", type=Path, help="Require the frozen eps_cal block roles.")
     parser.add_argument(
         "--reference-labels",
         type=Path,
@@ -1130,6 +1130,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             block_roles=block_roles,
             ledger=ledger,
         )
+        if unmatched := reference.stats.get("external_labels_unmatched", 0):
+            raise ValueError(f"Unmatched external ORCID labels for {args.dataset!r}: {unmatched}")
         identity_reference = reference.repeated
         diagnostic_reference = reference.with_singletons
         reference_stats = dict(reference.stats)

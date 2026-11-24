@@ -79,6 +79,8 @@ def _require_test_separated_reference(
     stats = plan.get("reference")
     if not isinstance(stats, dict):
         raise ValueError(f"The EPS reference does not exclude final-test identities: {dataset}")
+    if unmatched := stats.get("external_labels_unmatched", 0):
+        raise ValueError(f"Unmatched external ORCID labels for {dataset!r}: {unmatched}")
     policy = stats.get("reference_policy")
     if policy == REFERENCE_POLICY_ALL_IDENTITIES:
         if verified_eps_cal_blocks is None:
@@ -99,8 +101,7 @@ def _require_test_separated_reference(
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
     if block_roles is not None:
         role_digest = stats.get(BLOCK_ROLE_SHA256_FIELD)
-        needs_digest = policy == REFERENCE_POLICY_ALL_IDENTITIES or block_roles.closure_mode == "home_pool"
-        if (needs_digest or role_digest is not None) and role_digest != block_roles.sha256:
+        if role_digest != block_roles.sha256:
             raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
         orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
         if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
@@ -360,6 +361,8 @@ def apply_reviewed_eps(
         raise ValueError("A manual review note is required")
     if (sweep_root is None) != (not datasets):
         raise ValueError("Pass the sweep root and the dataset list together, or neither")
+    if sweep_root is None and (identity_evidence is not None or block_role_assignments is not None):
+        raise ValueError("Frozen block roles require a bound EPS sweep")
     if sweep_root is None and expected_batching_threshold is not None:
         raise ValueError("--expected-batching-threshold requires --sweep-root")
     if close_pair is not None:

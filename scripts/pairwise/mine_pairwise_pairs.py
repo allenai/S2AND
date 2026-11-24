@@ -176,7 +176,7 @@ def _sample_frame(
     per_identity: int,
     frame_seed: str,
     rng: random.Random,
-) -> tuple[list[Pair], int]:
+) -> tuple[list[Pair], list[Pair]]:
     # Freeze a bounded candidate frame before sampling, so probabilities account for identity caps.
     frame: list[Pair] = []
     counts: Counter[str] = Counter()
@@ -192,7 +192,7 @@ def _sample_frame(
         frame.append(pair)
         if len(frame) >= frame_size:
             break
-    return rng.sample(frame, min(per_block, len(frame))), len(frame)
+    return rng.sample(frame, min(per_block, len(frame))), frame
 
 
 def mine_pairs(
@@ -247,7 +247,7 @@ def mine_pairs(
             ("merged_unlabeled", merged_unlabeled.size, merged_unlabeled.pair),
             ("random", math.comb(len(signatures), 2), partial(_random_pair, signatures)),
         ):
-            sample, frame_size = _sample_frame(
+            sample, frame = _sample_frame(
                 pair_at,
                 population,
                 identities,
@@ -257,14 +257,16 @@ def mine_pairs(
                 frame_seed=f"{block}:{stratum}",
                 rng=rng,
             )
+            frame_size = len(frame)
             inclusion = len(sample) / frame_size if frame_size else 0.0
             stratum_counts[stratum] = {
                 "eligible_pairs": population,
                 "frame_pairs": frame_size,
+                "reporting_population_pairs": frame_size,
                 "sampled_pairs": len(sample),
                 "inclusion_probability": inclusion,
             }
-            seen_pairs.update(sample)
+            seen_pairs.update(frame)
             rows.extend((block, left, right, stratum, inclusion) for left, right in sorted(sample))
         counts[block] = {
             "eligible_signatures": len(signatures),
@@ -289,6 +291,7 @@ def mine_pairs(
                 "pairs_per_block_per_stratum": per_block,
                 "pairs_per_identity_per_stratum": per_identity,
                 "probability_scope": "within_capped_stratum_frame",
+                "reporting_population": "disjoint capped stratum frames fixed before sampling",
                 "output_sha256": sha256_file(output_path),
                 "blocks": counts,
             },

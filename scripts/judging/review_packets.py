@@ -1,6 +1,6 @@
 """Leak-proof blind review packet builder and validator for Sol 6.2 manual labeling.
 
-Enforces strict field allowlists (raw paper metadata only Ã¢â‚¬â€ never ``signature_id``,
+Enforces strict field allowlists (raw paper metadata only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never ``signature_id``,
 ``paper_id``, ``author_id``, predicted cluster summaries, ORCIDs, scores, ranks, model
 names, or ground-truth flags), flattens author lists to plain strings, scrubs incidental
 ORCIDs and emails, requires a fresh packet directory with the private answer key stored
@@ -278,11 +278,12 @@ def _select_controls(
     control_fraction: float,
     control_seed: int,
     balance_by_score_band: bool,
+    minimum: int = 2,
 ) -> list[Mapping[str, Any]]:
     if not items_count or control_fraction <= 0.0:
         return []
     rng = random.Random(control_seed)
-    target = max(2, round(items_count * control_fraction / (1.0 - control_fraction)))
+    target = max(minimum, round(items_count * control_fraction / (1.0 - control_fraction)))
     if balance_by_score_band:
         target += target % 2
     by_class: dict[str, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
@@ -531,6 +532,7 @@ def build_blind_pair_packets(
         control_fraction=control_fraction,
         control_seed=effective_control_seed,
         balance_by_score_band=balance_controls_by_score_band,
+        minimum=_MIN_CONTROL_REQUESTS if ledger is not None else 2,
     )
     combined = _stratified_interleave(
         [(False, item) for item in items],
@@ -654,6 +656,7 @@ def build_blind_linker_packets(
         control_fraction=control_fraction,
         control_seed=effective_control_seed,
         balance_by_score_band=balance_controls_by_score_band,
+        minimum=_MIN_CONTROL_REQUESTS if ledger is not None else 2,
     )
     combined = _stratified_interleave(
         [(False, q) for q in queries],
@@ -987,17 +990,22 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
         shared_requests = left_requests.keys() & right_requests.keys()
         by_task: dict[str, dict[str, list[tuple[str | None, str | None]]]] = defaultdict(lambda: defaultdict(list))
         zero_candidate_requests = 0
-        for request in sorted(shared_requests):
-            stratum, left_zero = left_requests[request]
-            right_stratum, right_zero = right_requests[request]
+        planned_requests = left_requests.keys() | right_requests.keys()
+        for request in sorted(planned_requests):
+            default = left_requests.get(request) or right_requests[request]
+            stratum, left_zero = left_requests.get(request, default)
+            right_stratum, right_zero = right_requests.get(request, default)
             if stratum != right_stratum:
                 raise ValueError(f"Mismatched strata for jointly judged item {request!r}")
             if left_zero or right_zero:
                 zero_candidate_requests += 1
                 by_task[request[0]][stratum].append((None, None))
-        for key in sorted(shared_natural):
-            stratum, a, _ = left[key]
-            right_stratum, b, _ = right[key]
+        planned_natural = left_natural | right_natural
+        for key in sorted(planned_natural):
+            planned_stratum = (left[key] if key in left_natural else right[key])[0]
+            missing: tuple[str, str | None, bool] = (planned_stratum, None, False)
+            stratum, a, _ = left[key] if key in left_natural else missing
+            right_stratum, b, _ = right[key] if key in right_natural else missing
             if stratum != right_stratum:
                 raise ValueError(f"Mismatched strata for jointly judged item {key!r}")
             by_task[key[0]][stratum].append((a, b))
@@ -1015,7 +1023,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                     families[i]: sorted(right_requests.keys() - left_requests.keys()),
                     families[j]: sorted(left_requests.keys() - right_requests.keys()),
                 },
-                "shared_zero_candidate_requests": zero_candidate_requests,
+                "planned_zero_candidate_requests": zero_candidate_requests,
                 **_paired_judge_metrics(
                     [row for strata in by_task.values() for rows in strata.values() for row in rows]
                 ),

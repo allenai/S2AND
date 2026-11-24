@@ -383,9 +383,9 @@ def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Pat
     assert not metrics["passes_control_bar"]
     comparison = report["cross_family_agreement"][0]
     assert comparison["missing_request_keys"]["claude"] == [("linker", "a ross", "extra")]
-    assert comparison["shared_zero_candidate_requests"] == 1
+    assert comparison["planned_zero_candidate_requests"] == 2
     agreement = comparison["by_task"]["linker"]["giant"]
-    assert agreement["overlap"] == 3
+    assert agreement["overlap"] == 4
     assert agreement["both_decided"] == 0
     assert agreement["cohen_kappa"] is None
     assert agreement["decided_vs_abstain"] == 1
@@ -550,7 +550,8 @@ def test_judge_coverage_requires_matching_natural_keys(tmp_path: Path, check: st
     report = score_judges(judges)
     if check == "different_keys":
         agreement = report["cross_family_agreement"][0]
-        assert agreement["overlap"] == 1
+        assert agreement["overlap"] == 2
+        assert agreement["unresolved_share"] == 0.5
         assert agreement["missing_natural_keys"]["claude"] == [("pair", "a smith", "item-2", "")]
         assert agreement["natural_key_coverage"] == 0.5
         return

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from collections import Counter
 from collections.abc import Mapping
@@ -21,7 +22,7 @@ from s2and.incremental_linking_training.classic import (
 )
 from s2and.text import normalize_orcid
 from scripts.production.counts.generate_orcid_name_prefix_counts import EXCLUDED_ORCID_GROUPS
-from scripts.production.data.block_roles import BlockRoles, in_orcid_home_role, normalize_block_key
+from scripts.production.data.block_roles import BlockRoles, load_block_roles, normalize_block_key
 from scripts.production.model.initial_query_sources import (
     MAP_SHA256_FIELD,
     InitialQuerySources,
@@ -166,6 +167,7 @@ def read_reference(
     external_labels: Mapping[str, str] | None = None,
     allow_all_identities: bool = False,
     block_roles: BlockRoles | None = None,
+    require_repeated: bool = True,
 ) -> OrcidReference:
     """Build ORCID references outside final-test identities (or all identities for block-disjoint pools).
 
@@ -176,7 +178,8 @@ def read_reference(
     """
     if allow_all_identities and test_identities:
         raise ValueError("allow_all_identities cannot be set when test_identities is non-empty")
-    role = block_roles.role_for(dataset) if block_roles is not None else None
+    if block_roles is not None:
+        block_roles.role_for(dataset)
     if query_sources is None:
         query_sources = load_initial_query_sources(snapshot_root, arrow_datasets={dataset: arrow_dataset})
     origins = query_sources.origins.get(dataset, {})
@@ -220,11 +223,7 @@ def read_reference(
         elif signature_id in error_records:
             excluded_errors += bool(orcid)
         elif orcid:
-            if (
-                block_roles is not None
-                and role is not None
-                and not in_orcid_home_role(orcid, role, block_roles.orcid_home_role)
-            ):
+            if block_roles is not None and not block_roles.scores(dataset, orcid):
                 excluded_non_home += 1
             else:
                 candidates[signature_id] = orcid
@@ -248,7 +247,7 @@ def read_reference(
     repeated = {signature: orcid for signature, orcid in with_singletons.items() if counts[orcid] >= 2}
     if overlap := (set(with_singletons) | set(repeated)) & test_identities:
         raise ValueError(f"EPS reference contains final-test records: {dataset} {sorted(overlap)[:5]}")
-    if not repeated:
+    if require_repeated and not repeated:
         raise ValueError(f"No repeated ORCID references for dataset={dataset}")
     excluded_fraction = (len(candidates) - len(with_singletons)) / len(candidates) if candidates else 0.0
     extra_external_stats: dict[str, Any] = {}
@@ -321,3 +320,87 @@ def score_assignments(reference: Mapping[str, str], assignments: Mapping[str, st
         "reference_coverage": count / len(reference),
         "scored_reference_groups": len(truth_sizes),
     }
+
+
+def score_block_role(
+    arrow_dataset: ArrowDataset,
+    snapshot_root: Path,
+    block: str,
+    *,
+    roles_path: Path,
+    role: str,
+    assignments: Mapping[str, str],
+    eps: float,
+    external_labels: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Score B3 on the frozen home-role reference for one assigned block."""
+    roles = load_block_roles(roles_path)
+    if roles.role_for(block) != role:
+        raise ValueError(f"Block {block!r} is outside role {role!r}")
+    if not snapshot_root.is_dir():
+        raise FileNotFoundError(snapshot_root)
+    errors = (
+        reviewed_error_records(snapshot_root, block) if (snapshot_root / ORCID_ERROR_RECORDS).is_file() else frozenset()
+    )
+    reference = read_reference(
+        arrow_dataset,
+        snapshot_root,
+        block,
+        test_identities=frozenset(),
+        error_records=errors,
+        external_labels=external_labels,
+        allow_all_identities=True,
+        block_roles=roles,
+        require_repeated=False,
+    )
+    return {
+        "block": normalize_block_key(block),
+        "role": role,
+        "reference": reference.stats,
+        "repeated": (
+            score_assignments(reference.repeated, assignments, eps)
+            if reference.repeated.keys() & assignments.keys()
+            else None
+        ),
+        "with_singletons": score_assignments(reference.with_singletons, assignments, eps),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Score stored assignments against a frozen-role reference."""
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--block-role-assignments", type=Path, required=True)
+    parser.add_argument("--role", required=True)
+    parser.add_argument("--block", required=True)
+    parser.add_argument("--arrow-dir", type=Path, required=True)
+    parser.add_argument("--snapshot-root", type=Path, required=True)
+    parser.add_argument("--assignments-json", type=Path, required=True, help="Map signature IDs to predicted clusters.")
+    parser.add_argument("--external-labels", type=Path)
+    parser.add_argument("--eps", type=float, required=True)
+    args = parser.parse_args(argv)
+    assignments = json.loads(args.assignments_json.read_text(encoding="utf-8"))
+    if not isinstance(assignments, dict) or any(
+        not key or not isinstance(value, str) or not value for key, value in assignments.items()
+    ):
+        raise ValueError("Expected a JSON object mapping signature IDs to nonempty cluster IDs")
+    with ArrowDataset.open(args.arrow_dir) as arrow:
+        report = score_block_role(
+            arrow,
+            args.snapshot_root,
+            args.block,
+            roles_path=args.block_role_assignments,
+            role=args.role,
+            assignments=assignments,
+            eps=args.eps,
+            external_labels=(
+                load_external_reference_labels(args.external_labels, dataset=args.block)
+                if args.external_labels
+                else None
+            ),
+        )
+    print(json.dumps(report, sort_keys=True, indent=2, allow_nan=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

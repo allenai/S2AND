@@ -118,3 +118,15 @@ by private source and candidate IDs. A linker control request succeeds when ever
 Report request accuracy, same and different control accuracy, and directional error rates by shard and stratum.
 Report paired coverage, agreement, and Cohen’s κ by task and stratum on natural items. Kappa uses jointly
 decided verdicts. The agreement measure that includes abstentions counts decided versus abstain as disagreement.
+
+
+
+### Score and sample by frozen role
+
+Run `uv run python -m scripts.eps_sweep.orcid_b3` with `--block-role-assignments`, `--role`, `--block`,
+`--arrow-dir`, `--snapshot-root`, `--assignments-json` and `--eps`. Pass verified labels with
+`--external-labels` when available. The report gives reference coverage and B3 with and without singletons.
+
+Run `uv run python -m scripts.production.data.mine_pairwise_pairs` with `--block-role-assignments`,
+`--blocks-json`, `--pairs-per-block` and `--output`. Map block keys to Arrow directories in the input JSON.
+The miner samples uniformly within `pairwise_train` blocks and writes signature ID pairs and inclusion probabilities.

@@ -12,6 +12,7 @@ from scripts.production.data.assign_block_roles import (
     PERMANENT_EXCLUDED_BLOCKS,
     BlockSpec,
     assign_block_roles,
+    load_blocks,
     main,
     verify_role_assignments,
 )
@@ -35,7 +36,7 @@ def _sample_blocks() -> list[BlockSpec]:
     ]
     for i in range(20):
         stratum = ("large", "medium", "small")[i % 3]
-        split = "holdout" if i < 6 else "development"
+        split = "holdout" if i < 8 else "development"
         blocks.append(BlockSpec(f"blk {i:02d}", 1000 + i * 500, frozenset(), stratum, split))
     return blocks
 
@@ -43,7 +44,7 @@ def _sample_blocks() -> list[BlockSpec]:
 def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overflow() -> None:
     blocks = _sample_blocks()
     targets = {
-        "final_test": 4,
+        "final_test": 6,
         "eps_cal": 4,
         "gate_thresh": 2,
         "gate_fit": 2,
@@ -55,14 +56,14 @@ def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overfl
         blocks,
         targets,
         seed=42,
-        extra_dev_test_blocks={"blk_06"},
+        extra_dev_test_blocks={"blk_08"},
         enforce_source_splits=True,
     )
     res2 = assign_block_roles(
         list(reversed(blocks)),
         targets,
         seed=42,
-        extra_dev_test_blocks={"blk_06"},
+        extra_dev_test_blocks={"blk_08"},
         enforce_source_splits=True,
     )
     assert res1 == res2
@@ -76,12 +77,12 @@ def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overfl
     assert mapping["a khan"] == "dev_test"
     assert mapping["s feldman"] == "dev_test"
     assert mapping["b linked"] == "dev_test"
-    assert mapping["blk 06"] == "dev_test"
+    assert mapping["blk 08"] == "dev_test"
     # Cross-block ORCID pair must receive the exact same role (and NOT be dragged to dev_test by excluded_shared!).
     assert mapping["c pair 1"] == mapping["c pair 2"]
     assert mapping["c pair 1"] != "dev_test"
     # final_test receives ONLY holdout blocks and does NOT absorb overflow.
-    assert [len(res1["roles"][role]) for role in ("final_test_a", "final_test_b")] == [2, 2]
+    assert [len(res1["roles"][role]) for role in ("final_test_a", "final_test_b")] == [3, 3]
     assert len(res1["unassigned"]) > 0
     assert res1["verification"]["cross_role_orcid_overlap"] == 0
 
@@ -261,3 +262,114 @@ def test_frozen_block_roles_reject_unlisted_orcid(tmp_path: Path) -> None:
     for block, identity in (("one", "0000-0001-5000-0007"), ("two", orcid)):
         with pytest.raises(ValueError, match="ORCID .* absent .* block"):
             roles.scores(block, identity)
+
+
+@pytest.mark.parametrize("check", ["implicit_home", "exclusion", "missing_pin"])
+def test_refreeze_preserves_homes_and_exclusions(tmp_path: Path, check: str) -> None:
+    implicit, shared = "0000-0002-1694-233X", "0000-0002-9079-593X"
+    records = [
+        {"block_key": "training", "orcids": [implicit, shared], "split": "development"},
+        {"block_key": "old holdout", "orcids": [shared], "split": "holdout"},
+        {"block_key": "excluded", "orcids": [], "split": "development"},
+    ]
+    blocks, targets = tmp_path / "blocks.json", tmp_path / "targets.json"
+
+    def freeze(output: str, role_targets: dict[str, int], *extra: str) -> Path:
+        blocks.write_text(json.dumps([dict(row, signature_count=20) for row in records]), encoding="utf-8")
+        targets.write_text(json.dumps(role_targets), encoding="utf-8")
+        assert (
+            main(
+                [
+                    "--blocks",
+                    str(blocks),
+                    "--targets-json",
+                    str(targets),
+                    "--output-dir",
+                    str(tmp_path / output),
+                    "--closure-mode",
+                    "home_pool",
+                    "--enforce-source-splits",
+                    *extra,
+                ]
+            )
+            == 0
+        )
+        return tmp_path / output / "assignments.json"
+
+    first = freeze("first", {"pairwise_train": 1, "final_test_a": 1}, "--exclude-blocks", "excluded")
+    prior = load_block_roles(first)
+    assert prior.orcid_home_role == {shared: "final_test_a"}
+    records.append({"block_key": "new holdout", "orcids": [implicit, shared], "split": "holdout"})
+    args = ("--pinned-roles-json", str(first))
+    if check == "missing_pin":
+        records.pop(1)
+        with pytest.raises(ValueError, match="old holdout"):
+            freeze("second", {"pairwise_train": 2, "final_test_b": 1}, *args)
+        return
+
+    second = freeze("second", {"pairwise_train": 2, "final_test_b": 1}, *args)
+    current = load_block_roles(second)
+    if check == "implicit_home":
+        assert current.orcid_home_role == {shared: "final_test_a", implicit: "pairwise_train"}
+        assert current.scores("training", implicit)
+        assert not current.scores("new holdout", implicit)
+        assert not current.scores("new holdout", shared)
+    else:
+        assert json.loads(second.read_text(encoding="utf-8"))["excluded_blocks"] == ["excluded"]
+        assert "excluded" not in current.block_to_role
+    assert all(current.role_for(block) == role for block, role in prior.block_to_role.items())
+
+
+@pytest.mark.parametrize("giants", [9, 1])
+def test_small_development_roles_reserve_giants(giants: int) -> None:
+    blocks = [
+        *[BlockSpec(f"small {i}", 100, stratum="small", source_split="development") for i in range(400)],
+        *[BlockSpec(f"giant {i}", 20_000, stratum="giant", source_split="development") for i in range(giants)],
+    ]
+    roles = ("eps_cal", "gate_fit", "gate_thresh", "dev_test")
+    result = assign_block_roles(blocks, dict.fromkeys(roles, 10), enforce_source_splits=True)
+    counts = result["verification"]["role_block_counts_by_stratum"]
+    assert all(len(result["roles"][role]) == 10 for role in roles)
+    assert sum(counts[role]["giant"] > 0 for role in roles) == min(giants, len(roles))
+    assert result["stratum_shortfalls"] == {role: ["giant"] for role in roles if not counts[role]["giant"]}
+
+
+def test_sealed_target_must_cover_each_stratum() -> None:
+    blocks = [
+        BlockSpec(f"{stratum} {i}", 100, stratum=stratum, source_split="holdout")
+        for stratum, count in (("small", 100), ("medium", 10), ("giant", 2))
+        for i in range(count)
+    ]
+    with pytest.raises(ValueError, match="Sealed targets.*one block per stratum"):
+        assign_block_roles(blocks, {"final_test": 4}, enforce_source_splits=True)
+
+
+@pytest.mark.parametrize("count_key", ["https://orcid.org/0000-0002-1694-233x", "0000-0001-5000-0007"])
+def test_load_blocks_normalizes_mention_counts(tmp_path: Path, count_key: str) -> None:
+    orcid = "0000-0002-1694-233X"
+    path = tmp_path / "blocks.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "block_key": "train",
+                    "signature_count": 100,
+                    "orcids": [orcid],
+                    "orcid_mention_counts": {count_key: 50},
+                },
+                {"block_key": "tune", "signature_count": 100, "orcids": [orcid, orcid]},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    if count_key != "https://orcid.org/0000-0002-1694-233x":
+        with pytest.raises(ValueError, match="Missing ORCID mention counts"):
+            load_blocks(path)
+        return
+    result = assign_block_roles(
+        load_blocks(path),
+        {"pairwise_train": 1, "eps_cal": 1},
+        pinned_roles={"train": "pairwise_train", "tune": "eps_cal"},
+        closure_mode="home_pool",
+    )
+    assert result["orcid_home_role"] == {orcid: "pairwise_train"}

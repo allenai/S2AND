@@ -259,3 +259,65 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     manifest.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="does not match"):
         mine_pairs(role_path, specs, tmp_path / "stale.csv", per_block=1, identity_evidence=evidence)
+
+
+def test_gate_arrival_order_uses_inserted_and_production_components(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from datetime import UTC, datetime
+
+    from scripts.common.identity_ledger import load_identity_evidence
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+    from scripts.linker.build_linker_inputs import _arrival_requests, _production_seeds
+
+    snapshot, gold = evidence_inputs
+    output = tmp_path / "identity"
+    build_identity_evidence(snapshot, gold, output)
+    mentions = load_identity_evidence(output / "manifest.json").read_block("a lovelace")
+    arrivals = tmp_path / "arrivals.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "cluster_block_key": ["a lovelace"] * 5,
+                "corpus_paper_id": [1, 2, 3, 4, 10],
+                "position": [0] * 5,
+                "inserted": [
+                    datetime(2026, 10, 19),
+                    datetime(2026, 11, 21),
+                    datetime(2026, 11, 20),
+                    None,
+                    datetime(2026, 11, 22),
+                ],
+                "updated": [datetime(2026, 11, 23)] * 5,
+                "clusterer": ["AltAdIncremental", "AltAdFullBlock", "AltAdIncremental", "AltAdIncremental", None],
+            }
+        ),
+        arrivals,
+    )
+    queries, counts = _arrival_requests(
+        arrivals, "a lovelace", mentions, mentions.keys() - {"1-0"}, datetime(2026, 10, 20, tzinfo=UTC), 1
+    )
+    assert queries == ["2-0"]
+    assert counts["missing_inserted"] == counts["inserted_before_since"] == 1
+    assert counts["clusterer_counts"] == {"AltAdFullBlock": 1}
+
+    raw = tmp_path / "a_lovelace"
+    seeds = raw / "cluster_seeds.arrow"
+    table = pa.table(
+        {
+            "signature_id": ["1-0", "2-0", "3-0", "4-0"],
+            "cluster_id": ["production a", "production a", "production b", "production a"],
+        }
+    )
+    with pa.ipc.new_file(str(seeds), table.schema) as writer:
+        writer.write_table(table)
+    bundle = tmp_path / "incremental" / "a_lovelace.arrow.tar.gz"
+    bundle.parent.mkdir()
+    with tarfile.open(bundle, "w:gz") as archive:
+        for member in (raw / "signatures.arrow", seeds):
+            archive.add(member, arcname=member.name)
+    assert _production_seeds(bundle, "a lovelace", mentions, queries) == {
+        "1-0": "production a",
+        "3-0": "production b",
+        "4-0": "production a",
+    }

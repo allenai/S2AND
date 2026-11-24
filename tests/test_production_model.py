@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ import pytest
 import s2and.incremental_linking.artifact as incremental_artifact_module
 import s2and.production_bundle as production_bundle_module
 import s2and.production_model as production_model_module
+from s2and.arrow_inputs import ArrowDataset
 from s2and.data import ANDData
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
@@ -1470,10 +1472,11 @@ def test_loaded_pairwise_contract_replays_stamped_year(
 
 
 @pytest.fixture
-def contract_one_inference(tmp_path: Path, synthetic_pairwise_bundle: tuple[Path, Clusterer]):
+def contract_one_inference(
+    tmp_path: Path, synthetic_pairwise_bundle: tuple[Path, Clusterer]
+) -> Iterator[tuple[Clusterer, ArrowDataset]]:
     import pyarrow as pa
 
-    from s2and.arrow_inputs import ArrowDataset
     from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_name_counts_index
     from tests.helpers import tiny_name_counts_tuple, write_test_arrow_artifact_manifest
     from tests.raw_arrow_helpers import base_arrow_paths, write_ipc
@@ -1602,3 +1605,207 @@ def test_contract_one_cached_production_route_skips_bulk_featurizer(contract_one
         bulk_clusters=cached_clusters,
     )
     assert sorted(sid for members in clusters.values() for sid in members) == ["q1", "s1"]
+
+
+def test_contract_one_disallow_rescore_cache_miss_replays_stamped_year(
+    contract_one_inference: tuple[Clusterer, ArrowDataset], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from s2and import memory_budget
+    from s2and.incremental_linking import production, runtime
+    from s2and.runtime import build_runtime_context, load_s2and_rust_extension
+
+    clusterer, arrow = contract_one_inference
+    artifact = clusterer.incremental_linker_artifact
+    assert artifact is not None
+    seeds = {"s1": "c_match", "s2": "c_other"}
+    seed_path = arrow.root / "cluster_seeds.arrow"
+    observed: list[float] = []
+    predict = runtime.predict_pairwise_class0
+
+    def record(classifier, features):
+        if classifier is clusterer.nameless_classifier:
+            observed.extend(features[:, 0].tolist())
+        return predict(classifier, features)
+
+    monkeypatch.setattr(runtime, "_FUSED_LINKER_SCORING", False)
+    monkeypatch.setattr(runtime, "predict_pairwise_class0", record)
+    planner = load_s2and_rust_extension().RawBlockQueryCandidatePlanner.from_auto_queries(
+        arrow.native, str(seed_path), top_k=2, orcid_enabled=False, num_threads=1, legacy_paper_years=True
+    )
+    try:
+        context = production._QueryDisallowRescoreContext(
+            clusterer=clusterer,
+            artifact=artifact,
+            planner=planner,
+            arrow_dataset=arrow,
+            cluster_seeds_path=seed_path,
+            cluster_seed_disallows_path=None,
+            name_tuples=frozenset(),
+            retrieval_top_k=2,
+            partial_supervision={},
+            runtime_context=build_runtime_context("rescore", backend="rust"),
+            total_ram_bytes=2**35,
+            cluster_seeds_require=seeds,
+            cluster_seed_representative_by_component={value: key for key, value in seeds.items()},
+            orcid_fanout_by_query={},
+            component_sizes=memory_budget.summarize_promoted_component_sizes({"c_match": 1, "c_other": 1}),
+            memory_layout=production._promoted_incremental_memory_layout(clusterer, artifact),
+            base_candidate_rows_per_query=2,
+            base_pairs_per_query=2,
+            featurizer_cache=production._QueryDisallowFeaturizerCache(),
+        )
+        result = production._rescore_query_disallow_endpoint(context, "q1", {"c_other"})
+        assert result.telemetry["featurizer_build_count"] == 1
+        assert observed == [50.0]
+    finally:
+        planner.release()
+
+
+def test_contract_one_fused_distance_chunk_replays_stamped_year(
+    contract_one_inference: tuple[Clusterer, ArrowDataset], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import s2and.model as model_module
+    from s2and.feature_port import _get_rust_feature_data
+    from tests.helpers import build_arrow_training_dataset
+    from tests.test_feature_port_parity import _load_dataset_from_dir
+
+    clusterer, _ = contract_one_inference
+    raw = _load_dataset_from_dir(str(Path(__file__).parent / "dummy"), "stamped_chunk")
+    for sid, year in (("0", 1800), ("2", 2010)):
+        paper_id = str(raw.signatures[sid].paper_id)
+        raw.papers[paper_id] = raw.papers[paper_id]._replace(year=year)
+    dataset = build_arrow_training_dataset(raw, tmp_path / "training")
+    native = _get_rust_feature_data(dataset)
+    ids = native.signature_ids()
+    chunk = model_module._DistanceMatrixChunk(
+        block_key="a wang",
+        block_size=2,
+        start_offset=0,
+        index_i=np.array([0]),
+        index_j=np.array([1]),
+        pair_ids=None,
+        labels=np.array([np.nan]),
+        block_signature_indices=[ids.index("0"), ids.index("2")],
+    )
+    observed: list[float] = []
+    original = model_module._predict_and_combine
+
+    def record(classifier, nameless, features, labels, nameless_features, *args, **kwargs):
+        observed.extend(nameless_features[:, 0].tolist())
+        return original(classifier, nameless, features, labels, nameless_features, *args, **kwargs)
+
+    monkeypatch.setattr(model_module, "_predict_and_combine", record)
+    clusterer._predict_distance_matrix_chunk(chunk, dataset, dataset.runtime_context, "stamped")
+    assert observed == [50.0]
+
+
+def test_prebuilt_native_prediction_preserves_contract_one(
+    contract_one_inference: tuple[Clusterer, ArrowDataset], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import s2and.model as model_module
+    from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+
+    clusterer, arrow = contract_one_inference
+    ids = ["q1", "s1"]
+    native = build_rust_featurizer_from_arrow_dataset(arrow, signature_ids=ids, name_tuples=frozenset(), num_threads=1)
+    observed: list[float] = []
+    predict = model_module._predict_class0_with_runtime
+
+    def record(classifier, features, **kwargs):
+        if classifier is clusterer.nameless_classifier:
+            observed.extend(features[:, 0].tolist())
+        return predict(classifier, features, **kwargs)
+
+    monkeypatch.setattr(model_module, "_native_block_scorers", lambda *_: None)
+    monkeypatch.setattr(model_module, "_predict_class0_with_runtime", record)
+    clusterer.predict_from_rust_featurizer({"a wang": ids}, native)
+    assert observed == [50.0]
+
+
+def test_background_planner_preserves_contract_one_stamped_query(
+    contract_one_inference: tuple[Clusterer, ArrowDataset], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from s2and.incremental_linking import production
+    from s2and.incremental_linking.feature_block import temporary_cluster_seed_sidecars
+
+    clusterer, arrow = contract_one_inference
+    artifact = clusterer.incremental_linker_artifact
+    assert artifact is not None
+    seeds = {"s1": "c_match", "s2": "c_other"}
+    monkeypatch.setattr(production, "_BACKGROUND_SEED_PLANNER_MIN_SIGNATURES", 1)
+    background = production.start_background_seed_planner(
+        clusterer,
+        ["q1", "s1", "s2"],
+        arrow_dataset=arrow,
+        artifact=artifact,
+        cluster_seeds_require=seeds,
+        altered_cluster_signatures=["s1"],
+        query_signature_ids=None,
+        attachment_state=None,
+    )
+    assert background is not None
+    try:
+        final_seeds = {**seeds, "s1": "c_split"}
+        with temporary_cluster_seed_sidecars(final_seeds, prefix="reloaded_seeds_") as sidecars:
+            planner = background.take(Path(sidecars["cluster_seeds"]), None)
+            assert planner is not None
+            try:
+                plan = planner.plan(["q1"])
+            finally:
+                planner.release()
+        assert set(plan["row_component_keys"]) == set(final_seeds.values())
+        assert set(plan["row_query_years"]) == {1800}
+        assert set(plan["row_query_year_missing"]) == {0}
+    finally:
+        background.release()
+
+
+def test_pairwise_eps_publication_preserves_contract_one(
+    tmp_path: Path, synthetic_pairwise_bundle: tuple[Path, Clusterer]
+) -> None:
+    _, clusterer = synthetic_pairwise_bundle
+    clusterer.featurizer_info.legacy_paper_years = True
+    clusterer.nameless_featurizer_info.legacy_paper_years = True
+    source, output = tmp_path / "pending", tmp_path / "calibrated"
+    write_pairwise_production_bundle(clusterer, source, release_version="1.4", eps_calibration=PENDING_EPS_CALIBRATION)
+    manifest = source / "manifest.json"
+    assert json.loads(manifest.read_text(encoding="utf-8"))["feature_contract_version"] == 1
+    finalize_pairwise_eps(
+        source_bundle_dir=source,
+        output_bundle_dir=output,
+        expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        new_eps=0.37,
+    )
+    assert json.loads((output / "manifest.json").read_text(encoding="utf-8"))["feature_contract_version"] == 1
+
+
+@pytest.mark.parametrize("overlay", ["view", "seeds"])
+def test_legacy_featurizer_seed_views_preserve_years(
+    contract_one_inference: tuple[Clusterer, ArrowDataset], overlay: str
+) -> None:
+    from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+    from s2and.featurizer import FeaturizationInfo
+
+    _, arrow = contract_one_inference
+    ids = ["q1", "s1"]
+    native = build_rust_featurizer_from_arrow_dataset(
+        arrow,
+        signature_ids=ids,
+        name_tuples=frozenset(),
+        preprocess=True,
+        num_threads=1,
+    ).with_legacy_paper_years()
+    view = (
+        native.view_with_cluster_seed_sidecars(ids, None, None, num_threads=1)
+        if overlay == "view"
+        else native.with_cluster_seeds({}, set())
+    )
+    assert dict(view.signature_years())["q1"] == 1800
+    ordered = view.signature_ids()
+    matrix = view.featurize_pairs_matrix_indexed(
+        [(ordered.index("q1"), ordered.index("s1"))],
+        FeaturizationInfo(["year_diff"]).selected_feature_indices(),
+        1,
+        np.nan,
+    )
+    assert np.asarray(matrix)[0, 0] == 50.0

@@ -1658,3 +1658,43 @@ def test_labeled_planner_preserves_contract_one_years(tmp_path: Path) -> None:
     assert list(legacy_plan["row_query_year_missing"]) == [0]
     assert list(legacy_plan["row_query_years"]) == [1800]
     assert list(modern_plan["row_query_year_missing"]) == [1]
+
+
+def test_legacy_pairwise_year_diff_treats_nonpositive_as_missing(tmp_path: Path) -> None:
+    from s2and.featurizer import FeaturizationInfo
+
+    paths = base_arrow_paths(tmp_path, years=[0, 2015, 2010])
+    legacy = _native_featurizer(paths, ["q1", "s1"], set()).with_legacy_paper_years()
+    matrix = _indexed_pair_matrix(legacy, [("q1", "s1")])
+    year_index = FeaturizationInfo(["year_diff"]).selected_feature_indices()[0]
+    assert np.isnan(matrix[0, year_index])
+
+
+@pytest.mark.parametrize(
+    ("years", "year_options", "query_year_missing", "candidate_year_min"),
+    [
+        pytest.param([0, 2015, 2010], {"legacy_paper_years": True}, 1, 2015, id="nonpositive"),
+        pytest.param([1801, 1800, 1810], {"legacy_paper_years": True}, 0, 1800, id="legacy-seed"),
+        pytest.param([1800, 2015, 2010], {}, 1, 2015, id="default"),
+    ],
+)
+def test_auto_query_planner_applies_year_contract(
+    tmp_path: Path,
+    years: list[int],
+    year_options: dict[str, bool],
+    query_year_missing: int,
+    candidate_year_min: int,
+) -> None:
+    paths = base_arrow_paths(tmp_path, years=years)
+    with open_arrow_dataset(paths) as arrow:
+        planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+            arrow.native, paths["cluster_seeds"], top_k=2, orcid_enabled=False, num_threads=1, **year_options
+        )
+        try:
+            plan = planner.plan(["q1"])
+        finally:
+            planner.release()
+    assert set(plan["row_query_year_missing"]) == {query_year_missing}
+    index = list(plan["row_component_keys"]).index("c_match")
+    assert plan["row_candidate_year_range_missing"][index] == 0
+    assert plan["row_candidate_year_min"][index] == candidate_year_min

@@ -192,6 +192,15 @@ def test_linker_and_gate_year_features_ignore_corpus_placeholders() -> None:
     signals["query_year"] = np.asarray([1601, 2020, 2020], dtype=np.float32)
     signals["candidate_year_min"] = np.asarray([2010, 1800, 2010], dtype=np.float32)
     features = build_promoted_non_pairwise_row_features(rows, signals)
+    legacy = build_promoted_non_pairwise_row_features(rows, signals, legacy_paper_years=True)
+    assert legacy["year_gap_to_candidate_range"][0] == 409
+    assert legacy["year_gap_signed_to_candidate_range"][0] == -409
+
+    signals["candidate_year_min"] = np.asarray([1700] * 3, dtype=np.float32)
+    signals["candidate_year_max"] = np.asarray([1800] * 3, dtype=np.float32)
+    upper_placeholder = build_promoted_non_pairwise_row_features(rows, signals)
+    for feature in ("year_compatibility", "candidate_year_span", "year_gap_to_candidate_range"):
+        np.testing.assert_array_equal(upper_placeholder[feature], [0.0] * 3)
     np.testing.assert_allclose(features["year_compatibility"], [0.0, 0.0, 0.8])
     np.testing.assert_allclose(features["candidate_year_span"], [5.0, 0.0, 5.0])
     for feature in ("year_gap_to_candidate_range", "year_gap_signed_to_candidate_range"):

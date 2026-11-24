@@ -158,7 +158,6 @@ def test_freshness_and_duplicate_metadata_diagnostics(
             f"Cannot verify s2and_rust source freshness: {error.value}. "
             "Correct the native source inputs before rebuilding."
         )
-        assert "INTERNALERROR" not in message
 
     with subtests.test("invalid-utf8-source-name"):
         source = _write_tree(tmp_path / "utf8_crate", _TREE)

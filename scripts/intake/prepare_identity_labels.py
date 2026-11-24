@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
@@ -234,16 +235,23 @@ def prepare_identity_labels(
     ]
     name_columns_present = first_col is not None or last_col is not None
 
-    # Prefer a tiny block-key predicate pushdown (e.g. ["a khan", "a_khan"]) when block_col exists:
-    # Parquet row-group / dictionary pruning skips ~98% of a 74M-row file in <1s, whereas pushing a
-    # 100k-element paper_id isin() set across 74M rows stalls PyArrow evaluation.
+    dataset_reader = ds.dataset(gold_path, format="parquet")
     filter_expr = None
     if block_col is not None and arrow_blocks_norm:
-        block_variants: set[str] = set()
-        for blk in arrow_blocks_norm:
-            block_variants.add(blk)
-            block_variants.add(blk.replace(" ", "_"))
-        filter_expr = ds.field(block_col).isin(sorted(block_variants))
+        # Match ASCII keys in Arrow and normalize Unicode candidates with Python's exact rules.
+        raw_key = ds.field(block_col)
+        ascii_key = pc.ascii_lower(pc.utf8_trim(raw_key, characters=" \t\n\v\f\r\x1c\x1d\x1e\x1f"))
+        ascii_key = pc.replace_substring_regex(ascii_key, pattern=r"[\s_\x0B\x1C-\x1F]+", replacement=" ")
+        candidates = ascii_key.isin(sorted(arrow_blocks_norm)) | pc.match_substring_regex(
+            raw_key, pattern=r"[^\x00-\x7F]"
+        )
+        spellings = {
+            raw
+            for batch in dataset_reader.to_batches(columns=[block_col], filter=candidates, batch_size=65_536)
+            for raw in pc.unique(batch.column(0)).to_pylist()
+            if raw is not None and normalize_block_key(_optional_str(raw)) in arrow_blocks_norm
+        }
+        filter_expr = ds.field(block_col).isin(sorted(spellings)) if spellings else ds.scalar(False)
     elif arrow_paper_ids and len(arrow_paper_ids) <= 4096:
         paper_field = schema.field(paper_col)
         if pa.types.is_integer(paper_field.type):
@@ -253,7 +261,6 @@ def prepare_identity_labels(
         elif pa.types.is_string(paper_field.type) or pa.types.is_large_string(paper_field.type):
             filter_expr = ds.field(paper_col).isin(sorted(arrow_paper_ids))
 
-    dataset_reader = ds.dataset(gold_path, format="parquet")
     scanner = dataset_reader.scanner(columns=needed_cols, filter=filter_expr, batch_size=65_536)
 
     audit: dict[str, Any] = {
@@ -440,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         block_roles=load_block_roles(args.block_role_assignments) if args.block_role_assignments is not None else None,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return 0 if report["verified_rows"] else 1
 
 
 if __name__ == "__main__":

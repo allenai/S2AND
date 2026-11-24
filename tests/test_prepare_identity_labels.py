@@ -44,7 +44,7 @@ def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Pat
             "paper_id": ["1", "2"],
             "position": [0, 0],
             "orcid": [shared, shared],
-            "block_key": ["a ross", "b ross"],
+            "block_key": [" A_ROSS ", " B__ROSS "],
             "scored": [True, True],
         }
     ).to_parquet(gold, index=False)
@@ -406,6 +406,38 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     assert audit["repeated_orcids"] == 1
     assert audit["verification_mode"] == "position_block_and_name"
     assert json.loads(audit_json.read_text(encoding="utf-8"))["verified_rows"] == 4
+
+    from scripts.intake.prepare_identity_labels import main
+
+    assert (
+        main(
+            [
+                "--arrow-dataset-dir",
+                str(arrow_dir),
+                "--gold-parquet",
+                str(gold_path),
+                "--output-parquet",
+                str(tmp_path / "empty.parquet"),
+                "--expected-split",
+                "wrong",
+            ]
+        )
+        == 1
+    )
+
+
+def test_gold_block_filter_uses_unicode_canonical_keys(tmp_path: Path) -> None:
+    arrow_dir = tmp_path / "greek"
+    _write_signatures_arrow(
+        arrow_dir,
+        [{"signature_id": "s", "paper_id": "1", "author_position": 0, "author_block": "a αος"}],
+    )
+    gold = tmp_path / "gold.parquet"
+    pd.DataFrame([{"paper_id": "1", "position": 0, "orcid": "0000-0002-1694-233X", "block_key": " A_ΑΟΣ "}]).to_parquet(
+        gold, index=False
+    )
+    audit = prepare_identity_labels(arrow_dir, gold, tmp_path / "joined.parquet")
+    assert audit["verified_rows"] == 1
 
 
 @pytest.mark.parametrize("scored_order", [(False, True), (True, False)])

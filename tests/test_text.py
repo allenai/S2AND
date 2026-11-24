@@ -18,7 +18,6 @@ from s2and.text import (
     diff,
     email_prefix_suffix,
     equal,
-    equal_initial,
     equal_middle,
     first_names_name_compatible,
     get_text_ngrams,
@@ -234,14 +233,6 @@ class TestClusterer(unittest.TestCase):
         assert not same_prefix_tokens("", "alice")
         assert not same_prefix_tokens("", "")
         assert first_names_name_compatible("", "alice", set()) is True
-
-    def test_equal_initial(self):
-        assert np.isnan(equal_initial(None, None))
-        assert np.isnan(equal_initial("", ""))
-        assert np.isnan(equal_initial("a", ""))
-        assert 0 == equal_initial("a", "b")
-        assert 1 == equal_initial("a", "a")
-        assert 1 == equal_initial("a", "as")
 
     def test_counter_jaccard(self):
         assert np.isnan(counter_jaccard(Counter(), Counter()))

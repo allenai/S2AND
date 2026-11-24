@@ -12,7 +12,6 @@ from s2and.incremental_linking_training.classic import (
     _fit_promoted_logistic_gate,
     _promoted_stratified_gate_spec,
     _score_query_choices,
-    build_whole_author_holdout_rows,
     report_logistic_gate_error_weights,
 )
 from scripts.eps_sweep import apply_reviewed_eps as apply_eps
@@ -235,70 +234,6 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     report = result.abstain_rule_summary["promoted_logistic_gate"]["false_abstain_weight_report"]
     assert report["n_queries"] == 20
     assert report["configured_false_abstain_weight"] == result.gate_config["error_weights"]["false_abstain"]
-
-
-def test_build_whole_author_holdout_rows_guards_membership_features_and_labels() -> None:
-    rows = pd.DataFrame(
-        [
-            {"query_group_id": "q1", "candidate_component_key": "c1", "retrieval_rank": "1", "label": 1},
-            {"query_group_id": "q1", "candidate_component_key": "c2", "retrieval_rank": "2", "label": 0},
-            {"query_group_id": "q1", "candidate_component_key": "c3", "retrieval_rank": "10", "label": 1},
-            {"query_group_id": "q1", "candidate_component_key": "c4", "retrieval_rank": "3", "label": 0},
-            {"query_group_id": "q2", "candidate_component_key": "c5", "retrieval_rank": "1", "label": 1},
-            {"query_group_id": "q3", "candidate_component_key": "c6", "retrieval_rank": "1", "label": 1},
-        ]
-    )
-    membership = {"c1": {"A1"}, "c2": {"A9"}, "c3": {"A1", "A8"}, "c4": {"A7"}, "c5": {"A2"}, "c6": {"A3"}}
-    out, summary = build_whole_author_holdout_rows(
-        rows,
-        query_to_author={"q1": "A1", "q2": "A2", "q3": "A3"},
-        component_to_authors=membership,
-        holdout_query_ids={"q1", "q2"},
-        retrieval_top_k=5,
-    )
-    assert summary == {
-        "holdout_queries_requested": 2,
-        "holdout_queries_retained": 1,
-        "holdout_queries_dropped_empty": 1,
-        "author_rows_removed": 3,
-    }
-    q1 = out[out["query_group_id"] == "q1"]
-    assert q1["candidate_component_key"].tolist() == ["c2", "c4"]
-    assert q1["retrieval_rank"].tolist() == [1, 2]
-    assert q1["label"].tolist() == [0, 0]
-
-    # Rejects missing component_to_authors key (never silently manufactures false negatives!).
-    with pytest.raises(KeyError, match="missing from component_to_authors"):
-        build_whole_author_holdout_rows(
-            rows,
-            query_to_author={"q1": "A1"},
-            component_to_authors={"c2": {"A9"}},
-            holdout_query_ids={"q1"},
-        )
-    # Rejects incomplete membership where a label==1 row survives author removal.
-    with pytest.raises(ValueError, match="still has a label==1"):
-        build_whole_author_holdout_rows(
-            rows,
-            query_to_author={"q1": "A1"},
-            component_to_authors={"c1": set(), "c2": set(), "c3": set(), "c4": set()},
-            holdout_query_ids={"q1"},
-        )
-    # Rejects materialized feature frames.
-    with pytest.raises(ValueError, match="featureless pre-materialization"):
-        build_whole_author_holdout_rows(
-            rows.assign(pw_mean_prob=0.5),
-            query_to_author={"q1": "A1"},
-            component_to_authors=membership,
-            holdout_query_ids={"q1"},
-        )
-    # Rejects missing requested holdout query IDs.
-    with pytest.raises(KeyError, match="absent from candidate_rows"):
-        build_whole_author_holdout_rows(
-            rows,
-            query_to_author={"q_missing": "A9"},
-            component_to_authors=membership,
-            holdout_query_ids={"q_missing"},
-        )
 
 
 def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path: Path) -> None:

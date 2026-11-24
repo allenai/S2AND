@@ -10,28 +10,13 @@ import pytest
 
 import s2and.shap_utils as shap_utils
 from s2and.eval import (
-    _shap_values_for_tree_model_preserving_booster_params,
-    _write_claims_eval_shap_plots,
     b3_precision_recall_fscore,
-    claims_eval,
     cluster_precision_recall_fscore,
     f1_score,
-    facet_eval,
-    min_pair_edit,
     pairwise_eval,
     pairwise_precision_recall_fscore,
     pairwise_probability_metrics,
 )
-
-
-def test_min_pair_edit_corrects_a_wrong_positive_pair() -> None:
-    predictions = {
-        "left": [("Left paper", "left-id")],
-        "right": [("Right paper", "right-id")],
-        "sig_pairs_wrong": [("left-id", "right-id", "Left paper", "Right paper", False, True)],
-        "sig_pairs_right": [],
-    }
-    assert min_pair_edit(predictions) == (1.0, 1, 2)
 
 
 def test_pairwise_probability_metrics_match_hand_calculated_ensemble() -> None:
@@ -186,41 +171,6 @@ def test_cluster_metrics_require_partitions_of_the_same_population() -> None:
     for _case_id, metric in metrics:
         with pytest.raises(ValueError, match="Predictions do not cover all the signatures"):
             metric({"t1": ["s1"]}, {"p1": ["s2"]})
-
-
-def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:
-    signature = SimpleNamespace(
-        paper_id="p1",
-        author_info_block="block",
-        author_info_full_name="alice smith",
-        author_info_estimated_gender=None,
-        author_info_estimated_ethnicity=None,
-        author_info_first="Alice",
-        author_info_affiliations=[],
-        author_info_email=None,
-        author_info_coauthors=[],
-    )
-    paper = SimpleNamespace(
-        authors=[SimpleNamespace(author_name="Alice Smith")],
-        year=1601,
-        has_abstract=False,
-        venue="",
-        journal_name="",
-    )
-    dataset = SimpleNamespace(
-        get_blocks=lambda: {"block": ["s1"]},
-        clusters={"c1": {"signature_ids": ["s1"]}},
-        signature_to_cluster_id={"s1": "c1"},
-        signatures={"s1": signature},
-        papers={"p1": paper},
-    )
-
-    result = facet_eval(cast(Any, dataset), {"s1": (0.8, 0.6, 0.7)})
-
-    assert result.homonymity_f1 == {0: [0.7]}
-    assert result.synonymity_f1 == {0: [0.7]}
-    assert result.year_f1 == {0: [0.7]}
-    assert result.signature_lookup[0]["year"] is None
 
 
 class TestShapIntegration(unittest.TestCase):
@@ -386,133 +336,6 @@ def test_shap_values_reject_calibrated_voting_and_stacking_classifiers():
     for classifier in unsupported:
         with pytest.raises(TypeError, match=rf"{type(classifier).__name__} is unsupported.*skip_shap=True"):
             shap_utils._shap_values_for_tree_model(classifier, X[:3])
-
-
-def _build_claims_eval_test_inputs(dists):
-    class _Author:
-        def __init__(self, author_name):
-            self.author_name = author_name
-
-    class _Paper:
-        def __init__(self, title):
-            self.title = title
-            self.authors = [_Author("Test Author")]
-
-    class _Signature:
-        def __init__(self, affiliations):
-            self.author_info_affiliations = affiliations
-
-    class _Dataset:
-        def __init__(self):
-            self.mode = "inference"
-            self._blocks = {"blk": ["p1___0", "p2___0"]}
-            self.papers = {
-                "p1": _Paper("Paper 1"),
-                "p2": _Paper("Paper 2"),
-            }
-            self.signatures = {
-                "p1___0": _Signature(["Org 1"]),
-                "p2___0": _Signature(["Org 2"]),
-            }
-
-        def get_blocks(self):
-            return self._blocks
-
-    class _Clusterer:
-        def __init__(self, dists_value):
-            self._dists = dists_value
-
-        def predict(self, _block_dict, _dataset):
-            return {"blk_0": ["p1___0", "p2___0"]}, self._dists
-
-    dataset = _Dataset()
-    clusterer = _Clusterer(dists)
-    claims_pairs = [("p1___0", "p2___0", 1, "blk", "blk")]
-    return dataset, clusterer, claims_pairs
-
-
-def test_claims_eval_handles_missing_affiliations_and_optional_distances(tmp_path):
-    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists=None)
-    dataset.signatures["p1___0"].author_info_affiliations = None
-
-    def evaluate(directory):
-        return claims_eval(
-            dataset=dataset,
-            clusterer=clusterer,
-            claims_pairs=claims_pairs,
-            directory_for_caching=directory,
-            optional_name="unit",
-        )
-
-    assert evaluate(None)["total"] == 1
-    assert evaluate(str(tmp_path))["total"] == 1
-    assert (tmp_path / "preds_unit.json").is_file()
-    assert not (tmp_path / "dists_unit.pkl").exists()
-
-    clusterer._dists = {"blk": np.array([0.5])}
-    assert evaluate(str(tmp_path))["total"] == 1
-    assert (tmp_path / "dists_unit.pkl").is_file()
-
-
-def test_native_lightgbm_shap_routes_booster_and_restores_params(monkeypatch):
-    import lightgbm as lgb
-
-    from s2and.production_model import NativeLightGBMBinaryClassifier
-
-    X, y = _small_binary_classification()
-    classifier = lgb.LGBMClassifier(n_estimators=4, random_state=7, verbosity=-1).fit(X, y)
-    captured_models = []
-
-    def mutate_booster_params(model, features, class_index):
-        assert class_index == 1
-        captured_models.append(model)
-        model.params["temporary"] = "shap"
-        return np.zeros_like(features)
-
-    with tempfile.TemporaryDirectory() as td:
-        model_path = os.path.join(td, "model.txt")
-        classifier.booster_.save_model(model_path)
-        native_classifier = NativeLightGBMBinaryClassifier(model_path)
-        wrapper_values = shap_utils._shap_values_for_tree_model(classifier, X[:3], class_index=1)
-        native_values = shap_utils._shap_values_for_tree_model(native_classifier, X[:3], class_index=1)
-        assert native_values.shape == (3, 4)
-        np.testing.assert_allclose(native_values, wrapper_values)
-
-        monkeypatch.setattr(shap_utils, "_shap_values_for_tree_model", mutate_booster_params)
-        original_params = dict(native_classifier.booster_.params)
-
-        values = _shap_values_for_tree_model_preserving_booster_params(native_classifier, X[:2])
-
-        np.testing.assert_array_equal(values, np.zeros((2, 4)))
-        assert captured_models == [native_classifier.booster_]
-        assert isinstance(captured_models[0], lgb.Booster)
-        assert native_classifier.booster_.params == original_params
-
-
-def test_write_claims_eval_shap_plots_requires_nameless_features(monkeypatch):
-    class DummyFeatureInfo:
-        def get_feature_names(self):
-            return ["feature"]
-
-    class DummyClusterer:
-        classifier = object()
-        nameless_classifier = object()
-        featurizer_info = DummyFeatureInfo()
-        nameless_featurizer_info = None
-
-    def fake_many_pairs_featurize(*_args, **_kwargs):
-        return np.ones((1, 1)), np.array([1]), None
-
-    monkeypatch.setattr("s2and.eval.many_pairs_featurize", fake_many_pairs_featurize)
-
-    with pytest.raises(ValueError, match="output_shap=True requires clusterer.nameless_featurizer_info"):
-        _write_claims_eval_shap_plots(
-            id1="p1___0",
-            id2="p2___0",
-            dataset=cast(Any, object()),
-            clusterer=cast(Any, DummyClusterer()),
-            directory_for_caching=".",
-        )
 
 
 if __name__ == "__main__":

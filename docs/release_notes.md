@@ -113,12 +113,6 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   train, validation, and held-out pairs. Plans require Arrow papers and embeddings.
   The published `1.3` data reproduces the `1.3` training and validation matrices.
 - `train_pairwise.py` and `train_linker_and_finalize.py` require `--n-jobs`.
-- Production bundle evaluation in `eval_prod_models.py` uses the test block IDs
-  and order-independent membership digest recorded by the trainer. It verifies
-  membership for JSON and Arrow, reads `data_random_seed` from
-  `reproducibility/pairwise_training_config.json`, and rejects `--seed` outside
-  `--train`. For an older bundle without these records, use the frozen release
-  evaluator or retrain.
 - Arrow batch indexes use `S2ABI003` with a 32-byte header. Rebuild older indexes
   and regenerate their dataset manifests. Index validators and `overwrite=False`
   reuse check layout and size. `ArrowDataset.open_trusted(paths)` accepts
@@ -159,8 +153,6 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   blocks. Augmented evaluation cannot contain a benchmark development signature.
 - Production conversion and evaluation use SPECTER2. Runtime conversion writes
   one embedding table under manifest key `specter`, usually `specter2.arrow`.
-  `eval_prod_models.py` removes `--specter1-model-path`. SPECTER1 remains an
-  explicit research comparison in `--train` mode.
 - Python and Rust share the `canonical_v2` name and feature behavior. Titles
   retain letters and digits, CLD2 uses plain-text mode, malformed email is
   treated as missing, and query-author features use canonical name fields.
@@ -189,8 +181,7 @@ Bulk prediction takes the same `cluster_seeds_require` and `cluster_seeds_disall
   spaces in venues, affiliations, and suffixes.
 - `ANDData` groups by `author_info.block`. The `block_type` constructor
   argument, `Signature.author_info_given_block`, `get_original_blocks()`,
-  and `get_s2_blocks()` are removed. `facet_eval()` drops `block_type` and
-  uses the S2 grouping for block size, homonymity, and synonymity. Legacy
+  and `get_s2_blocks()` are removed. Legacy
   `author_info.given_block` JSON is accepted as an ignored field. Preserve
   original benchmark partitions externally if you need them.
 
@@ -473,14 +464,7 @@ See the [canonical name contract](canonical_names.md#canonical-name-contract).
   empty.
 - Altered-profile split components receive IDs that cannot collide with
   existing profile IDs.
-- Automatic `eval_prod_models.py` routing can use JSON if the Arrow source or
-  requested dataset is unavailable or lacks a declared embedding generation or
-  name-count index. Selection uses the embedding filename declared in the
-  manifest even if the file resolves to a different name. The evaluator
-  reports why it fell back to JSON. Broken collection bindings, missing base
-  artifacts, and invalid or corrupt declared data raise errors. Empty Arrow
-  files identify their table and path. `--no-arrow` skips Arrow inspection.
-  Linker source assembly rejects Arrow inputs that differ from their recorded
+- Linker source assembly rejects Arrow inputs that differ from their recorded
   manifest checksums.
 - Caller distances in bulk prediction are checked against seed groups only
   within each request block. Near-hard values within `1e-6` of `0` or `10000`

@@ -248,16 +248,9 @@ least two subblocks to run the step.
 ### Arrow validation in release and evaluation tools
 
 Linker source assembly validates each original Arrow manifest and its table and
-index hashes before rebinding its name-count index path. Evaluation's automatic
-Arrow selection treats invalid manifests or corrupt declared data as errors;
-it does not silently switch to JSON. `scripts/eval_prod_models.py --no-arrow`
-explicitly selects JSON, skips Arrow inspection, and requires
-`--json-data-root`. Automatic selection can use JSON when the Arrow source
-or requested dataset is unavailable, the requested SPECTER generation is
-undeclared, or the name-count index is undeclared; it reports the fallback
-reason. A manifest missing required base artifacts is an error. SPECTER
-generation selection uses the declared manifest filename, including when the
-resolved on-disk filename has different casing.
+index hashes before rebinding its name-count index path. The release evaluator
+uses the Arrow benchmark and held-out labels. See the
+[reproduction guide](reproduce.md) for the evaluation command.
 
 ## Clustering corrections and close-pair bonus
 
@@ -606,7 +599,7 @@ The focused code gate is:
 ```powershell
 uv run pytest -q tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 uv run pytest -q tests/test_name_tuple_artifact.py tests/test_generate_orcid_name_prefix_counts.py
-uv run pytest -q tests/test_train_pairwise_script.py tests/test_promoted_linker_training_cli.py tests/test_eval_prod_models.py
+uv run pytest -q tests/test_train_pairwise_script.py tests/test_promoted_linker_training_cli.py
 uv run ruff check s2and scripts/production/model tests/test_production_model.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 git diff --check
 ```

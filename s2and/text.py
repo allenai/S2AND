@@ -1567,36 +1567,6 @@ def equal_middle(
     return 1 if name_1 == name_2 else 0
 
 
-def equal_initial(
-    name_1: str | None,
-    name_2: str | None,
-    default_val: float = NUMPY_NAN,
-) -> int | float:
-    """
-    Checks if two initials are qual
-
-    Parameters
-    ----------
-    name_1: string
-        first initial
-    name_2: string
-        second initial
-    default_val: float
-        the default value to return when one or both of the names is empty
-
-    Returns
-    -------
-    int: 0 (if unequal) or 1 (if equal)
-    """
-    if name_1 is None or name_2 is None or len(name_1) == 0 or len(name_2) == 0:
-        return default_val
-
-    if name_1.strip().lower()[0] == name_2.strip().lower()[0]:
-        return 1
-    else:
-        return 0
-
-
 def counter_jaccard(
     counter_1: Counter, counter_2: Counter, default_val: float = NUMPY_NAN, denominator_max: float = np.inf
 ) -> float:

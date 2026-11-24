@@ -67,17 +67,15 @@ Rust Rayon. See [Build a Rust-backed training dataset](training.md#build-a-rust-
    training work. Helper pools can oversubscribe CPUs when they run inside those
    phases. Increase the helper budget only when profiling shows a benefit.
 
-   Pairwise training, model evaluation, and the promoted incremental profiler
+   Pairwise training, linker training, and the promoted incremental profiler
    overwrite `OMP_NUM_THREADS` after import using their `n_jobs` settings.
    `train_pairwise.py`, `train_linker_and_finalize.py`, and
    `profile_promoted_incremental_arrow.py` require `--n-jobs`.
-   `eval_prod_models.py` takes `--n_jobs`. Set the script's allocation
-   explicitly. The parent setting still matters for runtimes that initialize
+   Set the script's allocation explicitly. The parent setting still matters for runtimes that initialize
    before the override.
    [Pairwise trainer](../scripts/production/model/train_pairwise.py) ·
    [Linker trainer](../scripts/production/model/train_linker_and_finalize.py) ·
-   [Profiler](../scripts/verification/profile_promoted_incremental_arrow.py) ·
-   [Evaluator](../scripts/eval_prod_models.py)
+   [Profiler](../scripts/verification/profile_promoted_incremental_arrow.py)
 
    For release jobs, follow the [operating rules](release.md#operating-rules).
 

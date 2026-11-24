@@ -17,8 +17,6 @@ Follow the [release process](../docs/release.md) for production runs.
 | `production/model/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
 | `production/model/release_pairwise.py` | Validation-only EPS calibration (`calibrate-eps`) and outer-test evaluation (`evaluate-heldout`) |
 | `production/model/rebind_name_counts_index.py` | Bind a copy of a complete model to a rebuilt `name_counts_index/` without refitting |
-| `production/data/prepare_linker_replay.py` | Prepare current metadata and SPECTER2 inputs for fixed linker replay IDs |
-| `production/data/prepare_linker_support.py` | Prepare linker support tables from reviewed benchmark and ORCID labels |
 | `production/data/prepare_identity_labels.py` | Join and audit external Gold ORCID `(paper_id, position)` labels onto Arrow block signatures |
 | `production/data/assign_block_roles.py` | Deterministically partition production blocks into ORCID-disjoint 1.5 training, tuning, and test pools |
 | `production/data/gate_public_snapshot.py` | Intake-once S2AG paper filtering, abstract redaction, email scrubbing, and `population_corrections.json` generation |
@@ -43,7 +41,6 @@ Use [the data guide](../docs/data.md) to download them.
 
 | Script | What it does |
 |---|---|
-| `extract_big_block_dataset.py` | Stream a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, `specter.pickle`, `cluster_seeds.json`, `altered_cluster_signatures.txt`, and `meta.json`; supports both pretty-printed and minified JSON exports |
 | `convert_to_arrow.py` | Convert service JSON, benchmarks, and linker replay inputs into bounded Arrow runtime artifacts with current raw-planner batch indexes; validate name counts/datasets and write checksum-bound collection manifests |
 | `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on a giant Arrow block and write preservation metrics, plots, and tables. Runs the native subblocker that `Clusterer.predict_from_arrow` uses, with the packaged ORCID prefix counts. |
 
@@ -51,7 +48,6 @@ Use [the data guide](../docs/data.md) to download them.
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate an explicitly supplied SPECTER2 bundle on the full (default) or mini datasets. Requires an explicit `--arrow-data-root` or `--json-data-root` (JSON also needs `--name-counts-index-root` and `--name-tuples-path`). Owner-only: non-training evaluation needs the internal pre-cut `pairwise/arrow/release` root and scores the bundle's inner test blocks. Public outer-test evaluation is `release_pairwise.py evaluate-heldout` ([reproduction](../docs/reproduce.md) step 4). Non-training evaluation rejects `--seed` and auto-uses Arrow when complete artifacts exist; SPECTER1 is an explicit `--train` research comparison only. |
 | `eps_sweep/sweep_eps_on_linking_gold.py` | Giant-block release EPS curves with hidden-ORCID identity B3; reuse native distances and linkage trees |
 | `eps_sweep/plot_b3_eps_sweeps.py` | Plot completed giant-block B3 curves for manual EPS review |
 | `eps_sweep/apply_reviewed_eps.py` | Apply the explicit reviewed EPS to a fresh complete model and preserve all trained weights |

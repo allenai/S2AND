@@ -66,7 +66,10 @@ def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_contr
             "source_id": f"ctrl_{i}",
             "block_key": "a_smith",
             "paper_a": _paper(100 + 2 * i),
-            "paper_b": _paper(100 + 2 * i + 1),
+            "paper_b": {
+                **_paper(100 + 2 * i + 1),
+                "author_orcid": "0000-0002-1694-233X" if i % 2 else "0000-0001-5000-0007",
+            },
             "metadata": {"gold_label": i % 2},
         }
         for i in range(6)
@@ -153,7 +156,9 @@ def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path:
         for i in range(6)
     ]
     out = tmp_path / "linker_packets"
-    summary = build_blind_linker_packets(queries=queries, output_dir=out, seed=7, max_items_per_shard=4)
+    summary = build_blind_linker_packets(
+        queries=queries, output_dir=out, seed=7, max_items_per_shard=4, control_fraction=0
+    )
     assert summary["shard_count"] == 2
     assert Path(summary["answer_key_path"]).is_file()
 
@@ -187,8 +192,9 @@ def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path:
 def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_path: Path) -> None:
     shared = "0000-0002-1694-233X"
     local = "0000-0001-5000-0007"
+    other = "0000-0002-9079-593X"
     assignments = assign_block_roles(
-        [BlockSpec("a smith", 5, frozenset({shared, local})), BlockSpec("b smith", 2, frozenset({shared}))],
+        [BlockSpec("a smith", 5, frozenset({shared, local, other})), BlockSpec("b smith", 2, frozenset({shared}))],
         {"gate_thresh": 1, "final_test_a": 1},
         pinned_roles={"a smith": "gate_thresh", "b smith": "final_test_a"},
         closure_mode="home_pool",
@@ -202,6 +208,7 @@ def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_pat
     controls = [
         {**item, "source_id": "outside_home"},
         {**item, "source_id": "inside_home", "paper_a": gold_paper, "metadata": {"gold_label": 1}},
+        {**item, "source_id": "different", "paper_a": {**gold_paper, "author_orcid": other}},
         {**item, "source_id": "unscored", "paper_a": {**gold_paper, "scored": False}},
         {**item, "source_id": "sealed", "block_key": "b smith", "paper_b": shared_paper},
     ]
@@ -215,7 +222,7 @@ def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_pat
     )
     key = json.loads(Path(result["answer_key_path"]).read_text(encoding="utf-8"))
     assert result["excluded_controls"] == 3
-    assert {row["source_id"] for row in key["items"]} == {"natural", "inside_home"}
+    assert {row["source_id"] for row in key["items"]} == {"natural", "inside_home", "different"}
     with pytest.raises(ValueError, match="allowed packet roles"):
         build_blind_pair_packets(
             items=[{**item, "block_key": "b smith"}],
@@ -231,7 +238,10 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
             "source_id": source_id,
             "block_key": "a lee",
             "paper_a": _paper(1),
-            "paper_b": _paper(2),
+            "paper_b": {
+                **_paper(2),
+                "author_orcid": "0000-0001-5000-0007" if label == 0 else "0000-0002-1694-233X",
+            },
             "metadata": {"stratum": "giant", "gold_label": label},
         }
 
@@ -253,7 +263,7 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
             items=regular,
             control_items=controls,
             output_dir=tmp_path / family,
-            control_fraction=0.5,
+            control_fraction=0.4,
             seed=100 + idx,
             control_seed=10,
             max_items_per_shard=3,
@@ -300,7 +310,9 @@ def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path) -> None:
     judges = []
     orders = []
     for family, seed in (("sol", 1), ("claude", 5)):
-        summary = build_blind_linker_packets(queries=[item], output_dir=tmp_path / family, seed=seed)
+        summary = build_blind_linker_packets(
+            queries=[item], output_dir=tmp_path / family, seed=seed, control_fraction=0
+        )
         key_path = Path(summary["answer_key_path"])
         (record,) = json.loads(key_path.read_text(encoding="utf-8"))["items"]
         slots = record["slot_to_candidate_key"]
@@ -343,7 +355,11 @@ def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Pat
             "metadata": {"stratum": "giant"},
             "slot_to_candidate_key": {"S0": "c0", "S1": "c1"},
         }
-        key_path.write_text(json.dumps({"packet_type": "linker", "shards": ["s"], "items": [control, natural]}))
+        zero = [
+            {**natural, "item_id": source, "source_id": source, "slot_to_candidate_key": {}}
+            for source in (("empty", "extra") if family == "sol" else ("empty",))
+        ]
+        key_path.write_text(json.dumps({"packet_type": "linker", "shards": ["s"], "items": [control, natural, *zero]}))
         verdicts = [
             {"item_id": "control", "candidate_verdicts": dict.fromkeys(slots, "different")},
             {
@@ -363,8 +379,13 @@ def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Pat
     assert metrics["control_request_accuracy"] == 0
     assert metrics["same_control_accuracy"] == 0
     assert metrics["different_control_accuracy"] == 1
-    agreement = report["cross_family_agreement"][0]["by_task"]["linker"]["giant"]
-    assert agreement["overlap"] == 2
+    assert metrics["zero_candidate_requests"] == 2
+    assert not metrics["passes_control_bar"]
+    comparison = report["cross_family_agreement"][0]
+    assert comparison["missing_request_keys"]["claude"] == [("linker", "a ross", "extra")]
+    assert comparison["shared_zero_candidate_requests"] == 1
+    agreement = comparison["by_task"]["linker"]["giant"]
+    assert agreement["overlap"] == 3
     assert agreement["both_decided"] == 0
     assert agreement["cohen_kappa"] is None
     assert agreement["decided_vs_abstain"] == 1
@@ -392,13 +413,16 @@ def _pair_control(source: str, *, same: bool, **metadata) -> dict:
 
 
 @pytest.mark.parametrize("packet_type", ["pair", "linker"])
-def test_packet_controls_reject_truth_that_contradicts_verified_orcids(tmp_path: Path, packet_type: str) -> None:
-    roles = load_block_roles(_packet_roles(tmp_path))
+@pytest.mark.parametrize("with_roles", [False, True])
+def test_packet_controls_reject_truth_that_contradicts_verified_orcids(
+    tmp_path: Path, packet_type: str, with_roles: bool
+) -> None:
+    roles = load_block_roles(_packet_roles(tmp_path)) if with_roles else None
     pair = _pair_control("control", same=False, gold_label="same")
     kwargs = {
         "output_dir": tmp_path / "packet",
         "block_roles": roles,
-        "allowed_roles": {"gate_thresh"},
+        "allowed_roles": {"gate_thresh"} if with_roles else (),
         "control_fraction": 0.5,
     }
     with pytest.raises(ValueError, match="contradict.*verified ORCIDs"):
@@ -469,6 +493,17 @@ def test_packet_control_selection_balances_class_and_score_band(tmp_path: Path, 
         assert "score_band_v14" not in public
 
 
+@pytest.mark.parametrize("with_different", [False, True])
+def test_packet_builder_rejects_insufficient_balanced_controls(tmp_path: Path, with_different: bool) -> None:
+    items = [_pair_control(f"natural-{i}", same=True) for i in range(5)]
+    controls = [_pair_control(f"same-{i}", same=True) for i in range(10)]
+    if with_different:
+        controls.append(_pair_control("different", same=False))
+    error = "Insufficient balanced controls" if with_different else "both verified control classes"
+    with pytest.raises(ValueError, match=error):
+        build_blind_pair_packets(items=items, control_items=controls, control_fraction=0.5, output_dir=tmp_path / "out")
+
+
 def test_packet_build_cli_requires_frozen_roles(tmp_path: Path) -> None:
     items_path = tmp_path / "items.json"
     items_path.write_text(json.dumps([_pair_control("natural", same=True)]), encoding="utf-8")
@@ -512,11 +547,13 @@ def test_judge_coverage_requires_matching_natural_keys(tmp_path: Path, check: st
             encoding="utf-8",
         )
         judges.append((family, verdict_path, key_path))
-    if check == "different_keys":
-        with pytest.raises(ValueError, match="Natural keys differ.*claude is missing 1"):
-            score_judges(judges)
-        return
     report = score_judges(judges)
+    if check == "different_keys":
+        agreement = report["cross_family_agreement"][0]
+        assert agreement["overlap"] == 1
+        assert agreement["missing_natural_keys"]["claude"] == [("pair", "a smith", "item-2", "")]
+        assert agreement["natural_key_coverage"] == 0.5
+        return
     if check == "class_bar":
         metrics = report["judges"][0]["overall"]
         assert metrics["control_request_accuracy"] == 0.9

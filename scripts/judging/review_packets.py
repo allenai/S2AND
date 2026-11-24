@@ -273,12 +273,12 @@ def _select_controls(
     control_seed: int,
     balance_by_score_band: bool,
 ) -> list[Mapping[str, Any]]:
-    if not items_count or not control_items or control_fraction <= 0.0:
+    if not items_count or control_fraction <= 0.0:
         return []
     rng = random.Random(control_seed)
-    target = max(1, round(items_count * control_fraction / (1.0 - control_fraction)))
-    if balance_by_score_band and target < 2:
-        raise ValueError("Score-band balancing requires room for at least two controls")
+    target = max(2, round(items_count * control_fraction / (1.0 - control_fraction)))
+    if balance_by_score_band:
+        target += target % 2
     by_class: dict[str, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
     for item in control_items:
         metadata = item.get("metadata", {})
@@ -296,8 +296,9 @@ def _select_controls(
         rng.shuffle(positive)
 
     pairs = [(negative, positive) for _, (negative, positive) in sorted(by_class.items()) if negative and positive]
-    if balance_by_score_band and not pairs:
-        raise ValueError("Score-band balancing requires both control classes in a shared score band")
+    if not pairs:
+        scope = " in a shared score band" if balance_by_score_band else ""
+        raise ValueError(f"Expected both verified control classes{scope}")
     selected: list[Mapping[str, Any]] = []
     while pairs and len(selected) + 2 <= target:
         for negative, positive in pairs:
@@ -305,10 +306,12 @@ def _select_controls(
                 break
             selected.extend((negative.pop(), positive.pop()))
         pairs = [(negative, positive) for negative, positive in pairs if negative and positive]
-    if not balance_by_score_band and len(selected) < target:
+    if not balance_by_score_band and target - len(selected) == 1:
         extra = max(by_class[""], key=len)
         if extra:
             selected.append(extra.pop())
+    if len(selected) != target:
+        raise ValueError(f"Insufficient balanced controls: selected {len(selected)}, needed {target}")
     return selected
 
 
@@ -331,12 +334,10 @@ def _scored_controls(
     packet_type: str,
     allowed_roles: Collection[str],
 ) -> list[Mapping[str, Any]]:
-    if block_roles is None:
-        return list(items)
     result = []
     for item in items:
         block = str(item["block_key"])
-        if block_roles.role_for(block) not in allowed_roles:
+        if block_roles is not None and block_roles.role_for(block) not in allowed_roles:
             continue
         candidates = item["candidates"] if packet_type == "linker" else ()
         if packet_type == "pair":
@@ -350,7 +351,7 @@ def _scored_controls(
             orcid
             and orcid not in EXCLUDED_ORCID_GROUPS
             and paper.get("scored", True) is True
-            and block_roles.scores(block, orcid)
+            and (block_roles is None or block_roles.scores(block, orcid))
             for paper, orcid in zip(papers, orcids, strict=True)
         ):
             continue
@@ -689,6 +690,9 @@ def build_blind_linker_packets(
 
 
 _CONTROL_PASS_MINIMUM = 0.90
+_MIN_CONTROL_REQUESTS = 10
+RequestKey = tuple[str, str, str]
+JudgmentKey = tuple[str, str, str, str]
 _DECIDED = frozenset({"same", "different"})
 _VERDICTS = _DECIDED | {"insufficient_evidence", "cannot_tell", "abstain"}
 
@@ -697,7 +701,11 @@ def _fraction(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
-def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_requests: Sequence[bool]) -> dict[str, Any]:
+def _judge_metrics(
+    rows: Sequence[tuple[str | None, str | None]],
+    control_requests: Sequence[tuple[bool, bool]],
+    zero_candidate_requests: int = 0,
+) -> dict[str, Any]:
     decided = sum(verdict in _DECIDED for verdict, _ in rows)
     controls = [(verdict, truth) for verdict, truth in rows if truth is not None]
     same = sum(truth == "same" for _, truth in controls)
@@ -711,7 +719,11 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_reques
     lower_class_accuracy = (
         min(same_accuracy, different_accuracy) if same_accuracy is not None and different_accuracy is not None else None
     )
-    request_accuracy = _fraction(sum(control_requests), len(control_requests))
+    request_accuracy = _fraction(sum(success for _, success in control_requests), len(control_requests))
+    positive_requests = [success for positive, success in control_requests if positive]
+    negative_requests = [success for positive, success in control_requests if not positive]
+    positive_request_accuracy = _fraction(sum(positive_requests), len(positive_requests))
+    negative_request_accuracy = _fraction(sum(negative_requests), len(negative_requests))
     return {
         "items": len(rows),
         "missing": sum(verdict is None for verdict, _ in rows),
@@ -720,15 +732,24 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_reques
         "controls": len(controls),
         "control_accuracy": _fraction(sum(verdict == truth for verdict, truth in controls), len(controls)),
         "control_requests": len(control_requests),
+        "positive_control_requests": len(positive_requests),
+        "negative_control_requests": len(negative_requests),
+        "positive_control_request_accuracy": positive_request_accuracy,
+        "negative_control_request_accuracy": negative_request_accuracy,
+        "zero_candidate_requests": zero_candidate_requests,
         "control_request_accuracy": request_accuracy,
         "same_controls": same,
         "same_control_accuracy": same_accuracy,
         "different_control_accuracy": different_accuracy,
         "lower_control_class_accuracy": lower_class_accuracy,
         "passes_control_bar": (
-            lower_class_accuracy is not None
+            len(control_requests) >= _MIN_CONTROL_REQUESTS
+            and lower_class_accuracy is not None
             and request_accuracy is not None
-            and min(lower_class_accuracy, request_accuracy) >= _CONTROL_PASS_MINIMUM
+            and positive_request_accuracy is not None
+            and negative_request_accuracy is not None
+            and min(lower_class_accuracy, request_accuracy, positive_request_accuracy, negative_request_accuracy)
+            >= _CONTROL_PASS_MINIMUM
         ),
         "different_controls": different,
         "false_same": false_same,
@@ -745,7 +766,7 @@ def _judge_metrics(rows: Sequence[tuple[str | None, str | None]], control_reques
 
 def _read_judge_verdicts(
     verdicts_path: Path, answer_key: Path
-) -> tuple[dict[str, Any], dict[tuple[str, str, str, str], tuple[str, str | None, bool]]]:
+) -> tuple[dict[str, Any], dict[JudgmentKey, tuple[str, str | None, bool]], dict[RequestKey, tuple[str, bool]]]:
     key = json.loads(answer_key.read_text(encoding="utf-8"))
     by_item = {row["item_id"]: row for row in key["items"]}
     if len(by_item) != len(key["items"]):
@@ -763,9 +784,13 @@ def _read_judge_verdicts(
 
     by_shard: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
     by_stratum: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
-    shard_controls: dict[str, list[bool]] = defaultdict(list)
-    stratum_controls: dict[str, list[bool]] = defaultdict(list)
-    aligned: dict[tuple[str, str, str, str], tuple[str, str | None, bool]] = {}
+    shard_controls: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
+    stratum_controls: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
+    zero_by_shard: Counter[str] = Counter()
+    zero_by_stratum: Counter[str] = Counter()
+    aligned: dict[JudgmentKey, tuple[str, str | None, bool]] = {}
+    requests: dict[RequestKey, tuple[str, bool]] = {}
+    seen_requests: set[RequestKey] = set()
     for item_id, item in by_item.items():
         record = verdicts.get(item_id, {})
         metadata = item.get("metadata", {})
@@ -792,9 +817,20 @@ def _read_judge_verdicts(
             raise ValueError(f"Unknown packet type in {answer_key}")
         if set(item_verdicts) - set(slots) or any(value not in _VERDICTS for value in item_verdicts.values()):
             raise ValueError(f"Invalid verdict or slot for {item_id!r} in {verdicts_path}")
+        request_key: RequestKey = (key["packet_type"], normalize_block_key(item["block_key"]), item["source_id"])
+        if request_key in seen_requests:
+            raise ValueError(f"Duplicate source request {request_key!r} in {answer_key}")
+        seen_requests.add(request_key)
+        by_shard[shard]
+        by_stratum[stratum]
+        if not slots:
+            zero_by_shard[shard] += 1
+            zero_by_stratum[stratum] += 1
+        if not item["is_control"]:
+            requests[request_key] = (stratum, not slots)
         control_success = bool(slots)
         for slot, candidate in slots.items():
-            identity = (key["packet_type"], normalize_block_key(item["block_key"]), item["source_id"], candidate)
+            identity = (*request_key, candidate)
             if identity in aligned:
                 raise ValueError(f"Duplicate source and candidate {identity!r} in {answer_key}")
             verdict = item_verdicts.get(slot)
@@ -804,18 +840,28 @@ def _read_judge_verdicts(
             by_shard[shard].append((verdict, truth))
             by_stratum[stratum].append((verdict, truth))
         if item["is_control"]:
-            shard_controls[shard].append(control_success)
-            stratum_controls[stratum].append(control_success)
-    return {
-        "overall": _judge_metrics(
-            [row for rows in by_shard.values() for row in rows],
-            [success for outcomes in shard_controls.values() for success in outcomes],
-        ),
-        "by_shard": {shard: _judge_metrics(rows, shard_controls[shard]) for shard, rows in sorted(by_shard.items())},
-        "by_stratum": {
-            stratum: _judge_metrics(rows, stratum_controls[stratum]) for stratum, rows in sorted(by_stratum.items())
+            outcome = (bool(gold_keys), control_success)
+            shard_controls[shard].append(outcome)
+            stratum_controls[stratum].append(outcome)
+    return (
+        {
+            "overall": _judge_metrics(
+                [row for rows in by_shard.values() for row in rows],
+                [outcome for outcomes in shard_controls.values() for outcome in outcomes],
+                zero_by_shard.total(),
+            ),
+            "by_shard": {
+                shard: _judge_metrics(rows, shard_controls[shard], zero_by_shard[shard])
+                for shard, rows in sorted(by_shard.items())
+            },
+            "by_stratum": {
+                stratum: _judge_metrics(rows, stratum_controls[stratum], zero_by_stratum[stratum])
+                for stratum, rows in sorted(by_stratum.items())
+            },
         },
-    }, aligned
+        aligned,
+        requests,
+    )
 
 
 def _paired_judge_metrics(rows: Sequence[tuple[str | None, str | None]]) -> dict[str, Any]:
@@ -857,10 +903,12 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
         raise ValueError("Each judge must supply a distinct verdict file")
     reports = []
     verdicts = []
+    requests = []
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
-        report, aligned = _read_judge_verdicts(verdict_path, key_path)
+        report, aligned, natural_requests = _read_judge_verdicts(verdict_path, key_path)
         reports.append({"family": family, "verdicts": str(verdict_path), **report})
         verdicts.append(aligned)
+        requests.append(natural_requests)
     agreement = []
     for i, j in combinations(range(len(judges)), 2):
         if families[i] == families[j]:
@@ -868,13 +916,20 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
         left, right = verdicts[i], verdicts[j]
         left_natural = {key for key, (_, _, control) in left.items() if not control}
         right_natural = {key for key, (_, _, control) in right.items() if not control}
-        if left_natural != right_natural:
-            raise ValueError(
-                f"Natural keys differ: {families[i]} is missing {len(right_natural - left_natural)}, "
-                f"{families[j]} is missing {len(left_natural - right_natural)}"
-            )
+        shared_natural = left_natural & right_natural
+        left_requests, right_requests = requests[i], requests[j]
+        shared_requests = left_requests.keys() & right_requests.keys()
         by_task: dict[str, dict[str, list[tuple[str | None, str | None]]]] = defaultdict(lambda: defaultdict(list))
-        for key in sorted(left_natural):
+        zero_candidate_requests = 0
+        for request in sorted(shared_requests):
+            stratum, left_zero = left_requests[request]
+            right_stratum, right_zero = right_requests[request]
+            if stratum != right_stratum:
+                raise ValueError(f"Mismatched strata for jointly judged item {request!r}")
+            if left_zero or right_zero:
+                zero_candidate_requests += 1
+                by_task[request[0]][stratum].append((None, None))
+        for key in sorted(shared_natural):
             stratum, a, _ = left[key]
             right_stratum, b, _ = right[key]
             if stratum != right_stratum:
@@ -884,6 +939,17 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]]) -> dict[str, Any]:
             {
                 "judges": [i, j],
                 "families": [families[i], families[j]],
+                "natural_key_coverage": _fraction(len(shared_natural), len(left_natural | right_natural)),
+                "missing_natural_keys": {
+                    families[i]: sorted(right_natural - left_natural),
+                    families[j]: sorted(left_natural - right_natural),
+                },
+                "request_coverage": _fraction(len(shared_requests), len(left_requests.keys() | right_requests.keys())),
+                "missing_request_keys": {
+                    families[i]: sorted(right_requests.keys() - left_requests.keys()),
+                    families[j]: sorted(left_requests.keys() - right_requests.keys()),
+                },
+                "shared_zero_candidate_requests": zero_candidate_requests,
                 **_paired_judge_metrics(
                     [row for strata in by_task.values() for rows in strata.values() for row in rows]
                 ),

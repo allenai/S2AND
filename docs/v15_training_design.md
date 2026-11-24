@@ -65,6 +65,15 @@ Pass the same file to `sweep_eps_on_linking_gold.py --score-mode orcid-b3 --allo
 and `apply_reviewed_eps.py`. EPS verifies the manifest digest, the zero scored overlap, and the scored identities
 in the saved reference against frozen block membership. A nonzero raw overlap is expected when `home_pool` assigns a shared identity.
 
+### Check sealed overlap with 1.4 training
+
+Run `uv run python -m scripts.production.data.check_v14_training_overlap` with
+`--block-role-assignments`, `--blocks-json`, and one or more `--training-parquet` arguments.
+Map every block in both final-test halves to its Arrow directory. Supply the 1.4 training signature
+inventory as Parquet shards with string `signature_id` and nullable string `orcid` columns.
+The command checks Arrow signature IDs, deposited ORCIDs, and frozen Gold ORCIDs against the inventory.
+It reports distinct overlaps for each sealed half and exits with status 1 if either half overlaps training.
+
 ### Build linker tasks
 
 Run `scripts/production/data/build_linker_task_tables.py --block-role-assignments assignments.json

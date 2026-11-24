@@ -75,6 +75,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=42,
         help="Graph subblocking seed; production uses the model's random_state (default: 42).",
     )
+    parser.add_argument(
+        "--component-members-parquet",
+        type=Path,
+        default=None,
+        help=(
+            "Reviewed components with signature_id and candidate_component_key columns. "
+            "The sweep fails if any threshold splits a component with two or more selected signatures."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -171,6 +180,32 @@ def _orcid_preservation_metrics(
         "orcid_preserved_signature_count": int(preserved_signature_count),
         "orcid_signature_weighted_preservation_rate": float(preserved_signature_count / total_signature_count),
     }
+
+
+def load_component_labels(path: Path, signature_ids: set[str]) -> dict[str, str]:
+    """Read reviewed component keys for the selected signatures.
+
+    Args:
+        path: Parquet file with `signature_id` and `candidate_component_key` columns.
+        signature_ids: Signatures in the analyzed block. Other rows are ignored.
+
+    Returns:
+        Component key by signature ID.
+    """
+    table = pd.read_parquet(path, columns=["signature_id", "candidate_component_key"])
+    return {
+        str(signature_id): str(component_key)
+        for signature_id, component_key in zip(table["signature_id"], table["candidate_component_key"], strict=True)
+        if str(signature_id) in signature_ids
+    }
+
+
+def split_component_keys(component_labels: dict[str, str], signature_to_subblock: dict[str, str]) -> list[str]:
+    """Return reviewed components whose signatures land in more than one subblock."""
+    subblocks_by_component: dict[str, set[str]] = defaultdict(set)
+    for signature_id, component_key in component_labels.items():
+        subblocks_by_component[component_key].add(signature_to_subblock[signature_id])
+    return sorted(key for key, subblocks in subblocks_by_component.items() if len(subblocks) > 1)
 
 
 def _subblock_size_metrics(subblocks: dict[str, list[str]]) -> dict[str, float | int]:
@@ -330,6 +365,7 @@ def _threshold_row(
     *,
     threshold: int,
     random_seed: int,
+    component_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Subblock one block natively at one threshold and summarize the partition."""
     threshold_start = time.perf_counter()
@@ -344,6 +380,16 @@ def _threshold_row(
     signature_to_subblock = _signature_to_subblock(subblocks)
     if set(signature_to_subblock) != set(all_signature_ids):
         raise ValueError("Native subblocking must return every input signature exactly once")
+    # Release review requires the cap and every reviewed component to hold.
+    max_size = max(len(signature_ids) for signature_ids in subblocks.values())
+    if max_size > int(threshold):
+        raise ValueError(f"threshold={threshold}: largest subblock has {max_size} signatures")
+    split_components = split_component_keys(component_labels or {}, signature_to_subblock)
+    if split_components:
+        raise ValueError(
+            f"threshold={threshold}: subblocking split {len(split_components)} reviewed components, "
+            f"for example {split_components[:5]}"
+        )
     single_letter_ids = _single_letter_first_name_ids(signatures, all_signature_ids, int(threshold))
     preservation_metrics = _orcid_preservation_metrics(repeated_orcid_groups, signature_to_subblock)
     subblock_metrics = _subblock_size_metrics(subblocks)
@@ -388,6 +434,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         signatures = load_block_signatures(arrow_dataset, args.block)
         all_signature_ids = sorted(signatures)
         repeated_orcid_groups = _build_repeated_orcid_groups(signatures)
+        component_labels = (
+            load_component_labels(args.component_members_parquet, set(all_signature_ids))
+            if args.component_members_parquet is not None
+            else {}
+        )
         rows: list[dict[str, Any]] = []
         for threshold in thresholds:
             rows.append(
@@ -398,6 +449,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     repeated_orcid_groups,
                     threshold=threshold,
                     random_seed=int(args.random_seed),
+                    component_labels=component_labels,
                 )
             )
 
@@ -432,6 +484,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "repeated_orcid_signature_count": int(
             sum(len(signature_ids) for signature_ids in repeated_orcid_groups.values())
         ),
+        "reviewed_component_signature_count": int(len(component_labels)),
+        "reviewed_component_count": int(len(set(component_labels.values()))),
         "thresholds": thresholds,
         "artifacts": {
             "threshold_summary_csv": str(summary_csv_path),

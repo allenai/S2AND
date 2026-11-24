@@ -303,11 +303,15 @@ uv run python scripts/analyze_giant_block_subblocking.py `
   --thresholds REVIEWED_MAXIMUM_SIZE `
   --output-dir "$RunRoot/reports/subblocking" `
   --random-seed REVIEWED_SEED `
+  --component-members-parquet path/to/reviewed_components.parquet `
   --n-jobs 12
 ```
 
-Confirm that the largest subblock fits the requested threshold and record the
-preservation metrics with the release evidence.
+The component-members file needs `signature_id` and `candidate_component_key` columns.
+Rows for signatures outside the block are ignored.
+The sweep fails, and writes no report, if a subblock exceeds the threshold or a
+reviewed component spans two subblocks.
+Record the preservation metrics with the release evidence.
 
 ### Promoted incremental performance
 

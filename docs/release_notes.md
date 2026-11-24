@@ -17,14 +17,14 @@
 - Linker source preflight resolves calibration and test assignments with the trainer's selector
   and rejects missing eligible rows, mismatched `base_group_id` values, inconsistent eval-table
   paths, labels for missing replay datasets, and duplicate or conflicting candidates, before any copy.
-  The fit, `evaluate_classic` and the EPS tools reject an assignment whose source key has no eval table.
+  The fit, `evaluate_linker` and the EPS tools reject an assignment whose source key has no eval table.
 - Linker source preflight checks each dataset within each label table: with ten or more marked
   `negative_singleton_orcid` views, at least 10% must have a positive candidate. Mark unreviewed
   views `unlabeled_singleton_orcid`.
 - Giant EPS sweeps require `--batching-threshold` and record it. Applying a snapshot sweep requires
   `--expected-batching-threshold`, one snapshot, and a `--datasets` list that matches the snapshot's
   calibration assignments outside `s2and_eval`; it rejects curves recorded for another dataset.
-  The EPS reference excludes the same final-test split as `evaluate_classic`.
+  The EPS reference excludes the same final-test split as `evaluate_linker`.
 - Corrected dataset packaging requires `--precision-f1-tolerance`. Calibration requires
   `--allow-zero-precision-f1-tolerance` when a close-pair bonus wins at zero tolerance, and saves
   the refused run's trials for the retry.

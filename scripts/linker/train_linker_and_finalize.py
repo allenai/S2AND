@@ -67,12 +67,12 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
     _promoted_stratified_gate_spec,
     _resolve_path,
     _validate_stratified_split_assignments,
-    evaluate_classic,
-    fit_classic,
     load_bundle,
     read_classic_holdout_identities,
 )
 from s2and.incremental_linking_training.data_loading import load_clusterer  # noqa: E402
+from s2and.incremental_linking_training.evaluate import evaluate_linker  # noqa: E402
+from s2and.incremental_linking_training.ranker import fit_linker  # noqa: E402
 from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa: E402
     preflight_source_rows,
     read_source_parquet_rows,
@@ -2206,7 +2206,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         started = time.perf_counter()
         active_params = dict(feature_bundle.models["classic"]["best_params"])
 
-        calibrated = fit_classic(
+        calibrated = fit_linker(
             feature_bundle,
             n_jobs=int(args.n_jobs),
             holdout_identities=holdout_identities,
@@ -2264,7 +2264,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_query_groups_per_table=max_query_groups,
             linker_legacy_paper_years=linker_legacy_paper_years,
         )
-    evaluation = evaluate_classic(
+    evaluation = evaluate_linker(
         evaluation_feature_bundle,
         calibrated=calibrated,
         artifact=complete_model.incremental_linker_artifact,

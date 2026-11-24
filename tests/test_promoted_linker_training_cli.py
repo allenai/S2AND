@@ -568,7 +568,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         abstain_rule_summary={},
     )
 
-    def fit_classic(_bundle: Any, **_kwargs: Any) -> Any:
+    def fit_linker(_bundle: Any, **_kwargs: Any) -> Any:
         if problem == "frozen":
             assert set(_kwargs["frozen_task_rows"]) == {"linker_train", "gate_fit", "gate_thresh"}
         else:
@@ -592,7 +592,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         assert Path(path).is_dir()
         return SimpleNamespace(incremental_linker_artifact=loaded_artifact)
 
-    def evaluate_classic(_bundle: Any, **kwargs: Any) -> Any:
+    def evaluate_linker(_bundle: Any, **kwargs: Any) -> Any:
         order.append("evaluate")
         assert kwargs["artifact"] is loaded_artifact
         return classic_training.ClassicEvaluation(
@@ -605,8 +605,8 @@ def test_release_serializes_complete_bundle_before_evaluation(
             },
         )
 
-    monkeypatch.setattr(promoted_train, "fit_classic", fit_classic)
-    monkeypatch.setattr(promoted_train, "evaluate_classic", evaluate_classic)
+    monkeypatch.setattr(promoted_train, "fit_linker", fit_linker)
+    monkeypatch.setattr(promoted_train, "evaluate_linker", evaluate_linker)
     monkeypatch.setattr(promoted_train, "save_incremental_linking_artifact", save_artifact)
     monkeypatch.setattr(promoted_train, "finalize_production_bundle", finalize_bundle)
     monkeypatch.setattr(promoted_train, "load_production_model", load_complete)

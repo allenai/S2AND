@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from s2and.incremental_linking_training import classic
+from s2and.incremental_linking_training import classic, ranker
 from scripts.common.initial_query_sources import InitialQuerySources
 from scripts.linker import train_linker_and_finalize as release
 from tests.training_helpers import write_classic_tiny_bundle
@@ -124,7 +124,7 @@ def test_real_fit_requires_early_holdout_exclusion_and_retains_counts(
         pytest.fail("classifier construction must not precede overlap rejection")
 
     with monkeypatch.context() as patch:
-        patch.setattr(classic, "_build_classic_classifier", no_classifier)
+        patch.setattr(ranker, "_build_classic_classifier", no_classifier)
         with pytest.raises(ValueError, match="Materialized training rows overlap"):
             classic.fit_classic(
                 bundle, n_jobs=1, holdout_identities=identities, pre_materialization_holdout_summary={"rows_removed": 2}
@@ -159,7 +159,7 @@ def test_fit_rejects_gate_window_mismatch_before_classifier(
     def no_classifier(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("classifier construction must not precede gate window rejection")
 
-    monkeypatch.setattr(classic, "_build_classic_classifier", no_classifier)
+    monkeypatch.setattr(ranker, "_build_classic_classifier", no_classifier)
     with pytest.raises(ValueError, match="5 != 25"):
         classic.fit_classic(bundle, n_jobs=1)
 

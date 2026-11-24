@@ -549,3 +549,32 @@ def test_orcid_b3_external_labels_and_allow_all_identities(tmp_path) -> None:
                 external_labels=external,
                 allow_all_identities=True,
             )
+
+
+def test_distance_cache_rejects_a_different_pairwise_contract(tmp_path: Path) -> None:
+    from s2and.production_model import canonical_artifact_hashes
+    from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
+
+    bundle = tmp_path / "model"
+    write_synthetic_pairwise_bundle(bundle, artifact_hashes=canonical_artifact_hashes(), release_version="1.4")
+    args = SimpleNamespace(
+        arrow_root=tmp_path / "arrow",
+        batching_threshold=10,
+        dataset="test",
+        model_path=bundle,
+        pair_chunk_size=3,
+        suppress_orcid_constraints=True,
+        use_orcid_subblocking=False,
+    )
+    previous = sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["1", "2"], "generation")
+    cache = tmp_path / "cache.pkl"
+    with cache.open("wb") as outfile:
+        pickle.dump({"metadata": previous, "dist": [0.25]}, outfile)
+
+    path = bundle / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["feature_contract_version"] = 1
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    current = sweep_eps_on_linking_gold._cache_metadata(cast(Any, args), "block", ["1", "2"], "generation")
+    with pytest.raises(ValueError, match="pairwise_model_sha256"):
+        sweep_eps_on_linking_gold._load_cached_distance(cache, current)

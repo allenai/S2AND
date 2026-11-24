@@ -36,7 +36,8 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 # three-cluster extension is removed (later rounds join the third cluster);
 # 12–13: guarded ORCID joins within blocks and across Arrow subblocks.
 # 14: treat corpus placeholder years as missing when computing features and ranking candidates.
-DISTANCE_POLICY_VERSION = 14
+# 15: apply the pairwise bundle year contract when building EPS distance matrices.
+DISTANCE_POLICY_VERSION = 15
 # Release EPS needs curves that ran the production attachment passes.
 RELEASE_ROUTE = "production"
 

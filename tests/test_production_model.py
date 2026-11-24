@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
@@ -1466,3 +1467,138 @@ def test_loaded_pairwise_contract_replays_stamped_year(
             runtime_context=runtime,
         )
         np.testing.assert_equal(features[0, 0], expected)
+
+
+@pytest.fixture
+def contract_one_inference(tmp_path: Path, synthetic_pairwise_bundle: tuple[Path, Clusterer]):
+    import pyarrow as pa
+
+    from s2and.arrow_inputs import ArrowDataset
+    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_name_counts_index
+    from tests.helpers import tiny_name_counts_tuple, write_test_arrow_artifact_manifest
+    from tests.raw_arrow_helpers import base_arrow_paths, write_ipc
+
+    pairwise, _ = synthetic_pairwise_bundle
+    manifest_path = pairwise / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(release_version="1.4", feature_contract_version=1)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    linker = tmp_path / "linker_contract_one"
+    target = _write_synthetic_linker(pairwise, linker)
+    metadata_path = linker / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata_path.write_text(json.dumps({**metadata, "feature_contract_version": 1}), encoding="utf-8")
+    complete = tmp_path / "complete_contract_one"
+    finalize_production_bundle(
+        pairwise_bundle_dir=pairwise,
+        output_bundle_dir=complete,
+        incremental_linker_artifact_dir=linker,
+        target_json=target,
+    )
+    clusterer = load_production_model(complete, n_jobs=1)
+    clusterer.use_default_constraints_as_supervision = False
+    arrow_root = tmp_path / "arrow_contract_one"
+    paths = base_arrow_paths(arrow_root, years=[1800, 2015, 2010])
+    specter = pa.table(
+        {
+            "paper_id": ["p_q", "p1", "p2"],
+            "embedding": pa.array([[1.0, 0.0]] * 3, type=pa.list_(pa.float32(), 2)),
+        }
+    )
+    paths["specter"] = write_ipc(arrow_root / "specter.arrow", specter)
+    paths["specter_batch_index"], _ = write_arrow_batch_lookup_index(
+        Path(paths["specter"]),
+        arrow_root / "specter.bin",
+        key_column="paper_id",
+        table_name="specter",
+    )
+    paths["name_counts_index"], _ = write_name_counts_index(arrow_root, tiny_name_counts_tuple())
+    write_test_arrow_artifact_manifest(arrow_root, paths)
+    with ArrowDataset.open(arrow_root) as arrow:
+        yield clusterer, arrow
+
+
+def test_contract_one_prediction_and_eps_replay_stamped_year(
+    contract_one_inference, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import s2and.incremental_linking.runtime as linker_runtime
+    import s2and.model as model_module
+    from scripts.eps_sweep import sweep_eps_on_linking_gold as sweep
+
+    clusterer, arrow = contract_one_inference
+    pair_ids = ["q1", "s1"]
+    blocks = {"a wang": pair_ids}
+    year_diffs: list[float] = []
+    row_years: list[int] = []
+    original_bulk_predict = model_module._predict_class0_with_runtime
+    original_incremental_predict = linker_runtime.predict_pairwise_class0
+    original_row_features = linker_runtime.build_promoted_non_pairwise_row_features_with_telemetry
+
+    def record_features(classifier, features):
+        if classifier is clusterer.nameless_classifier:
+            year_diffs.extend(features[:, 0].tolist())
+
+    def bulk_predict(classifier, features, **kwargs):
+        record_features(classifier, features)
+        return original_bulk_predict(classifier, features, **kwargs)
+
+    def incremental_predict(classifier, features):
+        record_features(classifier, features)
+        return original_incremental_predict(classifier, features)
+
+    def record_row_features(candidate_batch, signals, *, legacy_paper_years):
+        assert legacy_paper_years
+        row_years.extend(signals["query_year"].tolist())
+        return original_row_features(candidate_batch, signals, legacy_paper_years=legacy_paper_years)
+
+    # Use the supported unfused scoring paths to observe the real native feature matrices.
+    monkeypatch.setattr(model_module, "_native_block_scorers", lambda *_: None)
+    monkeypatch.setattr(linker_runtime, "_FUSED_LINKER_SCORING", False)
+    monkeypatch.setattr(model_module, "_predict_class0_with_runtime", bulk_predict)
+    monkeypatch.setattr(linker_runtime, "predict_pairwise_class0", incremental_predict)
+    monkeypatch.setattr(linker_runtime, "build_promoted_non_pairwise_row_features_with_telemetry", record_row_features)
+    clusters, _ = clusterer.predict_from_arrow(blocks, arrow, name_tuples=frozenset())
+    assert sorted(sid for members in clusters.values() for sid in members) == sorted(pair_ids)
+    assert year_diffs == [50.0]
+
+    year_diffs.clear()
+    result = clusterer.predict_incremental_from_arrow(
+        pair_ids, arrow, cluster_seeds_require={"s1": "1"}, name_tuples=frozenset()
+    )
+    assert sorted(sid for members in result["clusters"].values() for sid in members) == sorted(pair_ids)
+    assert row_years == [1800]
+    assert year_diffs == [50.0]
+
+    year_diffs.clear()
+    args = argparse.Namespace(
+        model_path=clusterer.production_model_bundle_dir,
+        arrow_root=tmp_path,
+        dataset="test",
+        batching_threshold=10,
+        pair_chunk_size=4,
+        use_orcid_subblocking=False,
+        suppress_orcid_constraints=True,
+        total_ram_bytes=2**30,
+        overwrite_dists=False,
+        compute_missing_dists=True,
+    )
+    caches = sweep._ensure_distance_caches(args, clusterer, blocks, tmp_path / "cache", arrow)
+    assert caches[0]["computed"]
+    assert year_diffs == [50.0]
+
+
+def test_contract_one_cached_production_route_skips_bulk_featurizer(contract_one_inference) -> None:
+    clusterer, arrow = contract_one_inference
+    blocks = {"a wang": ["q1", "s1"]}
+
+    def cached_clusters(groups):
+        return {f"{key}_{i}": [sid] for key, members in groups.items() for i, sid in enumerate(members)}
+
+    clusters, _ = clusterer._predict_from_arrow_request(
+        blocks,
+        arrow,
+        batching_threshold=1,
+        name_tuples=frozenset(),
+        bulk_clusters=cached_clusters,
+    )
+    assert sorted(sid for members in clusters.values() for sid in members) == ["q1", "s1"]

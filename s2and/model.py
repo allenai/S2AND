@@ -2831,6 +2831,8 @@ class Clusterer:
             rust_featurizer,
             context="Clusterer.make_distance_matrices_from_rust_featurizer",
         )
+        if self.featurizer_info.legacy_paper_years:
+            rust_featurizer = cast(Any, rust_featurizer).with_legacy_paper_years()
         return self._make_distance_matrices_from_verified_rust_featurizer(
             block_dict,
             rust_featurizer,
@@ -3940,7 +3942,7 @@ class Clusterer:
                 cluster_seeds_path=cluster_seeds_path,
                 cluster_seed_disallows_path=cluster_seed_disallows_path,
             )
-        if self.featurizer_info.legacy_paper_years:
+        if rust_featurizer is not None and self.featurizer_info.legacy_paper_years:
             rust_featurizer = cast(Any, rust_featurizer).with_legacy_paper_years()
         arrow_featurizer_seconds = time.perf_counter() - featurizer_start
         predict_start = time.perf_counter()

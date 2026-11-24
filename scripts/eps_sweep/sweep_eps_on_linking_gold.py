@@ -584,22 +584,23 @@ def _canonical_pairwise_clusterer_bytes(clusterer_path: Path) -> bytes:
 def _pairwise_model_sha256(model_path: Path) -> str | None:
     """Hash only the pairwise-distance-determining parts of a model bundle.
 
-    Excludes ``incremental_linker/``, ``reproducibility/``, and top-level ``manifest.json``
-    (for directory bundles containing ``pairwise/``) so linker, gate, target-spec, and EPS
-    variants sharing identical pairwise boosters reuse cached pairwise distance matrices.
+    Include the pairwise feature contract from the production manifest.
+    Ignore linker, gate, target-spec, and EPS variants for distance reuse.
     """
     if not model_path.exists():
         return None
     if model_path.is_file():
         return _hash_file(model_path)
     digest = hashlib.sha256()
-    digest.update(b"s2and-pairwise-model-fingerprint-v1\0")
+    digest.update(b"s2and-pairwise-model-fingerprint-v2\0")
     has_pairwise_dir = (model_path / "pairwise").is_dir()
     for child in sorted(candidate for candidate in model_path.rglob("*") if candidate.is_file()):
         rel_path = child.relative_to(model_path).as_posix()
         if _is_non_pairwise_bundle_relpath(rel_path):
             continue
         if has_pairwise_dir and rel_path == "manifest.json":
+            manifest = json.loads(child.read_text(encoding="utf-8"))
+            digest.update(json.dumps(manifest.get("feature_contract_version")).encode("utf-8") + b"\0")
             continue
         rel_bytes = rel_path.encode("utf-8")
         digest.update(len(rel_bytes).to_bytes(8, "little", signed=False))

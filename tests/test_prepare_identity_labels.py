@@ -320,7 +320,9 @@ def test_prepare_identity_labels_enforces_all_verification_guards(tmp_path: Path
     assert audit["dropped_wrong_split"] == 1
     assert audit["dropped_unscored"] == 2
     assert audit["dropped_invalid_position"] == 1
-    assert audit["dropped_block_key_mismatch"] == 1
+    # s_wrong_block ('b_jones') is excluded at the Parquet block-key pushdown level before scanning!
+    assert "s_wrong_block" not in set(verified["signature_id"])
+    assert audit["dropped_block_key_mismatch"] == 0
     assert audit["dropped_name_mismatch"] == 1
     assert audit["dropped_ambiguous_paper_block"] == 1
     assert audit["dropped_excluded_orcid_group"] == 1

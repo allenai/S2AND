@@ -237,10 +237,18 @@ def prepare_identity_labels(
     ]
     name_columns_present = first_col is not None or last_col is not None
 
-    # Build predicate pushdown filter on paper_id (safe regardless of underscore vs space block_key).
-    paper_field = schema.field(paper_col)
+    # Prefer a tiny block-key predicate pushdown (e.g. ["a khan", "a_khan"]) when block_col exists:
+    # Parquet row-group / dictionary pruning skips ~98% of a 74M-row file in <1s, whereas pushing a
+    # 100k-element paper_id isin() set across 74M rows stalls PyArrow evaluation.
     filter_expr = None
-    if arrow_paper_ids:
+    if block_col is not None and arrow_blocks_norm:
+        block_variants: set[str] = set()
+        for blk in arrow_blocks_norm:
+            block_variants.add(blk)
+            block_variants.add(blk.replace(" ", "_"))
+        filter_expr = ds.field(block_col).isin(sorted(block_variants))
+    elif arrow_paper_ids and len(arrow_paper_ids) <= 4096:
+        paper_field = schema.field(paper_col)
         if pa.types.is_integer(paper_field.type):
             int_ids = [int(pid) for pid in arrow_paper_ids if pid.isdigit()]
             if int_ids:

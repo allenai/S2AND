@@ -28,17 +28,19 @@ from s2and.incremental_linking_training.source_bundle_preflight import (  # noqa
     validate_source_bundle_support_files,
 )
 from s2and.production_training_contract import _unit_float, load_model_plan  # noqa: E402
+from scripts.common.arrow_roots import (  # noqa: E402
+    copy_arrow_root_without_name_counts,
+    generic_dataset_manifests,
+    read_json_object,
+    rebind_dataset_manifests,
+    reject_filesystem_links,
+    validate_root_name_counts_binding,
+)
 from scripts.common.unknown_signatures import load_unknown_signatures  # noqa: E402
-from scripts.intake.convert_to_arrow import _write_root_manifest  # noqa: E402
+from scripts.intake.convert_to_arrow import write_root_manifest  # noqa: E402
 from scripts.linker.linker_source_bundle import (  # noqa: E402
-    _copy_arrow_root_without_name_counts,
-    _dataset_manifests,
-    _read_json,
-    _rebind_dataset_manifests,
-    _reject_filesystem_links,
-    _validate_bundle_paths,
-    _validate_label_replay_datasets,
-    _validate_root_name_counts_binding,
+    validate_bundle_paths,
+    validate_label_replay_datasets,
     validate_portable_source_bundle,
 )
 from scripts.release.verification.validate_local_arrow_release import validate_release_root  # noqa: E402
@@ -125,7 +127,7 @@ def _copy_current_tree(source: Path, destination: Path, *, snapshot: Path, inven
 
 def _validate_corrected_source_inventory(root: Path, corrected: Path) -> int:
     inventory_path = corrected / "manifest.json"
-    inventory = _read_json(inventory_path)["files"]
+    inventory = read_json_object(inventory_path)["files"]
     if not isinstance(inventory, dict) or not inventory:
         raise ValueError("Corrected source inventory must contain files")
     actual = {
@@ -154,14 +156,14 @@ def validate_corrected_datasets(root: Path) -> dict[str, Any]:
     public = validate_release_root(root)
     incremental = validate_portable_source_bundle(root)
     pairwise = root / "pairwise"
-    inputs = _read_json(pairwise / "inputs.json")
+    inputs = read_json_object(pairwise / "inputs.json")
     if _local_path(pairwise, inputs["name_counts_index"], boundary=root) != index:
         raise ValueError("Pairwise inputs must use the shared name_counts_index")
     corrected = _local_path(pairwise, inputs["corrected_source_root"], boundary=root)
     corrected_source_file_count = _validate_corrected_source_inventory(root, corrected)
     if _local_path(pairwise, inputs["linker_source_bundle"], boundary=root) != root:
         raise ValueError("Pairwise inputs must reference the snapshot incremental bundle")
-    model_plan = _read_json(pairwise / "model_plan.json")
+    model_plan = read_json_object(pairwise / "model_plan.json")
     load_model_plan(pairwise / "model_plan.json")
     expected_model = {
         name: {role: spec for role, spec in files.items() if role in MODEL_ROLES}
@@ -172,10 +174,10 @@ def validate_corrected_datasets(root: Path) -> dict[str, Any]:
     index_digest = sha256_file(index / "manifest.json")
     for mode, sources in inputs["sources"].items():
         collection = _local_path(pairwise, inputs["arrow"][mode], boundary=root)
-        manifests = _dataset_manifests(collection)
+        manifests = generic_dataset_manifests(collection)
         if set(manifests) != set(sources):
             raise ValueError(f"Pairwise source and Arrow dataset populations differ: {mode}")
-        _validate_root_name_counts_binding(collection, authoritative_manifest_sha256=index_digest)
+        validate_root_name_counts_binding(collection, authoritative_manifest_sha256=index_digest)
         for name, files in sources.items():
             resolved_files = {}
             for role, spec in files.items():
@@ -254,7 +256,7 @@ def package_corrected_datasets(
     for source in (public, corrected, pairwise, linker, index, *replay_sources.values()):
         if output.is_relative_to(source) or source.is_relative_to(output):
             raise ValueError("Dataset snapshot input and output directories must not overlap")
-        _reject_filesystem_links(source, context="dataset snapshot input")
+        reject_filesystem_links(source, context="dataset snapshot input")
     license_source = public / "LICENSE.txt"
     if not license_source.is_file():
         raise FileNotFoundError(license_source)
@@ -267,7 +269,7 @@ def package_corrected_datasets(
     require_name_counts_index_artifact(
         index, context="corrected dataset package", producer_hint="pass the common index", verify=True
     )
-    inputs = _read_json(pairwise / "inputs.json")
+    inputs = read_json_object(pairwise / "inputs.json")
     if release_version is not None and (
         not isinstance(release_version, str) or not release_version or release_version.strip() != release_version
     ):
@@ -287,22 +289,22 @@ def package_corrected_datasets(
         if Path(name).name != name or name in {".", ".."} or ":" in name or "\\" in name:
             raise ValueError(f"Invalid benchmark dataset name: {name}")
     index_digest = sha256_file(index / "manifest.json")
-    _validate_root_name_counts_binding(
+    validate_root_name_counts_binding(
         public, authoritative_manifest_sha256=index_digest, dataset_manifests=public_manifests
     )
-    replay_manifests = _dataset_manifests(linker)
-    _validate_root_name_counts_binding(
+    replay_manifests = generic_dataset_manifests(linker)
+    validate_root_name_counts_binding(
         linker, authoritative_manifest_sha256=index_digest, dataset_manifests=replay_manifests
     )
-    _validate_bundle_paths(linker)
+    validate_bundle_paths(linker)
     bundle = load_bundle(linker)
     validate_source_bundle_support_files(bundle)
-    _validate_label_replay_datasets(bundle, replay_manifests)
+    validate_label_replay_datasets(bundle, replay_manifests)
 
-    _copy_arrow_root_without_name_counts(linker, output)
+    copy_arrow_root_without_name_counts(linker, output)
     _copy_file(license_source, output / "LICENSE.txt")
     shutil.copytree(index, output / "name_counts_index")
-    _rebind_dataset_manifests(output, name_counts_index=output / "name_counts_index")
+    rebind_dataset_manifests(output, name_counts_index=output / "name_counts_index")
     shutil.copyfile(output / "manifest.json", output / "replay_manifest.json")
     inventory: dict[str, str] = {}
     reusable = _copy_corrected_sources(corrected, output / "corrected_sources", snapshot=output, inventory=inventory)
@@ -332,8 +334,8 @@ def package_corrected_datasets(
     for mode, relative in inputs["arrow"].items():
         source = _local_path(pairwise, relative, boundary=pairwise)
         target = destination_pairwise / relative
-        _copy_arrow_root_without_name_counts(source, target)
-        _rebind_dataset_manifests(target, name_counts_index=output / "name_counts_index")
+        copy_arrow_root_without_name_counts(source, target)
+        rebind_dataset_manifests(target, name_counts_index=output / "name_counts_index")
         inputs["arrow"][mode] = _relative_path(target, destination_pairwise)
     inputs.update(
         release_version=version,
@@ -360,9 +362,9 @@ def package_corrected_datasets(
     benchmarks = output / "benchmarks"
     for name, manifest_path in public_manifests.items():
         shutil.copytree(manifest_path.parent, benchmarks / name)
-    _write_root_manifest(benchmarks, dataset_manifests={name: f"{name}/manifest.json" for name in public_manifests})
-    _rebind_dataset_manifests(benchmarks, name_counts_index=output / "name_counts_index")
-    _write_root_manifest(
+    write_root_manifest(benchmarks, dataset_manifests={name: f"{name}/manifest.json" for name in public_manifests})
+    rebind_dataset_manifests(benchmarks, name_counts_index=output / "name_counts_index")
+    write_root_manifest(
         output,
         dataset_manifests={name: f"benchmarks/{name}/manifest.json" for name in public_manifests},
         replay_bundles={"incremental": "replay_manifest.json"},

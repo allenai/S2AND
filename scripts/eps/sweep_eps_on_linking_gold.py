@@ -40,7 +40,7 @@ from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.block_corrections import arrow_small_block_signatures, year_gap_split_enabled
 from scripts.common.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
-from scripts.eps.common import (
+from scripts.eps.sweep_curves import (
     CLUSTERING_SOURCE,
     DEFAULT_OUTPUT_ROOT,
     DISTANCE_POLICY_VERSION,

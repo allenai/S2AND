@@ -346,7 +346,7 @@ def test_generic_root_updates_reject_published_roots(tmp_path: Path) -> None:
         json.dumps({"dataset": "qian"}),
         encoding="utf-8",
     )
-    convert_to_arrow._write_root_manifest(
+    convert_to_arrow.write_root_manifest(
         output_root,
         dataset_manifests={"qian": "qian/manifest.json"},
         release_version="1.3",

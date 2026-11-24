@@ -28,8 +28,8 @@ if str(REPO_ROOT) not in sys.path:
 from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
+from scripts.common.email_redaction import find_plaintext_emails, scrub_text_emails  # noqa: E402
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
-from scripts.intake.hash_release_emails import _find_plaintext_emails, scrub_text_emails  # noqa: E402
 
 ORCID_REDACTED_TOKEN = "[ORCID_REDACTED]"
 # Note: signature_id and paper_id are intentionally EXCLUDED from blind payloads (kept only in answer_key)
@@ -181,7 +181,7 @@ def _scan_blind_value(value: Any, *, path: str, violations: list[str], allow_nes
     elif isinstance(value, str):
         if _contains_valid_orcid(value):
             violations.append(f"{path}: ORCID pattern found in blind packet text")
-        if ("@" in value or "\uff20" in value) and _find_plaintext_emails(value):
+        if ("@" in value or "\uff20" in value) and find_plaintext_emails(value):
             violations.append(f"{path}: plaintext email found in blind packet text")
 
 

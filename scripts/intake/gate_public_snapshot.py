@@ -32,7 +32,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from s2and._sha256 import sha256_file  # noqa: E402
-from scripts.intake.hash_release_emails import hash_feature_email, scrub_text_emails  # noqa: E402
+from scripts.common.email_redaction import hash_feature_email, scrub_text_emails  # noqa: E402
 
 REDACTED_ABSTRACT_MARKER = "Has Abstract"
 

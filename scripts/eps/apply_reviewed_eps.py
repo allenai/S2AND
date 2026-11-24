@@ -37,7 +37,13 @@ from scripts.common.initial_query_sources import (
     InitialQuerySources,
     load_initial_query_sources,
 )
-from scripts.eps.common import (
+from scripts.eps.orcid_b3 import (
+    BLOCK_ROLE_SHA256_FIELD,
+    REFERENCE_POLICY,
+    REFERENCE_POLICY_ALL_IDENTITIES,
+    final_test_query_identities,
+)
+from scripts.eps.sweep_curves import (
     CLUSTERING_SOURCE,
     DISTANCE_POLICY_VERSION,
     RELEASE_ROUTE,
@@ -45,12 +51,6 @@ from scripts.eps.common import (
     read_singleton_inclusive_curve,
     read_sweep_curve,
     write_json,
-)
-from scripts.eps.orcid_b3 import (
-    BLOCK_ROLE_SHA256_FIELD,
-    REFERENCE_POLICY,
-    REFERENCE_POLICY_ALL_IDENTITIES,
-    final_test_query_identities,
 )
 
 TestIdentityLoader = Callable[[Path, str, InitialQuerySources], frozenset[str]]

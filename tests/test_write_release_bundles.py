@@ -14,12 +14,12 @@ import pytest
 
 from s2and._sha256 import sha256_file
 from s2and.production_training_contract import load_model_plan, load_packaged_artifact_authority
+from scripts.common.email_redaction import hash_feature_email
 from scripts.common.plan_datasets import (
     load_development_dataset,
     open_plan_arrow,
     plan_unknown_signatures,
 )
-from scripts.intake.hash_release_emails import hash_feature_email
 from scripts.release.write_release_bundles import write_release_bundles
 from tests.fixture_templates import copy_template
 from tests.pairwise_release_helpers import convert_release_arrow, write_pairwise_artifacts, write_pairwise_dataset

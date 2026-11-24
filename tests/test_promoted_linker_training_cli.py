@@ -3,15 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
+from s2and.incremental_linking.runtime import CandidateBatchPairwiseModelResult
 from s2and.incremental_linking_training import classic as classic_training
+from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
 from scripts.production.model import train_linker_and_finalize as promoted_train
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, write_minimal_arrow_prediction_bundle
 from tests.test_linker_source_bundle import _write_arrow_root, _write_linker_inputs, _write_singleton_orcid_views
@@ -453,7 +460,7 @@ def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
 
 
-@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group"])
+@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group", "frozen", "non-top25"])
 def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -475,6 +482,11 @@ def test_release_serializes_complete_bundle_before_evaluation(
     if problem == "missing-test-group":
         labels = source_root / "labels" / "hwang_eval.parquet"
         pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
+    if problem == "non-top25":
+        source_manifest = source_root / "bundle.json"
+        source_config = json.loads(source_manifest.read_text(encoding="utf-8"))
+        source_config["models"]["classic"]["retrieval_top_k"] = 7
+        source_manifest.write_text(json.dumps(source_config), encoding="utf-8")
     bundle = promoted_train.load_bundle(source_root)
     bundle.models["classic"]["best_params"] = {"n_estimators": 1}
     map_path = bundle.root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
@@ -536,6 +548,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
             assert _kwargs["query_ids_by_table"] == {"s2and_eval_path": {"cal:q1", "s2and:q1"}}
         else:
             assert "holdout_identities" not in _kwargs
+            assert set(_kwargs["table_keys"]) == {"s2and_eval_path", "hwang_eval_path"}
         order.append(stage)
         stage_summaries[stage] = [{**item, "stage": stage} for item in FULL_MATERIALIZATION_SUMMARIES]
         return bundle, stage_summaries[stage]
@@ -556,8 +569,11 @@ def test_release_serializes_complete_bundle_before_evaluation(
     )
 
     def fit_classic(_bundle: Any, **_kwargs: Any) -> Any:
-        assert _kwargs["holdout_identities"] is training_authorities[0]
-        assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
+        if problem == "frozen":
+            assert set(_kwargs["frozen_task_rows"]) == {"linker_train", "gate_fit", "gate_thresh"}
+        else:
+            assert _kwargs["holdout_identities"] is training_authorities[0]
+            assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
         order.append("fit")
         return calibrated
 
@@ -615,7 +631,34 @@ def test_release_serializes_complete_bundle_before_evaluation(
         "--output-dir",
         str(output_dir),
     ]
-    if problem is not None:
+    if problem in {"frozen", "non-top25"}:
+        role_names = ("linker_train", "gate_fit", "gate_thresh")
+        roles = tmp_path / "roles.json"
+        roles.write_text(
+            json.dumps(assign_block_roles([BlockSpec(f"test {i}", 2) for i in range(3)], dict.fromkeys(role_names, 1))),
+            encoding="utf-8",
+        )
+        manifest = tmp_path / "tasks.json"
+        if problem == "frozen":
+            manifest.write_text("{}", encoding="utf-8")
+        args.extend(["--linker-task-manifest", str(manifest), "--block-role-assignments", str(roles)])
+
+        def materialize_frozen_tasks(
+            path: Path, *_args: Any, **_kwargs: Any
+        ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
+            assert problem == "frozen", "Fetched frozen task rows before validating the source window"
+            assert path == manifest
+            order.append("materialize_training")
+            stage_summaries["materialize_training"] = []
+            return {role: pd.DataFrame() for role in role_names}, []
+
+        monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", materialize_frozen_tasks)
+        if problem == "non-top25":
+            with pytest.raises(ValueError, match="Frozen linker tasks require top-25"):
+                promoted_train.main(args)
+            assert not order
+            return
+    elif problem is not None:
         message = {
             "unreviewed-singletons": "0/10 marked negative_singleton_orcid views",
             "missing-test-group": "did not all match source rows.*hwang:q1",
@@ -711,7 +754,7 @@ def _fixed_ranker_source_fixture(tmp_path: Path) -> Path:
     source = tmp_path / "source"
     _write_linker_inputs(source, leak=False)
     dataset = "replay_demo"
-    block = _block_inputs(tmp_path / "replay", "a ross", _ORCIDS[0])
+    block = _block_inputs(tmp_path / "replay", "a ross", _ORCIDS[0], query_year=1800, recent_seed_year=1820)
     shutil.copytree(block["arrow_dir"], source / "datasets" / dataset)
     components = source / "components" / f"{dataset}_members.parquet"
     pd.read_parquet(components).assign(signature_id="s00").to_parquet(components, index=False)
@@ -764,8 +807,6 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
         ]
     )
     if check == "legacy_frozen":
-        from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-
         roles = tmp_path / "roles.json"
         roles.write_text(json.dumps(assign_block_roles([BlockSpec("a ross", 1, frozenset())], {"gate_fit": 1})))
         args.use_legacy_gate_calibration = False
@@ -800,7 +841,41 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert metadata["feature_contract_version"] == 1
     else:
+        pairwise_year_diffs: list[float] = []
+        query_years: list[int] = []
+        linker_year_gaps: list[float] = []
+        year_indices = FeaturizationInfo(["year_diff"]).selected_feature_indices()
+        compute_pairs = promoted_train.compute_candidate_batch_pairwise_model_and_aggregate_stats
+        build_rows = promoted_train.build_promoted_non_pairwise_row_features
+
+        def record_pairwise_years(
+            dataset: ANDData | None, batch: LinkerCandidateBatch, **kwargs: Any
+        ) -> CandidateBatchPairwiseModelResult:
+            pairs = list(
+                zip(batch.left_signature_indices.tolist(), batch.right_signature_indices.tolist(), strict=True)
+            )
+            matrix = kwargs["featurizer"].featurize_pairs_matrix_indexed(pairs, year_indices, 1, np.nan)
+            pairwise_year_diffs.extend(np.asarray(matrix)[:, 0].tolist())
+            return compute_pairs(dataset, batch, **kwargs)
+
+        def record_linker_years(
+            batch: LinkerCandidateBatch, row_signals: Mapping[str, Any], *, legacy_paper_years: bool = False
+        ) -> dict[str, np.ndarray]:
+            features = build_rows(batch, row_signals, legacy_paper_years=legacy_paper_years)
+            query_years.extend(row_signals["query_year"].tolist())
+            linker_year_gaps.extend(features["year_gap_to_candidate_range"].tolist())
+            return features
+
+        monkeypatch.setattr(
+            promoted_train, "compute_candidate_batch_pairwise_model_and_aggregate_stats", record_pairwise_years
+        )
+        monkeypatch.setattr(promoted_train, "build_promoted_non_pairwise_row_features", record_linker_years)
         report = promoted_train.run(args)
+        assert set(pairwise_year_diffs) == {20.0}
+        assert set(query_years) == {1800}
+        assert set(linker_year_gaps) == {20.0}
+        training_tables = {summary["table_key"] for summary in report["feature_materialization_summaries"]["training"]}
+        assert training_tables == {"classic_gate_source_path", "s2and_eval_path"}
         complete = Path(report["complete_model_path"])
         assert report["evaluation_summary"]["training_summary"]["ranker_refit"] is False
         assert "training_rows" not in report["observed_metrics"]

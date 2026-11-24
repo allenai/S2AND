@@ -278,6 +278,7 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
         assert judge["by_stratum"]["giant"]["false_same_minus_false_different"] == skew
         assert judge["by_stratum"]["giant"]["missing"] == missing
     agreement = summary["cross_family_agreement"][0]
+    assert agreement["paired_verdict_share"] == pytest.approx(2 / 3)
     assert agreement["both_decided_share"] == pytest.approx(2 / 3)
     assert agreement["agreement"] == 1
     assert agreement["cohen_kappa"] == 1

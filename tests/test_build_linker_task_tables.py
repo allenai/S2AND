@@ -39,7 +39,14 @@ class _Pairwise:
 
 
 def _block_inputs(
-    root: Path, block: str, orcid: str, *, recent_seeds: int = 29, deposited_orcids: bool = True
+    root: Path,
+    block: str,
+    orcid: str,
+    *,
+    recent_seeds: int = 29,
+    deposited_orcids: bool = True,
+    query_year: int = 2020,
+    recent_seed_year: int = 2020,
 ) -> dict[str, str]:
     root.mkdir()
     arrow_dir = root / "arrow"
@@ -85,7 +92,12 @@ def _block_inputs(
                 "title": ["Graph models" if hit else "Genetics" for hit in matching],
                 "venue": ["Conf"] * size,
                 "journal_name": [""] * size,
-                "year": pa.array([2020] * (3 + recent_seeds) + [1900] * (n_seeds - recent_seeds), type=pa.int64()),
+                "year": pa.array(
+                    [query_year] * len(query_ids)
+                    + [recent_seed_year] * recent_seeds
+                    + [1900] * (n_seeds - recent_seeds),
+                    type=pa.int64(),
+                ),
             }
         ),
         "paper_authors": pa.table(

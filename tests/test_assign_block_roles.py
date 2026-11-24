@@ -373,3 +373,39 @@ def test_load_blocks_normalizes_mention_counts(tmp_path: Path, count_key: str) -
         closure_mode="home_pool",
     )
     assert result["orcid_home_role"] == {orcid: "pairwise_train"}
+
+
+def test_sealed_halves_fill_their_last_quota_from_the_same_stratum() -> None:
+    blocks = [
+        BlockSpec(f"{stratum} {index}", 100, stratum=stratum, source_split="holdout")
+        for stratum in ("small", "medium")
+        for index in range(5)
+    ]
+    result = assign_block_roles(blocks, {"final_test": 6}, enforce_source_splits=True)
+    counts = result["verification"]["role_block_counts_by_stratum"]
+    assert sorted(counts["final_test_a"].values()) == [1, 2]
+    assert counts["final_test_a"] == counts["final_test_b"]
+
+
+@pytest.mark.parametrize("require_orcid_lists", [False, True])
+def test_missing_orcid_list_obeys_input_requirement(tmp_path: Path, require_orcid_lists: bool) -> None:
+    path = tmp_path / "blocks.json"
+    path.write_text(json.dumps([{"block_key": "a ross", "signature_count": 3}]), encoding="utf-8")
+    if require_orcid_lists:
+        with pytest.raises(ValueError, match="Expected an ORCID list"):
+            load_blocks(path, require_orcid_lists=True)
+    else:
+        (block,) = load_blocks(path, require_orcid_lists=False)
+        assert not block.orcids
+
+
+def test_implicit_mention_counts_normalize_repeated_orcids(tmp_path: Path) -> None:
+    orcid = "0000-0002-1694-233X"
+    url = f"https://orcid.org/{orcid}"
+    path = tmp_path / "blocks.json"
+    path.write_text(
+        json.dumps([{"block_key": "a ross", "signature_count": 3, "orcids": [orcid, url, ""]}]),
+        encoding="utf-8",
+    )
+    (block,) = load_blocks(path, require_orcid_lists=True)
+    assert block.orcid_mention_counts == {orcid: 2}

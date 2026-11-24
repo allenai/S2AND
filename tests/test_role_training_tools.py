@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import numpy as np
@@ -73,7 +77,34 @@ def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None
             roles_path, {block: Path(spec["arrow_dir"]), "sealed": tmp_path}, output, per_block=6
         )
     assert not output.exists()
-    assert mine_pairwise_pairs.mine_pairs(roles_path, {block: Path(spec["arrow_dir"])}, output, per_block=6) == 6
+
+
+def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from scripts.production.data.mine_pairwise_pairs import main
+
+    block = "a ross"
+    spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0])
+    roles_path, blocks_path, output = (tmp_path / name for name in ("roles.json", "blocks.json", "pairs.csv"))
+    roles = assign_block_roles([BlockSpec(block, 32)], {"pairwise_train": 1})
+    roles_path.write_text(json.dumps(roles), encoding="utf-8")
+    arrow_dir = Path(spec["arrow_dir"]).relative_to(tmp_path)
+    blocks_path.write_text(json.dumps({block: arrow_dir.as_posix()}), encoding="utf-8")
+    assert (
+        main(
+            [
+                "--block-role-assignments",
+                str(roles_path),
+                "--blocks-json",
+                str(blocks_path),
+                "--pairs-per-block",
+                "6",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"blocks": 1, "pairs": 6}
     rows = pd.read_csv(output)
     assert list(rows["block_key"].unique()) == [block]
     assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == 6
@@ -155,25 +186,71 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, check: str
         }
 
 
-def test_role_b3_scores_singleton_only_reference(tmp_path: Path) -> None:
-    from scripts.eps_sweep.orcid_b3 import score_block_role
+def test_role_b3_scores_singleton_only_reference(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from scripts.eps_sweep.orcid_b3 import main
 
     block = "a ross"
     identity = _ORCIDS[0]
     spec = _block_inputs(tmp_path / "block", block, identity)
-    roles = tmp_path / "roles.json"
-    roles.write_text(json.dumps(assign_block_roles([BlockSpec(block, 32, frozenset({identity}))], {"dev_test": 1})))
-    with ArrowDataset.open(spec["arrow_dir"]) as arrow:
-        result = score_block_role(
-            arrow,
-            tmp_path,
-            block,
-            roles_path=roles,
-            role="dev_test",
-            assignments={"q_full": "c"},
-            eps=0.38,
-            external_labels={"q_full": identity},
+    roles, assignments, labels = (tmp_path / name for name in ("roles.json", "assignments.json", "labels.parquet"))
+    roles.write_text(
+        json.dumps(assign_block_roles([BlockSpec(block, 32, frozenset({identity}))], {"dev_test": 1})),
+        encoding="utf-8",
+    )
+    assignments.write_text(json.dumps({"q_full": "c"}), encoding="utf-8")
+    pd.DataFrame({"signature_id": ["q_full"], "orcid": [identity]}).to_parquet(labels, index=False)
+    assert (
+        main(
+            [
+                "--block-role-assignments",
+                str(roles),
+                "--role",
+                "dev_test",
+                "--block",
+                block,
+                "--arrow-dir",
+                str(spec["arrow_dir"]),
+                "--snapshot-root",
+                str(tmp_path),
+                "--assignments-json",
+                str(assignments),
+                "--external-labels",
+                str(labels),
+                "--eps",
+                "0.38",
+            ]
         )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["reference"]["reference_source"] == "external_labels"
     assert result["with_singletons"]["scored_signatures"] == 1
     assert result["with_singletons"]["f1"] == 1.0
     assert result["repeated"] is None
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "option"),
+    [
+        ("scripts.eps_sweep.orcid_b3", "--assignments-json"),
+        ("scripts/production/data/build_linker_task_tables.py", "--block-inputs"),
+        ("scripts.production.data.check_v14_training_overlap", "--training-parquet"),
+        ("scripts.production.data.mine_pairwise_pairs", "--pairs-per-block"),
+    ],
+    ids=["orcid-b3", "build-linker-task-tables", "check-v14-training-overlap", "mine-pairwise-pairs"],
+)
+def test_release_tool_entry_point_help(tmp_path: Path, entry_point: str, option: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    if entry_point.endswith(".py"):
+        # Bypass the editable install's .pth so the script must add the checkout.
+        command = [sys.executable, "-S", str(root / entry_point), "--help"]
+        env = os.environ | {"PYTHONPATH": sysconfig.get_path("purelib")}
+        cwd = tmp_path
+    else:
+        command = [sys.executable, "-m", entry_point, "--help"]
+        env = os.environ.copy()
+        cwd = root
+    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+    assert option in result.stdout

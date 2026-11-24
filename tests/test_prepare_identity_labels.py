@@ -9,8 +9,8 @@ import pyarrow.ipc as ipc
 import pytest
 
 from scripts.production.data.assign_block_roles import BlockSpec, assign_block_roles
-from scripts.production.data.block_roles import load_block_roles
 from scripts.production.data.prepare_identity_labels import (
+    main,
     names_are_compatible,
     normalize_block_key,
     prepare_identity_labels,
@@ -36,7 +36,6 @@ def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Pat
     )
     path = tmp_path / "assignments.json"
     path.write_text(json.dumps(assignments), encoding="utf-8")
-    roles = load_block_roles(path)
     gold = tmp_path / "gold.parquet"
     pd.DataFrame(
         {
@@ -62,7 +61,27 @@ def test_identity_label_join_scores_shared_orcid_only_in_home_role(tmp_path: Pat
             ],
         )
         output = directory / "labels.parquet"
-        audit = prepare_identity_labels(directory, gold, output, block_roles=roles)
+        audit_path = directory / "audit.json"
+        assert (
+            main(
+                [
+                    "--arrow-dataset-dir",
+                    str(directory),
+                    "--gold-parquet",
+                    str(gold),
+                    "--output-parquet",
+                    str(output),
+                    "--block-role-assignments",
+                    str(path),
+                    "--audit-json",
+                    str(audit_path),
+                ]
+            )
+            == 0
+        )
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        assert audit["scored_rows"] == int(idx == 2)
+        assert audit["unique_orcids"] == int(idx == 2)
         assert audit["non_home_verified_rows"] == (1 if idx == 1 else 0)
         labels = pd.read_parquet(output)
         assert labels["signature_id"].tolist() == [f"s{idx}"]

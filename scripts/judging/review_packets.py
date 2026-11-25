@@ -912,9 +912,8 @@ def _judge_metrics(
 
 
 def _read_judge_verdicts(
-    verdicts_path: Path, answer_key: Path
+    verdicts_path: Path, answer_key: Path, key: Mapping[str, Any], *, stale_control_blocks: Collection[str]
 ) -> tuple[dict[str, Any], dict[JudgmentKey, tuple[str, str | None, bool]], dict[RequestKey, tuple[str, bool]]]:
-    key = json.loads(answer_key.read_text(encoding="utf-8"))
     by_item = {row["item_id"]: row for row in key["items"]}
     if len(by_item) != len(key["items"]):
         raise ValueError(f"Duplicate item IDs in {answer_key}")
@@ -968,6 +967,8 @@ def _read_judge_verdicts(
         if request_key in seen_requests:
             raise ValueError(f"Duplicate source request {request_key!r} in {answer_key}")
         seen_requests.add(request_key)
+        if item["is_control"] and request_key[1] in stale_control_blocks:
+            continue
         by_shard[shard]
         by_stratum[stratum]
         if not slots:
@@ -1058,35 +1059,51 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
     gate_votes: dict[tuple[str, str, str], dict[str, set[str | None]]] = defaultdict(lambda: defaultdict(set))
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
         key = json.loads(key_path.read_text(encoding="utf-8"))
+        gate_blocks: set[str] = set()
+        stale_control_blocks: set[str] = set()
         if ledger is not None:
-            blocks = {item["block_key"] for item in key["items"]}
-            ledger.roles.require_bindings(key, blocks, context=f"{family} judging key")
-            scored_blocks.update(blocks)
-        elif BLOCK_BINDINGS_FIELD in key or EVIDENCE_SHA256_FIELD in key:
-            raise ValueError("Ledger-backed judging keys require frozen roles and identity evidence")
-        report, aligned, natural_requests = _read_judge_verdicts(verdict_path, key_path)
-        reports.append({"family": family, "verdicts": str(verdict_path), **report})
-        verdicts.append(aligned)
-        requests.append(natural_requests)
-        if ledger is not None and key["packet_type"] == "linker":
-            gate_blocks = {
-                normalize_block_key(item["block_key"])
-                for item in key["items"]
-                if not item["is_control"] and ledger.roles.role_for(item["block_key"]) == "gate_thresh"
-            }
-            if gate_blocks:
+            blocks = {normalize_block_key(item["block_key"]) for item in key["items"]}
+            natural_blocks = {normalize_block_key(item["block_key"]) for item in key["items"] if not item["is_control"]}
+            if key["packet_type"] == "linker":
+                gate_blocks = {block for block in natural_blocks if ledger.roles.role_for(block) == "gate_thresh"}
+            if gate_blocks or GATE_BINDINGS_FIELD in key:
                 candidates = key.get(GATE_CANDIDATE_ORCIDS)
                 if (
-                    not isinstance(candidates, dict)
+                    not gate_blocks
+                    or not isinstance(candidates, dict)
                     or candidates.keys() != gate_blocks
                     or key.get(GATE_BINDINGS_FIELD) != ledger.roles.gate_judgment_bindings(candidates)
                 ):
                     raise ValueError(f"{family} gate judging key block provenance does not match the identity ledger")
                 for block, identities in candidates.items():
                     gate_candidates[block].update(identities)
+                # A changed control-only block cannot supply accuracy metrics for the current ledger.
+                saved = key.get(BLOCK_BINDINGS_FIELD)
+                current = ledger.roles.bindings_for(blocks & ledger.roles.block_to_role.keys())
+                if (
+                    not isinstance(saved, dict)
+                    or saved.keys() != blocks
+                    or any(saved[block] != current[block] for block in natural_blocks)
+                ):
+                    raise ValueError(f"{family} judging key block provenance does not match the identity ledger")
+                stale_control_blocks = {
+                    block for block in blocks if block not in current or saved[block] != current[block]
+                }
+            else:
+                ledger.roles.require_bindings(key, blocks, context=f"{family} judging key")
+            scored_blocks.update(blocks - stale_control_blocks)
+        elif BLOCK_BINDINGS_FIELD in key or EVIDENCE_SHA256_FIELD in key:
+            raise ValueError("Ledger-backed judging keys require frozen roles and identity evidence")
+        report, aligned, natural_requests = _read_judge_verdicts(
+            verdict_path, key_path, key, stale_control_blocks=stale_control_blocks
+        )
+        reports.append({"family": family, "verdicts": str(verdict_path), **report})
+        verdicts.append(aligned)
+        requests.append(natural_requests)
+        if gate_blocks:
             for item in key["items"]:
                 block = normalize_block_key(item["block_key"])
-                if item["is_control"] or ledger.roles.role_for(block) != "gate_thresh":
+                if item["is_control"] or block not in gate_blocks:
                     continue
                 digest = key.get(GATE_SEED_DIGESTS, {}).get(block)
                 if not is_lowercase_sha256(digest) or gate_seed_digests.setdefault(block, digest) != digest:

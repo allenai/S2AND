@@ -260,7 +260,8 @@ Keep each answer key private.
 Run `review_packets.py score --identity-evidence evidence/manifest.json --block-role-assignments assignments.json --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json`.
 The report records ledger bindings for every scored block. Gate labels use their own bindings
 for the gate blocks in the judging panel and assigned blocks holding identities named by those
-candidates. A change to a separate scoring or control block leaves gate labels usable.
+candidates. The scorer skips controls in a changed control-only block when those gate dependencies
+still match. Changes to gate dependencies invalidate the judgments.
 Each verdict row contains `item_id` and a pair `verdict` or a linker `candidate_verdicts` mapping from packet
 slot to verdict. Use `same`, `different`, or `insufficient_evidence`. List the two primary families first, followed
 by any audit families. The report lists audit coverage and checks audit consensus on the candidates

@@ -242,6 +242,84 @@ def test_gate_query_metadata_follows_frozen_signature(
     }
 
 
+def test_score_gate_key_after_unrelated_control_change(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    control_block = "a lovelace"
+    holder = "e noether"
+    key = tmp_path / "key.json"
+    review_packets.build_blind_linker_packets(
+        queries=[
+            {
+                "block_key": block,
+                "source_id": "gate",
+                "query": {"signature_id": "13-0"},
+                "candidates": [{"candidate_key": "other"}],
+            }
+        ],
+        block_roles=ledger.roles,
+        ledger=ledger,
+        allowed_roles={"gate_thresh"},
+        linker_task_manifest=task,
+        output_dir=tmp_path / "packets",
+        answer_key_path=key,
+        control_fraction=0,
+    )
+    roles = replace(
+        ledger.roles,
+        block_to_role={**ledger.roles.block_to_role, control_block: "gate_fit"},
+        source_splits={**ledger.roles.source_splits, control_block: "development"},
+        evidence_blocks={**ledger.roles.evidence_blocks, control_block: "a" * 64},
+        block_orcids={**ledger.roles.block_orcids, control_block: frozenset({DEPOSITED})},
+        identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"gate_fit"})},
+    )
+    payload = json.loads(key.read_text())
+    gate_item = payload["items"][0]
+    control = {
+        **gate_item,
+        "item_id": "control",
+        "source_id": "control",
+        "block_key": control_block,
+        "is_control": True,
+        "metadata": {"gold_candidate_keys": []},
+    }
+    payload["items"].append(control)
+    payload[BLOCK_BINDINGS_FIELD] = roles.bindings_for({block, control_block})
+    _json(key, payload)
+    judges = []
+    for family in ("one", "two"):
+        verdicts = tmp_path / f"{family}.jsonl"
+        verdicts.write_text(
+            "".join(
+                json.dumps({"item_id": row["item_id"], "candidate_verdicts": {"C1": "different"}}) + "\n"
+                for row in (gate_item, control)
+            ),
+            encoding="utf-8",
+        )
+        judges.append((family, verdicts, key))
+    before = review_packets.score_judges(judges, ledger=replace(ledger, roles=roles))
+    assert before["judges"][0]["overall"]["control_requests"] == 1
+    assert len(before["gate_thresh_labels"]) == 1
+    changed = replace(roles, evidence_blocks={**roles.evidence_blocks, control_block: "b" * 64})
+    after = review_packets.score_judges(judges, ledger=replace(ledger, roles=changed))
+    assert after["gate_thresh_labels"] == before["gate_thresh_labels"]
+    assert after["judges"][0]["overall"]["control_requests"] == 0
+    assert after[BLOCK_BINDINGS_FIELD] == roles.bindings_for({block})
+
+    relevant = replace(
+        changed,
+        block_to_role={**changed.block_to_role, holder: "gate_thresh"},
+        source_splits={**changed.source_splits, holder: "development"},
+        evidence_blocks={**changed.evidence_blocks, holder: "c" * 64},
+        block_orcids={**changed.block_orcids, holder: frozenset({HOLDOUT})},
+        gate_block_orcids={**changed.gate_block_orcids, holder: frozenset({HOLDOUT})},
+    )
+    assert relevant.bindings_for({block}) == changed.bindings_for({block})
+    with pytest.raises(ValueError, match="gate judging key block provenance"):
+        review_packets.score_judges(judges, ledger=replace(ledger, roles=relevant))
+
+
 def _v14_source(tmp_path: Path, index: Path, allowed_abstracts: Path) -> Path:
     root = tmp_path / "v14"
     export = request_bundle(tmp_path / "v14-exports", "h wang", [("801", None), ("802", None), ("803", None)])

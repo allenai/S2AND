@@ -622,3 +622,9 @@ ORCID constraints are suppressed and native fused scoring is available. Each pas
 own constraints and overrides, then runs linkage and block corrections at its EPS. The context
 defaults to a 1 GiB residual cache and falls back to ordinary scoring when the matrix exceeds
 the cache or runtime memory budget.
+
+For fixed-EPS ranker and gate replays, pass that EPS as the context's snapshot_eps and reuse the
+context across variants. The first attachment pass in each block can reuse its candidate plans,
+pairwise aggregates and feature matrices. The ranker and gate run for each variant, and later
+passes plan from that variant's links. The 512 MiB snapshot budget is split evenly between plans
+and scoring inputs. Global query-disallow rescoring uses fresh plans and features.

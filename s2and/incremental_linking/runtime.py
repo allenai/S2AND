@@ -121,6 +121,71 @@ class LinkOrAbstainProductionResult(LinkOrAbstainRetrievedCandidatesResult):
     decision_row_signals: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class FirstPassBatch:
+    """Ranker-independent scoring inputs for one window's query slice."""
+
+    feature_matrix: LinkerFeatureMatrix
+    retrieval_batch: LinkerRetrievalBatch
+    pairwise_model_result: CandidateBatchPairwiseModelResult
+    decision_row_signals: Mapping[str, Any]
+    signature_ids_by_index: tuple[str, ...]
+    orcid_force_link_enabled: bool
+
+
+def replay_first_pass_batch(
+    artifact: IncrementalLinkingArtifact,
+    snapshot: FirstPassBatch,
+    query_signature_ids: list[str],
+    *,
+    n_jobs: int,
+    total_ram_bytes: int,
+) -> LinkOrAbstainProductionResult | None:
+    """Rescore a saved batch if the pair aggregate chunk boundaries still match."""
+    batch = snapshot.retrieval_batch.candidate_batch
+    stats = snapshot.pairwise_model_result.pairwise_stats
+    pair_plan = compute_linker_pair_chunk_plan(
+        total_pairs=batch.pair_count,
+        row_count=batch.row_count,
+        matrix_feature_count=len(stats.matrix_indices),
+        aggregate_feature_count=len(stats.aggregate_indices),
+        total_ram_bytes=total_ram_bytes,
+    )
+    if min(batch.pair_count, pair_plan.chunk_pairs) != min(batch.pair_count, stats.chunk_plan.chunk_pairs):
+        return None
+    signature_indices = {sid: index for index, sid in enumerate(snapshot.signature_ids_by_index)}
+    row_query_indices = batch.row_query_signature_indices
+    assert row_query_indices is not None
+    retrieved = set(row_query_indices.tolist())
+    no_candidates = np.array(
+        [signature_indices[sid] for sid in query_signature_ids if signature_indices[sid] not in retrieved],
+        dtype=np.uint32,
+    )
+    result = _predict_incremental_link_or_abstain_retrieved_candidates(
+        artifact,
+        snapshot.retrieval_batch,
+        extra_row_signals=snapshot.decision_row_signals,
+        no_candidate_query_signature_indices=no_candidates,
+        n_jobs=n_jobs,
+        total_ram_bytes=total_ram_bytes,
+        orcid_force_link_enabled=snapshot.orcid_force_link_enabled,
+        prepared_feature_matrix=snapshot.feature_matrix,
+    )
+    return LinkOrAbstainProductionResult(
+        feature_matrix=result.feature_matrix,
+        compact_result=result.compact_result,
+        telemetry={**result.telemetry, "first_pass_snapshot_hit": 1},
+        retrieval_batch=snapshot.retrieval_batch,
+        pairwise_model_result=snapshot.pairwise_model_result,
+        linked_signature_clusters={
+            snapshot.signature_ids_by_index[decision.query_signature_index]: decision.component_key
+            for decision in result.compact_result.decisions
+            if decision.action == "link" and decision.component_key is not None
+        },
+        decision_row_signals=dict(snapshot.decision_row_signals),
+    )
+
+
 def _ordered_group_indices(query_indices: np.ndarray) -> tuple[np.ndarray, ...]:
     groups_by_query: dict[Any, list[int]] = {}
     for row_index, query_index in enumerate(query_indices.tolist()):
@@ -1609,6 +1674,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     featurizer: Any | None = None,
     hard_excluded_rows: np.ndarray | None = None,
     orcid_force_link_enabled: bool = True,
+    prepared_feature_matrix: LinkerFeatureMatrix | None = None,
 ) -> LinkOrAbstainRetrievedCandidatesResult:
     """Private vertical slice over retrieved candidates."""
 
@@ -1619,19 +1685,23 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     if not orcid_force_link_enabled and "orcid_match" in row_signals:
         row_signals = dict(row_signals)
         row_signals.pop("orcid_match")
-    feature_matrix, row_feature_telemetry = _featureize_linker_candidates_with_telemetry(
-        dataset=dataset,
-        candidate_batch=candidate_batch,
-        row_signals=row_signals,
-        feature_columns=artifact.feature_columns,
-        pairwise_stats=pairwise_stats,
-        n_jobs=n_jobs,
-        total_ram_bytes=total_ram_bytes,
-        nan_value=nan_value,
-        runtime_context=runtime_context,
-        featurizer=featurizer,
-        legacy_paper_years=getattr(artifact, "legacy_paper_years", False),
-    )
+    if prepared_feature_matrix is None:
+        feature_matrix, row_feature_telemetry = _featureize_linker_candidates_with_telemetry(
+            dataset=dataset,
+            candidate_batch=candidate_batch,
+            row_signals=row_signals,
+            feature_columns=artifact.feature_columns,
+            pairwise_stats=pairwise_stats,
+            n_jobs=n_jobs,
+            total_ram_bytes=total_ram_bytes,
+            nan_value=nan_value,
+            runtime_context=runtime_context,
+            featurizer=featurizer,
+            legacy_paper_years=getattr(artifact, "legacy_paper_years", False),
+        )
+    else:
+        feature_matrix = prepared_feature_matrix
+        row_feature_telemetry = {}
     scorer_plan = memory_budget.compute_native_scorer_chunk_plan(
         row_count=candidate_batch.row_count,
         feature_count=len(artifact.feature_columns),

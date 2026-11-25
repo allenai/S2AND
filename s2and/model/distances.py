@@ -19,7 +19,11 @@ from s2and.corrections.block_corrections import BlockCorrections, corrections_co
 from s2and.data import ANDData
 from s2and.feature_port import _get_rust_feature_data
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from s2and.incremental_linking.attach_reuse import ResidualModelDistances, attachment_dataset_key
+from s2and.incremental_linking.attach_reuse import (
+    ResidualModelDistances,
+    _estimator_cache_fingerprint,
+    attachment_dataset_key,
+)
 from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
@@ -49,7 +53,6 @@ from .constraints import (
     _orcid_name_waiver_setting,
     _profile_exclusion_kwargs,
 )
-from .incremental import _estimator_cache_fingerprint
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import time
@@ -16,6 +18,7 @@ import s2and.incremental_linking.runtime as runtime_module
 from s2and import feature_port, memory_budget
 from s2and.arrow_inputs import ArrowDataset
 from s2and.consts import LARGE_DISTANCE
+from s2and.incremental_linking.attach_reuse import _estimator_cache_fingerprint, attachment_dataset_key, retained_bytes
 from s2and.incremental_linking.completion import ResidualClusterer, complete_incremental_prediction
 from s2and.incremental_linking.completion_metadata import (
     SignatureCjkGivenNames,
@@ -27,6 +30,10 @@ from s2and.incremental_linking.completion_metadata import (
 from s2and.incremental_linking.feature_block import (
     normalize_cluster_seed_disallow_pairs,
     temporary_cluster_seed_sidecars,
+)
+from s2and.incremental_linking.linker_pairwise import (
+    PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS,
+    PROMOTED_PAIRWISE_AGG_FEATURE_INDICES,
 )
 from s2and.incremental_linking.policy import (
     promoted_linker_orcid_force_link_enabled,
@@ -1516,6 +1523,44 @@ def _predict_incremental_promoted_linker_from_arrow(
         sibling_components=sibling_components,
         seed_representatives=seed_representatives,
     )
+    attach_reuse = None if attachment_state is None else attachment_state.attach_reuse
+    snapshot_key = None
+    if (
+        attachment_state is not None
+        and attach_reuse is not None
+        and attachment_state.snapshot_first_pass
+        and not query_disallow_partners
+    ):
+        # Seed order affects the plan's tie breaks. Include values and order in the digest.
+        seed_digest = hashlib.sha256(json.dumps(list(cluster_seeds_require.items())).encode()).digest()
+        main_info = clusterer.featurizer_info
+        nameless_info = getattr(clusterer, "nameless_featurizer_info", None)
+        snapshot_key = (
+            attachment_dataset_key(arrow_dataset),
+            attach_reuse.snapshot_eps,
+            seed_digest,
+            tuple(sorted(planner_disallows)),
+            tuple(partial_supervision.items()),
+            name_check_exempt_signature_ids,
+            dataset.partial_supervision_is_distance_override,
+            name_tuples,
+            _estimator_cache_fingerprint(clusterer.classifier),
+            _estimator_cache_fingerprint(getattr(clusterer, "nameless_classifier", None)),
+            tuple(main_info.selected_feature_indices()),
+            None if nameless_info is None else tuple(nameless_info.selected_feature_indices()),
+            bool(main_info.legacy_paper_years),
+            retrieval_top_k,
+            artifact.feature_contract_version,
+            artifact.legacy_paper_years,
+            artifact.feature_columns,
+            PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS,
+            PROMOTED_PAIRWISE_AGG_FEATURE_INDICES,
+            bool(orcid_enabled),
+            bool(clusterer.suppress_orcid),
+            bool(clusterer.use_default_constraints_as_supervision),
+            bool(clusterer.dont_merge_cluster_seeds),
+            clusterer.n_jobs,
+        )
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
     seed_arrow_start = time.perf_counter()
     with temporary_cluster_seed_sidecars(
@@ -1539,7 +1584,9 @@ def _predict_incremental_promoted_linker_from_arrow(
         final_limits_history: list[memory_budget.PromotedPhaseALimits] = []
 
         raw_request_planner: Any | None = None
-        if unassigned_signature_ids:
+
+        def _build_request_planner() -> Any:
+            nonlocal raw_planner_build_seconds
             planner_build_start = time.perf_counter()
             disallows_path_text = None if cluster_seed_disallows_path is None else str(cluster_seed_disallows_path)
             legacy_linker_years = getattr(artifact, "legacy_paper_years", False)
@@ -1589,6 +1636,10 @@ def _predict_incremental_promoted_linker_from_arrow(
                     attachment_state.planner = raw_request_planner
                     attachment_state.planner_key = planner_key
             raw_planner_build_seconds = time.perf_counter() - planner_build_start
+            return raw_request_planner
+
+        if unassigned_signature_ids and snapshot_key is None:
+            raw_request_planner = _build_request_planner()
         scoring_batch_size = query_batch_size
         rescore_featurizer_cache = _QueryDisallowFeaturizerCache()
 
@@ -1622,28 +1673,39 @@ def _predict_incremental_promoted_linker_from_arrow(
                 raw_batch_memory_replan_count += 1
             if len(query_window) < scoring_batch_size:
                 scoring_batch_size = len(query_window)
-            if raw_request_planner is None:
-                raise RuntimeError("reusable raw Arrow planner was not initialized")
-            planner_start = time.perf_counter()
-            # Scoring reads cluster_seeds_require, so the plan omits its member lists.
-            raw_candidate_plan = raw_request_planner.plan(query_window, include_component_members=False)
-            raw_batch_plan_seconds += time.perf_counter() - planner_start
-            raw_batch_plan_count += 1
-            raw_batch_plan_query_count += len(query_window)
+            window_key = None if snapshot_key is None else (snapshot_key, tuple(query_window))
+            raw_plan_bundle = (
+                None if window_key is None or attach_reuse is None else attach_reuse.snapshot_plans.get(window_key)
+            )
+            if raw_plan_bundle is None:
+                if raw_request_planner is None:
+                    raw_request_planner = _build_request_planner()
+                planner_start = time.perf_counter()
+                # Scoring reads cluster_seeds_require, so the plan omits its member lists.
+                raw_candidate_plan = raw_request_planner.plan(query_window, include_component_members=False)
+                raw_batch_plan_seconds += time.perf_counter() - planner_start
+                raw_batch_plan_count += 1
+                raw_batch_plan_query_count += len(query_window)
             first_batch = query_window[:scoring_batch_size]
             refreshed_batch = _refresh_batch(first_batch, retrieval_payload_resident=True)
             if len(refreshed_batch) < len(first_batch):
                 scoring_batch_size = len(refreshed_batch)
                 raw_batch_memory_replan_count += 1
-            attach_reuse = None if attachment_state is None else attachment_state.attach_reuse
-            raw_plan_bundle = (
-                RawArrowPlanBundle.from_native_mapping(raw_candidate_plan)
-                if attach_reuse is None
-                else RawArrowPlanBundle.from_native_mapping(
-                    raw_candidate_plan, first_name_buckets=attach_reuse.first_name_buckets
+            if raw_plan_bundle is None:
+                raw_plan_bundle = (
+                    RawArrowPlanBundle.from_native_mapping(raw_candidate_plan)
+                    if attach_reuse is None
+                    else RawArrowPlanBundle.from_native_mapping(
+                        raw_candidate_plan, first_name_buckets=attach_reuse.first_name_buckets
+                    )
                 )
-            )
-            del raw_candidate_plan
+                del raw_candidate_plan
+                if window_key is not None and attach_reuse is not None:
+                    size = retained_bytes((window_key, raw_plan_bundle))
+                    if attach_reuse.snapshot_plans.fits(size):
+                        attach_reuse.snapshot_plans.store(window_key, raw_plan_bundle, size)
+                    else:
+                        window_key = None
             featurizer_start = time.perf_counter()
             signature_ids = raw_plan_bundle.signature_order.signature_ids
             if (
@@ -1709,23 +1771,50 @@ def _predict_incremental_promoted_linker_from_arrow(
                         window_offset + len(query_batch),
                     )
                 )
-                result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
-                    clusterer,
-                    artifact,
-                    arrow_dataset=arrow_dataset,
-                    query_signature_ids=query_batch,
-                    top_k=retrieval_top_k,
-                    partial_supervision=partial_supervision,
-                    runtime_context=runtime_context,
-                    n_jobs=clusterer.n_jobs,
-                    total_ram_bytes=resolved_total_ram_bytes,
-                    raw_plan_bundle=batch_plan_bundle,
-                    rust_featurizer=raw_batch_featurizer,
-                    partial_supervision_seed_signature_to_component=cluster_seeds_require,
-                    cluster_seed_disallow_excluded_components=None,
-                    partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
-                    name_check_exempt_signature_ids=name_check_exempt_signature_ids,
+                batch_key = None if window_key is None else (window_key, window_offset, len(query_batch))
+                snapshot = None if batch_key is None or attach_reuse is None else attach_reuse.snapshots.get(batch_key)
+                result = (
+                    None
+                    if snapshot is None
+                    else runtime_module.replay_first_pass_batch(
+                        artifact,
+                        snapshot,
+                        query_batch,
+                        n_jobs=resolve_n_jobs(clusterer.n_jobs),
+                        total_ram_bytes=resolved_total_ram_bytes,
+                    )
                 )
+                if result is None:
+                    result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
+                        clusterer,
+                        artifact,
+                        arrow_dataset=arrow_dataset,
+                        query_signature_ids=query_batch,
+                        top_k=retrieval_top_k,
+                        partial_supervision=partial_supervision,
+                        runtime_context=runtime_context,
+                        n_jobs=clusterer.n_jobs,
+                        total_ram_bytes=resolved_total_ram_bytes,
+                        raw_plan_bundle=batch_plan_bundle,
+                        rust_featurizer=raw_batch_featurizer,
+                        partial_supervision_seed_signature_to_component=cluster_seeds_require,
+                        cluster_seed_disallow_excluded_components=None,
+                        partial_supervision_is_distance_override=dataset.partial_supervision_is_distance_override,
+                        name_check_exempt_signature_ids=name_check_exempt_signature_ids,
+                    )
+                    if batch_key is not None and snapshot is None and attach_reuse is not None:
+                        snapshot = runtime_module.FirstPassBatch(
+                            result.feature_matrix,
+                            result.retrieval_batch,
+                            result.pairwise_model_result,
+                            result.decision_row_signals,
+                            tuple(map(str, raw_batch_featurizer.signature_ids())),
+                            bool(orcid_enabled),
+                        )
+                        size = retained_bytes((batch_key, snapshot))
+                        if attach_reuse.snapshots.fits(size):
+                            attach_reuse.snapshots.store(batch_key, snapshot, size)
+                del snapshot
                 # The in-pass name check reads every link; the final seed-link check reads
                 # forced links. Forced links are rare, so most batches skip the ID lookup.
                 batch_decisions = result.compact_result.decisions

@@ -285,6 +285,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     exemplar = "501-0"
     assert not ledger.for_block(gate).eligibility(exemplar).fit_ok
     assert seed_map[exemplar] == candidate
+    other = next(
+        row["candidate_component_key"]
+        for row in rows
+        if row["query_signature_id"] == query and row["candidate_component_key"] != candidate
+    )
+    other_exemplar = next(sid for sid, component in seed_map.items() if component == other)
     blind_items = _json(
         tmp_path / "blind-items.json",
         [
@@ -296,7 +302,13 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
                     {
                         "candidate_key": candidate,
                         "exemplars": [{"signature_id": exemplar, "paper_id": exemplar.split("-")[0], "title": "Study"}],
-                    }
+                    },
+                    {
+                        "candidate_key": other,
+                        "exemplars": [
+                            {"signature_id": other_exemplar, "paper_id": other_exemplar.split("-")[0], "title": "Study"}
+                        ],
+                    },
                 ],
             }
         ],
@@ -319,20 +331,34 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--control-fraction",
         "0",
     )
-    (item,) = json.loads(blind_key_path.read_text())["items"]
-    (slot,) = item["slot_to_candidate_key"]
+    answer_key = json.loads(blind_key_path.read_text())
+    (item,) = answer_key["items"]
+    verdicts = {
+        slot: "same" if key == candidate else "different" for slot, key in item["slot_to_candidate_key"].items()
+    }
+    audit_slots = {slot: key for slot, key in item["slot_to_candidate_key"].items() if key == other}
+    audit_key = _json(
+        tmp_path / "audit-key.json", {**answer_key, "items": [{**item, "slot_to_candidate_key": audit_slots}]}
+    )
     blind_judges = []
     for family in ("sol", "claude"):
         verdict_path = _json(
-            tmp_path / f"gate-{family}.jsonl", {"item_id": item["item_id"], "candidate_verdicts": {slot: "same"}}
+            tmp_path / f"gate-{family}.jsonl", {"item_id": item["item_id"], "candidate_verdicts": verdicts}
         )
         blind_judges.extend(["--judge", family, verdict_path, blind_key_path])
+    audit_verdict = _json(
+        tmp_path / "gate-audit.jsonl",
+        {"item_id": item["item_id"], "candidate_verdicts": {slot: verdicts[slot] for slot in audit_slots}},
+    )
+    blind_judges.extend(["--judge", "audit", audit_verdict, audit_key])
     judged_path = tmp_path / "gate-judgments.json"
     _run(review_packets, "score", *binding, *blind_judges, "--output-json", judged_path)
     report = json.loads(judged_path.read_text())
     gate_table = pq.read_table(tasks / "gate_thresh.parquet").to_pandas()
     scored = _apply_blind_gate_labels(gate_table, report, roles)
-    assert scored["label"].sum() == scored["candidate_gold_scored"].sum() == 1
+    assert scored["label"].sum() == 1
+    assert scored["candidate_gold_scored"].sum() == 2
+    assert report["gate_thresh_audit_coverage"]["audit"]["planned_share"] == 0.5
     assert scored["query_gold_scored"].sum() == 0
     assert scored.loc[scored["label"].eq(1), "candidate_gold_mixed"].all()
     report["gate_thresh_labels"][0]["candidate_component_key"] = "outside-window"

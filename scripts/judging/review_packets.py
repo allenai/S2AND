@@ -963,6 +963,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
 
     Args:
         judges: Family, verdict file, and private answer key for each judge.
+            List the two primary families first, followed by any audit families.
 
     Returns:
         Per-judge control metrics and agreement on the same source items.
@@ -1054,10 +1055,22 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
         )
     report = {**(ledger.bindings if ledger is not None else {}), "judges": reports, "cross_family_agreement": agreement}
     if gate_votes:
+        primary = tuple(dict.fromkeys(families))[:2]
+        primary_candidates = {key for key, votes in gate_votes.items() if any(family in votes for family in primary)}
+        audit_coverage = {}
+        for family in dict.fromkeys(families):
+            if family in primary:
+                continue
+            planned = [gate_votes[key][family] for key in primary_candidates if family in gate_votes[key]]
+            audit_coverage[family] = {
+                "planned_candidates": len(planned),
+                "planned_share": _fraction(len(planned), len(primary_candidates)),
+                "candidates_with_verdict": sum(bool(votes - {None}) for votes in planned),
+            }
         labels = []
         for (block, query, candidate), votes in sorted(gate_votes.items()):
             consensus = set().union(*votes.values())
-            if votes.keys() != set(families) or len(consensus) != 1 or not consensus <= _DECIDED:
+            if not set(primary) <= votes.keys() or len(consensus) != 1 or not consensus <= _DECIDED:
                 continue
             labels.append(
                 {
@@ -1068,7 +1081,9 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                 }
             )
         report["gate_thresh_labels"] = labels
-        report["gate_thresh_planned_candidates"] = len(gate_votes)
+        report["gate_thresh_planned_candidates"] = len(primary_candidates)
+        report["gate_thresh_primary_families"] = list(primary)
+        report["gate_thresh_audit_coverage"] = audit_coverage
     return report
 
 

@@ -38,7 +38,6 @@ from scripts.intake.prepare_identity_labels import (
     _read_arrow_signatures,
     _strict_nonneg_int,
     canonical_gold_block_filter,
-    names_are_compatible,
 )
 from scripts.intake.requests_to_datasets import INTAKE_LOCK, SNAPSHOT_BINDING, SOURCE_RECORD
 
@@ -151,19 +150,13 @@ def _block_rows(
         candidates = [row for row in by_paper.get(paper, ()) if row["pos_norm"] == position]
         if reason == "dropped_block_key_mismatch" and any(gold_block == _rotated_key(row) for row in candidates):
             reason = "dropped_name_order_rotation"
-        elif (
-            gold_block == block
-            and reason in {"dropped_unmatched_paper_position", "dropped_name_mismatch"}
-            and any(names)
-        ):
-            shifted = [
-                row
-                for row in by_paper.get(paper, ())
-                if row["pos_norm"] != position and names_are_compatible(*_signature_names(row), *names)
-            ]
-            if len(shifted) == 1:
-                candidates.extend(shifted)
-                reason = "dropped_position_shift"
+        elif gold_block == block and reason == "dropped_ambiguous_paper_block":
+            # The gold row could refer to any of this paper's mentions in the block.
+            candidates = by_paper[paper]
+        elif gold_block == block and reason == "dropped_unmatched_paper_position" and paper in by_paper:
+            # Gold v2 has no author names to resolve a shifted position.
+            candidates = by_paper[paper]
+            reason = "dropped_position_shift"
         counts[reason] += 1
         for candidate in candidates:
             rejected[candidate["signature_id"]].append({**entry, "reason": reason})
@@ -277,7 +270,7 @@ def _write_evidence(
         staging.mkdir()
         for index, (block, (dataset, path)) in enumerate(new_blocks.items(), start=len(metadata)):
             rows, audit = _block_rows(joins[block], block, gold_partitions.pop(block, []), errors.get(block, ()))
-            unmatched = audit["dropped_unmatched_paper_position"]
+            unmatched = audit["dropped_unmatched_paper_position"] + audit["dropped_position_shift"]
             total = audit["gold_rows_for_block"]
             if total and unmatched / total > max_unmatched_gold:
                 raise ValueError(

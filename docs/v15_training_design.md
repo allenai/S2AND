@@ -79,8 +79,11 @@ uv run --offline --no-sync python -m scripts.intake.build_identity_evidence \
 
 Add `--reviewed-errors-json` with a map from block keys to reviewed signature IDs when available.
 The table includes every exported mention, verified gold rows with the original split and scoring
-flag, deposited ORCIDs, conflicts, and exclusions. Rejected gold joins can veto fitting or scoring
-through identity overlap. Only verified gold supplies a score. Inspect the per-block join audit.
+flag, deposited ORCIDs, conflicts, and exclusions. Any rejected gold join vetoes the affected mention
+for fitting, mining, and scoring. Position shifts are detected from the same block and paper when the
+gold position is missing. A gold row ambiguous within its paper and block vetoes each mention there.
+Only verified gold supplies a score. Freeze identity lists and seed purity
+use matched gold and deposited identities. Inspect the per-block join audit.
 The builder fails above 2% unmatched gold for any block. Use `--max-unmatched-gold` after reviewing
 the mismatch. To append, use `--append` on the same evidence directory with the same gold file.
 The manifest records each new partition and leaves the earlier partitions intact.

@@ -61,9 +61,9 @@ class EvidenceBlock(TypedDict):
 
 
 def evidence_identities(row: MentionEvidence) -> frozenset[str]:
-    """Return the distinct normalized identities from both evidence sources."""
+    """Return the distinct normalized identities from matched gold and deposits."""
     deposited = row["deposited_orcid"]
-    gold = {entry["orcid"] for entry in (*row["gold"], *row.get("rejected_gold", ()))}
+    gold = {entry["orcid"] for entry in row["gold"]}
     if deposited:
         gold.add(deposited)
     return frozenset(gold)
@@ -177,15 +177,13 @@ class BlockEligibility:
         for orcid in identities:
             if orcid not in self.roles.block_orcids[self.block] or orcid not in self.roles.identity_roles:
                 raise ValueError(f"Unknown evidence identity {orcid!r} in frozen block {self.block!r}")
-        # An ambiguous author position cannot serve as an unlabeled fitting endpoint.
-        ambiguous = any(entry["reason"].startswith("dropped_ambiguous_") for entry in row.get("rejected_gold", ()))
         fit_ok = (
-            not ambiguous
-            and row["evidence_state"] != "conflict"
+            not row.get("rejected_gold")
+            and len(identities) <= 1
             and all(self.roles.identity_roles[orcid] == {self.role} for orcid in identities)
         )
         score_orcid = None
-        if fit_ok and row["evidence_state"] == "single":
+        if fit_ok and identities:
             score_orcid = next(
                 (gold["orcid"] for gold in row["gold"] if gold["scored"] and gold["split"] == self.expected_split),
                 None,

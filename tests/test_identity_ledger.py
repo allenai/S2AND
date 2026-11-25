@@ -12,6 +12,7 @@ from tests.helpers import write_arrow_tables_bundle
 pytestmark = pytest.mark.tooling
 GOLD = "0000-0002-1694-233X"
 DEPOSITED = "0000-0001-5109-3700"
+HOLDOUT = "0000-0003-3808-2083"
 
 
 def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
@@ -123,6 +124,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
 
     snapshot, gold = evidence_inputs
     labels = pq.read_table(gold)
+    labels = labels.set_column(3, "orcid", pa.array([GOLD, GOLD, HOLDOUT, DEPOSITED]))
     foreign = dict(labels.to_pylist()[2], cluster_block_key="l a", corpus_paper_id=4, author_last="Lovelace")
     pq.write_table(pa.concat_tables([labels, pa.Table.from_pylist([foreign], schema=labels.schema)]), gold)
     evidence = tmp_path / "evidence"
@@ -141,7 +143,8 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     rejected = ledger.for_block("a lovelace").eligibility("4-0")
     assert not rejected.fit_ok
     assert rejected.score_orcid is None
-    assert GOLD in rejected.identities
+    assert not rejected.identities
+    assert ledger.for_block("g hopper").scored() == {"5-0": HOLDOUT}
     assert audit["dropped_name_order_rotation"] == 1
 
 
@@ -177,10 +180,13 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
     roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
     view = BlockEligibility(block, role, "development", {row["signature_id"]: row for row in evidence}, roles)
     decision = view.eligibility(f"{paper}-2")
-    assert decision.identities == {GOLD}
+    assert not decision.identities
     assert decision.score_orcid is None
     assert not decision.fit_ok
-    assert view.eligibility(f"{paper}-1").fit_ok
+    other = view.eligibility(f"{paper}-1")
+    assert not other.fit_ok
+    assert other.score_orcid is None
+    assert not other.identities
     assert audit["dropped_ambiguous_paper_block"] == 1
 
 
@@ -200,8 +206,61 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
     first, second = pq.read_table(output).to_pylist()
     assert first["signature_count"] == 4
     assert first["stratum"] == "tiny"
-    assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 3, GOLD: 2}
+    assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 2, GOLD: 2}
     assert second["source_split"] == "holdout"
+
+
+@pytest.mark.parametrize(
+    ("gold_block", "gold_position", "reason"),
+    [
+        ("a lovelace", 1, "dropped_position_shift"),
+        ("g hopper", 0, "dropped_block_key_mismatch"),
+        ("l ada", 0, "dropped_name_order_rotation"),
+    ],
+)
+def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold_position: int, reason: str) -> None:
+    import pandas as pd
+
+    from scripts.common.block_roles import BlockRoles
+    from scripts.common.identity_ledger import BlockEligibility
+    from scripts.intake.build_freeze_input import mention_counts
+    from scripts.intake.build_identity_evidence import _block_rows
+    from scripts.intake.prepare_identity_labels import SignatureJoin
+
+    block, role = "a lovelace", "linker_train"
+    signatures = pd.DataFrame(
+        {
+            "signature_id": ["1-0", "2-0"],
+            "paper_id": ["1", "2"],
+            "author_position": [0, 0],
+            "author_block": [block, block],
+            "author_first": ["Ada", "Ada"],
+            "author_last": ["Lovelace", "Lovelace"],
+        }
+    )
+    gold = {"cluster_block_key": block, "position": 0, "orcid": GOLD, "scored": True, "split": "development"}
+    rows, audit = _block_rows(
+        SignatureJoin(signatures),
+        block,
+        [
+            dict(gold, corpus_paper_id=1),
+            dict(gold, corpus_paper_id=1, cluster_block_key=gold_block, position=gold_position),
+            dict(gold, corpus_paper_id=2),
+            dict(gold, corpus_paper_id=1, cluster_block_key=gold_block, position=gold_position, orcid=DEPOSITED),
+        ],
+        (),
+    )
+    assert audit[reason] == 2
+    roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
+    view = BlockEligibility(block, role, "development", {row["signature_id"]: row for row in rows}, roles)
+    assert mention_counts(view.rows) == {GOLD: 2}
+    rejected = view.eligibility("1-0")
+    assert not rejected.fit_ok
+    assert rejected.score_orcid is None
+    assert rejected.identities == {GOLD}
+    fitting_seeds = [sid for sid in view.rows if view.eligibility(sid).fit_ok]
+    assert fitting_seeds == ["2-0"]
+    assert view.component_label(fitting_seeds) == GOLD
 
 
 def test_freeze_masks_shared_identities_and_reserves_both_halves(
@@ -277,9 +336,9 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     block = ledger.for_block("a lovelace")
     assert not block.eligibility("1-0").fit_ok
     assert not block.eligibility("3-0").fit_ok
-    for sid in ("2-0", "4-0"):
-        assert block.eligibility(sid).fit_ok
-        assert block.eligibility(sid).score_orcid is None
+    assert block.eligibility("2-0").fit_ok
+    assert not block.eligibility("4-0").fit_ok
+    assert block.eligibility("4-0").score_orcid is None
     assert block.component_label(["1-0", "2-0"]) is None
     assert not ledger.for_block("g hopper").scored()
     with pytest.raises(ValueError, match="No identity evidence"):
@@ -300,6 +359,8 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     from scripts.pairwise.mine_pairwise_pairs import BlockInput, mine_pairs
 
     snapshot, gold = evidence_inputs
+    labels = pq.read_table(gold)
+    pq.write_table(labels.set_column(3, "orcid", pa.array([GOLD, GOLD, HOLDOUT, DEPOSITED])), gold)
     directory = tmp_path / "identity"
     build_identity_evidence(snapshot, gold, directory)
     evidence = directory / "manifest.json"
@@ -316,7 +377,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     assignment_root = tmp_path / "assignments"
     assignment_root.mkdir()
     assignments = assignment_root / "assignments.parquet"
-    pq.write_table(pa.table({"signature_id": ["2-0", "4-0"], "cluster_id": ["a", "b"]}), assignments)
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
     manifest = assignment_root / "manifest.json"
     record = {
         "binding": {
@@ -332,7 +393,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 1
     with output.open(newline="", encoding="utf-8") as source_file:
         (row,) = csv.DictReader(source_file)
-    assert {row["signature_id_1"], row["signature_id_2"]} == {"2-0", "4-0"}
+    assert {row["signature_id_1"], row["signature_id_2"]} == {"2-0", "3-0"}
     record["binding"]["block_bindings"]["a lovelace"]["role_sha256"] = "old"
     manifest.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="does not match"):
@@ -344,7 +405,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"pairwise_train": 2})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
-    pq.write_table(pa.table({"signature_id": ["2-0", "3-0", "4-0"], "cluster_id": ["a", "a", "b"]}), assignments)
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
     other = tmp_path / "other" / assignments.name
     other.parent.mkdir()
     pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)

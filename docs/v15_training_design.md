@@ -229,7 +229,9 @@ Use ORCID Gold v2 and classic benchmarks for bulk pairwise training, ranker trai
 - **Strict field allowlist:** Paper metadata only for pair packets (never predicted-cluster summaries, scores, ranks, split names, cluster IDs, or ORCIDs).
 - **Isolated passes across judge families** with independently randomized A/B or candidate order. Report agreement and Cohen's κ on jointly decided items, the jointly decided share, and missing verdicts.
 - **10–15% embedded ORCID gold controls** per packet (re-examine when the family fails the 90% control bar) + **10–20% cross-family model audit** on sealed test packets and classic benchmarks.
-- **No "any abstain drops query" rule:** Never discard an entire 25-candidate query when a secondary candidate receives `abstain`.
+- **Partial gate judgments:** Keep decided candidate outcomes. Score a query in abstention metrics
+  only when every candidate has an agreed verdict. An abstention is correct when all verdicts are
+  `different`.
 - **Automatic ORCID selection-bias logging:** Every gate/EPS evaluation logs linked Gold-ORCID share and linked median publication year alongside B3 metrics.
 
 Build controls with `review_packets.py build --identity-evidence evidence/manifest.json --block-role-assignments assignments.json --allowed-role gate_thresh`

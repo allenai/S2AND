@@ -106,6 +106,7 @@ from scripts.common.linker_seeds import (  # noqa: E402
     members_by_component,
     read_frozen_seeds,
 )
+from scripts.linker.blind_gate_metrics import update_blind_gate_metrics  # noqa: E402
 from scripts.linker.build_linker_task_tables import TASK_ROLES  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
@@ -2236,6 +2237,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Never publish a normal production_model_vX bundle from a smoke run.
             complete_model_dir = output_dir / "smoke_model_DO_NOT_SHIP"
         fit_kwargs: dict[str, Any] = {}
+        blind_gate_rows: pd.DataFrame | None = None
         if frozen_manifest is not None and block_roles is not None:
             feature_bundle = _bundle_with_promoted_target(source_bundle, target)
             if (
@@ -2255,6 +2257,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 **({"gate_judgments": gate_judgments} if gate_judgments is not None else {}),
             )
             fit_kwargs["frozen_task_rows"] = task_rows
+            if gate_judgments is not None:
+                blind_gate_rows = task_rows["gate_thresh"]
         else:
             feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
                 source_bundle=source_bundle,
@@ -2295,6 +2299,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             **({"fixed_ranker": fixed_ranker} if fixed_ranker is not None else {}),
             **fit_kwargs,
         )
+        if blind_gate_rows is not None:
+            update_blind_gate_metrics(
+                calibrated,
+                blind_gate_rows,
+                tuple(feature_bundle.models["classic"]["feature_columns"]),
+                int(args.n_jobs),
+            )
         artifact_metadata = save_incremental_linking_artifact(
             calibrated.model,
             artifact_dir,

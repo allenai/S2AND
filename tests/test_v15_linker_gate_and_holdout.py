@@ -15,10 +15,12 @@ from s2and.incremental_linking_training.classic import (
     _score_query_choices,
     report_logistic_gate_error_weights,
 )
+from s2and.incremental_linking_training.gate import _apply_logistic_gate_predictions
 from scripts.common.block_roles import load_block_roles
 from scripts.eps import apply_reviewed_eps as apply_eps
 from scripts.eps.orcid_b3 import REFERENCE_POLICY_ALL_IDENTITIES
 from scripts.linker import train_linker_and_finalize as promoted_train
+from scripts.linker.blind_gate_metrics import summarize_blind_gate_predictions, with_query_gold_scored
 
 pytestmark = pytest.mark.tooling
 
@@ -346,3 +348,31 @@ def test_fixed_ranker_accepts_legacy_calibration_splits(tmp_path: Path, monkeypa
     assert result.model is ranker
     assert result.gate_config["training_summary"]["fit_queries"] == 40
     assert result.gate_config["training_summary"]["validation_queries"] == 20
+
+
+def test_blind_gate_metrics_require_a_fully_resolved_window() -> None:
+    rows = pd.DataFrame(
+        {
+            "query_group_id": ["partial", "partial", "positive", "positive", "negative", "negative"],
+            "dataset": ["gate"] * 6,
+            "query_view": ["full"] * 6,
+            "candidate_component_key": ["first", "second"] * 3,
+            "retrieval_rank": [1, 2] * 3,
+            "label": [0, 0, 0, 1, 0, 0],
+            "candidate_gold_scored": [True, False, True, True, True, True],
+            "query_gold_scored": [False, False, True, True, True, True],
+        }
+    )
+    choices = _score_query_choices(
+        rows, np.array([0.5, 0.4] * 3), query_id_column="query_group_id", include_margin=True
+    )
+    choices = with_query_gold_scored(choices, rows)
+    predictions = _apply_logistic_gate_predictions(choices, np.array([False, False, False]))
+    metrics = summarize_blind_gate_predictions(predictions)
+    assert predictions["chosen_candidate_gold_scored"].all()
+    assert predictions["query_gold_scored"].tolist() == [False, True, True]
+    assert metrics["n_unscored_queries"] == 1
+    assert metrics["n_queries"] == 2
+    assert metrics["n_negative_queries"] == 1
+    assert metrics["false_abstain"] == 1
+    assert metrics["accuracy"] == 0.5

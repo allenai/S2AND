@@ -240,12 +240,14 @@ def _guard_predict_block_matrix_allocation(
     fastcluster_fused_dtype: Any,
     total_ram_bytes: int | None,
     copies_codes: bool = False,
+    extra_bytes: int = 0,
 ) -> None:
     """Fail fast before exact prediction allocates a block matrix above the RAM budget.
 
     Linkage works in the matrix, so the matrix is the block's peak. The post-linkage
     corrections add their one-byte-per-pair copy. A block with profile exclusions also keeps a
-    second matrix for relinking, which this guard does not count.
+    second matrix for relinking, which this guard does not count. Callers can supply extra
+    allocations through `extra_bytes`.
     """
     if total_ram_bytes is None or block_size <= 1:
         return
@@ -262,6 +264,7 @@ def _guard_predict_block_matrix_allocation(
     )
     if copies_codes and uses_fastcluster:
         matrix_bytes += int(block_size * (block_size - 1) // 2)
+    matrix_bytes += extra_bytes
     if matrix_bytes <= int(snapshot.available_bytes):
         return
     raise MemoryError(
@@ -1370,6 +1373,8 @@ def _fill_cached_residual_model_distances(
     signatures: list[str],
     output: np.ndarray,
     *,
+    rust_featurizer: Any,
+    block_signature_indices: list[int],
     block_scorers: tuple[Any, Any | None],
     selected_indices: list[int],
     nameless_selected_indices: list[int] | None,
@@ -1391,35 +1396,42 @@ def _fill_cached_residual_model_distances(
         None if nameless_selected_indices is None else tuple(nameless_selected_indices),
         self.featurizer_info.legacy_paper_years,
     )
-    cached = reuse.residuals.get(key)
-    if cached is None:
+    with reuse.residual_lock:
+        cached = reuse.residuals.get(key)
+        new_entry = cached is None
         size = len(group)
         pair_count = size * (size - 1) // 2
-        retained_bytes = pair_count * output.itemsize + size * 128
-        if not reuse.residuals.fits(retained_bytes):
+        retained_bytes = pair_count * output.itemsize + size * 128 if new_entry else 0
+        if new_entry and not reuse.residuals.fits(retained_bytes):
             return False
+        # Budget the gathered labels, cache indices, and native override offsets.
+        index_bytes = output.size * (np.dtype(np.intp).itemsize + np.dtype(np.int64).itemsize)
         try:
             _guard_predict_block_matrix_allocation(
                 block_key="attachment queries",
-                block_size=size,
+                block_size=len(signatures),
                 uses_fastcluster=True,
                 fastcluster_fused_dtype=output.dtype,
                 total_ram_bytes=total_ram_bytes,
+                extra_bytes=retained_bytes + index_bytes,
             )
         except MemoryError as exc:
             logger.info("Attachment reuse residual matrix bypassed: %s", exc)
             return False
-        featurizer = state.featurizer()
-        if self.featurizer_info.legacy_paper_years:
-            featurizer = featurizer.with_legacy_paper_years()
-        signature_indices = _build_signature_index_by_id(featurizer)
-        values = np.empty(pair_count, dtype=output.dtype)
-        featurizer.fill_block_distances_indexed(
-            [signature_indices[sid] for sid in group],
-            values,
-            LARGE_INTEGER,
-            np.empty(0, dtype=np.int64),
-            np.empty(0, dtype=np.float64),
+        if cached is None:
+            cached = ResidualModelDistances(
+                {sid: i for i, sid in enumerate(group)}, np.full(pair_count, np.nan, dtype=output.dtype)
+            )
+        cache_offsets = cached.subset_offsets(signatures)
+        if cache_offsets is None:
+            return False
+        # NaNs ask the native fill to score a pair. Known scores pass through unchanged.
+        rust_featurizer.fill_block_distances_indexed(
+            block_signature_indices,
+            output,
+            0.0,
+            np.arange(output.size, dtype=np.int64),
+            cached.values[cache_offsets],
             selected_indices,
             block_scorers[0],
             nameless_selected_indices,
@@ -1429,10 +1441,10 @@ def _fill_cached_residual_model_distances(
             num_threads=resolve_n_jobs(self.n_jobs),
             **_one_pass_tile_overrides,
         )
-        values.setflags(write=False)
-        cached = ResidualModelDistances({sid: i for i, sid in enumerate(group)}, values)
-        reuse.residuals.store(key, cached, retained_bytes)
-    return cached.fill_subset(signatures, output)
+        cached.values[cache_offsets] = output
+        if new_entry:
+            reuse.residuals.store(key, cached, retained_bytes)
+        return True
 
 
 def _make_distance_matrices_from_verified_rust_featurizer(
@@ -1541,6 +1553,8 @@ def _make_distance_matrices_from_verified_rust_featurizer(
                     residual_reuse,
                     signatures,
                     pairwise_proba,
+                    rust_featurizer=rust_featurizer,
+                    block_signature_indices=block_signature_indices,
                     block_scorers=block_scorers,
                     selected_indices=selected_indices,
                     nameless_selected_indices=nameless_selected_indices,

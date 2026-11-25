@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable
 from dataclasses import dataclass
+from threading import Lock
 from types import TracebackType
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -59,29 +60,30 @@ class ResidualModelDistances:
     positions: dict[str, int]
     values: np.ndarray
 
-    def fill_subset(self, signatures: list[str], output: np.ndarray) -> bool:
-        """Fill an ordered subset and refuse pairs with changed orientation."""
+    def subset_offsets(self, signatures: list[str]) -> np.ndarray | None:
+        """Map ordered subset pairs to the cache and refuse changed orientation."""
         positions = np.fromiter(
             (self.positions.get(sid, -1) for sid in signatures), dtype=np.intp, count=len(signatures)
         )
         if positions[0] < 0 or np.any(positions[1:] <= positions[:-1]):
-            return False
+            return None
+        offsets = np.empty(len(positions) * (len(positions) - 1) // 2, dtype=np.intp)
         offset = 0
         size = len(self.positions)
         for row, left in enumerate(positions[:-1]):
             right = positions[row + 1 :]
             end = offset + len(right)
             start = left * (2 * size - left - 1) // 2 - left - 1
-            output[offset:end] = self.values[start + right]
+            offsets[offset:end] = start + right
             offset = end
-        return True
+        return offsets
 
 
 class AttachReuse:
     """Own one offline sweep's setup and residual model scores.
 
     Limits count retained signature memberships, including native block rows.
-    Use a context manager to release native buffers before closing the dataset.
+    Run requests sequentially and close the context before closing the dataset.
     """
 
     def __init__(self, *, setup_signature_limit: int = 400_000, residual_byte_limit: int = 1 << 30) -> None:
@@ -92,6 +94,8 @@ class AttachReuse:
             "featurizer signatures", setup_signature_limit
         )
         self.residuals = _BoundedCache[ResidualModelDistances]("residual bytes", residual_byte_limit)
+        # Distance workers can use the same cache within a request.
+        self.residual_lock = Lock()
 
     def __enter__(self) -> AttachReuse:
         return self
@@ -105,14 +109,15 @@ class AttachReuse:
         """Log retained sizes and release the caches."""
         for block in self.blocks.entries.values():
             block.release()
-        for cache in (self.blocks, self.subblocks, self.residuals):
-            logger.info(
-                "Attachment reuse %s: retained=%d limit=%d entries=%d hits=%d",
-                cache.name,
-                cache.size,
-                cache.limit,
-                len(cache.entries),
-                cache.hits,
-            )
-            cache.entries.clear()
-            cache.size = 0
+        with self.residual_lock:
+            for cache in (self.blocks, self.subblocks, self.residuals):
+                logger.info(
+                    "Attachment reuse %s: retained=%d limit=%d entries=%d hits=%d",
+                    cache.name,
+                    cache.size,
+                    cache.limit,
+                    len(cache.entries),
+                    cache.hits,
+                )
+                cache.entries.clear()
+                cache.size = 0

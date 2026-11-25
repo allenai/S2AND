@@ -3,6 +3,7 @@
 import json
 
 import numpy as np
+from lightgbm import LGBMClassifier
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
@@ -66,51 +67,73 @@ def test_setup_reuse_across_eps(tmp_path, monkeypatch):
 
 
 def test_residual_model_cache_reapplies_constraints_and_checks_model(tmp_path):
-    names = [("Ada", "", "Smith"), ("Bob", "", "Smith"), ("Ada", "", "Smith"), ("A", "", "Smith")]
-    dataset = _dataset(names, {})
+    ada = ("Ada", "", "Smith")
+    names = [ada, ("Bob", "", "Smith"), ada, ("A", "", "Smith"), ada, ("Ada", "May", "Smith")]
+    dataset = _dataset(names, {}, years=(2000, 2001, 2000, 2012, 2001, 2004))
     prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
-    info = FeaturizationInfo(["year_diff"])
+    info = FeaturizationInfo(["name_similarity", "year_diff"])
 
-    def classifier(seed):
-        from tests.promoted_linking_helpers import tiny_binary_booster
-
-        path = tmp_path / f"pairwise-{seed}.txt"
-        tiny_binary_booster(len(info.selected_feature_indices()), seed=seed).booster_.save_model(path)
+    def classifier(*, invert=False):
+        path = tmp_path / f"pairwise-{invert}.txt"
+        features = info.get_feature_names()
+        year_gaps = np.repeat(np.arange(13), 4)
+        matrix = np.zeros((len(year_gaps), len(features)))
+        matrix[:, features.index("year_diff")] = year_gaps
+        labels = np.tile(np.arange(4), 13) < 4 - np.minimum(year_gaps, 3)
+        booster = LGBMClassifier(n_jobs=1, n_estimators=4, min_child_samples=1, verbosity=-1)
+        booster.fit(matrix, labels ^ invert).booster_.save_model(path)
         return NativeLightGBMBinaryClassifier(path)
 
-    clusterer = Clusterer(info, classifier(101), cluster_model=FastCluster(linkage="average"), n_jobs=1)
+    clusterer = Clusterer(info, classifier(), cluster_model=FastCluster(linkage="average"), n_jobs=1)
     clusterer.suppress_orcid = True
     with ArrowDataset.open(tmp_path / "arrow") as arrow, AttachReuse() as reuse:
         group = list(dataset.signatures)
         state = _AttachmentBlockState(arrow, group, frozenset(), 1)
         state.attach_reuse = reuse
         state.residual_group = tuple(group)
+        native = state.featurizer()
+        scored_counts = []
 
-        def verify(ids, supervision, *, cached=True):
-            args = (clusterer, {"block": ids}, state.featurizer())
+        class RecordingFeaturizer:
+            def __getattr__(self, name):
+                return getattr(native, name)
+
+            def fill_block_distances_indexed(self, *args, **kwargs):
+                counts = native.fill_block_distances_indexed(*args, **kwargs)
+                scored_counts.append(counts[1])
+                return counts
+
+        def verify(ids, supervision):
             expected = distances._make_distance_matrices_from_verified_rust_featurizer(
-                *args, partial_supervision=supervision
+                clusterer, {"block": ids}, native, partial_supervision=supervision
             )["block"]
             observed = distances._make_distance_matrices_from_verified_rust_featurizer(
-                *args, partial_supervision=supervision, residual_reuse=state if cached else None
+                clusterer, {"block": ids}, RecordingFeaturizer(), partial_supervision=supervision, residual_reuse=state
             )["block"]
-            np.testing.assert_array_equal(observed, expected)
-            assert observed.tobytes() == expected.tobytes()
+            np.testing.assert_array_equal(observed.view(np.uint64), expected.view(np.uint64))
 
         try:
+            first = ["0", "2", "4", "5"]
+            verify(first, {})
+            [cached] = reuse.residuals.entries.values()
+            filled = cached.values[~np.isnan(cached.values)]
+            assert len(filled) == 6
+            assert len(np.unique(filled)) >= 2
+            verify(["1", "2", "4", "5"], {("1", "2"): 0.123})
+            verify(first, {("5", "0"): 0.456})
             verify(group, {})
-            verify(group[1:], {("1", "2"): 0.123})
-            verify(["0", "2", "3"], {("3", "0"): 0.456})
-            assert len(reuse.residuals.entries) == 1
-            assert reuse.residuals.hits == 2
-            verify(list(reversed(group)), {})
+            assert scored_counts == [6, 3, 0, 6]
+            assert not np.isnan(cached.values).any()
             assert reuse.residuals.hits == 3
-            clusterer.classifier = classifier(102)
+            verify(list(reversed(group)), {})
+            assert reuse.residuals.hits == 4
+            clusterer.classifier = classifier(invert=True)
             verify(group[1:], {})
             assert len(reuse.residuals.entries) == 2
-            assert reuse.residuals.hits == 3
+            assert scored_counts[-1] == 10
+            assert reuse.residuals.hits == 4
             clusterer.suppress_orcid = False
             verify(group[1:], {})
-            assert reuse.residuals.hits == 3
+            assert reuse.residuals.hits == 4
         finally:
             state.release()

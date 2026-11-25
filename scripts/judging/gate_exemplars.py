@@ -10,10 +10,11 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
-from scripts.common.arrow_roots import read_json_object
+from scripts.common.arrow_roots import generic_dataset_manifests, read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, BlockRoles, normalize_block_key
-from scripts.common.identity_ledger import IdentityLedger, evidence_identities
+from scripts.common.identity_ledger import IdentityEvidence, IdentityLedger, evidence_identities
 from scripts.common.linker_seeds import PRODUCTION_MAX_EXEMPLARS, members_by_component, read_frozen_seeds
 
 
@@ -53,6 +54,32 @@ def _paper_items(arrow: ArrowDataset, signature_ids: set[str]) -> dict[str, dict
     }
 
 
+def frozen_packet_papers(
+    signature_ids_by_block: Mapping[str, set[str]], *, snapshot: Path | None, evidence: IdentityEvidence | None
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load every displayed paper from the frozen Arrow collection."""
+    if evidence is not None:
+        if snapshot is not None and snapshot.resolve() != evidence.snapshot_root.resolve():
+            raise ValueError("Packet snapshot differs from the identity evidence snapshot")
+        snapshot = evidence.snapshot_root
+    if snapshot is None:
+        raise ValueError("Blind packet displays require --snapshot or ledger-backed identity evidence")
+    manifests = generic_dataset_manifests(snapshot)
+    by_block = {normalize_block_key(dataset): path for dataset, path in manifests.items()}
+    if len(by_block) != len(manifests):
+        raise ValueError("Duplicate canonical block keys in the packet snapshot")
+    papers = {}
+    for block, signatures in signature_ids_by_block.items():
+        if block not in by_block:
+            raise ValueError(f"Packet block {block!r} is absent from the frozen snapshot")
+        manifest = by_block[block]
+        if evidence is not None and sha256_file(manifest) != evidence.blocks[block]["dataset_manifest_sha256"]:
+            raise ValueError(f"Packet snapshot generation differs from the identity evidence for {block!r}")
+        with ArrowDataset.open(manifest.parent) as arrow:
+            papers.update(((block, sid), paper) for sid, paper in _paper_items(arrow, signatures).items())
+    return papers
+
+
 def resolve_gate_exemplars(
     items: Sequence[Mapping[str, Any]],
     roles: BlockRoles,
@@ -60,7 +87,7 @@ def resolve_gate_exemplars(
     *,
     control_ledger: IdentityLedger | None = None,
 ) -> tuple[list[Mapping[str, Any]], dict[str, str]]:
-    """Resolve frozen query papers and exemplars, preferring verified control members."""
+    """Resolve frozen seed membership and prefer verified control exemplar references."""
     by_block: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in items:
         block = normalize_block_key(item["block_key"])
@@ -92,12 +119,9 @@ def resolve_gate_exemplars(
                 key: sorted(members[key], key=lambda sid: not evidence_identities(rows[sid]))[:PRODUCTION_MAX_EXEMPLARS]
                 for key in keys
             }
-        query_ids = {str(item["query"]["signature_id"]) for item in block_items}
-        displayed_ids = query_ids | {sid for signatures in exemplar_ids.values() for sid in signatures}
         with ArrowDataset.open(spec["arrow_dir"]) as arrow:
             if arrow.generation_id != spec["arrow_generation_id"]:
                 raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
-            papers = _paper_items(arrow, displayed_ids)
         for item in block_items:
             candidates = []
             for candidate in item["candidates"]:
@@ -106,9 +130,9 @@ def resolve_gate_exemplars(
                     {
                         "candidate_key": key,
                         "member_signature_ids": members[key],
-                        "exemplars": [papers[sid] for sid in exemplar_ids[key]],
+                        "exemplars": [{"signature_id": sid} for sid in exemplar_ids[key]],
                     }
                 )
-            resolved[id(item)] = {**item, "query": papers[str(item["query"]["signature_id"])], "candidates": candidates}
+            resolved[id(item)] = {**item, "candidates": candidates}
         seed_digests[block] = spec["seeds_sha256"]
     return [resolved.get(id(item), item) for item in items], seed_digests

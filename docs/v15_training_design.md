@@ -231,6 +231,9 @@ Use ORCID Gold v2 and classic benchmarks for bulk pairwise training, ranker trai
 - **Phase 2 (conditional):** `5,000` `>45yr` historical pairwise training pairs (only if lifting `YEAR_DIFF_CAP=50`); `1,200–3,000` gate hard-negative packets (only if Phase 1A reliability flags >5 pp error after reweighting); `700–1,500` one-time cross-family audit of AMiner v6 merges & unknown signatures.
 
 ### Non-negotiable packet rules (`scripts/judging/review_packets.py`)
+
+Provide signature references for pair sides, linker queries, and exemplars. The builder reads their
+display fields from the ledger's frozen Arrow snapshot, or from `--snapshot` for builds without a ledger.
 - **Strict field allowlist:** Paper metadata only for pair packets (never predicted-cluster summaries, scores, ranks, split names, cluster IDs, or ORCIDs).
 - **Isolated passes across judge families** with independently randomized A/B or candidate order. Report agreement and Cohen's κ on jointly decided items, the jointly decided share, and missing verdicts.
 - **10–15% embedded ORCID gold controls** per packet (re-examine when the family fails the 90% control bar) + **10–20% cross-family model audit** on sealed test packets and classic benchmarks.

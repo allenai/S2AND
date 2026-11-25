@@ -4,8 +4,10 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
+from scripts.common.arrow_roots import write_root_manifest
 from scripts.common.block_roles import load_block_roles
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from scripts.judging.review_packets import (
@@ -17,6 +19,7 @@ from scripts.judging.review_packets import (
     score_judges,
     validate_blind_packet_records,
 )
+from tests.helpers import write_arrow_tables_bundle
 
 pytestmark = pytest.mark.tooling
 
@@ -41,6 +44,47 @@ def _paper(idx: int, *, email: bool = False, text_orcid: bool = False) -> dict:
     }
 
 
+@pytest.fixture(scope="module")
+def frozen_snapshot(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("packet-snapshot")
+    records = [_paper(i, email=True, text_orcid=True) for i in range(112)]
+    paper_ids = [record["paper_id"] for record in records]
+    tables = {
+        "signatures": pa.table(
+            {
+                "signature_id": [record["signature_id"] for record in records],
+                "paper_id": paper_ids,
+                "author_position": [0] * len(records),
+                "author_first": [record["author_name"] for record in records],
+                "author_middle": [""] * len(records),
+                "author_last": [""] * len(records),
+                "author_suffix": [""] * len(records),
+                "author_affiliations": [record["affiliations"] for record in records],
+            }
+        ),
+        "papers": pa.Table.from_pylist(
+            [
+                {
+                    **{field: record[field] for field in ("paper_id", "title", "abstract", "venue", "year")},
+                    "journal_name": "",
+                }
+                for record in records
+            ]
+        ),
+        "paper_authors": pa.table(
+            {"paper_id": paper_ids, "position": [0] * len(records), "author_name": [r["author_name"] for r in records]}
+        ),
+        "specter": pa.table(
+            {"paper_id": paper_ids, "embedding": pa.array([[1.0, 0.0]] * len(records), type=pa.list_(pa.float32(), 2))}
+        ),
+    }
+    datasets = ("a_smith", "a_lee", "b_lee")
+    for dataset in datasets:
+        write_arrow_tables_bundle(root / dataset, tables)
+    write_root_manifest(root, dataset_manifests={dataset: f"{dataset}/manifest.json" for dataset in datasets})
+    return root
+
+
 @pytest.mark.parametrize("year", [1601, " 1800 "])
 def test_blind_review_hides_corpus_placeholder_years(year: int | str) -> None:
     record = {"item_id": "test", "block_key": "a smith", "paper_a": {"year": year}, "paper_b": {"year": 1801}}
@@ -51,12 +95,14 @@ def test_blind_review_hides_corpus_placeholder_years(year: int | str) -> None:
     assert validate_blind_packet_records([record], packet_type="pair") == []
 
 
-def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_controls(tmp_path: Path) -> None:
+def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_controls(
+    tmp_path: Path, frozen_snapshot: Path
+) -> None:
     items = [
         {
             "source_id": f"src_{i}",
             "block_key": "a_smith",
-            "paper_a": _paper(2 * i, email=True, text_orcid=True),
+            "paper_a": {**_paper(2 * i), "title": "Caller title"},
             "paper_b": _paper(2 * i + 1),
         }
         for i in range(12)
@@ -85,6 +131,7 @@ def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_contr
         control_seed=999,
         control_fraction=0.2,
         max_items_per_shard=5,
+        snapshot=frozen_snapshot,
     )
     assert summary1["total_items"] == 15
     assert summary1["control_items"] == 3
@@ -104,6 +151,7 @@ def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_contr
         assert "author_id" not in raw_text
         assert "cluster_summary" not in raw_text
         assert "a@b.edu" not in raw_text
+        assert "Caller title" not in raw_text
         for line in raw_text.splitlines():
             rec = json.loads(line)
             assert rec["paper_a"]["authors"] == [rec["paper_a"]["author_name"]]
@@ -129,6 +177,7 @@ def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_contr
         control_seed=999,
         control_fraction=0.2,
         max_items_per_shard=5,
+        snapshot=frozen_snapshot,
     )
     key2_data = json.loads(key2.read_text(encoding="utf-8"))
     ctrl_ids_1 = {row["source_id"] for row in key1_data["items"] if row["is_control"]}
@@ -142,7 +191,7 @@ def test_build_blind_pair_packets_strips_leaks_isolates_key_and_stratifies_contr
         build_blind_pair_packets(items=items, output_dir=tmp_path / "bad", answer_key_path=tmp_path / "bad" / "k.json")
 
 
-def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path: Path) -> None:
+def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path: Path, frozen_snapshot: Path) -> None:
     queries = [
         {
             "source_id": f"q_{i}",
@@ -157,7 +206,7 @@ def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path:
     ]
     out = tmp_path / "linker_packets"
     summary = build_blind_linker_packets(
-        queries=queries, output_dir=out, seed=7, max_items_per_shard=4, control_fraction=0
+        queries=queries, output_dir=out, seed=7, max_items_per_shard=4, control_fraction=0, snapshot=frozen_snapshot
     )
     assert summary["shard_count"] == 2
     assert Path(summary["answer_key_path"]).is_file()
@@ -189,7 +238,7 @@ def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path:
     assert any("forbidden key" in v for v in violations)
 
 
-def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_path: Path) -> None:
+def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_path: Path, frozen_snapshot: Path) -> None:
     shared = "0000-0002-1694-233X"
     local = "0000-0001-5000-0007"
     other = "0000-0002-9079-593X"
@@ -219,6 +268,7 @@ def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_pat
         block_roles=roles,
         allowed_roles={"gate_thresh"},
         control_fraction=0.5,
+        snapshot=frozen_snapshot,
     )
     key = json.loads(Path(result["answer_key_path"]).read_text(encoding="utf-8"))
     assert result["excluded_controls"] == 3
@@ -232,7 +282,7 @@ def test_review_controls_require_home_role_and_keep_other_mentions_blind(tmp_pat
         )
 
 
-def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Path) -> None:
+def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Path, frozen_snapshot: Path) -> None:
     def make_item(source_id: str, *, label: int | None = None) -> dict:
         return {
             "source_id": source_id,
@@ -267,6 +317,7 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
             seed=100 + idx,
             control_seed=10,
             max_items_per_shard=3,
+            snapshot=frozen_snapshot,
         )
         answer_key = Path(report["answer_key_path"])
         items = json.loads(answer_key.read_text(encoding="utf-8"))["items"]
@@ -297,7 +348,7 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
     assert agreement["by_task"]["pair"]["giant"]["paired_verdicts"] == 2
 
 
-def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path) -> None:
+def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path, frozen_snapshot: Path) -> None:
     item = {
         "source_id": "real_query",
         "block_key": "a smith",
@@ -311,7 +362,7 @@ def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path) -> None:
     orders = []
     for family, seed in (("sol", 1), ("claude", 5)):
         summary = build_blind_linker_packets(
-            queries=[item], output_dir=tmp_path / family, seed=seed, control_fraction=0
+            queries=[item], output_dir=tmp_path / family, seed=seed, control_fraction=0, snapshot=frozen_snapshot
         )
         key_path = Path(summary["answer_key_path"])
         (record,) = json.loads(key_path.read_text(encoding="utf-8"))["items"]
@@ -440,7 +491,9 @@ def test_packet_controls_reject_truth_that_contradicts_verified_orcids(
 
 
 @pytest.mark.parametrize("use_bands", [False, True])
-def test_packet_control_selection_balances_class_and_score_band(tmp_path: Path, use_bands: bool) -> None:
+def test_packet_control_selection_balances_class_and_score_band(
+    tmp_path: Path, frozen_snapshot: Path, use_bands: bool
+) -> None:
     roles_path = _packet_roles(tmp_path)
     items = [_pair_control(f"natural-{i}", same=True) for i in range(4)]
     controls = [
@@ -468,6 +521,8 @@ def test_packet_control_selection_balances_class_and_score_band(tmp_path: Path, 
                 str(answer_key),
                 "--block-role-assignments",
                 str(roles_path),
+                "--snapshot",
+                str(frozen_snapshot),
                 "--allowed-role",
                 "gate_thresh",
                 "--control-fraction",

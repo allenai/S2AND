@@ -47,7 +47,7 @@ from scripts.common.identity_ledger import (  # noqa: E402
 )
 from scripts.common.linker_seeds import GATE_SEED_DIGESTS  # noqa: E402
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
-from scripts.judging.gate_exemplars import resolve_gate_exemplars  # noqa: E402
+from scripts.judging.gate_exemplars import frozen_packet_papers, resolve_gate_exemplars  # noqa: E402
 
 ORCID_REDACTED_TOKEN = "[ORCID_REDACTED]"
 # Note: signature_id and paper_id are intentionally EXCLUDED from blind payloads (kept only in answer_key)
@@ -538,6 +538,27 @@ def _shard_records(
     return shards
 
 
+def _load_packet_displays(
+    items: Sequence[tuple[bool, Mapping[str, Any]]],
+    *,
+    packet_type: str,
+    snapshot: Path | None,
+    ledger: IdentityLedger | None,
+    max_abstract_chars: int,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    ids: dict[str, set[str]] = defaultdict(set)
+    for _, item in items:
+        if packet_type == "pair":
+            refs = [item["paper_a"], item["paper_b"]]
+        else:
+            refs = [item["query"], *(ex for candidate in item["candidates"] for ex in candidate.get("exemplars", ()))]
+        ids[normalize_block_key(item["block_key"])].update(str(ref["signature_id"]) for ref in refs)
+    if not ids:
+        return {}
+    papers = frozen_packet_papers(ids, snapshot=snapshot, evidence=ledger.evidence if ledger is not None else None)
+    return {key: sanitize_paper_item(paper, max_abstract_chars=max_abstract_chars) for key, paper in papers.items()}
+
+
 def build_blind_pair_packets(
     *,
     items: Sequence[Mapping[str, Any]],
@@ -554,6 +575,7 @@ def build_blind_pair_packets(
     block_roles: BlockRoles | None = None,
     allowed_roles: Collection[str] = (),
     ledger: IdentityLedger | None = None,
+    snapshot: Path | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked, order-randomized blind pair packets plus a separate private answer key.
 
@@ -591,21 +613,25 @@ def build_blind_pair_packets(
         max_items_per_shard=max_items_per_shard,
         order_seed=seed,
     )
+    displays = _load_packet_displays(
+        combined, packet_type="pair", snapshot=snapshot, ledger=ledger, max_abstract_chars=max_abstract_chars
+    )
 
     rng = random.Random(seed)
     blind_records: list[dict[str, Any]] = []
     answer_key: list[dict[str, Any]] = []
     for index, (is_control, raw) in enumerate(combined, start=1):
         item_id = f"pair_{index:05d}"
+        block = normalize_block_key(raw["block_key"])
         swap_sides = rng.random() < 0.5
         raw_a = raw["paper_b"] if swap_sides else raw["paper_a"]
         raw_b = raw["paper_a"] if swap_sides else raw["paper_b"]
         blind_records.append(
             {
                 "item_id": item_id,
-                "block_key": str(raw["block_key"]),
-                "paper_a": sanitize_paper_item(raw_a, max_abstract_chars=max_abstract_chars),
-                "paper_b": sanitize_paper_item(raw_b, max_abstract_chars=max_abstract_chars),
+                "block_key": block,
+                "paper_a": displays[block, str(raw_a["signature_id"])],
+                "paper_b": displays[block, str(raw_b["signature_id"])],
             }
         )
         answer_key.append(
@@ -690,6 +716,7 @@ def build_blind_linker_packets(
     allowed_roles: Collection[str] = (),
     ledger: IdentityLedger | None = None,
     linker_task_manifest: Path | None = None,
+    snapshot: Path | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked blind linker candidate packets with shuffled neutral candidate slots."""
     if not 0.0 <= control_fraction <= 0.5:
@@ -732,12 +759,16 @@ def build_blind_linker_packets(
         max_items_per_shard=max_items_per_shard,
         order_seed=seed,
     )
+    displays = _load_packet_displays(
+        combined, packet_type="linker", snapshot=snapshot, ledger=ledger, max_abstract_chars=max_abstract_chars
+    )
 
     rng = random.Random(seed)
     blind_records: list[dict[str, Any]] = []
     answer_key: list[dict[str, Any]] = []
     for index, (is_control, raw) in enumerate(combined, start=1):
         item_id = f"linker_{index:05d}"
+        block = normalize_block_key(raw["block_key"])
         candidates_in = list(raw["candidates"])
         rng.shuffle(candidates_in)
         blind_candidates: list[dict[str, Any]] = []
@@ -748,17 +779,14 @@ def build_blind_linker_packets(
             blind_candidates.append(
                 {
                     "candidate_slot": slot,
-                    "exemplars": [
-                        sanitize_paper_item(ex, max_abstract_chars=max_abstract_chars)
-                        for ex in cand.get("exemplars", ())
-                    ],
+                    "exemplars": [displays[block, str(ex["signature_id"])] for ex in cand.get("exemplars", ())],
                 }
             )
         blind_records.append(
             {
                 "item_id": item_id,
-                "block_key": str(raw["block_key"]),
-                "query": sanitize_paper_item(raw["query"], max_abstract_chars=max_abstract_chars),
+                "block_key": block,
+                "query": displays[block, str(raw["query"]["signature_id"])],
                 "candidates": blind_candidates,
             }
         )
@@ -1221,6 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--items-json", type=Path, required=True)
     build_p.add_argument("--controls-json", type=Path, default=None)
     build_p.add_argument("--identity-evidence", type=Path)
+    build_p.add_argument("--snapshot", type=Path, help="Frozen Arrow collection when building without a ledger.")
     build_p.add_argument(
         "--linker-task-manifest", type=Path, help="Frozen linker_tasks.json for ledger-backed gate packets."
     )
@@ -1287,6 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
             block_roles=block_roles,
             allowed_roles=args.allowed_role,
             ledger=ledger,
+            snapshot=args.snapshot,
         )
     else:
         report = build_blind_linker_packets(
@@ -1303,6 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
             allowed_roles=args.allowed_role,
             ledger=ledger,
             linker_task_manifest=args.linker_task_manifest,
+            snapshot=args.snapshot,
         )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

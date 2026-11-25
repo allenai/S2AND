@@ -80,12 +80,15 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
     with tarfile.open(bundle, "w:gz") as archive:
         for path in raw.glob("*.arrow"):
             archive.add(path, arcname=path.name)
+    fit = "a lovelace"
+    fit_bundle = request_bundle(tmp_path / "raw", fit, [("1", None), ("2", None), ("3", None)])
     index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     snapshot = tmp_path / "snapshot"
-    allowed = _json(tmp_path / "allowed.json", [paper for paper, _ in papers])
+    allowed = _json(tmp_path / "allowed.json", [paper for paper, _ in papers] + ["1", "2", "3"])
     _run(
         requests_to_datasets,
         bundle,
+        fit_bundle,
         "--output-root",
         snapshot,
         "--name-counts-index",
@@ -97,16 +100,16 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
     )
     gold = _parquet(
         tmp_path / "gold.parquet",
-        cluster_block_key=[block] * 4,
-        corpus_paper_id=[11, 13, 14, 31],
-        position=[0] * 4,
-        orcid=[HOLDOUT, GOLD, HOLDOUT, HOLDOUT],
-        split=["development"] * 4,
-        scored=[True] * 4,
+        cluster_block_key=[block] * 4 + [fit] * 3,
+        corpus_paper_id=[11, 13, 14, 31, 1, 2, 3],
+        position=[0] * 7,
+        orcid=[HOLDOUT, GOLD, HOLDOUT, HOLDOUT, "0000-0001-5000-0007", DEPOSITED, "0000-0001-5000-0007"],
+        split=["development"] * 7,
+        scored=[True] * 7,
     )
     evidence = tmp_path / "evidence" / "manifest.json"
     _run(build_identity_evidence, "--snapshot", snapshot, "--gold-parquet", gold, "--output-dir", evidence.parent)
-    gold_blocks = _parquet(tmp_path / "gold-blocks.parquet", cluster_block_key=[block], split=["development"])
+    gold_blocks = _parquet(tmp_path / "gold-blocks.parquet", cluster_block_key=[block, fit], split=["development"] * 2)
     blocks = tmp_path / "blocks.parquet"
     _run(build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", gold_blocks, "--output", blocks)
     freeze = tmp_path / "freeze"
@@ -119,9 +122,9 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
         "--output-dir",
         freeze,
         "--targets-json",
-        _json(tmp_path / "targets.json", {"gate_thresh": 1}),
+        _json(tmp_path / "targets.json", {"gate_thresh": 1, "gate_fit": 1}),
         "--extra-pins-json",
-        _json(tmp_path / "pins.json", {block: "gate_thresh"}),
+        _json(tmp_path / "pins.json", {block: "gate_thresh", fit: "gate_fit"}),
     )
     roles = load_block_roles(freeze / "assignments.json")
     ledger = ledger_for_roles(evidence, roles)
@@ -240,6 +243,51 @@ def test_gate_query_metadata_follows_frozen_signature(
         "author_name": "g schneider",
         "affiliations": [],
     }
+
+
+def test_mixed_role_packet_resolves_fit_controls_from_frozen_papers(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
+) -> None:
+    gate, ledger, task = gate_packet_inputs
+    natural = {
+        "block_key": gate,
+        "source_id": "gate",
+        "query": {"signature_id": "13-0"},
+        "candidates": [{"candidate_key": "other"}],
+    }
+    controls = [
+        {
+            "block_key": "a lovelace",
+            "source_id": f"fit-{index}",
+            "query": {"signature_id": "3-0" if index % 2 else "2-0", "title": "Caller query"},
+            "candidates": [
+                {
+                    "candidate_key": "fit",
+                    "member_signature_ids": ["1-0"],
+                    "exemplars": [{"signature_id": "1-0", "title": "Caller exemplar"}],
+                }
+            ],
+        }
+        for index in range(10)
+    ]
+    output = tmp_path / "mixed"
+    review_packets.build_blind_linker_packets(
+        queries=[natural],
+        control_queries=controls,
+        block_roles=ledger.roles,
+        ledger=ledger,
+        allowed_roles={"gate_thresh", "gate_fit"},
+        linker_task_manifest=task,
+        output_dir=output,
+    )
+    records = [
+        json.loads(line) for path in (output / "packets").glob("*.jsonl") for line in path.read_text().splitlines()
+    ]
+    fit = [record for record in records if record["block_key"] == "a lovelace"]
+    assert len(fit) == 10
+    for record in fit:
+        assert record["query"]["title"] == "Study"
+        assert record["candidates"][0]["exemplars"][0]["title"] == "Study"
 
 
 def test_score_gate_key_after_unrelated_control_change(

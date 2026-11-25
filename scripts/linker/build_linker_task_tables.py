@@ -245,12 +245,13 @@ def _freeze_block_rows(
                 planner.release()
     frame = pd.DataFrame(rows, columns=pd.Index(_TASK_COLUMNS))
     if role == "gate_thresh" and eligibility is not None:
-        safe_for_judging = {
-            component: eligibility.component_is_safe(component_members)
-            for component, component_members in members.items()
-        }
+        mixed_components = {component for component, ids in identities_by_component.items() if len(ids) > 1}
         frame["label"] = pd.Series(pd.NA, index=frame.index, dtype="Int8")
-        frame["candidate_identity_eligible"] = frame["candidate_component_key"].map(safe_for_judging).astype(bool)
+        frame["candidate_gold_mixed"] = frame["candidate_component_key"].isin(mixed_components)
+        counts["mixed_candidate_components"] = frame.loc[
+            frame["candidate_gold_mixed"], "candidate_component_key"
+        ].nunique()
+        counts["mixed_candidate_rows"] = int(frame["candidate_gold_mixed"].sum())
     return frame, {"rows": len(frame), "requested_queries": len(query_ids), "planned_queries": len(queries), **counts}
 
 

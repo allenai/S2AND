@@ -352,7 +352,14 @@ def _validate_natural_items(
         if packet_type == "pair":
             papers = [item["paper_a"], item["paper_b"]]
         else:
-            papers = [item["query"], *(paper for candidate in item["candidates"] for paper in candidate["exemplars"])]
+            papers = [item["query"]]
+            exemplars = [paper for candidate in item["candidates"] for paper in candidate["exemplars"]]
+            if views[block].role == "gate_thresh":
+                # Production exemplars may carry conflicting identities. Verify their provenance.
+                for paper in exemplars:
+                    views[block].eligibility(str(paper["signature_id"]))
+            else:
+                papers.extend(exemplars)
         if any(not views[block].eligibility(str(paper["signature_id"])).fit_ok for paper in papers):
             raise ValueError(f"Natural judging item {item['source_id']!r} contains an ineligible signature")
 

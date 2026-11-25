@@ -97,7 +97,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "b ross": [(str(i), None) for i in range(201, 206)],
         "d hopper": [("301", None)],
         "e turing": [("401", None)],
-        "g schneider": [(str(i), None) for i in range(500, 533)],
+        "g schneider": [(str(i), gate_a if i == 501 else None) for i in range(500, 533)],
     }
     gold_rows = [
         ("a lovelace", 101, GOLD, "development", True),
@@ -279,10 +279,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert all(
         row["label"] is None and not row["candidate_gold_scored"] and not row["query_gold_scored"] for row in rows
     )
-    genuine = next(row for row in rows if row["candidate_identity_eligible"])
+    genuine = next(row for row in rows if row["candidate_component_key"] == "mixed")
     candidate = genuine["candidate_component_key"]
     query = genuine["query_signature_id"]
-    exemplar = next(sid for sid, component in seed_map.items() if component == candidate)
+    exemplar = "501-0"
+    assert not ledger.for_block(gate).eligibility(exemplar).fit_ok
+    assert seed_map[exemplar] == candidate
     blind_items = _json(
         tmp_path / "blind-items.json",
         [
@@ -332,6 +334,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     scored = _apply_blind_gate_labels(gate_table, report, roles)
     assert scored["label"].sum() == scored["candidate_gold_scored"].sum() == 1
     assert scored["query_gold_scored"].sum() == 0
+    assert scored.loc[scored["label"].eq(1), "candidate_gold_mixed"].all()
     report["gate_thresh_labels"][0]["candidate_component_key"] = "outside-window"
     with pytest.raises(ValueError, match="outside the frozen windows"):
         _apply_blind_gate_labels(gate_table, report, roles)

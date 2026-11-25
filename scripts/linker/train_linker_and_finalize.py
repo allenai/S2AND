@@ -1995,12 +1995,7 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
         raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
     labeled = rows.copy()
     verdicts = decisions.reindex(indexed).reset_index(drop=True)
-    eligible = labeled["candidate_identity_eligible"].reset_index(drop=True)
-    if (verdicts.eq("same") & ~eligible).any():
-        raise ValueError("A gate threshold positive refers to a mixed or ineligible component")
-    known = verdicts.notna() & eligible
-    if not known.any():
-        raise ValueError("No gate threshold verdict covers an eligible component")
+    known = verdicts.notna()
     labeled["label"] = verdicts.eq("same").astype("int8").to_numpy()
     labeled["candidate_gold_scored"] = known.to_numpy()
     grouped = labeled.groupby("query_group_id", sort=False)

@@ -24,7 +24,7 @@ def test_intake_publishes_and_resumes_snapshot(tmp_path: Path) -> None:
     table = table.set_column(
         table.schema.get_field_index("author_affiliations"),
         "author_affiliations",
-        pa.array([["Write to ada@example.org"]] * table.num_rows),
+        pa.array([["Write to ada@example.org or review@डाक.भारत"]] * table.num_rows),
     )
     write_arrow_ipc_table(table, signature_path)
     paper_path = source / "papers.arrow"
@@ -64,7 +64,7 @@ def test_intake_publishes_and_resumes_snapshot(tmp_path: Path) -> None:
     assert not any(root.rglob("unrelated"))
     signatures = pa.ipc.open_file(str(dataset / "signatures.arrow")).read_all()
     assert signatures["author_email"][0].as_py() != "ada@example.org"
-    assert signatures["author_affiliations"][0].as_py() == ["Write to [EMAIL_REDACTED]"]
+    assert signatures["author_affiliations"][0].as_py() == ["Write to [EMAIL_REDACTED] or [EMAIL_REDACTED]"]
     papers = pa.ipc.open_file(str(dataset / "papers.arrow")).read_all()
     assert papers["paper_id"].to_pylist() == ["p0"]
     assert papers["abstract"].to_pylist() == ["Has Abstract"]

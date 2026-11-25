@@ -182,8 +182,12 @@ def test_affiliation_email_followed_by_id(prefix: str, address: str, affiliation
     assert scrub_text_emails(cell) == f"{prefix}{EMAIL_REDACTED_TOKEN}{affiliation_id}"
 
 
-def test_internationalized_domain_is_detected_and_scrubbed(tmp_path: Path) -> None:
-    address = "review@\u4f8b\u5b50.\u4e2d\u56fd"
+@pytest.mark.parametrize(
+    "address",
+    ["review@\u4f8b\u5b50.\u4e2d\u56fd", "review@डाक.भारत", "review@cafe\u0301.cafe\u0301"],
+    ids=["han", "devanagari", "decomposed-latin"],
+)
+def test_internationalized_domain_is_detected_and_scrubbed(tmp_path: Path, address: str) -> None:
     text = f"Contact {address}."
     (tmp_path / "contact.txt").write_text(text, encoding="utf-8")
     assert find_plaintext_emails(text) == [address]

@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import tempfile
+from functools import cache
+from itertools import groupby
 from pathlib import Path
 from typing import Any
+from unicodedata import category
 
 import ijson
 import pyarrow as pa
@@ -26,23 +30,35 @@ _HASHED_EMAIL = re.compile(r"[0-9a-f]{64}@[0-9a-f]{64}|(?:hmac-sha256|sha256):[0
 # Matches ASCII and internationalized emails, fullwidth @, Unicode dashes (DASH_CHARS + \u2015),
 # brace-grouped locals ({a,b}@domain), quoted locals ("a"@domain), and malformed "@." forms.
 _EXTRA_DASHES = re.escape(DASH_CHARS + "\u2015")
-_EMAIL_LOCAL_CHARS = rf"\w.%+{_EXTRA_DASHES}"
-_EMAIL_DOMAIN_LABEL = rf"(?:[^\W_]|[{_EXTRA_DASHES}])+"
 _AT_CHARS = r"[@\uFF20]"
-_PLAINTEXT_EMAIL_RE = re.compile(
-    rf"(?:"
-    rf"\{{[{_EMAIL_LOCAL_CHARS},\s]+\}}"
-    rf"|\"[^\s\"@]+\""
-    rf"|(?<![{_EMAIL_LOCAL_CHARS}])[{_EMAIL_LOCAL_CHARS}]+"
-    rf")"
-    rf"{_AT_CHARS}\.?(?:{_EMAIL_DOMAIN_LABEL}\.)+[^\W\d_]{{2,}}"
-)
 # Avoid flagging chemical nanoparticle formulas like "Fe3O4@SiO2.The" in abstracts.
 _CHEMICAL_FORMULA_PREFIX_RE = re.compile(r"^[A-Z][a-z]?\d+(?:[A-Z][a-z]?\d*)*[@\uFF20](?:[A-Z][a-z]?\d*)+\.")
 _JSON_ESCAPED_AT_RE = re.compile(r"\\u0040|\\uff20", re.IGNORECASE)
 _TEXT_SCAN_SUFFIXES = frozenset({".json", ".jsonl", ".tsv", ".csv", ".txt", ".md", ".yaml", ".yml", ".html"})
 _TEXT_SCAN_CHUNK_CHARS = 2 * 1024 * 1024
 _TEXT_SCAN_OVERLAP_CHARS = 512
+
+
+@cache
+def _plaintext_email_pattern() -> re.Pattern[str]:
+    # Python's re lacks Unicode property escapes. Build letter and mark classes from Unicode categories.
+    ranges: dict[str, list[str]] = {"L": [], "M": []}
+    for kind, characters in groupby(map(chr, range(sys.maxunicode + 1)), lambda char: category(char)[0]):
+        if kind in ranges:
+            run = list(characters)
+            ranges[kind].append(run[0] if len(run) == 1 else f"{run[0]}-{run[-1]}")
+    letters = "".join(ranges["L"])
+    marks = "".join(ranges["M"])
+    local_chars = rf"\w.%+{marks}{_EXTRA_DASHES}"
+    domain_label = rf"(?:[^\W_]|[{marks}{_EXTRA_DASHES}])+"
+    return re.compile(
+        rf"(?:"
+        rf"\{{[{local_chars},\s]+\}}"
+        rf"|\"[^\s\"@]+\""
+        rf"|(?<![{local_chars}])[{local_chars}]+"
+        rf")"
+        rf"{_AT_CHARS}\.?(?:{domain_label}\.)+(?:[{letters}][{marks}]*){{2,}}"
+    )
 
 
 def hash_feature_email(value: str | None) -> str | None:
@@ -73,23 +89,25 @@ def _is_real_plaintext_email(token: str) -> bool:
 def scrub_text_emails(value: str | None, *, replacement: str = EMAIL_REDACTED_TOKEN) -> str | None:
     """Replace plaintext email mentions in free text without touching existing hashes.
 
-    Handles standard ASCII addresses, internationalized local/domain names, fullwidth
+    Handles ASCII and Unicode addresses with letters and combining marks, fullwidth
     ``＠``, Unicode hyphens, brace-grouped lists (``{a,b}@uni.edu``), quoted locals,
     and malformed ``user@.domain.tld`` variants.
     """
-    if not value:
+    if not value or ("@" not in value and "\uff20" not in value):
         return value
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(0)
         return replacement if _is_real_plaintext_email(token) else token
 
-    return _PLAINTEXT_EMAIL_RE.sub(_replace, value)
+    return _plaintext_email_pattern().sub(_replace, value)
 
 
 def _find_plaintext_emails_with_offsets(text: str) -> list[tuple[int, int, str]]:
     found: list[tuple[int, int, str]] = []
-    for match in _PLAINTEXT_EMAIL_RE.finditer(text):
+    if "@" not in text and "\uff20" not in text:
+        return found
+    for match in _plaintext_email_pattern().finditer(text):
         token = match.group(0)
         if _is_real_plaintext_email(token):
             found.append((match.start(), match.end(), token))

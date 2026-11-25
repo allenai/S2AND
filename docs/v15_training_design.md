@@ -66,7 +66,8 @@ uv run --offline --no-sync python -m scripts.intake.requests_to_datasets request
 Supply a directory or explicit list of full bundles. The builder checks their names against
 `author_block`, removes papers outside the S2AG allowlist, preserves abstract presence with
 `Has Abstract`, and hashes or scrubs emails before writing indexes. It scans retained and new
-datasets for plaintext emails. Re-run with the same index and allowlists that contain the prior
+datasets for plaintext emails. Scrubbing and scanning cover Unicode domains with combining marks.
+Re-run with the same index and allowlists that contain the prior
 permissions to append new blocks. Each block retains the permission digests it had at intake.
 Papers absent from the supplied lists stay restricted. A failed append preserves prior permissions.
 Free-text scrubbing covers addresses followed immediately by long runs of letters.

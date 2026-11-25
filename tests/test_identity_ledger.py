@@ -398,14 +398,18 @@ def test_v14_inventory_includes_null_orcid_candidate_members(tmp_path: Path) -> 
     from scripts.intake.build_v14_training_inventory import build_training_inventory
     from scripts.intake.requests_to_datasets import convert_requests
 
-    export = request_bundle(tmp_path / "raw", "h wang", [("10", GOLD), ("20", None), ("30", None), ("40", None)])
+    export = request_bundle(
+        tmp_path / "raw",
+        "h wang",
+        [("10", GOLD), ("20", None), ("30", None), ("40", None), ("50", None), ("193154881", None)],
+    )
     index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     root = tmp_path / "linker"
     convert_requests(
         [export],
         root,
         Path(index),
-        allowed_papers=frozenset({"10", "20", "30", "40"}),
+        allowed_papers=frozenset({"10", "20", "30", "40", "50", "193154881"}),
         abstract_allowed_papers=frozenset(),
     )
     train = root / "train.parquet"
@@ -414,16 +418,54 @@ def test_v14_inventory_includes_null_orcid_candidate_members(tmp_path: Path) -> 
     )
     members = root / "members.parquet"
     pq.write_table(
-        pa.table({"candidate_component_key": ["used", "used", "unused"], "signature_id": ["20-0", "30-0", "40-0"]}),
+        pa.table(
+            {
+                "candidate_component_key": ["used", "used", "unused", "cal", "classic"],
+                "signature_id": ["20-0", "30-0", "40-0", "193154881-0", "50-0"],
+            }
+        ),
         members,
+    )
+    tables = {"train_path": train.name}
+    for key, components, groups in (
+        ("classic_gate_source_path", ["classic"], ["classic-query"]),
+        ("hwang_eval_path", ["cal", "unused"], ["cal-query", "test-query"]),
+        ("s2and_eval_path", ["unused"], ["bench-query"]),
+    ):
+        tables[key] = f"{key}.parquet"
+        pq.write_table(
+            pa.table(
+                {
+                    "dataset": ["h_wang"] * len(components),
+                    "query_signature_id": ["10-0"] * len(components),
+                    "query_group_id": groups,
+                    "candidate_component_key": components,
+                }
+            ),
+            root / tables[key],
+        )
+    (root / "splits.csv").write_text(
+        "query_group_id,base_group_id,source_key,split\n"
+        "cal-query,cal,hwang_eval,calibration_check\n"
+        "test-query,test,hwang_eval,test\n",
+        encoding="utf-8",
     )
     (root / "bundle.json").write_text(
         json.dumps(
             {
+                "bundle_name": "fixture",
+                "expected_metrics": {},
+                "models": {
+                    "classic": {
+                        **tables,
+                        "stratified_eval_test_split": {"assignments_path": "splits.csv"},
+                        "promoted_stratified_gate": {"calibration_splits": ["calibration_fit", "calibration_check"]},
+                    }
+                },
                 "assets": {
-                    "featureless_rows": {"files": {"train_path": train.name}},
+                    "featureless_rows": {"files": tables},
                     "candidate_members": {"datasets": {"h_wang": members.name}},
-                }
+                },
             }
         )
     )
@@ -435,4 +477,4 @@ def test_v14_inventory_includes_null_orcid_candidate_members(tmp_path: Path) -> 
     output = tmp_path / "inventory.parquet"
     build_training_inventory(gold, [], output, linker_sources=[root])
     observed = {row["signature_id"]: row["orcid"] for row in pq.read_table(output).to_pylist()}
-    assert observed == {"10-0": GOLD, "20-0": None, "30-0": None, "99-0": DEPOSITED}
+    assert observed == {"10-0": GOLD, "20-0": None, "30-0": None, "50-0": None, "193154881-0": None, "99-0": DEPOSITED}

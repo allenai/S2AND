@@ -14,11 +14,13 @@ import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from s2and.arrow_inputs import ArrowDataset
+from s2and.incremental_linking_training.source_bundle import load_bundle
 from scripts.common.arrow_roots import generic_dataset_manifests, read_json_object
 from scripts.common.block_roles import normalize_block_key
 from scripts.common.initial_query_sources import load_initial_query_sources
 from scripts.intake.check_v14_training_overlap import canonical_id, checked_orcid, paper_position
 from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
+from scripts.linker.train_linker_and_finalize import _release_table_plan
 
 V14_LINKER_GIANTS = ("a khan", "h wang", "j smith", "s feldman", "s gupta", "s lee", "s park")
 _SCHEMA = pa.schema(
@@ -59,10 +61,17 @@ def _source_batches(path: Path, *, gold_giants: bool) -> Iterator[pa.RecordBatch
 
 
 def _training_linker_mentions(root: Path) -> Iterator[tuple[pa.RecordBatch, int, int]]:
-    """Resolve actual train queries and full candidate components to corpus positions."""
+    """Resolve training and gate calibration queries and full candidate components to corpus positions."""
     bundle = read_json_object(root / "bundle.json")
     assets = bundle["assets"]
-    training = root / assets["featureless_rows"]["files"]["train_path"]
+    tables = assets["featureless_rows"]["files"]
+    training_keys = ["train_path"]
+    if "classic_gate_source_path" in tables:
+        training_keys.append("classic_gate_source_path")
+    query_ids: dict[str, set[str]] = {}
+    if "stratified_eval_test_split" in bundle.get("models", {}).get("classic", {}):
+        planned_keys, query_ids, _ = _release_table_plan(load_bundle(root))
+        training_keys = list(planned_keys)
     member_paths = assets["candidate_members"]["datasets"]
     datasets = generic_dataset_manifests(root)
     corpus_datasets = {name for name in datasets if normalize_block_key(name) in V14_LINKER_GIANTS}
@@ -70,13 +79,17 @@ def _training_linker_mentions(root: Path) -> Iterator[tuple[pa.RecordBatch, int,
     queries: dict[str, set[str]] = defaultdict(set)
     components: dict[str, set[str]] = defaultdict(set)
     fields = ["dataset", "query_signature_id", "candidate_component_key"]
-    source = ds.dataset(training, format="parquet")
-    for batch in source.to_batches(columns=fields, filter=ds.field("dataset").isin(sorted(corpus_datasets))):
-        for row in batch.to_pylist():
-            name = row["dataset"]
-            sid = row["query_signature_id"]
-            queries[name].add(origins.get(name, {}).get(sid, sid))
-            components[name].add(row["candidate_component_key"])
+    for key in training_keys:
+        source = ds.dataset(root / tables[key], format="parquet")
+        predicate = ds.field("dataset").isin(sorted(corpus_datasets))
+        if key in query_ids:
+            predicate &= ds.field("query_group_id").isin(sorted(query_ids[key]))
+        for batch in source.to_batches(columns=fields, filter=predicate):
+            for row in batch.to_pylist():
+                name = row["dataset"]
+                sid = row["query_signature_id"]
+                queries[name].add(origins.get(name, {}).get(sid, sid))
+                components[name].add(row["candidate_component_key"])
     for name in sorted(queries):
         directory = datasets[name].parent
         members_path = root / member_paths[name]

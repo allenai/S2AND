@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import tempfile
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -184,12 +185,21 @@ def _hash_arrow(path: Path, *, scrub_free_text: bool = False) -> int:
 
 
 def _scrub_papers_arrow(path: Path) -> int:
+    return _scrub_arrow_text_columns(path, ("title", "abstract"))
+
+
+def _scrub_paper_authors_arrow(path: Path) -> int:
+    # Production author lists occasionally carry an email as the author name.
+    return _scrub_arrow_text_columns(path, ("author_name",))
+
+
+def _scrub_arrow_text_columns(path: Path, column_names: tuple[str, ...]) -> int:
     temporary = _atomic_temp_path(path)
     changed = 0
     try:
         with pa.memory_map(str(path), "r") as source:
             reader = pa.ipc.open_file(source)
-            text_columns = [idx for name in ("title", "abstract") if (idx := reader.schema.get_field_index(name)) >= 0]
+            text_columns = [idx for name in column_names if (idx := reader.schema.get_field_index(name)) >= 0]
             if not text_columns:
                 temporary.unlink(missing_ok=True)
                 return 0
@@ -277,6 +287,11 @@ def _scrub_papers_json(path: Path) -> int:
                             if after != before:
                                 changed += 1
                                 record[field] = after
+                    for author in record.get("authors") or ():
+                        name = author.get("author_name") if isinstance(author, dict) else None
+                        if isinstance(name, str) and (cleaned := scrub_text_emails(name)) != name:
+                            changed += 1
+                            author["author_name"] = cleaned
                 if not first:
                     output.write(",")
                 first = False
@@ -292,7 +307,10 @@ def _scrub_papers_json(path: Path) -> int:
     return changed
 
 
-def _refresh_arrow_dataset_manifest(directory: Path, *, signatures_changed: bool, papers_changed: bool) -> bool:
+_TABLE_INDEX_KEYS = {"signatures": "signature_id", "papers": "paper_id", "paper_authors": "paper_id"}
+
+
+def _refresh_arrow_dataset_manifest(directory: Path, changed_tables: Collection[str]) -> bool:
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
         return False
@@ -300,31 +318,19 @@ def _refresh_arrow_dataset_manifest(directory: Path, *, signatures_changed: bool
     paths = manifest.get("paths", {})
     files = manifest.setdefault("files", {})
     updated = False
-    if signatures_changed and "signatures" in paths:
-        sig_path = directory / paths["signatures"]
-        if "signatures_batch_index" in paths:
-            index_path = directory / paths["signatures_batch_index"]
+    for table in changed_tables:
+        if table not in paths:
+            continue
+        table_path = directory / paths[table]
+        index_name = f"{table}_batch_index"
+        if index_name in paths:
+            # A rewritten table invalidates its lookup index, so rebuild it with the table.
+            index_path = directory / paths[index_name]
             write_arrow_batch_lookup_index(
-                sig_path, index_path, key_column="signature_id", table_name="signatures", overwrite=True
+                table_path, index_path, key_column=_TABLE_INDEX_KEYS[table], table_name=table, overwrite=True
             )
-            files["signatures_batch_index"] = {
-                "byte_count": index_path.stat().st_size,
-                "sha256": sha256_file(index_path),
-            }
-        files["signatures"] = {"byte_count": sig_path.stat().st_size, "sha256": sha256_file(sig_path)}
-        updated = True
-    if papers_changed and "papers" in paths:
-        papers_path = directory / paths["papers"]
-        if "papers_batch_index" in paths:
-            index_path = directory / paths["papers_batch_index"]
-            write_arrow_batch_lookup_index(
-                papers_path, index_path, key_column="paper_id", table_name="papers", overwrite=True
-            )
-            files["papers_batch_index"] = {
-                "byte_count": index_path.stat().st_size,
-                "sha256": sha256_file(index_path),
-            }
-        files["papers"] = {"byte_count": papers_path.stat().st_size, "sha256": sha256_file(papers_path)}
+            files[index_name] = {"byte_count": index_path.stat().st_size, "sha256": sha256_file(index_path)}
+        files[table] = {"byte_count": table_path.stat().st_size, "sha256": sha256_file(table_path)}
         updated = True
     if updated:
         _write_json(manifest_path, manifest)
@@ -378,8 +384,8 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
 
     Hashes structured ``email`` / ``emails`` / ``author_email`` fields while preserving
     normalized pairwise equality, and optionally scrubs plaintext email mentions from
-    ``affiliations``, ``title``, and ``abstract``. Refreshes any sibling Arrow manifests
-    and batch lookup indexes (both ``signatures_batch_index`` and ``papers_batch_index``).
+    ``affiliations``, ``title``, ``abstract`` and author names. Refreshes any sibling Arrow
+    manifests and the batch lookup index of each rewritten table.
     """
     source_root = source_root.resolve()
     counts = {
@@ -387,8 +393,9 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
         "paper_json_fields": 0,
         "signature_arrow_values": 0,
         "paper_arrow_values": 0,
+        "paper_author_arrow_values": 0,
     }
-    arrow_dirs: dict[Path, list[bool]] = {}
+    arrow_dirs: dict[Path, set[str]] = {}
     for path in sorted(source_root.rglob("*")):
         if not path.is_file():
             continue
@@ -401,16 +408,19 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
             changed = _hash_arrow(path, scrub_free_text=scrub_free_text)
             counts["signature_arrow_values"] += changed
             if changed:
-                flags = arrow_dirs.setdefault(path.parent, [False, False])
-                flags[0] = True
+                arrow_dirs.setdefault(path.parent, set()).add("signatures")
         elif scrub_free_text and name == "papers.arrow":
             changed = _scrub_papers_arrow(path)
             counts["paper_arrow_values"] += changed
             if changed:
-                flags = arrow_dirs.setdefault(path.parent, [False, False])
-                flags[1] = True
-    for directory, (sig_changed, papers_changed) in sorted(arrow_dirs.items()):
-        _refresh_arrow_dataset_manifest(directory, signatures_changed=sig_changed, papers_changed=papers_changed)
+                arrow_dirs.setdefault(path.parent, set()).add("papers")
+        elif scrub_free_text and name == "paper_authors.arrow":
+            changed = _scrub_paper_authors_arrow(path)
+            counts["paper_author_arrow_values"] += changed
+            if changed:
+                arrow_dirs.setdefault(path.parent, set()).add("paper_authors")
+    for directory, tables in sorted(arrow_dirs.items()):
+        _refresh_arrow_dataset_manifest(directory, sorted(tables))
     return counts
 
 
@@ -568,7 +578,7 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
     Args:
         output_root: Staged root containing the dataset and source bundles.
         scrub_free_text: When True, also scrub plaintext emails from free-text
-            ``affiliations``, ``title``, and ``abstract`` fields.
+            ``affiliations``, ``title``, ``abstract`` and author-name fields.
 
     Returns:
         Changed Arrow values and source fields for each discovered dataset.
@@ -587,7 +597,11 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
         sig_changed = _hash_arrow(directory / "signatures.arrow", scrub_free_text=scrub_free_text)
         papers_arrow = directory / "papers.arrow"
         papers_changed = _scrub_papers_arrow(papers_arrow) if scrub_free_text and papers_arrow.is_file() else 0
-        changed = sig_changed + papers_changed
+        authors_arrow = directory / "paper_authors.arrow"
+        authors_changed = (
+            _scrub_paper_authors_arrow(authors_arrow) if scrub_free_text and authors_arrow.is_file() else 0
+        )
+        changed = sig_changed + papers_changed + authors_changed
 
         source_dir = source_root / "corrected_replay" / "raw" / name
         source = source_dir / "signatures.json"
@@ -603,9 +617,9 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
         report[name] = {"arrow_values": changed, "source_fields": source_changed}
         if not changed:
             continue
-        _refresh_arrow_dataset_manifest(
-            directory, signatures_changed=bool(sig_changed), papers_changed=bool(papers_changed)
-        )
+        table_counts = {"signatures": sig_changed, "papers": papers_changed, "paper_authors": authors_changed}
+        changed_tables = [table for table, count in table_counts.items() if count]
+        _refresh_arrow_dataset_manifest(directory, changed_tables)
         if replay_path.is_file():
             if replay is None:
                 replay = json.loads(replay_path.read_text(encoding="utf-8"))

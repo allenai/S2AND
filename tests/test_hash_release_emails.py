@@ -218,6 +218,50 @@ def test_affiliation_email_followed_by_a_long_run_of_letters() -> None:
     assert scrub_text_emails(address_and_text) == EMAIL_REDACTED_TOKEN
 
 
+def test_redact_source_tree_scrubs_author_names_and_rebuilds_their_index(tmp_path: Path) -> None:
+    # Production author lists can hold an email as the author name; intake must scrub it.
+    dataset_dir = tmp_path / "snapshot" / "datasets" / "a_dutta"
+    dataset_dir.mkdir(parents=True)
+    authors = pa.table(
+        {
+            "paper_id": ["p1", "p1", "p2"],
+            "position": [0, 1, 0],
+            "author_name": ["A Dutta", "contact.me@example.org", "B Roy"],
+        }
+    )
+    authors_path = dataset_dir / "paper_authors.arrow"
+    with pa.OSFile(str(authors_path), "wb") as sink, pa.ipc.new_file(sink, authors.schema) as writer:
+        writer.write_table(authors)
+    authors_idx = dataset_dir / "paper_authors.paper_authors_batch_index.bin"
+    write_arrow_batch_lookup_index(authors_path, authors_idx, key_column="paper_id", table_name="paper_authors")
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps(
+            {"paths": {"paper_authors": authors_path.name, "paper_authors_batch_index": authors_idx.name}, "files": {}}
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "snapshot" / "block_papers.json").write_text(
+        json.dumps({"p1": {"title": "T", "authors": [{"position": 0, "author_name": "x.y@example.org"}]}}),
+        encoding="utf-8",
+    )
+    assert len(scan_tree_for_plaintext_emails(tmp_path)) == 2
+
+    counts = redact_source_tree(tmp_path / "snapshot")
+
+    assert counts["paper_author_arrow_values"] == 1
+    assert counts["paper_json_fields"] == 1
+    assert scan_tree_for_plaintext_emails(tmp_path) == []
+    names = pa.ipc.open_file(pa.memory_map(str(authors_path))).read_all()["author_name"].to_pylist()
+    assert names == ["A Dutta", EMAIL_REDACTED_TOKEN, "B Roy"]
+    _, metrics = write_arrow_batch_lookup_index(
+        authors_path, authors_idx, key_column="paper_id", table_name="paper_authors", overwrite=False
+    )
+    assert metrics["reused"]
+    files = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))["files"]
+    assert files["paper_authors"]["sha256"] == sha256_file(authors_path)
+    assert files["paper_authors_batch_index"]["sha256"] == sha256_file(authors_idx)
+
+
 def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_path: Path) -> None:
     # Non-hardcoded dataset name (not in legacy 7-giant list) is discovered and redacted,
     # including rebuilding papers_batch_index and refreshing source inventory!

@@ -290,7 +290,7 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     assert roles.scores("a lovelace", DEPOSITED)
     assert "orcid_home_role" not in frozen
     assert frozen["verification"]["cross_role_mentions_by_role"]["pairwise_train"] == 2
-    with pytest.raises(ValueError, match="new exported blocks"):
+    with pytest.raises(ValueError, match="new or previously unassigned exported blocks"):
         freeze_identity_roles(
             blocks,
             evidence / "manifest.json",

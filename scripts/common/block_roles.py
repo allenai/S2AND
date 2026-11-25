@@ -23,6 +23,17 @@ def normalize_block_key(value: str | None) -> str:
     return _WHITESPACE_OR_UNDERSCORE.sub(" ", value.strip().lower()) if value else ""
 
 
+def assigned_identity_roles(
+    block_orcids: Mapping[str, Collection[str]], block_to_role: Mapping[str, str]
+) -> dict[str, frozenset[str]]:
+    """Index identities by the frozen roles of their assigned blocks."""
+    roles_by_orcid: dict[str, set[str]] = defaultdict(set)
+    for block, role in block_to_role.items():
+        for orcid in block_orcids[block]:
+            roles_by_orcid[orcid].add(role)
+    return {orcid: frozenset(roles) for orcid, roles in roles_by_orcid.items()}
+
+
 @dataclass(frozen=True)
 class BlockRoles:
     """Frozen block assignments and the roles holding each identity."""
@@ -89,6 +100,8 @@ def load_block_roles(path: Path) -> BlockRoles:
         raise ValueError(f"Block role manifest {path} is missing roles")
     by_block: dict[str, str] = {}
     for role, blocks in roles.items():
+        if role == "unassigned":
+            raise ValueError(f"Unassigned blocks cannot have a role in {path}")
         if not isinstance(blocks, list):
             raise ValueError(f"Expected a list of blocks for role {role!r} in {path}")
         for block in blocks:
@@ -111,15 +124,12 @@ def load_block_roles(path: Path) -> BlockRoles:
     if not isinstance(raw_orcids, dict) or set(raw_orcids) != expected or by_block.keys() - raw_orcids.keys():
         raise ValueError(f"Expected identity coverage for every frozen block in {path}")
     block_orcids: dict[str, frozenset[str]] = {}
-    roles_by_orcid: dict[str, set[str]] = defaultdict(set)
     for block, orcids in raw_orcids.items():
         if not isinstance(orcids, list) or any(
             not isinstance(orcid, str) or not orcid or normalize_orcid(orcid) != orcid for orcid in orcids
         ):
             raise ValueError(f"Invalid frozen ORCID list for {block!r} in {path}")
         block_orcids[block] = frozenset(str(orcid) for orcid in orcids)
-        for orcid in orcids:
-            roles_by_orcid[orcid].add(by_block.get(block, "unassigned"))
     digests = {key: payload.get(key) for key in ("identity_evidence_sha256", "snapshot_sha256")} if bound else {}
     if bound and not all(is_lowercase_sha256(value) for value in digests.values()):
         raise ValueError(f"Invalid identity evidence or snapshot digest in {path}")
@@ -134,7 +144,7 @@ def load_block_roles(path: Path) -> BlockRoles:
         by_block,
         sha256_file(path),
         block_orcids,
-        {orcid: frozenset(roles) for orcid, roles in roles_by_orcid.items()},
+        assigned_identity_roles(block_orcids, by_block),
         digests.get("identity_evidence_sha256"),
         digests.get("snapshot_sha256"),
         source_splits,

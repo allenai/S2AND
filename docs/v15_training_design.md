@@ -108,15 +108,16 @@ uv run --offline --no-sync python -m scripts.intake.assign_block_roles \
 
 Use an aggregate `final_test` target or distinct half targets. The allocator reserves feasible
 two-half strata first. Inspect its printed target and stratum shortfalls, cross-role identity counts,
-and cross-role mention counts. Supply only new exported blocks to `--extra-pins-json` on a re-freeze.
+and cross-role mention counts. Supply new or previously unassigned blocks to `--extra-pins-json`
+on a re-freeze. Raising role targets can also assign previously unassigned blocks.
 For an append, build a new freeze input from the expanded evidence manifest and pass the previous
 `assignments.json` with `--pinned-roles-json`. Keep all prior partitions, roles, and exclusions.
 Use `--overwrite` if writing into the existing freeze directory. Use `--fresh` only to deliberately
 start a new freeze on an already bound snapshot or ledger. Tasks, judging keys, and gate judgments
 remain valid for blocks with the same evidence and eligibility after a re-freeze.
 The freeze records the ORCID exclusion policy digest. Rebuild evidence and freeze again after it changes.
-An identity with evidence outside its role is ineligible for scoring and sampling. Unassigned
-evidence can also make an identity ineligible. Evaluation clustering keeps these mentions as context.
+An identity with evidence in another assigned role is ineligible for scoring and sampling. Adding
+unassigned blocks preserves existing bindings. Evaluation clustering keeps ineligible mentions as context.
 
 ### 7. Check sealed overlap with 1.4 training
 

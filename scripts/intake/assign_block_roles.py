@@ -33,6 +33,7 @@ from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     FINAL_TEST_ROLES,
+    assigned_identity_roles,
     load_block_roles,
     normalize_block_key,
 )
@@ -762,11 +763,11 @@ def freeze_identity_roles(
     extra = {normalize_block_key(block): role for block, role in (extra_pins or {}).items()}
     if len(extra) != len(extra_pins or {}):
         raise ValueError("Duplicate normalized keys in --extra-pins-json")
-    if prior is not None and extra.keys() & prior["evidence_blocks"].keys():
-        raise ValueError("Extra pins may only name new exported blocks")
+    if prior is not None and extra.keys() & (prior["evidence_blocks"].keys() - prior_unassigned):
+        raise ValueError("Extra pins may only name new or previously unassigned exported blocks")
     pins.update(extra)
     roles = assign_block_roles(
-        [block for block in blocks if block.block_key not in prior_unassigned],
+        blocks,
         targets,
         seed=seed,
         extra_dev_test_blocks=dev_test_blocks,
@@ -776,12 +777,9 @@ def freeze_identity_roles(
         enforce_source_splits=True,
         require_pinned_present=True,
     )
-    roles["unassigned"] = sorted(set(roles["unassigned"]) | prior_unassigned)
     mapping = roles["block_to_role"]
-    identity_roles: dict[str, set[str]] = defaultdict(set)
-    for block in blocks:
-        for orcid in block.orcids:
-            identity_roles[orcid].add(mapping.get(block.block_key, "unassigned"))
+    block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
+    identity_roles = assigned_identity_roles(block_orcids, mapping)
     cross_role = {orcid for orcid, assigned in identity_roles.items() if len(assigned) > 1}
     identities_by_role: dict[str, set[str]] = defaultdict(set)
     mentions_by_role: Counter[str] = Counter()
@@ -795,7 +793,9 @@ def freeze_identity_roles(
             or len(evidence_rows) != block.signature_count
         ):
             raise ValueError(f"Freeze input differs from the exported identity evidence for {key!r}")
-        role = mapping.get(key, "unassigned")
+        if key not in mapping:
+            continue
+        role = mapping[key]
         identities_by_role[role].update(cross_role & counts.keys())
         if cross_role & counts.keys():
             mentions_by_role[role] += len(
@@ -810,11 +810,9 @@ def freeze_identity_roles(
     roles["verification"].pop("closure_mode")
     roles["verification"]["raw_cross_role_orcid_overlap"] = len(cross_role)
     roles["verification"]["cross_role_identities_by_role"] = {
-        role: len(identities_by_role[role]) for role in (*VALID_ROLES, "unassigned")
+        role: len(identities_by_role[role]) for role in VALID_ROLES
     }
-    roles["verification"]["cross_role_mentions_by_role"] = {
-        role: mentions_by_role[role] for role in (*VALID_ROLES, "unassigned")
-    }
+    roles["verification"]["cross_role_mentions_by_role"] = {role: mentions_by_role[role] for role in VALID_ROLES}
     return {
         **roles,
         "format_version": 2,
@@ -823,7 +821,7 @@ def freeze_identity_roles(
         "snapshot_sha256": evidence.snapshot_sha256,
         "intake_sha256": evidence.intake_sha256,
         "evidence_blocks": evidence_blocks,
-        "block_orcids": {block.block_key: sorted(block.orcids) for block in blocks},
+        "block_orcids": block_orcids,
         "block_source_splits": {block.block_key: block.source_split for block in blocks},
     }
 
@@ -847,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Prior assignments.json to preserve on a re-freeze.",
     )
-    parser.add_argument("--extra-pins-json", type=Path, help="New block-role pins, for a first freeze or re-freeze.")
+    parser.add_argument("--extra-pins-json", type=Path, help="Pin new or previously unassigned blocks to roles.")
     parser.add_argument("--dev-test-blocks", nargs="*", default=())
     parser.add_argument("--exclude-blocks", nargs="*", default=())
     parser.add_argument("--fresh", action="store_true", help="Start a new freeze lineage for this intake.")

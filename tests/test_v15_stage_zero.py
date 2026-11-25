@@ -113,7 +113,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         ("g schneider", 501, gate_b, "development", True),
         ("g schneider", 532, gate_a, "development", True),
         ("f aba", 601, "0000-0002-7589-9587", "development", False),
-        ("z last", 701, "0000-0002-7589-9587", "holdout", False),
+        ("z last", 701, other_orcid, "holdout", False),
         ("h wang", 801, other_orcid, "development", True),
     ]
     # Give the inventory its own identity, disjoint from sealed gold.
@@ -590,11 +590,15 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     appended_path = tmp_path / "appended-freeze" / "assignments.json"
     newer_roles = load_block_roles(appended_path)
     assert newer_roles.block_to_role == roles.block_to_role
+    assert newer_roles.bindings_for({"d hopper", "e turing"}) == roles.bindings_for({"d hopper", "e turing"})
+    assert newer_roles.identity_roles[other_orcid] == {"final_test_b"}
+    with pytest.raises(ValueError, match="absent from the frozen role assignments"):
+        newer_roles.bindings_for({"z last"})
     assert {path: sha256_file(path) for path in filenames} == old_files
     task_manifest = json.loads((tasks / build_linker_task_tables.TASK_MANIFEST).read_text())
     _validate_frozen_task_bindings(task_manifest, newer_roles)
     foreign_roles = replace(
-        newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "unassigned"})}
+        newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test_b"})}
     )
     with pytest.raises(ValueError, match="block provenance"):
         _validate_frozen_task_bindings(task_manifest, foreign_roles)
@@ -614,3 +618,29 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         newer_judged,
     )
     assert newer_judged.read_bytes() == judged_path.read_bytes()
+    raised_targets = _json(
+        tmp_path / "raised-targets.json",
+        {"pairwise_train": 1, "pairwise_val": 1, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
+    )
+    new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test_b"})
+    raised = tmp_path / "raised-freeze"
+    _run(
+        assign_block_roles,
+        "--blocks",
+        readded_blocks,
+        "--identity-evidence",
+        evidence,
+        "--targets-json",
+        raised_targets,
+        "--pinned-roles-json",
+        appended_path,
+        "--extra-pins-json",
+        new_pins,
+        "--output-dir",
+        raised,
+    )
+    assert load_block_roles(raised / "assignments.json").block_to_role == {
+        **roles.block_to_role,
+        "f aba": "pairwise_val",
+        "z last": "final_test_b",
+    }

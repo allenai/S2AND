@@ -20,7 +20,7 @@ from s2and.arrow_tables import write_cluster_seeds_arrow, write_name_counts_inde
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from s2and.production_model import load_production_model
-from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles, load_identity_evidence
 from scripts.eps import apply_reviewed_eps, orcid_b3, sweep_eps_on_linking_gold
 from scripts.intake import (
@@ -148,6 +148,7 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
         {
             "tables": {"gate_thresh": {"blocks": {block: spec}}},
             BLOCK_BINDINGS_FIELD: roles.bindings_for({block}),
+            ROLE_SHA256_FIELD: roles.sha256,
         },
     )
     return block, ledger, task
@@ -515,6 +516,8 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         ("a lovelace", 101, GOLD, "development", True),
         ("a lovelace", 103, GOLD, "development", True),
         ("a lovelace", 104, unscored, "development", False),
+        ("a lovelace", 106, unscored, "development", True),
+        ("a lovelace", 107, unscored, "development", True),
         ("b ross", 201, eps_orcid, "development", True),
         ("b ross", 202, eps_orcid, "development", True),
         ("b ross", 203, eps_orcid, "development", False),
@@ -551,10 +554,10 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     abstract_permissions = _json(tmp_path / "abstracts.json", [])
     reviewed = _json(tmp_path / "errors.json", {"a lovelace": ["105-0"]})
     snapshot = tmp_path / "snapshot"
-    targets = _json(tmp_path / "targets.json", {"pairwise_train": 1, "eps_cal": 1, "final_test": 2})
+    targets = _json(tmp_path / "targets.json", {"fit_pool": 1, "eps_cal": 1, "final_test": 2})
     pins = _json(
         tmp_path / "pins.json",
-        {"a lovelace": "pairwise_train", "b ross": "eps_cal", "d hopper": "final_test_a", "e turing": "final_test_b"},
+        {"a lovelace": "fit_pool", "b ross": "eps_cal", "d hopper": "final_test_a", "e turing": "final_test_b"},
     )
     gate = "g schneider"
     raw_gate = exports[gate].parent / "g_schneider"
@@ -632,6 +635,35 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     old_roles, roles = load_block_roles(prior), load_block_roles(role_path)
     assert roles.block_to_role == {**old_roles.block_to_role, gate: "gate_thresh"}
+    fresh_dir = tmp_path / "fresh"
+    with pytest.raises(ValueError, match="requires the master assignment"):
+        _run(
+            assign_block_roles,
+            "--fresh",
+            "--blocks",
+            tmp_path / "next-blocks.parquet",
+            "--identity-evidence",
+            evidence,
+            "--output-dir",
+            fresh_dir,
+        )
+    _run(
+        assign_block_roles,
+        "--fresh",
+        "--blocks",
+        tmp_path / "next-blocks.parquet",
+        "--identity-evidence",
+        evidence,
+        "--output-dir",
+        fresh_dir,
+        "--pinned-roles-json",
+        role_path,
+    )
+    assert sha256_file(fresh_dir / "assignments.json") == roles.sha256
+    altered = tmp_path / "altered.json"
+    altered.write_bytes(role_path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="recorded master block role assignment"):
+        ledger_for_roles(evidence, load_block_roles(altered))
     binding = ["--identity-evidence", evidence, "--block-role-assignments", role_path]
     ledger = ledger_for_roles(evidence, roles)
     assert ledger is not None
@@ -671,8 +703,20 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "2026-10-20",
         "--requests-per-block",
         "2",
+        "--queries-per-block",
+        "1",
     )
     built = json.loads((inputs / "inputs.json").read_text())
+    fit_inputs = built["a lovelace"]
+    fit_assignments = {
+        row["signature_id"]: row["cluster_id"] for row in pq.read_table(fit_inputs["assignments"]).to_pylist()
+    }
+    fit_queries = set(json.loads(Path(fit_inputs["queries"]).read_text(encoding="utf-8")))
+    assert len(fit_queries) == 1
+    assert fit_queries <= fit_assignments.keys()
+    assert build_linker_task_tables.read_seed_components(Path(fit_inputs["seeds"])) == {
+        sid: component for sid, component in fit_assignments.items() if sid not in fit_queries
+    }
     assert json.loads(Path(built[gate]["queries"]).read_text()) == ["532-0", "531-0"]
     seed_map = build_linker_task_tables.read_seed_components(Path(built[gate]["seeds"]))
     assert seed_map["500-0"] == seed_map["501-0"] == "mixed"
@@ -1055,12 +1099,13 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     with pytest.raises(ValueError, match="absent from the frozen role assignments"):
         newer_roles.bindings_for({"z last"})
     assert {path: sha256_file(path) for path in filenames} == old_files
-    _validate_frozen_task_bindings(task_manifest, newer_roles)
+    with pytest.raises(ValueError, match="master block role assignment"):
+        _validate_frozen_task_bindings(task_manifest, newer_roles)
     foreign_roles = replace(
         newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test_b"})}
     )
     with pytest.raises(ValueError, match="block provenance"):
-        _validate_frozen_task_bindings(task_manifest, foreign_roles)
+        _validate_frozen_task_bindings({**task_manifest, ROLE_SHA256_FIELD: foreign_roles.sha256}, foreign_roles)
     with pytest.raises(ValueError, match="block provenance"):
         _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), foreign_roles, gate_blocks)
     assert _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), newer_roles, gate_blocks).equals(
@@ -1081,7 +1126,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert newer_judged.read_bytes() == judged_path.read_bytes()
     raised_targets = _json(
         tmp_path / "raised-targets.json",
-        {"pairwise_train": 1, "pairwise_val": 1, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
+        {"fit_pool": 2, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
     )
     new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test_b"})
     raised = tmp_path / "raised-freeze"
@@ -1102,9 +1147,10 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     assert load_block_roles(raised / "assignments.json").block_to_role == {
         **roles.block_to_role,
-        "f aba": "pairwise_val",
+        "f aba": "fit_pool",
         "z last": "final_test_b",
     }
+    assert load_block_roles(raised / "assignments.json").pairwise_validation_blocks == {"f aba"}
     for directory in (snapshot, evidence.parent):
         receipt = directory / ".role_freeze.json"
         receipt.rename(receipt.with_suffix(".bak"))

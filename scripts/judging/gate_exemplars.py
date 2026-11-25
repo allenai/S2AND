@@ -98,6 +98,7 @@ def resolve_gate_exemplars(
     if task_manifest_path is None:
         raise ValueError("Ledger-backed gate packets require --linker-task-manifest")
     manifest = read_json_object(task_manifest_path)
+    roles.require_assignment(manifest, context="Frozen gate tasks")
     blocks = manifest["tables"]["gate_thresh"]["blocks"]
     bindings = manifest[BLOCK_BINDINGS_FIELD]
     if any(bindings.get(block) != binding for block, binding in roles.bindings_for(by_block).items()):

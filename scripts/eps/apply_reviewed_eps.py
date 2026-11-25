@@ -39,7 +39,6 @@ from scripts.common.initial_query_sources import (
     load_initial_query_sources,
 )
 from scripts.eps.orcid_b3 import (
-    BLOCK_ROLE_SHA256_FIELD,
     REFERENCE_POLICY,
     REFERENCE_POLICY_ALL_IDENTITIES,
     final_test_query_identities,
@@ -100,8 +99,7 @@ def _require_test_separated_reference(
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
     if block_roles is not None:
-        if block_roles.evidence_sha256 is None and stats.get(BLOCK_ROLE_SHA256_FIELD) != block_roles.sha256:
-            raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
+        block_roles.require_assignment(stats, context=f"{dataset} EPS sweep reference")
         orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
         if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
             raise ValueError(f"The EPS reference contains an ORCID outside its home role: {dataset}")

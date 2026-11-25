@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from collections import Counter
 from pathlib import Path
@@ -11,7 +12,6 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import normalize_block_key
 from scripts.common.identity_ledger import (
     EVIDENCE_SHA256_FIELD,
@@ -31,6 +31,12 @@ SCHEMA = pa.schema(
         ("stratum", pa.string()),
     ]
 )
+GIANT_SIGNATURE_COUNT = 15_000
+
+
+def size_band(count: int) -> str:
+    """Return the intake size band for an exported signature count."""
+    return "<=1000" if count <= 1000 else "1001-15000" if count <= GIANT_SIGNATURE_COUNT else ">15000"
 
 
 def mention_counts(rows: dict[str, MentionEvidence]) -> Counter[str]:
@@ -44,50 +50,56 @@ def mention_counts(rows: dict[str, MentionEvidence]) -> Counter[str]:
     return Counter(orcid for _, _, orcid in mentions)
 
 
-def _metadata(path: Path, blocks: set[str]) -> dict[str, tuple[str, str | None]]:
+def _source_splits(path: Path, blocks: set[str]) -> dict[str, str]:
     parquet = pq.ParquetFile(path)
-    columns = ["cluster_block_key", "split"]
-    optional = [name for name in ("stratum", "script", "region", "script_region") if name in parquet.schema_arrow.names]
     result = {}
-    for batch in parquet.iter_batches(columns=columns + optional):
+    for batch in parquet.iter_batches(columns=["cluster_block_key", "split"]):
         for item in batch.to_pylist():
             block = normalize_block_key(item["cluster_block_key"])
             if block not in blocks:
                 continue
             if block in result or item["split"] not in {"development", "holdout"}:
                 raise ValueError(f"Duplicate or invalid source split for {block!r}")
-            region = item.get("script_region") or "/".join(
-                item[name] for name in ("script", "region") if item.get(name)
-            )
-            result[block] = (item["split"], item.get("stratum") or region or None)
+            result[block] = item["split"]
     if missing := blocks - result.keys():
         raise ValueError(f"Source split missing for exported blocks: {sorted(missing)}")
     return result
 
 
+def _read_origins(path: Path) -> dict[str, str]:
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not {"surname", "broad"}.issubset(reader.fieldnames or ()):
+            raise ValueError(f"Expected surname and broad columns in {path}")
+        origins = {}
+        for row in reader:
+            surname, broad = normalize_block_key(row["surname"]), (row["broad"] or "").strip()
+            if not surname or not broad or "|" in broad or (surname in origins and origins[surname] != broad):
+                raise ValueError(f"Invalid or conflicting origin for surname {surname!r} in {path}")
+            origins[surname] = broad
+        return origins
+
+
 def build_freeze_input(
-    evidence_path: Path, gold_blocks: Path, output: Path, *, strata: dict[str, str] | None = None
+    evidence_path: Path, gold_blocks: Path, output: Path, *, surname_origin_csv: Path | None = None
 ) -> list[dict[str, Any]]:
     """Write signatures, source split, stratum, and both sources of identities per exported block."""
     evidence = load_identity_evidence(evidence_path)
-    overrides = {normalize_block_key(block): stratum for block, stratum in (strata or {}).items()}
-    if len(overrides) != len(strata or {}) or overrides.keys() - evidence.blocks.keys():
-        raise ValueError("Strata overrides must name unique exported blocks")
-    metadata = _metadata(gold_blocks, set(evidence.blocks))
+    origins = _read_origins(surname_origin_csv) if surname_origin_csv is not None else {}
+    source_splits = _source_splits(gold_blocks, set(evidence.blocks))
     rows = []
     for block, entry in sorted(evidence.blocks.items()):
         identities = mention_counts(evidence.read_block(block))
         count = entry["signature_count"]
-        size = "<=1000" if count <= 1000 else "1001-15000" if count <= 15000 else ">15000"
-        source_split, region = metadata[block]
+        surname = block.partition(" ")[2]
         rows.append(
             {
                 "block_key": block,
                 "signature_count": count,
                 "orcids": sorted(identities),
                 "orcid_mention_counts": sorted(identities.items()),
-                "source_split": source_split,
-                "stratum": overrides.get(block, f"{size}/{region}" if region else size),
+                "source_split": source_splits[block],
+                "stratum": f"{size_band(count)}|{origins.get(surname, 'other')}",
             }
         )
     if output.exists():
@@ -109,11 +121,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity-evidence", required=True, type=Path)
     parser.add_argument("--gold-blocks", required=True, type=Path)
-    parser.add_argument("--strata-json", type=Path)
+    parser.add_argument("--surname-origin-csv", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
-    strata = read_json_object(args.strata_json) if args.strata_json else None
-    rows = build_freeze_input(args.identity_evidence, args.gold_blocks, args.output, strata=strata)
+    rows = build_freeze_input(
+        args.identity_evidence, args.gold_blocks, args.output, surname_origin_csv=args.surname_origin_csv
+    )
     print(json.dumps({"blocks": len(rows), "signatures": sum(row["signature_count"] for row in rows)}))
     return 0
 

@@ -68,7 +68,7 @@ def fit_linker(
             may omit this when the bundle retains complete holdout tables.
         pre_materialization_holdout_summary: Earlier exclusion counts to report.
             When supplied, any remaining overlap is a materialization failure.
-        frozen_task_rows: Optional featureized linker_train, gate_fit, and gate_thresh
+        frozen_task_rows: Optional featureized fit_pool, gate_fit, and gate_thresh
             windows from frozen development blocks.
         fixed_ranker: Verified source booster to reuse without fitting.
 
@@ -97,7 +97,7 @@ def fit_linker(
         if frozen_task_rows is None:
             train_df = _read_csv(_resolve_path(bundle, spec["train_path"]), compression="gzip")
         else:
-            frozen_train = frozen_task_rows["linker_train"]
+            frozen_train = frozen_task_rows["fit_pool"]
             train_df = frozen_train.loc[frozen_train["candidate_gold_scored"]].reset_index(drop=True)
         train_df, unlabeled_singleton_filter_summary = _drop_unlabeled_singleton_orcid_rows(
             train_df,

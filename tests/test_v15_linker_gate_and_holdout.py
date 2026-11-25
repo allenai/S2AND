@@ -189,7 +189,7 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     rows.loc[rows["query_group_id"].isin({"q_000", "q_049"}), "candidate_gold_scored"] = False
     gate_fit = rows.loc[rows["split"].eq("calibration_fit")]
     gate_thresh = rows.loc[rows["split"].eq("calibration_check")]
-    linker_train = gate_fit.assign(query_group_id=lambda frame: "train_" + frame["query_group_id"])
+    fit_pool = gate_fit.assign(query_group_id=lambda frame: "train_" + frame["query_group_id"])
     fitted_rows = []
 
     class Ranker:
@@ -225,7 +225,7 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
         frozen_task_rows={
             "gate_fit": gate_fit,
             "gate_thresh": gate_thresh,
-            **({} if fixed else {"linker_train": linker_train}),
+            **({} if fixed else {"fit_pool": fit_pool}),
         },
         **ranker_args,
     )
@@ -267,7 +267,8 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
     role_manifest.write_text(
         json.dumps(
             {
-                "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test": ["c_park"]},
+                "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test_a": ["c_park"]},
+                "pairwise_validation_blocks": [],
                 "verification": {"cross_role_orcid_overlap": 0},
                 "block_orcids": {"a smith": [], "b lee": [], "c park": []},
             }

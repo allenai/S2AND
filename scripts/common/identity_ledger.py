@@ -12,12 +12,13 @@ import pyarrow.parquet as pq
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.contracts import canonical_json_digest
 from scripts.common.arrow_roots import read_json_object, resolved_manifest_artifact_path
-from scripts.common.block_roles import BlockRoles, normalize_block_key
+from scripts.common.block_roles import ROLE_SHA256_FIELD, BlockRoles, normalize_block_key
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest
 
 EVIDENCE_SHA256_FIELD = "identity_evidence_sha256"
-ROLE_SHA256_FIELD = "block_role_assignments_sha256"
 FREEZE_BINDING = ".role_freeze.json"
+FREEZE_SHA256_FIELD = "freeze_assignments_sha256"
+SNAPSHOT_BINDING = "intake_manifest.json"
 INTAKE_SOURCE_RECORD = "request_source.json"
 
 
@@ -84,6 +85,18 @@ class IdentityEvidence:
     def block_digests(self) -> dict[str, str]:
         """Return the binding for each evidence partition and its intake inputs."""
         return {block: canonical_json_digest(entry) for block, entry in self.blocks.items()}
+
+    def assignment_receipts(self) -> set[str]:
+        """Read every saved master assignment hash for this intake."""
+        receipts = {
+            read_json_object(path)["assignments_sha256"]
+            for root in (self.snapshot_root, self.path.parent)
+            if (path := root / FREEZE_BINDING).is_file()
+        }
+        intake = self.snapshot_root / SNAPSHOT_BINDING
+        if intake.is_file() and (digest := read_json_object(intake).get(FREEZE_SHA256_FIELD)) is not None:
+            receipts.add(digest)
+        return receipts
 
     def read_block(self, block: str, *, dataset_dir: Path | None = None) -> dict[str, MentionEvidence]:
         """Return evidence keyed by signature and reject a different dataset generation."""
@@ -252,4 +265,6 @@ def ledger_for_roles(path: Path | None, roles: BlockRoles | None) -> IdentityLed
         or evidence.block_digests() != roles.evidence_blocks
     ):
         raise ValueError("Frozen roles do not match the identity evidence and intake snapshot")
+    if (receipts := evidence.assignment_receipts()) and receipts != {roles.sha256}:
+        raise ValueError("Frozen roles do not match the recorded master block role assignment")
     return IdentityLedger(evidence, roles)

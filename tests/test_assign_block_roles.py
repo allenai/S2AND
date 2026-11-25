@@ -49,9 +49,7 @@ def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overfl
         "eps_cal": 4,
         "gate_thresh": 2,
         "gate_fit": 2,
-        "linker_train": 3,
-        "pairwise_val": 2,
-        "pairwise_train": 3,
+        "fit_pool": 8,
     }
     res1 = assign_block_roles(
         blocks,
@@ -103,6 +101,72 @@ def test_assign_block_roles_balances_strata_without_aliasing() -> None:
         assert sum(k.startswith("b ") for k in assigned) == 2
 
 
+@pytest.mark.parametrize("old_role", ["pairwise_train", "pairwise_val", "linker_train"])
+def test_rejects_removed_roles(tmp_path: Path, old_role: str) -> None:
+    blocks = [BlockSpec("a ross", 32)]
+    with pytest.raises(ValueError, match=old_role):
+        assign_block_roles(blocks, {old_role: 1})
+    with pytest.raises(ValueError, match=old_role):
+        assign_block_roles(blocks, {"fit_pool": 1}, pinned_roles={"a ross": old_role})
+    manifest = assign_block_roles(blocks, {"fit_pool": 1})
+    manifest["roles"][old_role] = manifest["roles"].pop("fit_pool")
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match=rf"Unknown block role '{old_role}'"):
+        load_block_roles(path)
+
+
+def test_pairwise_validation_blocks_are_stratified_and_order_independent(tmp_path: Path) -> None:
+    blocks = [BlockSpec(f"{origin} {i}", 500, stratum=f"<=1000|{origin}") for origin in "ab" for i in range(10)]
+    result = assign_block_roles(blocks, {"fit_pool": 20}, pairwise_validation_fraction=0.2)
+    validation = result["pairwise_validation_blocks"]
+    assert [sum(key.startswith(f"{origin} ") for key in validation) for origin in "ab"] == [2, 2]
+    assert assign_block_roles(blocks[::-1], {"fit_pool": 20}, pairwise_validation_fraction=0.2) == result
+    assert len(assign_block_roles(blocks, {"fit_pool": 20})["pairwise_validation_blocks"]) == 3
+    assert assign_block_roles(blocks[:1], {"fit_pool": 1})["pairwise_validation_blocks"] == []
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps(result), encoding="utf-8")
+    assert load_block_roles(path).pairwise_validation_blocks == set(validation)
+    path.write_text(json.dumps({**result, "pairwise_validation_blocks": ["c missing"]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="pairwise_validation_blocks"):
+        load_block_roles(path)
+
+
+def test_giant_caps_include_pins_and_fit_pool_pins_cannot_override_dev_test() -> None:
+    blocks = [
+        BlockSpec("a khan", 15_001, stratum="giant"),
+        BlockSpec("a fit", 15_001, stratum="giant"),
+        BlockSpec("a spare", 15_001, stratum="giant"),
+        BlockSpec("a small", 15_000, stratum="small"),
+        BlockSpec("a other", 500, stratum="small"),
+    ]
+    result = assign_block_roles(
+        blocks, {"fit_pool": 2, "eps_cal": 1}, fit_pool_blocks=["A_FIT"], giant_caps={"fit_pool": 1, "eps_cal": 0}
+    )
+    assert result["roles"]["dev_test"] == ["a khan"]
+    assert set(result["roles"]["fit_pool"]) & {"a fit", "a spare"} == {"a fit"}
+    assert len(result["roles"]["fit_pool"]) == 2
+    assert result["roles"]["eps_cal"][0] in {"a small", "a other"}
+    for key in ("A_KHAN", "a small"):
+        with pytest.raises(ValueError, match="both fit_pool and dev_test"):
+            assign_block_roles(blocks, {"fit_pool": 2}, fit_pool_blocks=[key], extra_dev_test_blocks=["a small"])
+    with pytest.raises(ValueError, match="exceed the giant cap"):
+        assign_block_roles(blocks, {"fit_pool": 2}, giant_caps={"dev_test": 0})
+
+
+def test_sealed_halves_respect_asymmetric_giant_caps() -> None:
+    blocks = [
+        *[BlockSpec(f"s {i}", 15_000, stratum="small", source_split="holdout") for i in range(8)],
+        *[BlockSpec(f"g {i}", 15_001, stratum="giant", source_split="holdout") for i in range(8)],
+    ]
+    result = assign_block_roles(
+        blocks, {"final_test": 8}, giant_caps={"final_test_a": 0, "final_test_b": 1}, enforce_source_splits=True
+    )
+    assert [len(result["roles"][role]) for role in ("final_test_a", "final_test_b")] == [4, 4]
+    assert result["verification"]["role_block_counts_by_stratum"]["final_test_a"]["giant"] == 0
+    assert result["verification"]["role_block_counts_by_stratum"]["final_test_b"]["giant"] == 1
+
+
 def test_block_roles_do_not_follow_shared_orcids() -> None:
     shared_orcid = "0000-0002-1694-233X"
     blocks = [
@@ -134,9 +198,9 @@ def test_assign_block_roles_rejects_conflicting_pins_and_verify_catches_leaks() 
         BlockSpec(legacy, 100, frozenset()),
     ]
     with pytest.raises(ValueError, match="ORCID overlap"):
-        verify_role_assignments(verify_blocks, {"x1": "pairwise_train", "x2": "final_test_a", legacy: "dev_test"})
+        verify_role_assignments(verify_blocks, {"x1": "fit_pool", "x2": "final_test_a", legacy: "dev_test"})
     with pytest.raises(ValueError, match="must be assigned to 'dev_test'"):
-        verify_role_assignments(verify_blocks, {"x1": "pairwise_train", "x2": "pairwise_train", legacy: "final_test_a"})
+        verify_role_assignments(verify_blocks, {"x1": "fit_pool", "x2": "fit_pool", legacy: "final_test_a"})
 
 
 def test_stratified_holdout_reserves_rare_giants_across_both_halves() -> None:
@@ -209,8 +273,8 @@ def test_frozen_block_roles_reject_unlisted_orcid(tmp_path: Path) -> None:
     path = tmp_path / "roles.json"
     result = assign_block_roles(
         [BlockSpec("one", 20, frozenset({orcid})), BlockSpec("two", 20)],
-        {"final_test_a": 1, "pairwise_train": 1},
-        pinned_roles={"one": "final_test_a", "two": "pairwise_train"},
+        {"final_test_a": 1, "fit_pool": 1},
+        pinned_roles={"one": "final_test_a", "two": "fit_pool"},
     )
     path.write_text(json.dumps(result), encoding="utf-8")
     roles = load_block_roles(path)
@@ -278,8 +342,8 @@ def test_load_blocks_normalizes_mention_counts(tmp_path: Path, count_key: str) -
         return
     result = assign_block_roles(
         load_blocks(path),
-        {"pairwise_train": 1, "eps_cal": 1},
-        pinned_roles={"train": "pairwise_train", "tune": "eps_cal"},
+        {"fit_pool": 1, "eps_cal": 1},
+        pinned_roles={"train": "fit_pool", "tune": "eps_cal"},
         closure_mode="block_only",
     )
     assert result["verification"]["raw_cross_role_orcid_overlap"] == 1

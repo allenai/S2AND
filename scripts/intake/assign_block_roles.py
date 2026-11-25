@@ -17,6 +17,7 @@ import csv
 import hashlib
 import json
 import sys
+import tempfile
 from collections import Counter, defaultdict, deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     FINAL_TEST_ROLES,
+    VALID_ROLES,
     assigned_identity_roles,
     load_block_roles,
     normalize_block_key,
@@ -40,43 +42,30 @@ from scripts.common.block_roles import (  # noqa: E402
 from scripts.common.identity_ledger import (  # noqa: E402
     EVIDENCE_SHA256_FIELD,
     FREEZE_BINDING,
+    FREEZE_SHA256_FIELD,
+    SNAPSHOT_BINDING,
     evidence_identities,
     gate_veto_identities,
     load_identity_evidence,
 )
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest  # noqa: E402
-from scripts.intake.build_freeze_input import mention_counts  # noqa: E402
-from scripts.intake.requests_to_datasets import INTAKE_LOCK, SNAPSHOT_BINDING  # noqa: E402
-
-FREEZE_SHA256_FIELD = "freeze_assignments_sha256"
+from scripts.intake.build_freeze_input import GIANT_SIGNATURE_COUNT, mention_counts, size_band  # noqa: E402
+from scripts.intake.requests_to_datasets import INTAKE_LOCK  # noqa: E402
 
 PERMANENT_EXCLUDED_BLOCKS = frozenset({"f matsen"})
 LEGACY_DEV_TEST_BLOCKS = frozenset(
     {"a khan", "a silva", "h wang", "j smith", "s feldman", "s gupta", "s lee", "s park"}
-)
-VALID_ROLES = (
-    "pairwise_train",
-    "pairwise_val",
-    "linker_train",
-    "gate_fit",
-    "gate_thresh",
-    "eps_cal",
-    "dev_test",
-    *FINAL_TEST_ROLES,
 )
 ASSIGNABLE_ROLES = (
     *FINAL_TEST_ROLES,
     "eps_cal",
     "gate_thresh",
     "gate_fit",
-    "linker_train",
-    "pairwise_val",
-    "pairwise_train",
+    "fit_pool",
     "dev_test",
 )
-TRAINING_AND_TUNING_ROLES = frozenset(
-    {"pairwise_train", "pairwise_val", "linker_train", "gate_fit", "gate_thresh", "eps_cal"}
-)
+TRAINING_AND_TUNING_ROLES = frozenset({"fit_pool", "gate_fit", "gate_thresh", "eps_cal"})
+DEFAULT_PAIRWISE_VALIDATION_FRACTION = 0.15
 
 
 @dataclass(frozen=True)
@@ -221,6 +210,19 @@ def _validate_source_splits(blocks: Sequence[BlockSpec], enforce: bool) -> None:
                 )
 
 
+@dataclass
+class _GiantCaps:
+    remaining: dict[str, int]
+    counts: dict[str, int]
+
+    def allows(self, role: str, component: tuple[str, ...]) -> bool:
+        return role not in self.remaining or self.counts[component[0]] <= self.remaining[role]
+
+    def take(self, role: str, component: tuple[str, ...]) -> None:
+        if role in self.remaining:
+            self.remaining[role] -= self.counts[component[0]]
+
+
 def _allocate_strata(
     components: Sequence[tuple[str, ...]],
     by_key: Mapping[str, BlockSpec],
@@ -229,6 +231,7 @@ def _allocate_strata(
     *,
     seed: int,
     enforce_source_splits: bool,
+    giant_caps: _GiantCaps | None = None,
 ) -> None:
     groups: dict[tuple[str, str], deque[tuple[str, ...]]] = defaultdict(deque)
     sizes: Counter[tuple[str, str]] = Counter()
@@ -253,7 +256,18 @@ def _allocate_strata(
         assigned = 0
         while assigned < target and eligible:
             group = max(eligible, key=lambda group: (deficits[group], tie_break[group]))
-            component = groups[group].popleft()
+            queue = groups[group]
+            if giant_caps is None or giant_caps.allows(role, queue[0]):
+                component = queue.popleft()
+            else:
+                candidate = next((comp for comp in queue if giant_caps.allows(role, comp)), None)
+                if candidate is None:
+                    eligible.remove(group)
+                    continue
+                component = candidate
+                queue.remove(component)
+            if giant_caps is not None:
+                giant_caps.take(role, component)
             for key in component:
                 block_to_role[key] = role
             assigned += len(component)
@@ -272,6 +286,7 @@ def _reserve_role_strata(
     *,
     seed: int,
     enforce_source_splits: bool,
+    giant_caps: _GiantCaps | None = None,
 ) -> list[tuple[str, ...]]:
     groups: dict[tuple[str, str], deque[tuple[str, ...]]] = defaultdict(deque)
     for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
@@ -292,8 +307,20 @@ def _reserve_role_strata(
             expected_split = "holdout" if role in FINAL_TEST_ROLES else "development"
             if split and split != expected_split:
                 continue
-            if queue and (role, stratum) not in covered and len(queue[0]) <= remaining[role]:
-                component = queue.popleft()
+            if (role, stratum) not in covered and remaining[role]:
+                component = next(
+                    (
+                        comp
+                        for comp in queue
+                        if len(comp) <= remaining[role] and (giant_caps is None or giant_caps.allows(role, comp))
+                    ),
+                    None,
+                )
+                if component is None:
+                    continue
+                queue.remove(component)
+                if giant_caps is not None:
+                    giant_caps.take(role, component)
                 reserved.add(component[0])
                 remaining[role] -= len(component)
                 for key in component:
@@ -310,6 +337,7 @@ def _allocate_sealed_pairs(
     *,
     seed: int,
     enforce_source_splits: bool,
+    giant_caps: _GiantCaps | None = None,
 ) -> list[tuple[str, ...]]:
     left, right = FINAL_TEST_ROLES
     if left not in remaining or right not in remaining:
@@ -326,13 +354,21 @@ def _allocate_sealed_pairs(
     pair_target = min(remaining[left], remaining[right])
     assigned: set[str] = set()
 
-    def take(role: str, queue: deque[tuple[str, ...]]) -> None:
-        component = queue.popleft()
+    def take(role: str, queue: deque[tuple[str, ...]], component: tuple[str, ...] | None = None) -> None:
+        if component is None:
+            component = queue.popleft()
+        else:
+            queue.remove(component)
+        if giant_caps is not None:
+            giant_caps.take(role, component)
         assigned.add(component[0])
         remaining[role] -= len(component)
         for key in component:
             assignments[key] = role
             counts[role, by_key[key].stratum] += 1
+
+    def fits(role: str, component: tuple[str, ...]) -> bool:
+        return len(component) <= remaining[role] and (giant_caps is None or giant_caps.allows(role, component))
 
     # Cover feasible rare strata before spending proportional quotas.
     for stratum in sorted(
@@ -346,14 +382,18 @@ def _allocate_sealed_pairs(
         queue = strata[stratum]
         missing = [role for role in FINAL_TEST_ROLES if not counts[role, stratum]]
         if len(queue) == 1 and len(missing) == 2:
-            role = max(missing, key=remaining.__getitem__)
-            if len(queue[0]) <= remaining[role]:
+            role = max(missing, key=lambda role: (fits(role, queue[0]), remaining[role]))
+            if fits(role, queue[0]):
                 take(role, queue)
         elif len(queue) >= len(missing) and all(
-            len(component) <= remaining[role] for role, component in zip(missing, queue, strict=False)
+            fits(role, component) for role, component in zip(missing, queue, strict=False)
         ):
             for role in missing:
                 take(role, queue)
+        elif giant_caps is not None:
+            for role in missing:
+                if component := next((comp for comp in queue if fits(role, comp)), None):
+                    take(role, queue, component)
 
     # Fill both halves together so rounding cannot send the rare stratum to one half.
     deficits = {
@@ -364,7 +404,7 @@ def _allocate_sealed_pairs(
         eligible = [
             stratum
             for stratum, queue in strata.items()
-            if len(queue) >= 2 and len(queue[0]) <= remaining[left] and len(queue[1]) <= remaining[right]
+            if len(queue) >= 2 and fits(left, queue[0]) and fits(right, queue[1])
         ]
         if not eligible:
             break
@@ -376,14 +416,44 @@ def _allocate_sealed_pairs(
     return [component for component in components if component[0] not in assigned]
 
 
+def _pairwise_validation_fold(
+    blocks: Mapping[str, BlockSpec],
+    assignments: Mapping[str, str],
+    fraction: float,
+    seed: int,
+    *,
+    prior_fit: Collection[str] = (),
+    prior_validation: Collection[str] = (),
+) -> list[str]:
+    fit = {key for key, role in assignments.items() if role == "fit_pool"}
+    target = min(max(0, len(fit) - 1), int(len(fit) * fraction + 0.5))
+    if fraction and len(fit) >= 2:
+        target = max(1, target)
+    # Keep at least one fitting block, including when the prior pool was empty.
+    draws = max(0, target - len(prior_validation))
+    selected: dict[str, str] = {}
+    _allocate_strata(
+        [(key,) for key in fit.difference(prior_fit)],
+        blocks,
+        {"validation": draws},
+        selected,
+        seed=seed,
+        enforce_source_splits=False,
+    )
+    return sorted(set(prior_validation) | selected.keys())
+
+
 def assign_block_roles(
     blocks: Sequence[BlockSpec],
     role_targets: Mapping[str, int],
     *,
     seed: int = 20261123,
     extra_dev_test_blocks: Collection[str] = (),
+    fit_pool_blocks: Collection[str] = (),
     pinned_roles: Mapping[str, str] | None = None,
     excluded_blocks: Collection[str] = (),
+    giant_caps: Mapping[str, int] | None = None,
+    pairwise_validation_fraction: float = DEFAULT_PAIRWISE_VALIDATION_FRACTION,
     closure_mode: Literal["strict", "block_only"] = "strict",
     enforce_source_splits: bool = False,
     require_pinned_present: bool = False,
@@ -396,8 +466,11 @@ def assign_block_roles(
             targets is placed in ``unassigned`` (never dumped into ``final_test``).
         seed: Seed for stable SHA-256 component ranking.
         extra_dev_test_blocks: Additional reviewed blocks (e.g. 1.4 Batches 1-6) pinned to ``dev_test``.
+        fit_pool_blocks: Leakage-test blocks to pin to ``fit_pool``.
         pinned_roles: Optional explicit ``{block_key: role}`` pins (e.g. prior frozen assignments).
         excluded_blocks: Extra blocks to exclude alongside ``PERMANENT_EXCLUDED_BLOCKS``.
+        giant_caps: Maximum number of blocks above 15,000 signatures per specified role, including pins.
+        pairwise_validation_fraction: Fraction of fit_pool blocks held out from pairwise fitting.
         closure_mode: Use block-only allocation or require identity-disjoint blocks.
         enforce_source_splits: When True, both final test halves accept only ``holdout`` blocks and
             training/tuning roles accept only ``development`` blocks.
@@ -416,10 +489,19 @@ def assign_block_roles(
     for role, count in role_targets.items():
         if count < 0:
             raise ValueError(f"Target count for {role!r} must be >= 0, got {count}")
+    if not 0 <= pairwise_validation_fraction < 1:
+        raise ValueError("Pairwise validation fraction must be in [0, 1)")
+    caps = dict(giant_caps or {})
+    for role, cap in caps.items():
+        if role not in VALID_ROLES or type(cap) is not int or cap < 0:
+            raise ValueError(f"Invalid giant cap for role {role!r}: {cap!r}")
     _validate_source_splits(blocks, enforce_source_splits)
 
     excluded_set = {normalize_block_key(k) for k in excluded_blocks} | set(PERMANENT_EXCLUDED_BLOCKS)
     dev_test_set = {normalize_block_key(k) for k in extra_dev_test_blocks} | set(LEGACY_DEV_TEST_BLOCKS)
+    fit_pool_set = {normalize_block_key(k) for k in fit_pool_blocks}
+    if overlap := fit_pool_set & dev_test_set:
+        raise ValueError(f"Blocks cannot be pinned to both fit_pool and dev_test: {sorted(overlap)}")
 
     # Canonicalize input blocks, mapping normalized key -> original BlockSpec (with normalized key).
     norm_blocks: list[BlockSpec] = []
@@ -447,7 +529,13 @@ def assign_block_roles(
         key = normalize_block_key(raw_key)
         if role not in VALID_ROLES:
             raise ValueError(f"Unknown pinned role {role!r} for block {raw_key!r}")
+        if key in pins:
+            raise ValueError(f"Duplicate normalized pin for {key!r}")
         pins[key] = role
+    for key in fit_pool_set:
+        if key in pins and pins[key] != "fit_pool":
+            raise ValueError(f"Block {key!r} is pinned to {pins[key]!r} and fit_pool")
+        pins[key] = "fit_pool"
     for key in dev_test_set:
         if key in pins and pins[key] != "dev_test":
             raise ValueError(f"Block {key!r} is a legacy/reviewed dev_test block and cannot be pinned to {pins[key]!r}")
@@ -458,13 +546,14 @@ def assign_block_roles(
             (
                 {normalize_block_key(k) for k in (pinned_roles or {})}
                 | {normalize_block_key(k) for k in extra_dev_test_blocks}
+                | fit_pool_set
             )
             - seen_keys
         )
         if missing_pins:
             raise ValueError(f"Pinned/excluded blocks missing from input: {missing_pins}")
 
-    if conflicting := excluded_set & {normalize_block_key(key) for key in (pinned_roles or {})}:
+    if conflicting := excluded_set & ({normalize_block_key(key) for key in (pinned_roles or {})} | fit_pool_set):
         raise ValueError(f"Cannot exclude pinned blocks: {sorted(conflicting)}")
 
     active_blocks = [block for block in norm_blocks if block.block_key not in excluded_set]
@@ -478,6 +567,14 @@ def assign_block_roles(
     else:
         raise ValueError(f"Unsupported closure_mode: {closure_mode!r}")
 
+    giant_budget = (
+        _GiantCaps(
+            caps.copy(),
+            {comp[0]: sum(by_key[key].signature_count > GIANT_SIGNATURE_COUNT for key in comp) for comp in components},
+        )
+        if caps
+        else None
+    )
     block_to_role: dict[str, str] = {}
     free_components: list[tuple[str, ...]] = []
     for component in components:
@@ -488,6 +585,10 @@ def assign_block_roles(
             )
         if component_pins:
             role = next(iter(component_pins))
+            if giant_budget is not None:
+                if not giant_budget.allows(role, component):
+                    raise ValueError(f"Pinned blocks exceed the giant cap for {role!r}: {component}")
+                giant_budget.take(role, component)
             for key in component:
                 if (
                     enforce_source_splits
@@ -532,54 +633,76 @@ def assign_block_roles(
             or (block.block_key not in block_to_role and (not enforce_source_splits or block.source_split == "holdout"))
         )
         for role in FINAL_TEST_ROLES:
+            if role in caps:
+                continue
             pinned_strata = {by_key[key].stratum for key, assigned in block_to_role.items() if assigned == role}
             required = pinned_strata | {stratum for stratum in strata_by_role[role] if sealed_counts[stratum] > 1}
             if role_targets[role] < len(required):
                 raise ValueError("Sealed targets must allow at least one block per stratum in each half")
 
     free_components = _allocate_sealed_pairs(
-        free_components, by_key, remaining, block_to_role, seed=seed, enforce_source_splits=enforce_source_splits
+        free_components,
+        by_key,
+        remaining,
+        block_to_role,
+        seed=seed,
+        enforce_source_splits=enforce_source_splits,
+        giant_caps=giant_budget,
     )
     # Reserve coverage before proportional sampling can discard a rare stratum.
     free_components = _reserve_role_strata(
-        free_components, by_key, remaining, block_to_role, seed=seed, enforce_source_splits=enforce_source_splits
-    )
-    if enforce_source_splits:
-        cohorts = {
-            FINAL_TEST_ROLES[0]: FINAL_TEST_ROLES,
-            "pairwise_train": TRAINING_AND_TUNING_ROLES,
-            "dev_test": ("dev_test",),
-        }
-    else:
-        cohorts = {FINAL_TEST_ROLES[0]: ASSIGNABLE_ROLES}
-    targets_by_cohort = {
-        cohort: {role: count for role, count in remaining.items() if role in members}
-        for cohort, members in cohorts.items()
-    }
-    # Reserve the total sample before role rounding so rare strata reach small roles.
-    selected: dict[str, str] = {}
-    _allocate_strata(
         free_components,
         by_key,
-        {cohort: sum(targets.values()) for cohort, targets in targets_by_cohort.items()},
-        selected,
+        remaining,
+        block_to_role,
         seed=seed,
         enforce_source_splits=enforce_source_splits,
+        giant_caps=giant_budget,
     )
-    selected_components: dict[str, list[tuple[str, ...]]] = defaultdict(list)
-    for component in free_components:
-        if component[0] in selected:
-            selected_components[selected[component[0]]].append(component)
-    for cohort, targets in targets_by_cohort.items():
+    if giant_budget is not None:
         _allocate_strata(
-            selected_components[cohort],
+            free_components,
             by_key,
-            targets,
+            remaining,
             block_to_role,
             seed=seed,
             enforce_source_splits=enforce_source_splits,
+            giant_caps=giant_budget,
         )
-        remaining.update(targets)
+    else:
+        cohorts = (
+            {FINAL_TEST_ROLES[0]: FINAL_TEST_ROLES, "fit_pool": TRAINING_AND_TUNING_ROLES, "dev_test": ("dev_test",)}
+            if enforce_source_splits
+            else {FINAL_TEST_ROLES[0]: ASSIGNABLE_ROLES}
+        )
+        targets_by_cohort = {
+            cohort: {role: count for role, count in remaining.items() if role in members}
+            for cohort, members in cohorts.items()
+        }
+        # Reserve the total sample before role rounding so rare strata reach small roles.
+        selected: dict[str, str] = {}
+        _allocate_strata(
+            free_components,
+            by_key,
+            {cohort: sum(targets.values()) for cohort, targets in targets_by_cohort.items()},
+            selected,
+            seed=seed,
+            enforce_source_splits=enforce_source_splits,
+        )
+        selected_components: dict[str, list[tuple[str, ...]]] = defaultdict(list)
+        for component in free_components:
+            if component[0] in selected:
+                selected_components[selected[component[0]]].append(component)
+        for cohort, targets in targets_by_cohort.items():
+            _allocate_strata(
+                selected_components[cohort],
+                by_key,
+                targets,
+                block_to_role,
+                seed=seed,
+                enforce_source_splits=enforce_source_splits,
+            )
+            remaining.update(targets)
 
     verification = verify_role_assignments(
         active_blocks,
@@ -610,8 +733,13 @@ def assign_block_roles(
         "enforce_source_splits": bool(enforce_source_splits),
         "excluded_blocks": recorded_exclusions,
         "role_targets": {role: int(role_targets[role]) for role in target_order},
+        "giant_caps": caps,
         "roles": roles,
         "block_to_role": dict(sorted(block_to_role.items())),
+        "pairwise_validation_fraction": pairwise_validation_fraction,
+        "pairwise_validation_blocks": _pairwise_validation_fold(
+            by_key, block_to_role, pairwise_validation_fraction, seed
+        ),
         "block_orcids": {key: sorted(by_key[key].orcids) for key in sorted(block_to_role)},
         "block_signature_counts": {key: by_key[key].signature_count for key in sorted(block_to_role)},
         "unassigned": sorted(by_key.keys() - block_to_role.keys()),
@@ -685,7 +813,7 @@ def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockS
         else:
             raise ValueError(f"Expected ORCID mention counts for {key!r} in {path}")
         count = int(item["signature_count"])
-        size = item.get("size_band") or ("<=1000" if count <= 1000 else "1001-15000" if count <= 15000 else ">15000")
+        size = item.get("size_band") or size_band(count)
         region = item.get("script_region") or "/".join(
             str(item[field]) for field in ("script", "region") if item.get(field)
         )
@@ -712,7 +840,10 @@ def freeze_identity_roles(
     fresh: bool = False,
     extra_pins: Mapping[str, str] | None = None,
     dev_test_blocks: Collection[str] = (),
+    fit_pool_blocks: Collection[str] = (),
     excluded_blocks: Collection[str] = (),
+    giant_caps: Mapping[str, int] | None = None,
+    pairwise_validation_fraction: float | None = None,
     seed: int = 20261123,
 ) -> dict[str, Any]:
     """Freeze only exported blocks and discard every cross-role identity from scoring."""
@@ -721,19 +852,24 @@ def freeze_identity_roles(
     evidence = load_identity_evidence(evidence_path)
     if evidence.snapshot_sha256 != sha256_file(evidence.snapshot_root / "manifest.json"):
         raise ValueError("Snapshot has changed; append its evidence before freezing roles")
-    receipts = {
-        read_json_object(path)["assignments_sha256"]
-        for root in (evidence.snapshot_root, evidence.path.parent)
-        if (path := root / FREEZE_BINDING).exists()
-    }
-    intake = read_json_object(evidence.snapshot_root / SNAPSHOT_BINDING)
-    if FREEZE_SHA256_FIELD in intake:
-        receipts.add(intake[FREEZE_SHA256_FIELD])
-    if fresh and prior_path is not None:
-        raise ValueError("Use either a prior role manifest or --fresh")
-    if receipts and not fresh:
+    receipts = evidence.assignment_receipts()
+    if fresh and prior_path is None:
+        raise ValueError("--fresh requires the master assignment via --pinned-roles-json")
+    if fresh and (
+        targets
+        or extra_pins
+        or dev_test_blocks
+        or fit_pool_blocks
+        or excluded_blocks
+        or giant_caps is not None
+        or pairwise_validation_fraction is not None
+    ):
+        raise ValueError("--fresh reuses the master assignment and cannot take allocation options")
+    if receipts:
         if prior_path is None:
-            raise ValueError("Snapshot or evidence already has a freeze binding; pass the prior manifest or --fresh")
+            raise ValueError(
+                "Snapshot or evidence already has a freeze binding; pass the prior manifest even with --fresh"
+            )
         if receipts != {sha256_file(prior_path)}:
             raise ValueError("The prior role manifest does not match the latest freeze binding")
     metadata = pq.read_schema(blocks_path).metadata or {}
@@ -752,17 +888,30 @@ def freeze_identity_roles(
     pins: dict[str, str] = {}
     prior_exclusions: list[str] = []
     prior_unassigned: set[str] = set()
+    prior_fit: Collection[str] = ()
+    prior_validation: Collection[str] = ()
     if prior_path is not None and prior is not None:
         if prior.get("format_version") != 2 or prior.get("intake_sha256") != evidence.intake_sha256:
             raise ValueError("Re-freeze requires a prior ledger-backed manifest from the same intake")
         if any(evidence_blocks.get(block) != digest for block, digest in prior["evidence_blocks"].items()):
             raise ValueError("Prior evidence partitions changed or are missing")
-        pins.update(load_block_roles(prior_path).block_to_role)
+        prior_roles = load_block_roles(prior_path)
+        pins.update(prior_roles.block_to_role)
+        prior_fit = prior["roles"]["fit_pool"]
+        prior_validation = prior_roles.pairwise_validation_blocks
         prior_exclusions = prior["excluded_blocks"]
         prior_unassigned = set(prior["unassigned"])
         prior_blocks = prior["evidence_blocks"].keys()
+        if fresh and (
+            prior_blocks != evidence_blocks.keys()
+            or prior_roles.source_splits != {block.block_key: block.source_split for block in blocks}
+            or prior_roles.evidence_sha256 != evidence.sha256
+            or prior_roles.snapshot_sha256 != evidence.snapshot_sha256
+        ):
+            raise ValueError("--fresh must use the master assignment's evidence, blocks and source splits")
         requested_changes = (
-            {normalize_block_key(block) for block in dev_test_blocks} & (prior_blocks - prior_unassigned)
+            {normalize_block_key(block) for block in (*dev_test_blocks, *fit_pool_blocks)}
+            & (prior_blocks - prior_unassigned)
         ) | ({normalize_block_key(block) for block in excluded_blocks} & prior_blocks)
         if requested_changes:
             raise ValueError(f"Re-freeze cannot move prior blocks: {sorted(requested_changes)}")
@@ -772,17 +921,40 @@ def freeze_identity_roles(
     if prior is not None and extra.keys() & (prior["evidence_blocks"].keys() - prior_unassigned):
         raise ValueError("Extra pins may only name new or previously unassigned exported blocks")
     pins.update(extra)
-    roles = assign_block_roles(
-        blocks,
-        targets,
-        seed=seed,
-        extra_dev_test_blocks=dev_test_blocks,
-        pinned_roles=pins,
-        excluded_blocks=(*prior_exclusions, *excluded_blocks),
-        closure_mode="block_only",
-        enforce_source_splits=True,
-        require_pinned_present=True,
+    fraction = (
+        pairwise_validation_fraction
+        if pairwise_validation_fraction is not None
+        else prior["pairwise_validation_fraction"]
+        if prior is not None
+        else DEFAULT_PAIRWISE_VALIDATION_FRACTION
     )
+    if fresh:
+        assert prior is not None
+        roles = prior
+    else:
+        roles = assign_block_roles(
+            blocks,
+            targets,
+            seed=seed,
+            extra_dev_test_blocks=dev_test_blocks,
+            fit_pool_blocks=fit_pool_blocks,
+            pinned_roles=pins,
+            excluded_blocks=(*prior_exclusions, *excluded_blocks),
+            giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
+            pairwise_validation_fraction=fraction,
+            closure_mode="block_only",
+            enforce_source_splits=True,
+            require_pinned_present=True,
+        )
+        if prior_fit:
+            roles["pairwise_validation_blocks"] = _pairwise_validation_fold(
+                {block.block_key: block for block in blocks},
+                roles["block_to_role"],
+                fraction,
+                seed,
+                prior_fit=prior_fit,
+                prior_validation=prior_validation,
+            )
     mapping = roles["block_to_role"]
     block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
     identity_roles = assigned_identity_roles(block_orcids, mapping)
@@ -816,6 +988,8 @@ def freeze_identity_roles(
                     if not row["reviewed_error"] and not evidence_identities(row).isdisjoint(cross_role)
                 }
             )
+    if fresh:
+        return roles
     for key in ("closure_mode", "cross_block_components", "component_size_summary"):
         roles.pop(key)
     roles["verification"].pop("closure_mode")
@@ -848,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Parquet produced by build_freeze_input.",
     )
     parser.add_argument("--identity-evidence", type=Path, required=True)
-    parser.add_argument("--targets-json", type=Path, required=True, help="JSON dict of {role: target_block_count}.")
+    parser.add_argument("--targets-json", type=Path, help="JSON dict of {role: target_block_count}.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument(
@@ -859,10 +1033,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--extra-pins-json", type=Path, help="Pin new or previously unassigned blocks to roles.")
     parser.add_argument("--dev-test-blocks", nargs="*", default=())
+    parser.add_argument("--fit-pool-blocks", nargs="*", default=(), help="Pin leakage-test blocks to fit_pool.")
+    parser.add_argument("--giant-caps-json", type=Path, help="JSON dict of {role: maximum_giant_block_count}.")
+    parser.add_argument(
+        "--pairwise-validation-fraction", type=float, help="Holdout fraction within fit_pool (default 0.15)."
+    )
     parser.add_argument("--exclude-blocks", nargs="*", default=())
-    parser.add_argument("--fresh", action="store_true", help="Start a new freeze lineage for this intake.")
+    parser.add_argument(
+        "--fresh", action="store_true", help="Reproduce the master assignment without allocating blocks."
+    )
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting an existing assignments.json.")
     args = parser.parse_args(argv)
+    if args.targets_json is None and not args.fresh:
+        parser.error("--targets-json is required unless --fresh reuses the master assignment")
 
     evidence = load_identity_evidence(args.identity_evidence)
     with exclusive_file_lock(evidence.snapshot_root / INTAKE_LOCK):
@@ -879,16 +1062,26 @@ def main(argv: list[str] | None = None) -> int:
         result = freeze_identity_roles(
             args.blocks,
             args.identity_evidence,
-            read_json_object(args.targets_json),
+            read_json_object(args.targets_json) if args.targets_json else {},
             prior_path=args.pinned_roles_json,
             fresh=args.fresh,
             extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
             dev_test_blocks=args.dev_test_blocks,
+            fit_pool_blocks=args.fit_pool_blocks,
             excluded_blocks=args.exclude_blocks,
+            giant_caps=read_json_object(args.giant_caps_json) if args.giant_caps_json else None,
+            pairwise_validation_fraction=args.pairwise_validation_fraction,
             seed=args.seed,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        _replace_json(out_json, result)
+        if args.fresh:
+            # Preserve the master digest, including the JSON file's original formatting.
+            with tempfile.TemporaryDirectory(dir=args.output_dir) as staging:
+                copy = Path(staging) / out_json.name
+                copy.write_bytes(args.pinned_roles_json.read_bytes())
+                copy.replace(out_json)
+        else:
+            _replace_json(out_json, result)
         with (args.output_dir / "assignments.csv").open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(["block_key", "role"])

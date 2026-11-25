@@ -166,7 +166,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
     assert manifest["s2and_version"] == __version__
     assert set(manifest["tables"]) == set(TASK_ROLES)
     assert manifest["tables"]["gate_fit"]["blocks"]["b ross"]["counts"]["full_windows"] == 2
-    for role in ("linker_train", "gate_fit"):
+    for role in ("fit_pool", "gate_fit"):
         rows = pd.read_parquet(output / f"{role}.parquet")
         assert rows.groupby("query_signature_id").size().to_dict() == {"q_full": 25, "q_initial": 25}
         assert rows["whole_author_holdout"].all()
@@ -224,7 +224,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
             max_query_groups=None,
         )
     manifest_path.write_bytes(original_manifest)
-    (output / "linker_train.parquet").write_bytes(b"changed")
+    (output / "fit_pool.parquet").write_bytes(b"changed")
     with pytest.raises(ValueError, match="Frozen linker table changed"):
         _materialize_frozen_linker_tasks(
             output / TASK_MANIFEST,
@@ -236,6 +236,31 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
             total_ram_bytes=1_000_000_000,
             max_query_groups=None,
         )
+
+
+def test_pairwise_validation_blocks_feed_ranker_and_can_be_enabled_for_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.linker.build_linker_task_tables import TASK_BLOCK_ROLES
+
+    specs = [
+        BlockSpec(key, 32, frozenset({identity, _OUTSIDE_HOME}))
+        for key, identity in zip(("a ross", "b ross"), _ORCIDS[:2], strict=True)
+    ]
+    frozen = assign_block_roles(specs, {"fit_pool": 2})
+    (block,) = frozen["pairwise_validation_blocks"]
+    identity = next(iter(next(spec.orcids for spec in specs if spec.block_key == block) - {_OUTSIDE_HOME}))
+    roles_path = tmp_path / "roles.json"
+    roles_path.write_text(json.dumps(frozen), encoding="utf-8")
+    inputs_path = tmp_path / "inputs.json"
+    inputs_path.write_text(json.dumps({block: _block_inputs(tmp_path / "block", block, identity)}), encoding="utf-8")
+    ranker = build_linker_task_tables(roles_path, inputs_path, tmp_path / "ranker", blocks=[block])
+    assert set(ranker["tables"]) == {"fit_pool"}
+    assert set(ranker["tables"]["fit_pool"]["blocks"]) == {block}
+    monkeypatch.setitem(TASK_BLOCK_ROLES, "gate_fit", frozenset({"gate_fit", "fit_pool"}))
+    shared = build_linker_task_tables(roles_path, inputs_path, tmp_path / "shared", blocks=[block])
+    assert set(shared["tables"]) == {"fit_pool", "gate_fit"}
+    assert set(shared["tables"]["gate_fit"]["blocks"]) == {block}
 
 
 @pytest.mark.parametrize("recent_seeds", [1, 3])
@@ -334,7 +359,7 @@ def test_joined_identity_evidence_reaches_task_builder(tmp_path: Path, check: st
     seeds.to_parquet(spec["seeds"], index=False)
     output = tmp_path / "tasks"
     if check == "missing_scored":
-        label_path = Path(inputs[blocks["linker_train"]]["labels"])
+        label_path = Path(inputs[blocks["fit_pool"]]["labels"])
         pd.read_parquet(label_path).drop(columns="scored", errors="ignore").to_parquet(label_path, index=False)
         with pytest.raises(ValueError, match="missing required columns.*scored"):
             build_linker_task_tables(roles_path, inputs_path, output, holdout_fraction=1)

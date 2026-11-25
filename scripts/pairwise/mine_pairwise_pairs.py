@@ -1,4 +1,4 @@
-"""Mine 1.4 errors and random controls from frozen pairwise training blocks."""
+"""Mine 1.4 errors and random controls from frozen fit_pool blocks."""
 
 from __future__ import annotations
 
@@ -24,11 +24,14 @@ from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
-from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles, normalize_block_key
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 
 Pair = tuple[str, str]
+DEFAULT_PAIRS_PER_BLOCK = 2_000
+DEFAULT_VERIFIED_PAIR_FRACTION = 0.05
+DEFAULT_PAIRS_PER_BLOCK_FLOOR = 100
 
 
 @dataclass(frozen=True)
@@ -77,9 +80,7 @@ def _eligible_mentions(
     eligible = {}
     for sid, orcid in deposited.items():
         gold = identities.get(sid)
-        if any(
-            identity_roles.get(oid, frozenset({"pairwise_train"})) != {"pairwise_train"} for oid in (gold, orcid) if oid
-        ):
+        if any(identity_roles.get(oid, frozenset({"fit_pool"})) != {"fit_pool"} for oid in (gold, orcid) if oid):
             continue
         eligible[sid] = gold or orcid or f"signature:{sid}"
     labels = {sid: oid for sid, oid in scored.items() if sid in eligible and oid not in EXCLUDED_ORCID_GROUPS}
@@ -98,6 +99,7 @@ def _ledger_mentions(
     ledger: IdentityLedger, spec: BlockInput, block: str, manifest: Mapping[str, Any]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
     view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
+    ledger.roles.require_assignment(manifest["binding"], context=f"{block} pairwise assignments")
     ledger.roles.require_bindings(manifest["binding"], {block}, context=f"{block} pairwise assignments")
     if manifest["files"].get(spec.assignments.name) != sha256_file(spec.assignments):
         raise ValueError(f"Assignment digest mismatch: {spec.assignments}")
@@ -167,7 +169,7 @@ def _random_pair(signatures: list[str], index: int) -> Pair:
     return signatures[index - math.comb(right, 2)], signatures[right]
 
 
-def _sample_frame(
+def _capped_frame(
     pair_at: Callable[[int], Pair],
     population: int,
     identities: Mapping[str, str],
@@ -176,8 +178,7 @@ def _sample_frame(
     per_block: int,
     per_identity: int,
     frame_seed: str,
-    rng: random.Random,
-) -> tuple[list[Pair], list[Pair]]:
+) -> list[Pair]:
     # Freeze a bounded candidate frame before sampling, so probabilities account for identity caps.
     frame: list[Pair] = []
     counts: Counter[str] = Counter()
@@ -193,7 +194,21 @@ def _sample_frame(
         frame.append(pair)
         if len(frame) >= frame_size:
             break
-    return rng.sample(frame, min(per_block, len(frame))), frame
+    return frame
+
+
+def _stratum_quotas(frame_sizes: list[int], budget: int) -> list[int]:
+    """Split the block budget evenly, redistributing slots from exhausted frames."""
+    quotas = [0] * len(frame_sizes)
+    active = [i for i, size in enumerate(frame_sizes) if size]
+    while active and budget:
+        share, remainder = divmod(budget, len(active))
+        for offset, i in enumerate(active):
+            count = min(frame_sizes[i] - quotas[i], share + (offset < remainder))
+            quotas[i] += count
+            budget -= count
+        active = [i for i in active if quotas[i] < frame_sizes[i]]
+    return quotas
 
 
 def mine_pairs(
@@ -201,7 +216,9 @@ def mine_pairs(
     blocks: Mapping[str, BlockInput],
     output_path: Path,
     *,
-    per_block: int,
+    per_block: int = DEFAULT_PAIRS_PER_BLOCK,
+    verified_pair_fraction: float = DEFAULT_VERIFIED_PAIR_FRACTION,
+    per_block_floor: int = DEFAULT_PAIRS_PER_BLOCK_FLOOR,
     identity_evidence: Path | None = None,
     per_identity: int = 25,
     seed: int = 20261123,
@@ -209,14 +226,16 @@ def mine_pairs(
     """Write deduplicated pairs sampled within each capped stratum frame."""
     if min(per_block, per_identity) <= 0:
         raise ValueError("Pair caps must be positive")
+    if not 0 <= verified_pair_fraction <= 1 or per_block_floor < 0:
+        raise ValueError("Expected a verified pair fraction in [0, 1] and a nonnegative block floor")
     roles = load_block_roles(roles_path)
     ledger = ledger_for_roles(identity_evidence, roles)
     normalized = {normalize_block_key(block): spec for block, spec in blocks.items()}
     if not normalized or len(normalized) != len(blocks):
         raise ValueError("Expected at least one block and no duplicate normalized keys")
     for block in normalized:
-        if roles.role_for(block) != "pairwise_train":
-            raise ValueError(f"Block {block!r} is outside pairwise_train")
+        if roles.role_for(block) != "fit_pool":
+            raise ValueError(f"Block {block!r} is outside fit_pool")
     manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)
@@ -243,27 +262,38 @@ def mine_pairs(
         )
         signatures = sorted(identities)
         labeled = sorted(gold)
+        verified_pairs = math.comb(len(labeled), 2)
+        cap = max(min(per_block, int(verified_pair_fraction * verified_pairs)), min(per_block_floor, verified_pairs))
         false_merges = _grouped_frame(labeled, clusters, gold)
         missed_links = _grouped_frame(labeled, gold, clusters)
         merged_unlabeled = _grouped_frame(signatures, clusters, gold, include_unlabeled=True)
         stratum_counts = {}
         seen_pairs: set[Pair] = set()
+        frames: list[tuple[str, int, list[Pair]]] = []
         for stratum, population, pair_at in (
             ("false_merge", false_merges.size, false_merges.pair),
             ("missed_link", missed_links.size, missed_links.pair),
+            ("random", verified_pairs, partial(_random_pair, labeled)),
             ("merged_unlabeled", merged_unlabeled.size, merged_unlabeled.pair),
-            ("random", math.comb(len(signatures), 2), partial(_random_pair, signatures)),
         ):
-            sample, frame = _sample_frame(
-                pair_at,
-                population,
-                identities,
-                seen_pairs,
-                per_block=per_block,
-                per_identity=per_identity,
-                frame_seed=f"{block}:{stratum}",
-                rng=rng,
+            frame = (
+                _capped_frame(
+                    pair_at,
+                    population,
+                    identities,
+                    seen_pairs,
+                    per_block=cap,
+                    per_identity=per_identity,
+                    frame_seed=f"{block}:{stratum}",
+                )
+                if cap
+                else []
             )
+            frames.append((stratum, population, frame))
+            seen_pairs.update(frame)
+        quotas = _stratum_quotas([len(frame) for _, _, frame in frames], cap)
+        for (stratum, population, frame), quota in zip(frames, quotas, strict=True):
+            sample = rng.sample(frame, quota)
             frame_size = len(frame)
             inclusion = len(sample) / frame_size if frame_size else 0.0
             stratum_counts[stratum] = {
@@ -273,12 +303,14 @@ def mine_pairs(
                 "sampled_pairs": len(sample),
                 "inclusion_probability": inclusion,
             }
-            seen_pairs.update(frame)
             rows.extend((block, left, right, stratum, inclusion) for left, right in sorted(sample))
         counts[block] = {
             "eligible_signatures": len(signatures),
             "excluded_non_home_signatures": excluded,
             "ineligible_signatures": excluded,
+            "verified_signatures": len(labeled),
+            "verified_within_block_pairs": verified_pairs,
+            "pair_cap": cap,
             "labels_sha256": sha256_file(spec.labels) if spec.labels is not None else None,
             "assignments_sha256": sha256_file(spec.assignments),
             "strata": stratum_counts,
@@ -291,15 +323,14 @@ def mine_pairs(
     with manifest_path.open("x", encoding="utf-8", newline="\n") as handle:
         json.dump(
             {
-                **(
-                    {BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys())}
-                    if ledger is not None
-                    else {"block_role_assignments_sha256": roles.sha256}
-                ),
+                ROLE_SHA256_FIELD: roles.sha256,
+                **({BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys())} if ledger is not None else {}),
                 "seed": seed,
                 **shared_binding,
-                "role": "pairwise_train",
-                "pairs_per_block_per_stratum": per_block,
+                "role": "fit_pool",
+                "pairs_per_block": per_block,
+                "verified_pair_fraction": verified_pair_fraction,
+                "pairs_per_block_floor": per_block_floor,
                 "pairs_per_identity_per_stratum": per_identity,
                 "probability_scope": "within_capped_stratum_frame",
                 "reporting_population": "disjoint capped stratum frames fixed before sampling",
@@ -322,7 +353,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--blocks-json", type=Path, required=True, help="Map block keys to arrow_dir, labels and assignments."
     )
-    parser.add_argument("--pairs-per-block", type=int, required=True, help="Maximum per stratum and block.")
+    parser.add_argument("--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK, help="Cap across strata.")
+    parser.add_argument("--verified-pair-fraction", type=float, default=DEFAULT_VERIFIED_PAIR_FRACTION)
+    parser.add_argument("--pairs-per-block-floor", type=int, default=DEFAULT_PAIRS_PER_BLOCK_FLOOR)
     parser.add_argument("--pairs-per-identity", type=int, default=25, help="Maximum per stratum and identity.")
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--output", type=Path, required=True)
@@ -341,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         blocks,
         args.output,
         per_block=args.pairs_per_block,
+        verified_pair_fraction=args.verified_pair_fraction,
+        per_block_floor=args.pairs_per_block_floor,
         identity_evidence=args.identity_evidence,
         per_identity=args.pairs_per_identity,
         seed=args.seed,

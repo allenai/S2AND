@@ -125,7 +125,7 @@ def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Pa
         ledger.read_block("a lovelace")
 
 
-@pytest.mark.parametrize("role", ["pairwise_train", "gate_thresh"])
+@pytest.mark.parametrize("role", ["fit_pool", "gate_thresh"])
 def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path], tmp_path: Path, role: str) -> None:
     from dataclasses import replace
 
@@ -178,7 +178,7 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
     from scripts.intake.build_identity_evidence import _block_rows
     from scripts.intake.prepare_identity_labels import SignatureJoin
 
-    block, role, paper = "c klein", "pairwise_train", "173993366"
+    block, role, paper = "c klein", "fit_pool", "173993366"
     rows = [
         {
             "signature_id": f"{paper}-{pos}",
@@ -224,12 +224,15 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
         pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["holdout", "development"]}), source
     )
     output = tmp_path / "freeze-input.parquet"
-    build_freeze_input(evidence / "manifest.json", source, output, strata={"a_lovelace": "tiny"})
+    origins = tmp_path / "origins.csv"
+    origins.write_text("surname,broad\nLovelace,northern_european\n", encoding="utf-8")
+    build_freeze_input(evidence / "manifest.json", source, output, surname_origin_csv=origins)
     first, second = pq.read_table(output).to_pylist()
     assert first["signature_count"] == 4
-    assert first["stratum"] == "tiny"
+    assert first["stratum"] == "<=1000|northern_european"
     assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 2, GOLD: 2}
     assert second["source_split"] == "holdout"
+    assert second["stratum"] == "<=1000|other"
 
 
 @pytest.mark.parametrize(
@@ -249,7 +252,7 @@ def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold
     from scripts.intake.build_identity_evidence import _block_rows
     from scripts.intake.prepare_identity_labels import SignatureJoin
 
-    block, role = "a lovelace", "linker_train"
+    block, role = "a lovelace", "fit_pool"
     signatures = pd.DataFrame(
         {
             "signature_id": ["1-0", "2-0"],
@@ -303,7 +306,7 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     )
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
-    targets = {"pairwise_train": 1, "final_test_a": 1}
+    targets = {"fit_pool": 1, "final_test_a": 1}
     frozen = freeze_identity_roles(blocks, evidence / "manifest.json", targets)
     manifest = tmp_path / "assignments.json"
     manifest.write_text(json.dumps(frozen))
@@ -312,14 +315,14 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     assert not roles.scores("g hopper", GOLD)
     assert roles.scores("a lovelace", DEPOSITED)
     assert "orcid_home_role" not in frozen
-    assert frozen["verification"]["cross_role_mentions_by_role"]["pairwise_train"] == 2
+    assert frozen["verification"]["cross_role_mentions_by_role"]["fit_pool"] == 2
     with pytest.raises(ValueError, match="new or previously unassigned exported blocks"):
         freeze_identity_roles(
             blocks,
             evidence / "manifest.json",
             targets,
             prior_path=manifest,
-            extra_pins={"a lovelace": "pairwise_train"},
+            extra_pins={"a lovelace": "fit_pool"},
         )
     allocation = assign_block_roles(
         [
@@ -353,7 +356,7 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     blocks = tmp_path / "freeze.parquet"
     build_freeze_input(evidence, source, blocks)
     frozen = tmp_path / "roles.json"
-    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"pairwise_train": 1, "final_test_a": 1})))
+    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(frozen))
     assert ledger is not None
     block = ledger.for_block("a lovelace")
@@ -371,8 +374,6 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
 def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:
-    import csv
-
     from s2and._sha256 import sha256_file
     from scripts.common.block_roles import load_block_roles
     from scripts.common.identity_ledger import ledger_for_roles
@@ -394,7 +395,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence, source, blocks)
     role_path = tmp_path / "roles.json"
-    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"pairwise_train": 1, "final_test_a": 1})))
+    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
     assignment_root = tmp_path / "assignments"
@@ -405,6 +406,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     record = {
         "binding": {
             "block_bindings": ledger.roles.bindings_for({"a lovelace"}),
+            "block_role_assignments_sha256": ledger.roles.sha256,
             "model_sha256": "a" * 64,
             "index_sha256": "b" * 64,
         },
@@ -413,10 +415,11 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     manifest.write_text(json.dumps(record))
     specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
     output = tmp_path / "pairs.csv"
-    assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 1
-    with output.open(newline="", encoding="utf-8") as source_file:
-        (row,) = csv.DictReader(source_file)
-    assert {row["signature_id_1"], row["signature_id_2"]} == {"2-0", "3-0"}
+    assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 0
+    summary = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))["blocks"]["a lovelace"]
+    assert summary["eligible_signatures"] == 2
+    assert summary["verified_within_block_pairs"] == 0
+    assert summary["pair_cap"] == 0
     record["binding"]["block_bindings"]["a lovelace"]["role_sha256"] = "old"
     manifest.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="does not match"):
@@ -425,7 +428,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     pq.write_table(pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["development"] * 2}), source)
     both = tmp_path / "both-blocks.parquet"
     build_freeze_input(evidence, source, both)
-    role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"pairwise_train": 2})))
+    role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"fit_pool": 2})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
     pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
@@ -438,6 +441,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
                 {
                     "binding": {
                         "block_bindings": ledger.roles.bindings_for({block}),
+                        "block_role_assignments_sha256": ledger.roles.sha256,
                         "model_sha256": model_sha,
                         "index_sha256": "b" * 64,
                     },
@@ -556,11 +560,12 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence, source, blocks)
     path = tmp_path / "assignments.json"
-    path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"linker_train": 2})), encoding="utf-8")
+    path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 2})), encoding="utf-8")
     roles = load_block_roles(path)
     manifest = {
-        "tables": {"linker_train": {"blocks": dict.fromkeys(roles.block_to_role)}},
+        "tables": {"fit_pool": {"blocks": dict.fromkeys(roles.block_to_role)}},
         "block_bindings": roles.bindings_for(roles.block_to_role),
+        "block_role_assignments_sha256": roles.sha256,
     }
     _validate_frozen_task_bindings(manifest, roles)
     if check in {"load", "train"}:
@@ -575,7 +580,8 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
         subset = {"a lovelace": {}} if check == "subset" else {}
         with pytest.raises(ValueError, match="Missing.*g hopper"):
             _validate_frozen_task_bindings(
-                {"tables": {"linker_train": {"blocks": subset}}, "block_bindings": roles.bindings_for(subset)}, roles
+                {**manifest, "tables": {"fit_pool": {"blocks": subset}}, "block_bindings": roles.bindings_for(subset)},
+                roles,
             )
 
 

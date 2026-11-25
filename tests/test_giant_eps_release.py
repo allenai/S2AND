@@ -769,7 +769,7 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
         )
 
     set_sweep(reference.with_singletons, bind_manifest=False)
-    with pytest.raises(ValueError, match="same frozen block roles"):
+    with pytest.raises(ValueError, match="master block role assignment"):
         apply()
     set_sweep({**reference.with_singletons, "q1": shared}, bind_manifest=True)
     with pytest.raises(ValueError, match="outside its home role"):

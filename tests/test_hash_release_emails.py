@@ -178,14 +178,25 @@ def test_scrub_text_emails_handles_unicode_dashes_and_malformed_at_dot() -> None
 def test_affiliation_email_followed_by_id(prefix: str, address: str, affiliation_id: str) -> None:
     # Mask the source addresses while preserving the seven missed cells' structure.
     cell = f"{prefix}{address}{affiliation_id}"
-    assert find_plaintext_emails(cell) == [address]
-    assert scrub_text_emails(cell) == f"{prefix}{EMAIL_REDACTED_TOKEN}{affiliation_id}"
+    assert find_plaintext_emails(cell) == [address + affiliation_id]
+    assert scrub_text_emails(cell) == f"{prefix}{EMAIL_REDACTED_TOKEN}"
 
 
 @pytest.mark.parametrize(
     "address",
-    ["review@\u4f8b\u5b50.\u4e2d\u56fd", "review@डाक.भारत", "review@cafe\u0301.cafe\u0301"],
-    ids=["han", "devanagari", "decomposed-latin"],
+    [
+        "review@\u4f8b\u5b50.\u4e2d\u56fd",
+        "review@डाक.भारत",
+        "review@cafe\u0301.cafe\u0301",
+        "review@বাংলা.ভারত",
+        "review@col·legi.cat",
+        "review@نامه\u200cای.ایران",
+        "review+tag＠例子.中",
+        "a.b@example.eduDepartmentofComputerScienceandEngineering",
+        "a.b@example.nlEindhovenUniversityofTechnologyDepartmentofMathematics",
+        "a.b@example.co.ukABCDEFGHIJKLMNOPQRSTUVWXYZabc",
+        "review@example.edu" + "x" * 60,
+    ],
 )
 def test_internationalized_domain_is_detected_and_scrubbed(tmp_path: Path, address: str) -> None:
     text = f"Contact {address}."
@@ -193,6 +204,12 @@ def test_internationalized_domain_is_detected_and_scrubbed(tmp_path: Path, addre
     assert find_plaintext_emails(text) == [address]
     assert scrub_text_emails(text) == f"Contact {EMAIL_REDACTED_TOKEN}."
     assert len(scan_tree_for_plaintext_emails(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("text", ["Fe3O4@SiO2.The catalyst", "see a@b for details", "@b.org", "a@.org"])
+def test_email_detector_preserves_non_addresses(text: str) -> None:
+    assert find_plaintext_emails(text) == []
+    assert scrub_text_emails(text) == text
 
 
 def test_affiliation_email_followed_by_a_long_run_of_letters() -> None:

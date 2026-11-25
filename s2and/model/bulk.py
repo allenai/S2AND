@@ -6,6 +6,8 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence, Set
 from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -34,6 +36,7 @@ from s2and.corrections.seed_merging import (
 )
 from s2and.data import ANDData
 from s2and.feature_port import RESIDUAL_FEATURIZER, build_rust_featurizer_from_arrow_dataset
+from s2and.incremental_linking.attach_reuse import AttachReuse, attachment_dataset_key
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
 )
@@ -84,7 +87,7 @@ from .constraints import (
     _RustFeaturizerPredictDataset,
 )
 from .distances import _CONCURRENT_DISTANCE_BLOCK_MAX_SIZE, _CONCURRENT_DISTANCE_BLOCKS
-from .incremental import _AttachmentBlockState, _signature_batch_indices_for_request
+from .incremental import _AttachmentBlockSetup, _AttachmentBlockState, _signature_batch_indices_for_request
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer
@@ -286,6 +289,7 @@ def _predict_from_prepared_rust_featurizer(
     explicit_cluster_seeds_require: dict[str, int | str] | None,
     resolved_cluster_seeds_disallow: set[tuple[str, str]],
     prediction_state: PredictionState | None = None,
+    residual_reuse: _AttachmentBlockState | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
     """Predict with request metadata already exported from a Rust featurizer."""
 
@@ -377,6 +381,7 @@ def _predict_from_prepared_rust_featurizer(
                 total_ram_bytes=total_ram_bytes,
                 signature_index_by_id=signature_index_by_id,
                 prediction_state=block_state,
+                residual_reuse=residual_reuse,
             )
             return block_dists, time.perf_counter() - start
 
@@ -651,6 +656,17 @@ def _build_arrow_subblocked_block_dict(
     return subblocked, no_middle_dead_ends
 
 
+@dataclass
+class _AttachmentSubblocks:
+    subblocked: dict[str, list[str]]
+    multiple_letter: dict[str, list[str]]
+    single_letter: dict[str, list[str]]
+    alert: bool
+    no_middle_dead_ends: dict[str, str]
+    featurizer_signature_ids: list[str]
+    telemetry: dict[str, Any]
+
+
 def _predict_subblocked_single_letter_groups_from_arrow(
     self: Clusterer,
     block_dict_single_letter: Mapping[str, Sequence[str]],
@@ -665,6 +681,8 @@ def _predict_subblocked_single_letter_groups_from_arrow(
     cluster_seeds_disallow: set[tuple[str, str]],
     cluster_seeds_require: Mapping[str, int | str],
     original_blocks: Mapping[str, Sequence[str]],
+    attach_reuse: AttachReuse | None = None,
+    cache_residuals: bool = False,
 ) -> dict[str, list[str]]:
     """Attach initial-only groups using already normalized caller supervision."""
 
@@ -686,15 +704,20 @@ def _predict_subblocked_single_letter_groups_from_arrow(
             if block_state is not None:
                 block_state[1].release()
             block_state = None
-            block_state = (
-                origin,
-                _AttachmentBlockState(
-                    arrow_dataset,
-                    [str(signature_id) for signature_id in original_blocks[origin]],
-                    name_tuples,
-                    self.n_jobs,
-                ),
-            )
+            members = [str(signature_id) for signature_id in original_blocks[origin]]
+            state = _AttachmentBlockState(arrow_dataset, members, name_tuples, self.n_jobs)
+            if attach_reuse is not None:
+                key = (attachment_dataset_key(arrow_dataset), tuple(members), name_tuples)
+                setup = attach_reuse.blocks.get(key)
+                if setup is None and attach_reuse.blocks.fits(len(members)):
+                    setup = _AttachmentBlockSetup()
+                    attach_reuse.blocks.store(key, setup, len(members))
+                if setup is not None:
+                    state.setup = setup
+                    state.attach_reuse = attach_reuse
+            block_state = (origin, state)
+        if cache_residuals:
+            block_state[1].residual_group = tuple(group_signature_ids)
         synthetic_seed_map = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
         # Future initial-only groups are not known to this request's planner.
         # Retain the full disallows above and expose only currently addressable
@@ -779,6 +802,7 @@ def _predict_from_arrow(
     prediction_cluster_seeds_require: dict[str, int | str] | None,
     prediction_state: PredictionState | None = None,
     bulk_clusters: Callable[[Mapping[str, list[str]]], dict[str, list[str]]] | None = None,
+    attach_reuse: AttachReuse | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
     """Run native subblocking and prediction from one request-bound Arrow view.
 
@@ -833,35 +857,76 @@ def _predict_from_arrow(
             if signature_id in atomic_seed_signature_ids
         }
         subblocking_start = time.perf_counter()
-        block_dict_subblocked, no_middle_dead_ends = self._build_arrow_subblocked_block_dict(
-            block_dict,
-            arrow_lease,
-            batching_threshold=batching_threshold,
-            cluster_seeds_require=atomic_cluster_seeds_require,
-            prediction_state=prediction_state,
-        )
-        subblocking_firsts = _group_subblocking_firsts(
-            block_dict_subblocked,
-            block_dict,
-            batching_threshold,
-            lambda signature_ids: _load_arrow_canonical_name_parts(arrow_lease, signature_ids),
-        )
-        (
-            block_dict_multiple_letter,
-            block_dict_single_letter,
-            subblocking_alert_flag,
-        ) = self._partition_subblocked_first_name_groups(
-            block_dict_subblocked,
-            subblocking_firsts,
-            original_blocks=block_dict,
-        )
-        featurizer_signature_ids = list(
-            dict.fromkeys(
-                str(signature_id)
-                for block_key in sorted(block_dict_multiple_letter)
-                for signature_id in block_dict_multiple_letter[block_key]
+        subblocks = None
+        if attach_reuse is not None:
+            feature_contract = getattr(self, "feature_contract", None)
+            prefix_digest = (
+                feature_contract.get(ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD)
+                if isinstance(feature_contract, Mapping)
+                else None
             )
-        )
+            subblock_key = (
+                attachment_dataset_key(arrow_dataset),
+                tuple((key, tuple(value)) for key, value in sorted(block_dict.items())),
+                batching_threshold,
+                tuple(sorted(atomic_cluster_seeds_require.items())),
+                prefix_digest or DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
+                self._subblocking_graph_config(),
+                int(self.random_state or 0),
+            )
+            subblocks = attach_reuse.subblocks.get(subblock_key)
+        if subblocks is None:
+            block_dict_subblocked, no_middle_dead_ends = self._build_arrow_subblocked_block_dict(
+                block_dict,
+                arrow_lease,
+                batching_threshold=batching_threshold,
+                cluster_seeds_require=atomic_cluster_seeds_require,
+                prediction_state=prediction_state,
+            )
+            subblocking_firsts = _group_subblocking_firsts(
+                block_dict_subblocked,
+                block_dict,
+                batching_threshold,
+                lambda signature_ids: _load_arrow_canonical_name_parts(arrow_lease, signature_ids),
+            )
+            (
+                block_dict_multiple_letter,
+                block_dict_single_letter,
+                subblocking_alert_flag,
+            ) = self._partition_subblocked_first_name_groups(
+                block_dict_subblocked,
+                subblocking_firsts,
+                original_blocks=block_dict,
+            )
+            featurizer_signature_ids = list(
+                dict.fromkeys(
+                    str(signature_id)
+                    for block_key in sorted(block_dict_multiple_letter)
+                    for signature_id in block_dict_multiple_letter[block_key]
+                )
+            )
+            if attach_reuse is not None and attach_reuse.subblocks.fits(len(signature_ids)):
+                attach_reuse.subblocks.store(
+                    subblock_key,
+                    _AttachmentSubblocks(
+                        block_dict_subblocked,
+                        block_dict_multiple_letter,
+                        block_dict_single_letter,
+                        subblocking_alert_flag,
+                        no_middle_dead_ends,
+                        featurizer_signature_ids,
+                        deepcopy(prediction_state.telemetry["rust_arrow_subblocking"]),
+                    ),
+                    len(signature_ids),
+                )
+        else:
+            block_dict_subblocked = subblocks.subblocked
+            block_dict_multiple_letter = subblocks.multiple_letter
+            block_dict_single_letter = subblocks.single_letter
+            subblocking_alert_flag = subblocks.alert
+            no_middle_dead_ends = subblocks.no_middle_dead_ends
+            featurizer_signature_ids = subblocks.featurizer_signature_ids
+            prediction_state.telemetry["rust_arrow_subblocking"] = deepcopy(subblocks.telemetry)
         arrow_subblocking_seconds = time.perf_counter() - subblocking_start
         # The sequential initial-only passes re-enter the public incremental
         # API. Freeze canonical aliases once so each pass can reuse them.
@@ -973,6 +1038,7 @@ def _predict_from_arrow(
             name_tuples=prediction_name_tuples,
             cluster_seeds_disallow=cluster_seed_disallows,
             original_blocks=block_dict,
+            attach_reuse=attach_reuse,
         )
         pred_clusters = self._reunite_no_middle_dead_ends(
             pred_clusters,
@@ -989,6 +1055,7 @@ def _predict_from_arrow(
             block_dict_single_letter,
             pred_clusters=pred_clusters,
             cluster_seeds_require=active_cluster_seeds_require,
+            cache_residuals=attach_reuse is not None,
         )
         if orcid_join_enabled(self) and average_linkage_cut(self.cluster_model, cluster_model_params) is not None:
             oversized = {key: members for key, members in block_dict.items() if len(members) > batching_threshold}
@@ -1022,6 +1089,11 @@ def _predict_from_arrow(
             cluster_seeds_require=None,
             cluster_seeds_disallow=cluster_seed_disallows,
             prediction_state=prediction_state,
+            residual_reuse=(
+                attachment_state
+                if attachment_state is not None and attachment_state.residual_group is not None
+                else None
+            ),
         )
     predict_seconds = time.perf_counter() - predict_start
     nested_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_predict", {}))
@@ -1070,6 +1142,7 @@ def _predict_from_arrow_request(
     cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
     prediction_state: PredictionState | None = None,
     bulk_clusters: Callable[[Mapping[str, list[str]]], dict[str, list[str]]] | None = None,
+    attach_reuse: AttachReuse | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
     """Predict blocks through one open Arrow dataset with optional request-local prediction state.
 
@@ -1159,6 +1232,7 @@ def _predict_from_arrow_request(
                 prediction_cluster_seeds_require=prediction_cluster_seeds_require,
                 prediction_state=prediction_state,
                 bulk_clusters=bulk_clusters,
+                attach_reuse=attach_reuse,
             )
         with temporary_cluster_seed_sidecars(
             prediction_cluster_seeds_require or {},
@@ -1184,6 +1258,7 @@ def _predict_from_arrow_request(
                 prediction_cluster_seeds_require=prediction_cluster_seeds_require,
                 prediction_state=prediction_state,
                 bulk_clusters=bulk_clusters,
+                attach_reuse=attach_reuse,
             )
 
 

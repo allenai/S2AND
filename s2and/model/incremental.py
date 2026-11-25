@@ -8,7 +8,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from s2and import memory_budget
@@ -16,6 +16,7 @@ from s2and.arrow_inputs import ArrowDataset, arrow_string_array
 from s2and.corrections.block_corrections import correction_fingerprint
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset, release_rust_handle
+from s2and.incremental_linking.attach_reuse import AttachReuse
 from s2and.incremental_linking.completion import ResidualClusterer
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
@@ -37,7 +38,7 @@ from s2and.supervision import (
     normalize_partial_supervision,
     validate_incremental_seed_disallows,
 )
-from s2and.text import canonicalize_name_parts, normalize_orcid_compact
+from s2and.text import CanonicalNameParts, canonicalize_name_parts, normalize_orcid_compact
 from s2and.thread_config import resolve_n_jobs
 
 from ._shared import (
@@ -63,6 +64,30 @@ _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _ALTERED_PRESPLIT_CACHE_INIT_LOCK = threading.Lock()
 
 
+@dataclass
+class _AttachmentBlockSetup:
+    """Hold EPS-independent setup for one block in an offline reuse context."""
+
+    featurizer: Any | None = None
+    signatures: dict[str, _ArrowIncrementalSignatureInfo] = field(default_factory=dict)
+    name_parts: dict[str, tuple[CanonicalNameParts, str | None]] = field(default_factory=dict)
+
+    def signature_info(
+        self, arrow_lease: Any, signature_ids: Sequence[str]
+    ) -> dict[str, _ArrowIncrementalSignatureInfo]:
+        """Read each query's metadata once across the offline block's passes."""
+        missing = [sid for sid in signature_ids if sid not in self.signatures]
+        if missing:
+            self.signatures.update(_load_arrow_incremental_signature_info(arrow_lease, missing))
+        return {sid: self.signatures[sid] for sid in signature_ids}
+
+    def release(self) -> None:
+        """Release native paper buffers before the Arrow dataset closes."""
+        if self.featurizer is not None:
+            release_rust_handle(self.featurizer)
+            self.featurizer = None
+
+
 class _AttachmentBlockState:
     """Native state that the attachment passes of one original block share.
 
@@ -84,6 +109,9 @@ class _AttachmentBlockState:
         self._build_args = (arrow_dataset, list(signature_ids), num_threads)
         self._featurizer: Any | None = None
         self._orcid_info: dict[str, _ArrowIncrementalSignatureInfo] | None = None
+        self.residual_group: tuple[str, ...] | None = None
+        self.setup: _AttachmentBlockSetup | None = None
+        self.attach_reuse: AttachReuse | None = None
         self.planner: Any | None = None
         self.planner_key: tuple[Any, ...] | None = None
 
@@ -121,16 +149,22 @@ class _AttachmentBlockState:
         self.planner = None
 
     def featurizer(self) -> Any:
-        if self._featurizer is None:
+        setup = self.setup
+        featurizer = self._featurizer if setup is None else setup.featurizer
+        if featurizer is None:
             arrow_dataset, signature_ids, num_threads = self._build_args
-            self._featurizer = build_rust_featurizer_from_arrow_dataset(
+            featurizer = build_rust_featurizer_from_arrow_dataset(
                 arrow_dataset,
                 signature_ids=signature_ids,
                 name_tuples=self.name_tuples,
                 preprocess=True,
                 num_threads=num_threads,
             )
-        return self._featurizer
+            if setup is None:
+                self._featurizer = featurizer
+            else:
+                setup.featurizer = featurizer
+        return featurizer
 
 
 @dataclass(frozen=True)
@@ -930,7 +964,13 @@ def predict_incremental_from_arrow(
                 else []
             )
             metadata_signature_ids = (*unassigned_signature_ids, *altered_seed_signature_ids)
-            signatures = _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
+            attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
+            setup = None if attachment_state is None else attachment_state.setup
+            signatures = (
+                _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
+                if setup is None
+                else setup.signature_info(arrow_lease, metadata_signature_ids)
+            )
             if not bool(getattr(self, "suppress_orcid", False)) and any(
                 (signature_info := signatures.get(signature_id)) is not None
                 and signature_info.author_info_orcid is not None

@@ -19,7 +19,9 @@ from tests.promoted_linking_helpers import (
 )
 
 
-def _dataset(names: list[tuple[str, str, str]], seeds: dict[str, str]) -> ANDData:
+def _dataset(
+    names: list[tuple[str, str, str]], seeds: dict[str, str], *, years: tuple[int, ...] | None = None
+) -> ANDData:
     signatures, papers = {}, {}
     for index, (first, middle, last) in enumerate(names):
         sid, pid = str(index), str(100 + index)
@@ -41,7 +43,7 @@ def _dataset(names: list[tuple[str, str, str]], seeds: dict[str, str]) -> ANDDat
             "paper_id": int(pid),
             "title": "Notes on mathematics",
             "abstract": "",
-            "year": 2000,
+            "year": 2000 if years is None else years[index],
             "venue": "",
             "journal_name": "",
             "authors": [{"position": 0, "author_name": f"{first} {last}"}],

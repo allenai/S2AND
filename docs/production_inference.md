@@ -608,3 +608,18 @@ These tests validate code and synthetic bundles only. A release additionally
 needs a clean wheel/sdist check, exact-version Rust wheel install, a real
 canonical bundle, and the approved quality/runtime/RSS gates in
 [release.md](release.md).
+
+## Offline attachment replay
+
+The production route of the EPS sweep holds an attachment reuse context for each open, ORCID-free
+Arrow dataset. It retains subblocking, block featurizers and query name metadata across EPS
+values. Offline replays can pass an AttachReuse context to the same private Arrow request entry
+point. Use the context manager and close it before the Arrow dataset. It logs retained signatures
+and hits, and computes setup normally when its signature budget is exhausted.
+
+The residual cache retains condensed model distances for initial-only attachment groups when
+ORCID constraints are suppressed and native fused scoring is available. Each pass scores only
+previously unseen pairs in its residual subset, then applies its own constraints and overrides
+before linkage and block corrections at its EPS. The context defaults to a 1 GiB residual
+cache and falls back to ordinary scoring when the cache or temporary arrays exceed the
+applicable memory budget.

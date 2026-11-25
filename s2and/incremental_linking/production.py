@@ -404,6 +404,7 @@ def _record_link_priorities(
 def _new_link_name_conflict(
     dataset: _DirectArrowIncrementalDataset,
     partial_supervision: Mapping[tuple[str, str], int | float],
+    names: dict[str, tuple[CanonicalNameParts, str | None]] | None = None,
 ) -> tuple[Callable[[str, str], bool], Callable[[str], tuple[str, Any]]]:
     """Return the hard name constraint between two linked queries and its key.
 
@@ -415,11 +416,13 @@ def _new_link_name_conflict(
     """
 
     name_tuples = name_tuples_for_incremental_rules(dataset.name_tuples)
-    names: dict[str, tuple[CanonicalNameParts, str | None]] = {}
+    if names is None:
+        names = {}
+    cached_names = names
     verdicts: dict[tuple[tuple[CanonicalNameParts, str | None], tuple[CanonicalNameParts, str | None]], bool] = {}
 
     def name(signature_id: str) -> tuple[CanonicalNameParts, str | None]:
-        entry = names.get(signature_id)
+        entry = cached_names.get(signature_id)
         if entry is None:
             signature = dataset.signatures[signature_id]
             entry = (
@@ -428,7 +431,7 @@ def _new_link_name_conflict(
                 ),
                 given_name_for_constraint(signature.author_info_first, signature.author_info_middle),
             )
-            names[signature_id] = entry
+            cached_names[signature_id] = entry
         return entry
 
     def conflict(left: str, right: str) -> bool:
@@ -1891,7 +1894,10 @@ def _predict_incremental_promoted_linker_from_arrow(
         ):
             # Links from one pass do not see each other during scoring. Keep the
             # higher-priority link when two new links to one cluster conflict.
-            conflict, conflict_key = _new_link_name_conflict(dataset, partial_supervision)
+            setup = None if attachment_state is None else attachment_state.setup
+            conflict, conflict_key = _new_link_name_conflict(
+                dataset, partial_supervision, None if setup is None else setup.name_parts
+            )
             linked_signature_clusters, name_check_rejected = reject_conflicting_new_links(
                 linked_signature_clusters,
                 priorities=link_priorities,

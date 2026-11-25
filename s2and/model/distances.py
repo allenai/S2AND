@@ -19,6 +19,7 @@ from s2and.corrections.block_corrections import BlockCorrections, corrections_co
 from s2and.data import ANDData
 from s2and.feature_port import _get_rust_feature_data
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from s2and.incremental_linking.attach_reuse import ResidualModelDistances, attachment_dataset_key
 from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
@@ -48,9 +49,11 @@ from .constraints import (
     _orcid_name_waiver_setting,
     _profile_exclusion_kwargs,
 )
+from .incremental import _estimator_cache_fingerprint
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer
+    from .incremental import _AttachmentBlockState
 
 _PREDICT_FEATURE_COPY_MAX_BYTES = 128 * (1 << 20)
 
@@ -237,12 +240,14 @@ def _guard_predict_block_matrix_allocation(
     fastcluster_fused_dtype: Any,
     total_ram_bytes: int | None,
     copies_codes: bool = False,
+    extra_bytes: int = 0,
 ) -> None:
     """Fail fast before exact prediction allocates a block matrix above the RAM budget.
 
     Linkage works in the matrix, so the matrix is the block's peak. The post-linkage
     corrections add their one-byte-per-pair copy. A block with profile exclusions also keeps a
-    second matrix for relinking, which this guard does not count.
+    second matrix for relinking, which this guard does not count. Callers can supply extra
+    allocations through `extra_bytes`.
     """
     if total_ram_bytes is None or block_size <= 1:
         return
@@ -259,6 +264,7 @@ def _guard_predict_block_matrix_allocation(
     )
     if copies_codes and uses_fastcluster:
         matrix_bytes += int(block_size * (block_size - 1) // 2)
+    matrix_bytes += extra_bytes
     if matrix_bytes <= int(snapshot.available_bytes):
         return
     raise MemoryError(
@@ -1361,6 +1367,86 @@ def make_distance_matrices_from_rust_featurizer(
     )
 
 
+def _fill_cached_residual_model_distances(
+    self: Clusterer,
+    state: _AttachmentBlockState,
+    signatures: list[str],
+    output: np.ndarray,
+    *,
+    rust_featurizer: Any,
+    block_signature_indices: list[int],
+    block_scorers: tuple[Any, Any | None],
+    selected_indices: list[int],
+    nameless_selected_indices: list[int] | None,
+    total_ram_bytes: int | None,
+) -> bool:
+    """Fill model scores only, leaving constraints and caller distances to this request."""
+    reuse = state.attach_reuse
+    group = state.residual_group
+    if reuse is None or group is None or not self.suppress_orcid or not reuse.residuals.limit:
+        return False
+
+    key = (
+        attachment_dataset_key(state.arrow_dataset),
+        group,
+        state.name_tuples,
+        _estimator_cache_fingerprint(self.classifier),
+        _estimator_cache_fingerprint(self.nameless_classifier),
+        tuple(selected_indices),
+        None if nameless_selected_indices is None else tuple(nameless_selected_indices),
+        self.featurizer_info.legacy_paper_years,
+    )
+    with reuse.residual_lock:
+        cached = reuse.residuals.get(key)
+        new_entry = cached is None
+        size = len(group)
+        pair_count = size * (size - 1) // 2
+        retained_bytes = pair_count * output.itemsize + size * 128 if new_entry else 0
+        if new_entry and not reuse.residuals.fits(retained_bytes):
+            return False
+        # Budget the gathered labels, cache indices, and native override offsets.
+        index_bytes = output.size * (np.dtype(np.intp).itemsize + np.dtype(np.int64).itemsize)
+        try:
+            _guard_predict_block_matrix_allocation(
+                block_key="attachment queries",
+                block_size=len(signatures),
+                uses_fastcluster=True,
+                fastcluster_fused_dtype=output.dtype,
+                total_ram_bytes=total_ram_bytes,
+                extra_bytes=retained_bytes + index_bytes,
+            )
+        except MemoryError as exc:
+            logger.info("Attachment reuse residual matrix bypassed: %s", exc)
+            return False
+        if cached is None:
+            cached = ResidualModelDistances(
+                {sid: i for i, sid in enumerate(group)}, np.full(pair_count, np.nan, dtype=output.dtype)
+            )
+        cache_offsets = cached.subset_offsets(signatures)
+        if cache_offsets is None:
+            return False
+        # NaNs ask the native fill to score a pair. Known scores pass through unchanged.
+        rust_featurizer.fill_block_distances_indexed(
+            block_signature_indices,
+            output,
+            0.0,
+            np.arange(output.size, dtype=np.int64),
+            cached.values[cache_offsets],
+            selected_indices,
+            block_scorers[0],
+            nameless_selected_indices,
+            block_scorers[1],
+            use_constraints=False,
+            suppress_orcid=True,
+            num_threads=resolve_n_jobs(self.n_jobs),
+            **_one_pass_tile_overrides,
+        )
+        cached.values[cache_offsets] = output
+        if new_entry:
+            reuse.residuals.store(key, cached, retained_bytes)
+        return True
+
+
 def _make_distance_matrices_from_verified_rust_featurizer(
     self: Clusterer,
     block_dict: dict[str, list[str]],
@@ -1372,6 +1458,7 @@ def _make_distance_matrices_from_verified_rust_featurizer(
     total_ram_bytes: int | None = None,
     signature_index_by_id: Mapping[str, int] | None = None,
     prediction_state: PredictionState | None = None,
+    residual_reuse: _AttachmentBlockState | None = None,
 ) -> dict[str, np.ndarray]:
     """Build matrices after the request boundary verified the featurizer binding."""
 
@@ -1457,6 +1544,46 @@ def _make_distance_matrices_from_verified_rust_featurizer(
             # chunked loop's values; it holds no chunk-sized buffers.
             stage_start = time.perf_counter()
             main_booster, nameless_booster = block_scorers
+            # A NaN override clears a native label and needs the original model score.
+            if (
+                residual_reuse is not None
+                and not np.isnan(override_labels).any()
+                and _fill_cached_residual_model_distances(
+                    self,
+                    residual_reuse,
+                    signatures,
+                    pairwise_proba,
+                    rust_featurizer=rust_featurizer,
+                    block_signature_indices=block_signature_indices,
+                    block_scorers=block_scorers,
+                    selected_indices=selected_indices,
+                    nameless_selected_indices=nameless_selected_indices,
+                    total_ram_bytes=total_ram_bytes,
+                )
+            ):
+                model_predict_seconds += time.perf_counter() - stage_start
+                stage_start = time.perf_counter()
+                if self.use_default_constraints_as_supervision:
+                    for offset in range(0, block_pair_count, resolved_pair_chunk_size):
+                        count = min(resolved_pair_chunk_size, block_pair_count - offset)
+                        labels = _get_constraint_labels_block_upper_triangle_indexed_rust(
+                            block_signature_indices,
+                            large_integer=LARGE_INTEGER,
+                            start_offset=offset,
+                            max_pairs=count,
+                            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                            num_threads=self.n_jobs,
+                            featurizer=rust_featurizer,
+                            suppress_orcid=True,
+                        )
+                        constrained = ~np.isnan(labels)
+                        pairwise_proba[offset : offset + count][constrained] = labels[constrained] + LARGE_INTEGER
+                # Caller distances take precedence over the native constraint.
+                pairwise_proba[override_offsets] = override_labels + LARGE_INTEGER
+                constraint_seconds += time.perf_counter() - stage_start
+                chunk_count += 1
+                continue
             cast(Any, rust_featurizer).fill_block_distances_indexed(
                 block_signature_indices,
                 pairwise_proba,

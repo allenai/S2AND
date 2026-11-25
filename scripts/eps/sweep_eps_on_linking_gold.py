@@ -39,6 +39,7 @@ import pyarrow.ipc as ipc
 from s2and._sha256 import sha256_file as _hash_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.block_corrections import arrow_small_block_signatures, year_gap_split_enabled
+from s2and.incremental_linking.attach_reuse import AttachReuse
 from scripts.common.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
 from scripts.eps.sweep_curves import (
     CLUSTERING_SOURCE,
@@ -994,6 +995,7 @@ def _production_assignments_for_eps(
     cluster_blocks: Mapping[str, CachedBlockClusters],
     arrow_dataset: ArrowDataset,
     args: argparse.Namespace,
+    attach_reuse: AttachReuse | None = None,
 ) -> dict[str, str]:
     """Run production prediction at one EPS, with bulk clusters from the cached distances.
 
@@ -1027,6 +1029,7 @@ def _production_assignments_for_eps(
             batching_threshold=int(args.batching_threshold),
             total_ram_bytes=int(args.total_ram_bytes),
             bulk_clusters=bulk_clusters,
+            attach_reuse=attach_reuse,
         )
     assignments: dict[str, str] = {}
     for cluster_id, members in clusters.items():
@@ -1218,6 +1221,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ArrowDataset.open(production_root, require_specter=True, require_name_counts_index=True)
             )
         )
+        attach_reuse = None if production_dataset is None else production_stack.enter_context(AttachReuse())
         for eps in _eps_values(args, model_eps):
             started = time.perf_counter()
             bulk_assignments = _cluster_assignments_for_eps(
@@ -1234,6 +1238,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     cluster_blocks=cluster_blocks,
                     arrow_dataset=production_dataset,
                     args=args,
+                    attach_reuse=attach_reuse,
                 )
             )
             seconds = time.perf_counter() - started

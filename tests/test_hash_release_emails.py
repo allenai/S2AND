@@ -182,6 +182,12 @@ def test_affiliation_email_followed_by_id(prefix: str, address: str, affiliation
     assert scrub_text_emails(cell) == f"{prefix}{EMAIL_REDACTED_TOKEN}{affiliation_id}"
 
 
+def test_affiliation_email_followed_by_a_long_run_of_letters() -> None:
+    address_and_text = "a.b@example.eduDepartmentofInformationandComputerScience"
+    assert find_plaintext_emails(address_and_text) == [address_and_text]
+    assert scrub_text_emails(address_and_text) == EMAIL_REDACTED_TOKEN
+
+
 def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_path: Path) -> None:
     # Non-hardcoded dataset name (not in legacy 7-giant list) is discovered and redacted,
     # including rebuilding papers_batch_index and refreshing source inventory!

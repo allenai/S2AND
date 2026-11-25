@@ -9,6 +9,7 @@ import shutil
 import tarfile
 import tempfile
 from collections.abc import Collection, Sequence
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
 from uuid import uuid4
@@ -178,10 +179,13 @@ def convert_requests(
             "name_counts_index_sha256": index_digest,
             "permission_sha256": permission_sha256,
         }
-        intake = {**binding, "permission_papers": {key: sorted(papers) for key, papers in permissions.items()}}
-        if not binding_path.exists() or prior != intake:
+        intake = {**prior, **binding, "permission_papers": {key: sorted(papers) for key, papers in permissions.items()}}
+        if not prior:
             _replace_json(binding_path, intake)
-        return _convert_datasets(by_name, root, name_counts_index, binding, allowed_papers, abstract_allowed_papers)
+        results = _convert_datasets(by_name, root, name_counts_index, binding, allowed_papers, abstract_allowed_papers)
+        if prior and prior != intake:
+            _replace_json(binding_path, intake)
+        return results
 
 
 def _convert_datasets(
@@ -219,19 +223,22 @@ def _convert_datasets(
 
     retained = {name: verify_retained(path) for name, path in published.items()}
     results: dict[str, IntakeResult] = {}
-    for name, bundle in sorted(by_name.items()):
-        target = datasets / name
-        manifest = target / "manifest.json"
-        digest = sha256_file(bundle)
-        record = {**binding, "source_bundle_sha256": digest}
-        reused = target.exists()
-        if reused:
-            prior = retained[name] if name in retained else verify_retained(manifest)
-            if prior["source_bundle_sha256"] != digest:
-                raise ValueError(f"Existing dataset has a different source bundle: {target}")
-        else:
-            with tempfile.TemporaryDirectory(dir=datasets, prefix=f".{name}.") as temp:
-                staging = Path(temp)
+    with ExitStack() as staged:
+        pending = {}
+        for name, bundle in sorted(by_name.items()):
+            target = datasets / name
+            manifest = target / "manifest.json"
+            digest = sha256_file(bundle)
+            record = {**binding, "source_bundle_sha256": digest}
+            reused = target.exists()
+            if reused:
+                prior = retained[name] if name in retained else verify_retained(manifest)
+                if prior["source_bundle_sha256"] != digest:
+                    raise ValueError(f"Existing dataset has a different source bundle: {target}")
+                if name not in retained and prior["permission_sha256"] != binding["permission_sha256"]:
+                    raise ValueError(f"Unpublished dataset has different paper permissions: {target}")
+            else:
+                staging = Path(staged.enter_context(tempfile.TemporaryDirectory(dir=datasets, prefix=f".{name}.")))
                 paths = extract_request_tables(bundle, staging, DATASET_TABLES)
                 _validate_block(Path(paths["signatures"]), name)
                 if not _gate_tables(paths, allowed_papers, abstract_allowed_papers):
@@ -244,9 +251,11 @@ def _convert_datasets(
                 _open_dataset(staging)
                 record["dataset_manifest_sha256"] = sha256_file(staged_manifest)
                 _replace_json(staging / SOURCE_RECORD, record)
-                staging.rename(target)
-        manifests[name] = manifest.relative_to(root).as_posix()
-        results[name] = {"source_bundle_sha256": digest, "reused": reused}
+                pending[staging] = target
+            manifests[name] = manifest.relative_to(root).as_posix()
+            results[name] = {"source_bundle_sha256": digest, "reused": reused}
+        for staging, target in pending.items():
+            staging.rename(target)
 
     write_root_manifest(root, dataset_manifests=manifests)
     return results

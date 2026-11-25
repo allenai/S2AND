@@ -995,13 +995,14 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
     reports = []
     verdicts = []
     requests = []
+    scored_blocks: set[str] = set()
     gate_votes: dict[tuple[str, str, str], dict[str, set[str | None]]] = defaultdict(lambda: defaultdict(set))
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
         key = json.loads(key_path.read_text(encoding="utf-8"))
         if ledger is not None:
-            ledger.roles.require_bindings(
-                key, {item["block_key"] for item in key["items"]}, context=f"{family} judging key"
-            )
+            blocks = {item["block_key"] for item in key["items"]}
+            ledger.roles.require_bindings(key, blocks, context=f"{family} judging key")
+            scored_blocks.update(blocks)
         elif BLOCK_BINDINGS_FIELD in key or EVIDENCE_SHA256_FIELD in key:
             raise ValueError("Ledger-backed judging keys require frozen roles and identity evidence")
         report, aligned, natural_requests = _read_judge_verdicts(verdict_path, key_path)
@@ -1075,8 +1076,9 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
             }
         )
     report = {"judges": reports, "cross_family_agreement": agreement}
+    if ledger is not None:
+        report[BLOCK_BINDINGS_FIELD] = ledger.roles.bindings_for(scored_blocks)
     if ledger is not None and gate_votes:
-        report[BLOCK_BINDINGS_FIELD] = ledger.roles.bindings_for({block for block, _, _ in gate_votes})
         primary = tuple(dict.fromkeys(families))[:2]
         primary_candidates = {key for key, votes in gate_votes.items() if any(family in votes for family in primary)}
         audit_coverage = {}

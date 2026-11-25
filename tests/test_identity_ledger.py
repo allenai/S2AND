@@ -71,7 +71,11 @@ def evidence_inputs(tmp_path: Path) -> tuple[Path, Path]:
     index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     snapshot = tmp_path / "snapshot"
     convert_requests(
-        [first, second], snapshot, Path(index), allowed_papers=frozenset("12345"), abstract_allowed_papers=frozenset()
+        [first, second],
+        snapshot,
+        Path(index),
+        allowed_papers=frozenset({*"12345", "999"}),
+        abstract_allowed_papers=frozenset(),
     )
     gold = tmp_path / "gold.parquet"
     pq.write_table(
@@ -176,7 +180,7 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
         "scored": True,
         "split": "development",
     }
-    evidence, audit = _block_rows(SignatureJoin(pd.DataFrame(rows)), block, [label], ())
+    evidence, audit = _block_rows(SignatureJoin(pd.DataFrame(rows)), block, [label], (), {paper})
     roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
     view = BlockEligibility(block, role, "development", {row["signature_id"]: row for row in evidence}, roles)
     decision = view.eligibility(f"{paper}-2")
@@ -249,6 +253,7 @@ def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold
             dict(gold, corpus_paper_id=1, cluster_block_key=gold_block, position=gold_position, orcid=DEPOSITED),
         ],
         (),
+        {"1", "2"},
     )
     assert audit[reason] == 2
     roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
@@ -451,6 +456,49 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
         identity_ledger.load_identity_evidence(output / "manifest.json")
 
 
+def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    original = pq.read_table(gold)
+    template = original.slice(0, 1)
+    denied = template.set_column(1, "corpus_paper_id", pa.array([998]))
+    missing = template.set_column(1, "corpus_paper_id", pa.array([999]))
+    pq.write_table(pa.concat_tables([original, denied]), gold)
+    output = tmp_path / "evidence"
+    audit = build_identity_evidence(snapshot, gold, output)["audit"]["a lovelace"]
+    assert audit["permission_filtered_gold_rows"] == 1
+    assert not audit.get("dropped_unmatched_paper_position")
+    pq.write_table(pa.concat_tables([original, denied, missing]), gold)
+    with pytest.raises(ValueError, match="'a lovelace' has 1/4 unmatched gold"):
+        build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.21)
+
+
+def test_evidence_append_refuses_a_new_block_without_a_gold_match(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+    from scripts.intake.requests_to_datasets import convert_requests
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "evidence"
+    build_identity_evidence(snapshot, gold, evidence)
+    bundle = request_bundle(tmp_path / "append", "t pham", [("6", None)])
+    convert_requests(
+        [bundle],
+        snapshot,
+        tmp_path / "name_counts_index",
+        allowed_papers=frozenset({*"123456", "999"}),
+        abstract_allowed_papers=frozenset(),
+    )
+    before = (evidence / "manifest.json").read_bytes()
+    with pytest.raises(ValueError, match="No gold rows matched.*'t pham'"):
+        build_identity_evidence(snapshot, gold, evidence, append=True, max_unmatched_gold=1)
+    assert (evidence / "manifest.json").read_bytes() == before
+
+
 @pytest.mark.parametrize("check", ["load", "train", "subset", "empty"])
 def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
     check: str, evidence_inputs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -540,6 +588,10 @@ def test_gate_arrival_order_uses_inserted_and_production_components(
     pq.write_table(floats.set_column(index, "corpus_paper_id", floats.column(index).cast(pa.float64())), arrivals)
     with pytest.raises(ValueError, match="arrival.*key"):
         _arrival_requests(arrivals, "a lovelace", mentions, mentions.keys(), datetime(2026, 10, 20, tzinfo=UTC), 1)
+    for invalid in ("502.0", "00503"):
+        pq.write_table(floats.set_column(index, "corpus_paper_id", pa.array(["1", "2", "3", "4", invalid])), arrivals)
+        with pytest.raises(ValueError, match="arrival.*key"):
+            _arrival_requests(arrivals, "a lovelace", mentions, mentions.keys(), datetime(2026, 10, 20, tzinfo=UTC), 1)
 
     raw = tmp_path / "a_lovelace"
     seeds = raw / "cluster_seeds.arrow"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import tempfile
 from collections import Counter
 from collections.abc import Collection, Mapping
@@ -27,7 +28,7 @@ from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles, n
 from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
 from scripts.common.orcid_references import read_external_reference_identity_evidence
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
-from scripts.intake.prepare_identity_labels import _normalize_paper_id, canonical_gold_block_filter
+from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
 from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
 from scripts.linker.build_linker_task_tables import TASK_ROLES, _read_signatures
 
@@ -77,15 +78,9 @@ def _arrival_requests(
         for row in batch.to_pylist():
             if normalize_block_key(row["cluster_block_key"]) != block:
                 continue
-            paper_id = _normalize_paper_id(row["corpus_paper_id"])
+            paper_id = str(row["corpus_paper_id"])
             key = paper_id, row["position"]
-            if (
-                paper_id is None
-                or paper_id != str(row["corpus_paper_id"])
-                or key[1] is None
-                or key[1] < 0
-                or key in by_position
-            ):
+            if re.fullmatch(r"0|[1-9][0-9]*", paper_id) is None or key[1] is None or key[1] < 0 or key in by_position:
                 raise ValueError(f"Invalid or duplicate arrival key in {block!r}: {key!r}")
             by_position[key] = (row["inserted"], row["clusterer"])
     candidates = []

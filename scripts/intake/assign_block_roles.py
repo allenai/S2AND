@@ -45,7 +45,9 @@ from scripts.common.identity_ledger import (  # noqa: E402
 )
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest  # noqa: E402
 from scripts.intake.build_freeze_input import mention_counts  # noqa: E402
-from scripts.intake.requests_to_datasets import INTAKE_LOCK  # noqa: E402
+from scripts.intake.requests_to_datasets import INTAKE_LOCK, SNAPSHOT_BINDING  # noqa: E402
+
+FREEZE_SHA256_FIELD = "freeze_assignments_sha256"
 
 PERMANENT_EXCLUDED_BLOCKS = frozenset({"f matsen"})
 LEGACY_DEV_TEST_BLOCKS = frozenset(
@@ -718,17 +720,20 @@ def freeze_identity_roles(
     evidence = load_identity_evidence(evidence_path)
     if evidence.snapshot_sha256 != sha256_file(evidence.snapshot_root / "manifest.json"):
         raise ValueError("Snapshot has changed; append its evidence before freezing roles")
-    receipts = [
+    receipts = {
         read_json_object(path)["assignments_sha256"]
         for root in (evidence.snapshot_root, evidence.path.parent)
         if (path := root / FREEZE_BINDING).exists()
-    ]
+    }
+    intake = read_json_object(evidence.snapshot_root / SNAPSHOT_BINDING)
+    if FREEZE_SHA256_FIELD in intake:
+        receipts.add(intake[FREEZE_SHA256_FIELD])
     if fresh and prior_path is not None:
         raise ValueError("Use either a prior role manifest or --fresh")
     if receipts and not fresh:
         if prior_path is None:
             raise ValueError("Snapshot or evidence already has a freeze binding; pass the prior manifest or --fresh")
-        if set(receipts) != {sha256_file(prior_path)}:
+        if receipts != {sha256_file(prior_path)}:
             raise ValueError("The prior role manifest does not match the latest freeze binding")
     metadata = pq.read_schema(blocks_path).metadata or {}
     for digest_field, digest in {
@@ -883,6 +888,9 @@ def main(argv: list[str] | None = None) -> int:
             for key, role in result["block_to_role"].items():
                 writer.writerow([key, role])
         receipt = {"assignments_sha256": sha256_file(out_json)}
+        intake_path = evidence.snapshot_root / SNAPSHOT_BINDING
+        intake = read_json_object(intake_path)
+        _replace_json(intake_path, {**intake, FREEZE_SHA256_FIELD: receipt["assignments_sha256"]})
         for root in (evidence.snapshot_root, evidence.path.parent):
             _replace_json(root / FREEZE_BINDING, receipt)
     print(

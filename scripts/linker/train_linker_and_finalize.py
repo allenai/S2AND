@@ -1994,11 +1994,7 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
     if not indexed.is_unique or len(decisions.index.difference(indexed)):
         raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
     bound_blocks = report.get(BLOCK_BINDINGS_FIELD)
-    if (
-        not isinstance(bound_blocks, dict)
-        or set(judged["dataset"]) - bound_blocks.keys()
-        or bound_blocks.keys() - set(rows["dataset"])
-    ):
+    if not isinstance(bound_blocks, dict) or set(judged["dataset"]) - bound_blocks.keys():
         raise ValueError("Gate threshold judgments do not cover the declared frozen blocks")
     roles.require_bindings(report, bound_blocks.keys(), context="Gate threshold judgments")
     labeled = rows.copy()

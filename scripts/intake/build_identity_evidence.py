@@ -116,7 +116,11 @@ def _rotated_key(row: dict[str, Any]) -> str | None:
 
 
 def _block_rows(
-    join: SignatureJoin, block: str, gold: list[dict[str, Any]], reviewed_errors: Collection[str]
+    join: SignatureJoin,
+    block: str,
+    gold: list[dict[str, Any]],
+    reviewed_errors: Collection[str],
+    allowed_papers: Collection[str],
 ) -> tuple[list[MentionEvidence], Counter[str]]:
     by_signature: dict[str, list[GoldEvidence]] = defaultdict(list)
     rejected: dict[str, list[RejectedGoldEvidence]] = defaultdict(list)
@@ -133,6 +137,9 @@ def _block_rows(
         orcid = _normalized_orcid(item["orcid"])
         if paper is None or position is None or orcid is None:
             counts["invalid_gold_key_or_orcid"] += 1
+            continue
+        if paper not in allowed_papers:
+            counts["permission_filtered_gold_rows"] += gold_block == block
             continue
         names = (
             _optional_str(item.get("author_first", item.get("first"))),
@@ -233,6 +240,7 @@ def _write_evidence(
     binding = read_json_object(snapshot / SNAPSHOT_BINDING)
     if not binding.get("permission_sha256") or not binding.get("snapshot_id"):
         raise ValueError("Identity evidence requires a permission-gated intake snapshot")
+    allowed_papers = frozenset(binding["permission_papers"]["s2ag"])
     snapshot_digest = sha256_file(snapshot / "manifest.json")
     index_digest = binding["name_counts_index_sha256"]
     intake_digest = canonical_json_digest([binding["snapshot_id"], index_digest])
@@ -268,9 +276,13 @@ def _write_evidence(
         staging = Path(tmp) / "evidence"
         staging.mkdir()
         for index, (block, (dataset, path)) in enumerate(new_blocks.items(), start=len(metadata)):
-            rows, audit = _block_rows(joins[block], block, gold_partitions.pop(block, []), errors.get(block, ()))
+            rows, audit = _block_rows(
+                joins[block], block, gold_partitions.pop(block, []), errors.get(block, ()), allowed_papers
+            )
+            if append and not audit["matched_gold_rows"]:
+                raise ValueError(f"No gold rows matched the appended block {block!r}")
             unmatched = audit["dropped_unmatched_paper_position"] + audit["dropped_position_shift"]
-            total = audit["gold_rows_for_block"]
+            total = audit["gold_rows_for_block"] - audit["permission_filtered_gold_rows"]
             if total and unmatched / total > max_unmatched_gold:
                 raise ValueError(
                     f"{block!r} has {unmatched}/{total} unmatched gold rows ({unmatched / total:.2%}); "

@@ -461,6 +461,13 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         _json(verdict, {"item_id": key["items"][0]["item_id"], "verdict": "same"})
         judge_paths.extend(["--judge", family, verdict, answer_key])
     _run(review_packets, "score", *binding, *judge_paths, "--output-json", tmp_path / "judging.json")
+    judging = json.loads((tmp_path / "judging.json").read_text())
+    assert judging.get("block_bindings") == roles.bindings_for({"b ross"})
+    mixed_report = tmp_path / "gate-and-pair-judgments.json"
+    _run(review_packets, "score", *binding, *blind_judges, *judge_paths, "--output-json", mixed_report)
+    judged = json.loads(mixed_report.read_text())
+    assert judged["block_bindings"] == roles.bindings_for({gate, "b ross"})
+    assert _apply_blind_gate_labels(gate_table, judged, roles).equals(scored)
 
     eps_root = tmp_path / "eps"
     eps_output = eps_root / "b_ross"
@@ -644,3 +651,8 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "f aba": "pairwise_val",
         "z last": "final_test_b",
     }
+    for directory in (snapshot, evidence.parent):
+        receipt = directory / ".role_freeze.json"
+        receipt.rename(receipt.with_suffix(".bak"))
+        with pytest.raises(ValueError, match="prior.*--fresh"):
+            _run(assign_block_roles, *common, "--output-dir", tmp_path / "missing-receipt-freeze")

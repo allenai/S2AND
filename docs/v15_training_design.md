@@ -68,7 +68,8 @@ Supply a directory or explicit list of full bundles. The builder checks their na
 `Has Abstract`, and hashes or scrubs emails before writing indexes. It scans retained and new
 datasets for plaintext emails. Re-run with the same index and allowlists that contain the prior
 permissions to append new blocks. Each block retains the permission digests it had at intake.
-Papers absent from the supplied lists stay restricted.
+Papers absent from the supplied lists stay restricted. A failed append preserves prior permissions.
+Free-text scrubbing covers addresses followed immediately by long runs of letters.
 
 ### 4. Build the identity evidence table
 
@@ -84,9 +85,10 @@ for fitting, mining, and scoring. Position shifts are detected from the same blo
 gold position is missing. A gold row ambiguous within its paper and block vetoes each mention there.
 Only verified gold supplies a score. Freeze identity lists and seed purity
 use matched gold and deposited identities. Inspect the per-block join audit.
-The builder fails above 2% unmatched gold for any block. Use `--max-unmatched-gold` after reviewing
-the mismatch. To append, use `--append` on the same evidence directory with the same gold file.
-The manifest records each new partition and leaves the earlier partitions intact.
+The builder fails above 2% unmatched gold for any block. The limit counts permitted papers only.
+Use `--max-unmatched-gold` after reviewing the mismatch. To append, use `--append` on the same evidence
+directory with the same gold file. Each appended block requires at least one gold match. The manifest
+records each new partition and leaves the earlier partitions intact.
 
 ### 5. Build the freeze input
 
@@ -115,6 +117,7 @@ For an append, build a new freeze input from the expanded evidence manifest and 
 Use `--overwrite` if writing into the existing freeze directory. Use `--fresh` only to deliberately
 start a new freeze on an already bound snapshot or ledger. Tasks, judging keys, and gate judgments
 remain valid for blocks with the same evidence and eligibility after a re-freeze.
+The intake manifest keeps the freeze binding if a freeze receipt goes missing.
 The freeze records the ORCID exclusion policy digest. Rebuild evidence and freeze again after it changes.
 An identity with evidence in another assigned role is ineligible for scoring and sampling. Adding
 unassigned blocks preserves existing bindings. Evaluation clustering keeps ineligible mentions as context.
@@ -149,8 +152,9 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
 
 Map each block to its `arrow_dir`, with an additional `incremental_request` path for gate threshold
 blocks. Take the latest eligible mentions by `inserted` in each gate threshold block. Review any
-shortfall against K, missing timestamps, and the actual timestamp range. Invalid arrival keys and
-empty request sets fail. Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
+shortfall against K, missing timestamps, and the actual timestamp range. Arrival paper keys must be
+nonnegative integers or canonical decimal strings. Invalid arrival keys and empty request sets fail.
+Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `linker_train` and `gate_fit`, sample eligible scored mentions using `--queries-per-block` and
 recluster eligible remaining mentions with ORCID hidden. Include the pairwise training blocks to
 write 1.4 assignments for mining. Re-run with the same inputs to verify and reuse completed blocks.
@@ -241,6 +245,7 @@ to draw matched classes within supplied 1.4 score bands. Set `metadata.stratum` 
 Keep each answer key private.
 
 Run `review_packets.py score --identity-evidence evidence/manifest.json --block-role-assignments assignments.json --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json`.
+The report records ledger bindings for every scored block.
 Each verdict row contains `item_id` and a pair `verdict` or a linker `candidate_verdicts` mapping from packet
 slot to verdict. Use `same`, `different`, or `insufficient_evidence`. List the two primary families first, followed
 by any audit families. The report lists audit coverage and checks audit consensus on the candidates

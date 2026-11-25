@@ -94,3 +94,26 @@ def test_intake_rejects_bundle_named_for_another_block(tmp_path: Path) -> None:
             allowed_papers=frozenset({"p0"}),
             abstract_allowed_papers=frozenset(),
         )
+
+
+def test_failed_intake_append_preserves_prior_permissions(tmp_path: Path) -> None:
+    from scripts.intake.requests_to_datasets import SNAPSHOT_BINDING, convert_requests
+    from tests.test_identity_ledger import request_bundle
+
+    exports = tmp_path / "exports"
+    prior = request_bundle(exports, "a lovelace", [("1", None)])
+    valid = request_bundle(exports, "b ross", [("2", None)])
+    wrong = request_bundle(exports, "g hopper", [("3", None)])
+    invalid = wrong.with_name("z_turing.arrow.tar.gz")
+    wrong.rename(invalid)
+    index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
+    root = tmp_path / "snapshot"
+    permissions = {"allowed_papers": frozenset({"1"}), "abstract_allowed_papers": frozenset()}
+    convert_requests([prior], root, Path(index), **permissions)
+    before = (root / SNAPSHOT_BINDING).read_bytes()
+    expanded = {**permissions, "allowed_papers": frozenset({"1", "2", "3"})}
+    with pytest.raises(ValueError, match="author_block"):
+        convert_requests([valid, invalid], root, Path(index), **expanded)
+    assert (root / SNAPSHOT_BINDING).read_bytes() == before
+    assert not (root / "datasets" / "b_ross").exists()
+    assert convert_requests([prior], root, Path(index), **permissions)["a_lovelace"]["reused"]

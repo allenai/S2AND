@@ -64,6 +64,11 @@ def evidence_identities(row: MentionEvidence) -> frozenset[str]:
     return frozenset(gold)
 
 
+def gate_veto_identities(row: MentionEvidence) -> frozenset[str]:
+    """Return every identity named by a gate candidate member's evidence."""
+    return evidence_identities(row) | {entry["orcid"] for entry in row.get("rejected_gold", ())}
+
+
 @dataclass(frozen=True)
 class IdentityEvidence:
     """Read evidence by block and verify each partition against the table manifest."""
@@ -182,7 +187,13 @@ class BlockEligibility:
                 (gold["orcid"] for gold in row["gold"] if gold["scored"] and gold["split"] == self.expected_split),
                 None,
             )
-        return Eligibility(fit_ok, score_orcid, identities, foreign)
+        veto = foreign
+        if self.role == "gate_thresh":
+            named = gate_veto_identities(row)
+            veto = not named.isdisjoint(EXCLUDED_ORCID_GROUPS) or any(
+                self.roles.identity_roles.get(orcid, frozenset()) - {self.role} for orcid in named
+            )
+        return Eligibility(fit_ok, score_orcid, identities, veto)
 
     def scored(self) -> dict[str, str]:
         """Return score-eligible gold labels for this block."""

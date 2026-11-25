@@ -119,7 +119,10 @@ def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Pa
         ledger.read_block("a lovelace")
 
 
-def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
+@pytest.mark.parametrize("role", ["pairwise_train", "gate_thresh"])
+def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path], tmp_path: Path, role: str) -> None:
+    from dataclasses import replace
+
     from scripts.common.block_roles import load_block_roles
     from scripts.common.identity_ledger import ledger_for_roles
     from scripts.intake.assign_block_roles import freeze_identity_roles
@@ -132,7 +135,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     foreign = dict(labels.to_pylist()[2], cluster_block_key="l a", corpus_paper_id=4, author_last="Lovelace")
     pq.write_table(pa.concat_tables([labels, pa.Table.from_pylist([foreign], schema=labels.schema)]), gold)
     evidence = tmp_path / "evidence"
-    audit = build_identity_evidence(snapshot, gold, evidence)["audit"]["a lovelace"]
+    audit = build_identity_evidence(snapshot, gold, evidence, {"a lovelace": ["1-0", "2-0"]})["audit"]["a lovelace"]
     source = tmp_path / "gold-blocks.parquet"
     pq.write_table(
         pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
@@ -140,7 +143,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
     frozen = tmp_path / "roles.json"
-    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {"pairwise_train": 1, "final_test_a": 1})
+    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {role: 1, "final_test_a": 1})
     frozen.write_text(json.dumps(roles), encoding="utf-8")
     ledger = ledger_for_roles(evidence / "manifest.json", load_block_roles(frozen))
     assert ledger is not None
@@ -150,6 +153,13 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     assert not rejected.identities
     assert ledger.for_block("g hopper").scored() == {"5-0": HOLDOUT}
     assert audit["dropped_name_order_rotation"] == 1
+    assert rejected.identity_veto == (role == "gate_thresh")
+    if role == "gate_thresh":
+        assert DEPOSITED not in ledger.roles.identity_roles
+        refrozen = replace(
+            ledger.roles, identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"final_test_a"})}
+        )
+        assert ledger.roles.bindings_for({"a lovelace"}) != refrozen.bindings_for({"a lovelace"})
 
 
 def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:

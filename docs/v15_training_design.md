@@ -239,7 +239,8 @@ for a gate threshold packet. The allowed roles apply to regular items and contro
 ORCIDs and any source `scored` flags on the private paper inputs. Controls use the identity ledger.
 The builder derives pair and linker control truth from the verified ORCIDs and checks any supplied truth.
 Natural gate threshold candidates can receive blind labels on mixed production clusters. A member
-with an excluded or foreign-role identity vetoes a candidate. Pass `--linker-task-manifest tasks/linker_tasks.json`
+with an excluded or foreign-role identity vetoes a candidate. Gate bindings cover every identity
+named by the gate evidence, including rejected gold and reviewed errors. Pass `--linker-task-manifest tasks/linker_tasks.json`
 to use the frozen seed assignments and the bound Arrow papers. Supply candidate keys for gate items.
 The builder selects up to four exemplars per component in frozen seed order and checks the full
 component for control eligibility. The trainer resolves candidate membership from the same seeds

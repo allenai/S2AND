@@ -47,6 +47,7 @@ class BlockRoles:
     source_splits: dict[str, str] = field(default_factory=dict)
     evidence_blocks: dict[str, str] = field(default_factory=dict)
     excluded_orcid_groups_sha256: str | None = None
+    gate_block_orcids: dict[str, frozenset[str]] = field(default_factory=dict)
 
     def require_current_exclusions(self) -> None:
         """Reject roles built with a different policy or containing excluded ORCIDs."""
@@ -63,9 +64,20 @@ class BlockRoles:
         for block in sorted({normalize_block_key(key) for key in blocks}):
             role = self.role_for(block)
             outside_role = sorted(orcid for orcid in self.block_orcids[block] if self.identity_roles[orcid] != {role})
+            role_inputs = [role, self.source_splits[block], outside_role]
+            if role == "gate_thresh":
+                if block not in self.gate_block_orcids:
+                    raise ValueError("Frozen gate roles lack candidate identity coverage. Re-freeze the roles.")
+                # Rejected gold and reviewed errors can veto without contributing to identity_roles.
+                role_inputs.append(
+                    [
+                        (orcid, sorted(self.identity_roles.get(orcid, ())))
+                        for orcid in sorted(self.gate_block_orcids[block])
+                    ]
+                )
             bindings[block] = {
                 "evidence_sha256": self.evidence_blocks[block],
-                "role_sha256": canonical_json_digest([role, self.source_splits[block], outside_role]),
+                "role_sha256": canonical_json_digest(role_inputs),
             }
         return bindings
 
@@ -140,6 +152,20 @@ def load_block_roles(path: Path) -> BlockRoles:
         or any(split not in {"development", "holdout"} for split in source_splits.values())
     ):
         raise ValueError(f"Expected source splits for every evidence block in {path}")
+    gate_block_orcids: dict[str, frozenset[str]] = {}
+    if bound and "gate_block_orcids" in payload:
+        gate_coverage = payload["gate_block_orcids"]
+        gate_blocks = {block for block, role in by_block.items() if role == "gate_thresh"}
+        if not isinstance(gate_coverage, dict) or gate_coverage.keys() != gate_blocks:
+            raise ValueError(f"Invalid gate identity coverage in {path}")
+        for block, orcids in gate_coverage.items():
+            if (
+                not isinstance(orcids, list)
+                or any(not isinstance(orcid, str) or not orcid or normalize_orcid(orcid) != orcid for orcid in orcids)
+                or not block_orcids[block].issubset(orcids)
+            ):
+                raise ValueError(f"Invalid gate ORCID list for {block!r} in {path}")
+            gate_block_orcids[block] = frozenset(orcids)
     result = BlockRoles(
         by_block,
         sha256_file(path),
@@ -150,6 +176,7 @@ def load_block_roles(path: Path) -> BlockRoles:
         source_splits,
         evidence_blocks,
         payload.get("excluded_orcid_groups_sha256") if bound else None,
+        gate_block_orcids,
     )
     result.require_current_exclusions()
     return result

@@ -92,7 +92,12 @@ from s2and.production_training_contract import (  # noqa: E402
 )
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
-from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, BlockRoles, load_block_roles  # noqa: E402
+from scripts.common.block_roles import (  # noqa: E402
+    GATE_BINDINGS_FIELD,
+    GATE_CANDIDATE_ORCIDS,
+    BlockRoles,
+    load_block_roles,
+)
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.common.initial_query_sources import (  # noqa: E402
     MAP_RELATIVE_PATH,
@@ -2001,14 +2006,17 @@ def _apply_blind_gate_labels(
     decisions = judged.set_index(keys)["verdict"]
     if not indexed.is_unique or len(decisions.index.difference(indexed)):
         raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
-    bound_blocks = report.get(BLOCK_BINDINGS_FIELD)
-    if not isinstance(bound_blocks, dict) or set(judged["dataset"]) - bound_blocks.keys():
-        raise ValueError("Gate threshold judgments do not cover the declared frozen blocks")
-    roles.require_bindings(report, bound_blocks.keys(), context="Gate threshold judgments")
+    candidates = report.get(GATE_CANDIDATE_ORCIDS)
+    if (
+        not isinstance(candidates, dict)
+        or set(judged["dataset"]) - candidates.keys()
+        or report.get(GATE_BINDINGS_FIELD) != roles.gate_judgment_bindings(candidates)
+    ):
+        raise ValueError("Gate threshold judgments block provenance does not match the identity ledger")
     seed_digests = report.get(GATE_SEED_DIGESTS)
     if (
         not isinstance(seed_digests, dict)
-        or set(judged["dataset"]) - seed_digests.keys()
+        or candidates.keys() != seed_digests.keys()
         or any(block not in blocks or digest != blocks[block]["seeds_sha256"] for block, digest in seed_digests.items())
     ):
         raise ValueError("Gate threshold judgments do not match the frozen seed assignments")

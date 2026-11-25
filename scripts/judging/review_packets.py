@@ -30,6 +30,8 @@ from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     BLOCK_BINDINGS_FIELD,
+    GATE_BINDINGS_FIELD,
+    GATE_CANDIDATE_ORCIDS,
     BlockRoles,
     load_block_roles,
     normalize_block_key,
@@ -39,6 +41,7 @@ from scripts.common.identity_ledger import (  # noqa: E402
     EVIDENCE_SHA256_FIELD,
     BlockEligibility,
     IdentityLedger,
+    gate_veto_identities,
     ledger_for_roles,
 )
 from scripts.common.linker_seeds import GATE_SEED_DIGESTS  # noqa: E402
@@ -349,10 +352,12 @@ def _require_ledger_packet_roles(roles: BlockRoles | None, ledger: IdentityLedge
 
 def _validate_natural_items(
     items: Sequence[Mapping[str, Any]], ledger: IdentityLedger | None, packet_type: str
-) -> None:
+) -> dict[str, set[str]]:
+    named: dict[str, set[str]] = defaultdict(set)
     if ledger is None:
-        return
+        return named
     views: dict[str, BlockEligibility] = {}
+    validated: set[tuple[str, str]] = set()
     for item in items:
         block = normalize_block_key(item["block_key"])
         if block not in views:
@@ -361,15 +366,24 @@ def _validate_natural_items(
             papers = [item["paper_a"], item["paper_b"]]
         else:
             papers = [item["query"]]
+            if views[block].role == "gate_thresh":
+                named.setdefault(block, set())
             for candidate in item["candidates"]:
                 exemplars = candidate["exemplars"]
                 if views[block].role != "gate_thresh":
                     papers.extend(exemplars)
                     continue
-                if any(views[block].eligibility(sid).identity_veto for sid in candidate["member_signature_ids"]):
-                    raise ValueError(f"Natural judging item {item['source_id']!r} contains a vetoed identity")
+                component = (block, candidate["candidate_key"])
+                if component in validated:
+                    continue
+                for sid in candidate["member_signature_ids"]:
+                    if views[block].eligibility(sid).identity_veto:
+                        raise ValueError(f"Natural judging item {item['source_id']!r} contains a vetoed identity")
+                    named[block].update(gate_veto_identities(views[block].rows[sid]))
+                validated.add(component)
         if any(not views[block].eligibility(str(paper["signature_id"])).fit_ok for paper in papers):
             raise ValueError(f"Natural judging item {item['source_id']!r} contains an ineligible signature")
+    return named
 
 
 def _scored_controls(
@@ -691,7 +705,7 @@ def build_blind_linker_packets(
         queries, allowed_controls = resolved[: len(queries)], resolved[len(queries) :]
     else:
         allowed_controls = list(control_queries)
-    _validate_natural_items(queries, ledger, "linker")
+    gate_candidates = _validate_natural_items(queries, ledger, "linker")
     eligible_controls = _scored_controls(
         allowed_controls, block_roles, packet_type="linker", allowed_roles=allowed_roles, ledger=ledger
     )
@@ -779,14 +793,18 @@ def build_blind_linker_packets(
         if ledger is not None
         else {}
     )
-    packet_blocks = {normalize_block_key(item["block_key"]) for item in answer_key}
+    gate_bindings = (
+        {
+            GATE_BINDINGS_FIELD: ledger.roles.gate_judgment_bindings(gate_candidates),
+            GATE_CANDIDATE_ORCIDS: {block: sorted(identities) for block, identities in gate_candidates.items()},
+            GATE_SEED_DIGESTS: {block: seed_digests[block] for block in gate_candidates},
+        }
+        if ledger is not None and gate_candidates
+        else {}
+    )
     key_payload = {
         **bindings,
-        **(
-            {GATE_SEED_DIGESTS: {block: seed_digests[block] for block in packet_blocks & seed_digests.keys()}}
-            if seed_digests
-            else {}
-        ),
+        **gate_bindings,
         "packet_type": "linker",
         "order_seed": int(seed),
         "control_seed": int(effective_control_seed),
@@ -1028,6 +1046,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
     requests = []
     scored_blocks: set[str] = set()
     gate_seed_digests: dict[str, str] = {}
+    gate_candidates: dict[str, set[str]] = defaultdict(set)
     gate_votes: dict[tuple[str, str, str], dict[str, set[str | None]]] = defaultdict(lambda: defaultdict(set))
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
         key = json.loads(key_path.read_text(encoding="utf-8"))
@@ -1042,6 +1061,21 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
         verdicts.append(aligned)
         requests.append(natural_requests)
         if ledger is not None and key["packet_type"] == "linker":
+            gate_blocks = {
+                normalize_block_key(item["block_key"])
+                for item in key["items"]
+                if not item["is_control"] and ledger.roles.role_for(item["block_key"]) == "gate_thresh"
+            }
+            if gate_blocks:
+                candidates = key.get(GATE_CANDIDATE_ORCIDS)
+                if (
+                    not isinstance(candidates, dict)
+                    or candidates.keys() != gate_blocks
+                    or key.get(GATE_BINDINGS_FIELD) != ledger.roles.gate_judgment_bindings(candidates)
+                ):
+                    raise ValueError(f"{family} gate judging key block provenance does not match the identity ledger")
+                for block, identities in candidates.items():
+                    gate_candidates[block].update(identities)
             for item in key["items"]:
                 block = normalize_block_key(item["block_key"])
                 if item["is_control"] or ledger.roles.role_for(block) != "gate_thresh":
@@ -1139,6 +1173,8 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                     "verdict": next(iter(consensus)),
                 }
             )
+        report[GATE_BINDINGS_FIELD] = ledger.roles.gate_judgment_bindings(gate_candidates)
+        report[GATE_CANDIDATE_ORCIDS] = {block: sorted(identities) for block, identities in gate_candidates.items()}
         report[GATE_SEED_DIGESTS] = gate_seed_digests
         report["gate_thresh_labels"] = labels
         report["gate_thresh_planned_candidates"] = len(primary_candidates)

@@ -476,6 +476,27 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     judged = json.loads(mixed_report.read_text())
     assert judged["block_bindings"] == roles.bindings_for({gate, "b ross"})
     assert _apply_blind_gate_labels(gate_table, judged, roles, gate_blocks).equals(scored)
+    changed_pair_role = replace(roles, evidence_blocks={**roles.evidence_blocks, "b ross": "0" * 64})
+    assert _apply_blind_gate_labels(gate_table, judged, changed_pair_role, gate_blocks).equals(scored)
+
+    # A same-role block may hold an identity named by the judged candidates.
+    candidate_id = judged["gate_thresh_candidate_orcids"][gate][0]
+    shared = "same role block"
+    holders = replace(
+        roles,
+        block_to_role={**roles.block_to_role, shared: "gate_thresh"},
+        block_orcids={**roles.block_orcids, shared: frozenset({candidate_id})},
+        gate_block_orcids={**roles.gate_block_orcids, shared: frozenset({candidate_id})},
+        source_splits={**roles.source_splits, shared: "development"},
+        evidence_blocks={**roles.evidence_blocks, shared: "1" * 64},
+    )
+    with pytest.raises(ValueError, match="block provenance"):
+        _apply_blind_gate_labels(gate_table, judged, holders, gate_blocks)
+    bound_shared = {**judged, "gate_thresh_block_bindings": holders.bindings_for({gate, shared})}
+    assert _apply_blind_gate_labels(gate_table, bound_shared, holders, gate_blocks).equals(scored)
+    changed_shared = replace(holders, evidence_blocks={**holders.evidence_blocks, shared: "0" * 64})
+    with pytest.raises(ValueError, match="block provenance"):
+        _apply_blind_gate_labels(gate_table, bound_shared, changed_shared, gate_blocks)
 
     eps_root = tmp_path / "eps"
     eps_output = eps_root / "b_ross"

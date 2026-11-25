@@ -14,6 +14,8 @@ from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.text import normalize_orcid
 
 BLOCK_BINDINGS_FIELD = "block_bindings"
+GATE_BINDINGS_FIELD = "gate_thresh_block_bindings"
+GATE_CANDIDATE_ORCIDS = "gate_thresh_candidate_orcids"
 FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
 _WHITESPACE_OR_UNDERSCORE = re.compile(r"[\s_]+")
 
@@ -85,6 +87,15 @@ class BlockRoles:
         """Check that an artifact has current bindings for exactly its blocks."""
         if payload.get(BLOCK_BINDINGS_FIELD) != self.bindings_for(blocks):
             raise ValueError(f"{context} block provenance does not match the identity ledger")
+
+    def gate_judgment_bindings(self, candidates: Mapping[str, Collection[str]]) -> dict[str, dict[str, str]]:
+        """Bind gate blocks and the assigned blocks holding their candidates' identities."""
+        for block, identities in candidates.items():
+            if self.role_for(block) != "gate_thresh" or not set(identities).issubset(self.gate_block_orcids[block]):
+                raise ValueError(f"Unknown gate candidate identities in {block!r}")
+        named = {orcid for identities in candidates.values() for orcid in identities}
+        holders = {block for block in self.block_to_role if not named.isdisjoint(self.block_orcids[block])}
+        return self.bindings_for(set(candidates) | holders)
 
     def role_for(self, block_key: str) -> str:
         """Return the assigned role or reject an unassigned block."""

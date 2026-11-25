@@ -19,7 +19,12 @@ from s2and._atomic_io import exclusive_file_lock
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.text import canonicalize_name_parts, normalize_orcid
-from scripts.common.arrow_roots import _replace_json, generic_dataset_manifests, read_json_object
+from scripts.common.arrow_roots import (
+    _replace_json,
+    generic_dataset_manifests,
+    read_json_object,
+    resolved_manifest_artifact_path,
+)
 from scripts.common.block_roles import normalize_block_key
 from scripts.common.identity_ledger import (
     EvidenceBlock,
@@ -43,6 +48,7 @@ from scripts.intake.requests_to_datasets import INTAKE_LOCK, SNAPSHOT_BINDING, S
 _GOLD_FIELDS = [("orcid", pa.string()), ("scored", pa.bool_()), ("split", pa.string())]
 
 DEFAULT_MAX_UNMATCHED_GOLD = 0.02
+_UNMATCHED_REASON_PREFIX = "unmatched_gold_"
 
 EVIDENCE_SCHEMA = pa.schema(
     [
@@ -120,13 +126,16 @@ def _block_rows(
     block: str,
     gold: list[dict[str, Any]],
     reviewed_errors: Collection[str],
-    allowed_papers: Collection[str],
+    filtered_papers: Collection[str],
+    *,
+    retained_papers: Collection[str] | None = None,
 ) -> tuple[list[MentionEvidence], Counter[str]]:
     by_signature: dict[str, list[GoldEvidence]] = defaultdict(list)
     rejected: dict[str, list[RejectedGoldEvidence]] = defaultdict(list)
     by_paper: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in join.rows:
         by_paper[row["paper_id_norm"]].append(row)
+    exported = by_paper if retained_papers is None else retained_papers
     counts: Counter[str] = Counter()
     for item in gold:
         counts["gold_rows_scanned"] += 1
@@ -135,11 +144,15 @@ def _block_rows(
         paper = _normalize_paper_id(item["corpus_paper_id"])
         position = _strict_nonneg_int(item["position"])
         orcid = _normalized_orcid(item["orcid"])
+        if paper in filtered_papers:
+            counts["permission_filtered_gold_rows"] += gold_block == block
+            continue
         if paper is None or position is None or orcid is None:
             counts["invalid_gold_key_or_orcid"] += 1
+            counts[f"{_UNMATCHED_REASON_PREFIX}invalid_key_or_orcid"] += gold_block == block
             continue
-        if paper not in allowed_papers:
-            counts["permission_filtered_gold_rows"] += gold_block == block
+        if paper not in exported:
+            counts[f"{_UNMATCHED_REASON_PREFIX}absent_from_export"] += gold_block == block
             continue
         names = (
             _optional_str(item.get("author_first", item.get("first"))),
@@ -164,6 +177,8 @@ def _block_rows(
             candidates = by_paper[paper]
             reason = "dropped_position_shift"
         counts[reason] += 1
+        if gold_block == block:
+            counts[f"{_UNMATCHED_REASON_PREFIX}{reason.removeprefix('dropped_')}"] += 1
         for candidate in candidates:
             rejected[candidate["signature_id"]].append({**entry, "reason": reason})
 
@@ -204,6 +219,20 @@ def _block_rows(
     return rows, counts
 
 
+def _retained_papers(manifest_path: Path, manifest: dict[str, Any]) -> set[str]:
+    path = resolved_manifest_artifact_path(manifest_path, manifest["paths"]["papers"], key="papers")
+    if sha256_file(path) != manifest["files"]["papers"]["sha256"]:
+        raise ValueError(f"Snapshot paper digest mismatch: {path}")
+    with pa.memory_map(str(path), "r") as source:
+        reader = pa.ipc.open_file(source)
+        return {
+            paper.strip()
+            for index in range(reader.num_record_batches)
+            for paper in reader.get_batch(index).column("paper_id").to_pylist()
+            if paper
+        }
+
+
 def build_identity_evidence(
     snapshot: Path,
     gold: Path,
@@ -240,7 +269,6 @@ def _write_evidence(
     binding = read_json_object(snapshot / SNAPSHOT_BINDING)
     if not binding.get("permission_sha256") or not binding.get("snapshot_id"):
         raise ValueError("Identity evidence requires a permission-gated intake snapshot")
-    allowed_papers = frozenset(binding["permission_papers"]["s2ag"])
     snapshot_digest = sha256_file(snapshot / "manifest.json")
     index_digest = binding["name_counts_index_sha256"]
     intake_digest = canonical_json_digest([binding["snapshot_id"], index_digest])
@@ -276,28 +304,54 @@ def _write_evidence(
         staging = Path(tmp) / "evidence"
         staging.mkdir()
         for index, (block, (dataset, path)) in enumerate(new_blocks.items(), start=len(metadata)):
+            source = path.parent / SOURCE_RECORD
+            record = read_json_object(source)
+            filtered = record.get("permission_filtered_papers")
+            if not isinstance(filtered, list) or any(not isinstance(paper, str) or not paper for paper in filtered):
+                raise ValueError(
+                    f"Intake for {block!r} lacks its permission-filtered papers. Re-intake the raw bundle."
+                )
+            retained = _retained_papers(path, read_json_object(path))
+            filtered_papers = frozenset(filtered)
+            if (
+                record.get("snapshot_id") != binding["snapshot_id"]
+                or record.get("name_counts_index_sha256") != index_digest
+                or record.get("dataset_manifest_sha256") != sha256_file(path)
+                or not retained.isdisjoint(filtered_papers)
+            ):
+                raise ValueError(f"Intake paper coverage does not match the dataset for {block!r}")
             rows, audit = _block_rows(
-                joins[block], block, gold_partitions.pop(block, []), errors.get(block, ()), allowed_papers
+                joins[block],
+                block,
+                gold_partitions.pop(block, []),
+                errors.get(block, ()),
+                filtered_papers,
+                retained_papers=retained,
             )
             if append and not audit["matched_gold_rows"]:
                 raise ValueError(f"No gold rows matched the appended block {block!r}")
-            unmatched = audit["dropped_unmatched_paper_position"] + audit["dropped_position_shift"]
+            reasons = {
+                key.removeprefix(_UNMATCHED_REASON_PREFIX): count
+                for key, count in sorted(audit.items())
+                if key.startswith(_UNMATCHED_REASON_PREFIX) and count
+            }
+            unmatched = sum(reasons.values())
+            audit["unmatched_gold_rows"] = unmatched
             total = audit["gold_rows_for_block"] - audit["permission_filtered_gold_rows"]
             if total and unmatched / total > max_unmatched_gold:
                 raise ValueError(
                     f"{block!r} has {unmatched}/{total} unmatched gold rows ({unmatched / total:.2%}); "
-                    f"--max-unmatched-gold is {max_unmatched_gold:.2%}"
+                    f"--max-unmatched-gold is {max_unmatched_gold:.2%}. Reasons: {reasons}"
                 )
             destination = staging / f"block-{index:06d}.parquet"
             pq.write_table(pa.Table.from_pylist(rows, schema=EVIDENCE_SCHEMA), destination)
-            source = path.parent / SOURCE_RECORD
             metadata[block] = {
                 "path": destination.name,
                 "sha256": sha256_file(destination),
                 "signature_count": len(rows),
                 "dataset_manifest_sha256": sha256_file(path),
                 "dataset": dataset,
-                "permission_sha256": read_json_object(source)["permission_sha256"],
+                "permission_sha256": record["permission_sha256"],
                 "request_source_sha256": sha256_file(source),
                 "reviewed_errors_sha256": canonical_json_digest(sorted(errors.get(block, ()))),
             }

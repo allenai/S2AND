@@ -13,6 +13,8 @@ pytestmark = pytest.mark.tooling
 GOLD = "0000-0002-1694-233X"
 DEPOSITED = "0000-0001-5109-3700"
 HOLDOUT = "0000-0003-3808-2083"
+# The synthetic block has one mismatched name among three gold rows.
+FIXTURE_UNMATCHED_LIMIT = 1 / 3
 
 
 def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
@@ -66,7 +68,9 @@ def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -
 def evidence_inputs(tmp_path: Path) -> tuple[Path, Path]:
     from scripts.intake.requests_to_datasets import convert_requests
 
-    first = request_bundle(tmp_path, "a lovelace", [("1", DEPOSITED), ("2", DEPOSITED), ("3", None), ("4", None)])
+    first = request_bundle(
+        tmp_path, "a lovelace", [("1", DEPOSITED), ("2", DEPOSITED), ("3", None), ("4", None), ("998", None)]
+    )
     second = request_bundle(tmp_path, "g hopper", [("5", None)])
     index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     snapshot = tmp_path / "snapshot"
@@ -101,7 +105,9 @@ def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Pa
 
     snapshot, gold = evidence_inputs
     output = tmp_path / "evidence"
-    result = build_identity_evidence(snapshot, gold, output, {"g hopper": ["5-0"]})
+    result = build_identity_evidence(
+        snapshot, gold, output, {"g hopper": ["5-0"]}, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT
+    )
     ledger = load_identity_evidence(output / "manifest.json")
     rows = ledger.read_block("a_lovelace")
     assert rows["1-0"]["gold"] == [{"orcid": GOLD, "scored": True, "split": "development"}]
@@ -135,7 +141,9 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     foreign = dict(labels.to_pylist()[2], cluster_block_key="l a", corpus_paper_id=4, author_last="Lovelace")
     pq.write_table(pa.concat_tables([labels, pa.Table.from_pylist([foreign], schema=labels.schema)]), gold)
     evidence = tmp_path / "evidence"
-    audit = build_identity_evidence(snapshot, gold, evidence, {"a lovelace": ["1-0", "2-0"]})["audit"]["a lovelace"]
+    audit = build_identity_evidence(
+        snapshot, gold, evidence, {"a lovelace": ["1-0", "2-0"]}, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT
+    )["audit"]["a lovelace"]
     source = tmp_path / "gold-blocks.parquet"
     pq.write_table(
         pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
@@ -190,7 +198,7 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
         "scored": True,
         "split": "development",
     }
-    evidence, audit = _block_rows(SignatureJoin(pd.DataFrame(rows)), block, [label], (), {paper})
+    evidence, audit = _block_rows(SignatureJoin(pd.DataFrame(rows)), block, [label], (), ())
     roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
     view = BlockEligibility(block, role, "development", {row["signature_id"]: row for row in evidence}, roles)
     decision = view.eligibility(f"{paper}-2")
@@ -210,7 +218,7 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
 
     snapshot, gold = evidence_inputs
     evidence = tmp_path / "freeze-evidence"
-    build_identity_evidence(snapshot, gold, evidence)
+    build_identity_evidence(snapshot, gold, evidence, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     source = tmp_path / "blocks.parquet"
     pq.write_table(
         pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["holdout", "development"]}), source
@@ -263,7 +271,7 @@ def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold
             dict(gold, corpus_paper_id=1, cluster_block_key=gold_block, position=gold_position, orcid=DEPOSITED),
         ],
         (),
-        {"1", "2"},
+        (),
     )
     assert audit[reason] == 2
     roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
@@ -288,7 +296,7 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
 
     snapshot, gold = evidence_inputs
     evidence = tmp_path / "evidence"
-    build_identity_evidence(snapshot, gold, evidence)
+    build_identity_evidence(snapshot, gold, evidence, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     source = tmp_path / "blocks.parquet"
     pq.write_table(
         pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["holdout", "development"]}), source
@@ -336,7 +344,7 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
 
     snapshot, gold = evidence_inputs
     output = tmp_path / "evidence"
-    build_identity_evidence(snapshot, gold, output)
+    build_identity_evidence(snapshot, gold, output, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     evidence = output / "manifest.json"
     source = tmp_path / "blocks.parquet"
     pq.write_table(
@@ -377,7 +385,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     labels = pq.read_table(gold)
     pq.write_table(labels.set_column(3, "orcid", pa.array([GOLD, GOLD, HOLDOUT, DEPOSITED])), gold)
     directory = tmp_path / "identity"
-    build_identity_evidence(snapshot, gold, directory)
+    build_identity_evidence(snapshot, gold, directory, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     evidence = directory / "manifest.json"
     source = tmp_path / "blocks.parquet"
     pq.write_table(
@@ -460,7 +468,7 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
     with pytest.raises(ValueError, match="No gold rows matched"):
         build_identity_evidence(snapshot, gold, output, max_unmatched_gold=1)
     pq.write_table(original, gold)
-    build_identity_evidence(snapshot, gold, output)
+    build_identity_evidence(snapshot, gold, output, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     monkeypatch.setattr(orcid_references, "EXCLUDED_ORCID_GROUPS", frozenset({GOLD}))
     with pytest.raises(ValueError, match="excluded ORCID groups"):
         identity_ledger.load_identity_evidence(output / "manifest.json")
@@ -470,20 +478,30 @@ def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:
     from scripts.intake.build_identity_evidence import build_identity_evidence
+    from scripts.intake.requests_to_datasets import convert_requests
 
     snapshot, gold = evidence_inputs
+    # Expand permissions on a later intake without changing what the first block retained.
+    bundle = request_bundle(tmp_path / "later", "t pham", [("6", None)])
+    convert_requests(
+        [bundle],
+        snapshot,
+        tmp_path / "name_counts_index",
+        allowed_papers=frozenset({*"123456", "998", "999"}),
+        abstract_allowed_papers=frozenset(),
+    )
     original = pq.read_table(gold)
     template = original.slice(0, 1)
     denied = template.set_column(1, "corpus_paper_id", pa.array([998]))
-    missing = template.set_column(1, "corpus_paper_id", pa.array([999]))
+    missing = template.set_column(1, "corpus_paper_id", pa.array([997]))
     pq.write_table(pa.concat_tables([original, denied]), gold)
     output = tmp_path / "evidence"
-    audit = build_identity_evidence(snapshot, gold, output)["audit"]["a lovelace"]
+    audit = build_identity_evidence(snapshot, gold, output, max_unmatched_gold=0.34)["audit"]["a lovelace"]
     assert audit["permission_filtered_gold_rows"] == 1
     assert not audit.get("dropped_unmatched_paper_position")
     pq.write_table(pa.concat_tables([original, denied, missing]), gold)
-    with pytest.raises(ValueError, match="'a lovelace' has 1/4 unmatched gold"):
-        build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.21)
+    with pytest.raises(ValueError, match="'a lovelace' has 2/4 unmatched gold.*absent_from_export"):
+        build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.34)
 
 
 def test_evidence_append_refuses_a_new_block_without_a_gold_match(
@@ -494,7 +512,7 @@ def test_evidence_append_refuses_a_new_block_without_a_gold_match(
 
     snapshot, gold = evidence_inputs
     evidence = tmp_path / "evidence"
-    build_identity_evidence(snapshot, gold, evidence)
+    build_identity_evidence(snapshot, gold, evidence, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     bundle = request_bundle(tmp_path / "append", "t pham", [("6", None)])
     convert_requests(
         [bundle],
@@ -522,7 +540,7 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
 
     snapshot, gold = evidence_inputs
     evidence = tmp_path / "evidence" / "manifest.json"
-    build_identity_evidence(snapshot, gold, evidence.parent)
+    build_identity_evidence(snapshot, gold, evidence.parent, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     source = tmp_path / "gold-blocks.parquet"
     pq.write_table(pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development"] * 2}), source)
     blocks = tmp_path / "blocks.parquet"
@@ -562,7 +580,7 @@ def test_gate_arrival_order_uses_inserted_and_production_components(
 
     snapshot, gold = evidence_inputs
     output = tmp_path / "identity"
-    build_identity_evidence(snapshot, gold, output)
+    build_identity_evidence(snapshot, gold, output, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     mentions = load_identity_evidence(output / "manifest.json").read_block("a lovelace")
     arrivals = tmp_path / "arrivals.parquet"
     pq.write_table(

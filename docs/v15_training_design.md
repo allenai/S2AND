@@ -85,8 +85,12 @@ for fitting, mining, and scoring. Position shifts are detected from the same blo
 gold position is missing. A gold row ambiguous within its paper and block vetoes each mention there.
 Only verified gold supplies a score. Freeze identity lists and seed purity
 use matched gold and deposited identities. Inspect the per-block join audit.
-The builder fails above 2% unmatched gold for any block. The limit counts permitted papers only.
-Use `--max-unmatched-gold` after reviewing the mismatch. To append, use `--append` on the same evidence
+The builder defaults to at most 2% unmatched gold per block. The audit records missing export
+papers, shifted positions, other failed joins, and papers removed by that block's intake permissions.
+Only papers actually removed at intake are excluded from the denominator. An incomplete permission
+list can leave a small, unrepresentative sample. Review the reason counts and the permission source
+before using `--max-unmatched-gold` for a specific replay.
+Older snapshots need fresh intake receipts to recompute coverage. To append, use `--append` on the same evidence
 directory with the same gold file. Each appended block requires at least one gold match. The manifest
 records each new partition and leaves the earlier partitions intact.
 

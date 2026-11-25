@@ -107,10 +107,13 @@ def _validate_block(path: Path, name: str) -> None:
         raise ValueError(f"Bundle {name!r} does not match its author_block values: {sorted(keys)}")
 
 
-def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowed: frozenset[str]) -> int:
+def _gate_tables(
+    paths: dict[str, str], allowed: frozenset[str], abstract_allowed: frozenset[str]
+) -> tuple[int, set[str]]:
     paper_ids = pa.array(sorted(allowed), type=pa.string())
     abstract_ids = pa.array(sorted(abstract_allowed), type=pa.string())
     signatures = 0
+    filtered_papers: set[str] = set()
     for name, filename in paths.items():
         path = Path(filename)
         gated = path.with_suffix(".gated")
@@ -119,7 +122,11 @@ def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowe
             with pa.OSFile(str(gated), "wb") as output, pa.ipc.new_file(output, reader.schema) as writer:
                 for index in range(reader.num_record_batches):
                     batch = reader.get_batch(index)
-                    batch = batch.filter(pc.is_in(batch.column("paper_id"), value_set=paper_ids))
+                    keep = pc.is_in(batch.column("paper_id"), value_set=paper_ids)
+                    if name == "papers":
+                        removed = pc.unique(batch.column("paper_id").filter(pc.invert(keep))).to_pylist()
+                        filtered_papers.update(paper.strip() for paper in removed if paper)
+                    batch = batch.filter(keep)
                     if name == "signatures":
                         signatures += batch.num_rows
                     if name == "papers" and "abstract" in batch.schema.names:
@@ -134,7 +141,7 @@ def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowe
                         )
                     writer.write_batch(batch)
         gated.replace(path)
-    return signatures
+    return signatures, filtered_papers
 
 
 def _permission_digest(papers: frozenset[str]) -> str:
@@ -241,7 +248,8 @@ def _convert_datasets(
                 staging = Path(staged.enter_context(tempfile.TemporaryDirectory(dir=datasets, prefix=f".{name}.")))
                 paths = extract_request_tables(bundle, staging, DATASET_TABLES)
                 _validate_block(Path(paths["signatures"]), name)
-                if not _gate_tables(paths, allowed_papers, abstract_allowed_papers):
+                signatures, filtered_papers = _gate_tables(paths, allowed_papers, abstract_allowed_papers)
+                if not signatures:
                     raise ValueError(f"No signatures remain after paper permission filtering for {name!r}")
                 redact_source_tree(staging)
                 _scan_dataset(staging)
@@ -250,6 +258,7 @@ def _convert_datasets(
                 staged_manifest = write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, staging), staging)
                 _open_dataset(staging)
                 record["dataset_manifest_sha256"] = sha256_file(staged_manifest)
+                record["permission_filtered_papers"] = sorted(filtered_papers)
                 _replace_json(staging / SOURCE_RECORD, record)
                 pending[staging] = target
             manifests[name] = manifest.relative_to(root).as_posix()

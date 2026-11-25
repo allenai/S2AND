@@ -165,3 +165,25 @@ Verify one local root that combines `inference` and `dataset`.
 
 See [the production commands](../release/README.md) for the model fit and EPS calibration.
 See [the release process](../../docs/release.md) for acceptance and publication.
+
+## Re-attach corpus manual labels
+
+```bash
+uv run --offline --no-sync python -m scripts.intake.attach_manual_labels \
+  --mention-anchors reusable/mention_anchors.parquet \
+  --pair-labels reusable/pair_labels_corpus.parquet \
+  --cluster-changes reusable/cluster_changes_corpus.parquet \
+  --snapshot stage-zero/snapshot --identity-evidence stage-zero/evidence/manifest.json \
+  --output-dir stage-zero/manual-labels
+```
+
+The importer checks the snapshot against the identity evidence. It checks the same paper and author position first,
+then looks for a unique compatible author on that paper. Compatibility uses the canonical surname and given-name
+initial in either name order. An author listed without a snapshot signature can prevent a shift.
+
+Both output Parquet files keep the corpus fields and record a `status` for every input row. Use `attached` to select
+usable rows whose full set of mentions resolved without collisions. Only these rows have `snapshot_signature_id_a`
+and `snapshot_signature_id_b`, or `snapshot_member_signature_ids` for a cluster change. A row is `shifted` if any
+resolved mention moved. Ambiguity takes precedence when a row has both ambiguous and missing mentions.
+`report.json` counts match statuses and attachments by source. `manifest.json` binds the outputs to their inputs.
+Apply frozen role eligibility and the intended use's judge agreement rules before using the attachments.

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 import pyarrow.parquet as pq
 
@@ -23,12 +23,17 @@ class GoldEvidence(TypedDict):
     split: str | None
 
 
+class RejectedGoldEvidence(GoldEvidence):
+    reason: str
+
+
 class MentionEvidence(TypedDict):
     block_key: str
     signature_id: str
     corpus_paper_id: str
     position: int
     gold: list[GoldEvidence]
+    rejected_gold: NotRequired[list[RejectedGoldEvidence]]
     deposited_orcid: str | None
     excluded: bool
     reviewed_error: bool
@@ -46,7 +51,10 @@ class EvidenceBlock(TypedDict):
 def evidence_identities(row: MentionEvidence) -> frozenset[str]:
     """Return the distinct normalized identities from both evidence sources."""
     deposited = row["deposited_orcid"]
-    return frozenset([*(entry["orcid"] for entry in row["gold"]), *([deposited] if deposited else [])])
+    gold = {entry["orcid"] for entry in (*row["gold"], *row.get("rejected_gold", ()))}
+    if deposited:
+        gold.add(deposited)
+    return frozenset(gold)
 
 
 @dataclass(frozen=True)
@@ -147,8 +155,12 @@ class BlockEligibility:
         for orcid in identities:
             if orcid not in self.roles.block_orcids[self.block] or orcid not in self.roles.identity_roles:
                 raise ValueError(f"Unknown evidence identity {orcid!r} in frozen block {self.block!r}")
-        fit_ok = row["evidence_state"] != "conflict" and all(
-            self.roles.identity_roles[orcid] == {self.role} for orcid in identities
+        # An ambiguous author position cannot serve as an unlabeled fitting endpoint.
+        ambiguous = any(entry["reason"].startswith("dropped_ambiguous_") for entry in row.get("rejected_gold", ()))
+        fit_ok = (
+            not ambiguous
+            and row["evidence_state"] != "conflict"
+            and all(self.roles.identity_roles[orcid] == {self.role} for orcid in identities)
         )
         score_orcid = None
         if fit_ok and row["evidence_state"] == "single":

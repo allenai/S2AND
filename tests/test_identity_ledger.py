@@ -79,7 +79,7 @@ def evidence_inputs(tmp_path: Path) -> tuple[Path, Path]:
                 "cluster_block_key": ["A_Lovelace", "a lovelace", "g hopper", "a lovelace"],
                 "corpus_paper_id": [1, 3, 5, 4],
                 "position": [0, 0, 0, 0],
-                "orcid": [GOLD] * 4,
+                "orcid": [GOLD, GOLD, GOLD, DEPOSITED],
                 "split": ["development", "development", "holdout", "development"],
                 "scored": [True, False, True, True],
                 "author_last": ["Lovelace", "Lovelace", "Hopper", "Wrong"],
@@ -104,13 +104,84 @@ def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Pa
     assert rows["2-0"]["deposited_orcid"] == DEPOSITED
     assert rows["2-0"]["gold"] == []
     assert rows["3-0"]["gold"] == [{"orcid": GOLD, "scored": False, "split": "development"}]
-    assert rows["4-0"]["evidence_state"] == "none"
+    assert rows["4-0"]["rejected_gold"][0]["orcid"] == DEPOSITED
+    assert rows["4-0"]["gold"] == []
     assert result["audit"]["a lovelace"]["dropped_name_mismatch"] == 1
     assert ledger.read_block("g hopper")["5-0"]["reviewed_error"]
     partition = output / json.loads((output / "manifest.json").read_text())["blocks"]["a lovelace"]["path"]
     partition.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="digest mismatch"):
         ledger.read_block("a lovelace")
+
+
+def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
+    from scripts.common.block_roles import load_block_roles
+    from scripts.common.identity_ledger import ledger_for_roles
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    labels = pq.read_table(gold)
+    foreign = dict(labels.to_pylist()[2], cluster_block_key="l a", corpus_paper_id=4, author_last="Lovelace")
+    pq.write_table(pa.concat_tables([labels, pa.Table.from_pylist([foreign], schema=labels.schema)]), gold)
+    evidence = tmp_path / "evidence"
+    audit = build_identity_evidence(snapshot, gold, evidence)["audit"]["a lovelace"]
+    source = tmp_path / "gold-blocks.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
+    )
+    blocks = tmp_path / "blocks.parquet"
+    build_freeze_input(evidence / "manifest.json", source, blocks)
+    frozen = tmp_path / "roles.json"
+    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {"pairwise_train": 1, "final_test_a": 1})
+    frozen.write_text(json.dumps(roles), encoding="utf-8")
+    ledger = ledger_for_roles(evidence / "manifest.json", load_block_roles(frozen))
+    assert ledger is not None
+    rejected = ledger.for_block("a lovelace").eligibility("4-0")
+    assert not rejected.fit_ok
+    assert rejected.score_orcid is None
+    assert GOLD in rejected.identities
+    assert audit["dropped_name_order_rotation"] == 1
+
+
+def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
+    import pandas as pd
+
+    from scripts.common.block_roles import BlockRoles
+    from scripts.common.identity_ledger import BlockEligibility
+    from scripts.intake.build_identity_evidence import _block_rows
+    from scripts.intake.prepare_identity_labels import SignatureJoin
+
+    block, role, paper = "c klein", "pairwise_train", "173993366"
+    rows = [
+        {
+            "signature_id": f"{paper}-{pos}",
+            "paper_id": paper,
+            "author_position": pos,
+            "author_block": block,
+            "author_first": first,
+            "author_last": "Klein",
+        }
+        for pos, first in ((1, "Carol"), (2, "Charles"))
+    ]
+    label = {
+        "cluster_block_key": block,
+        "corpus_paper_id": int(paper),
+        "position": 2,
+        "orcid": GOLD,
+        "scored": True,
+        "split": "development",
+    }
+    evidence, audit = _block_rows(SignatureJoin(pd.DataFrame(rows)), block, [label], ())
+    roles = BlockRoles({block: role}, "", {block: frozenset({GOLD})}, {GOLD: frozenset({role})})
+    view = BlockEligibility(block, role, "development", {row["signature_id"]: row for row in evidence}, roles)
+    decision = view.eligibility(f"{paper}-2")
+    assert decision.identities == {GOLD}
+    assert decision.score_orcid is None
+    assert not decision.fit_ok
+    assert view.eligibility(f"{paper}-1").fit_ok
+    assert audit["dropped_ambiguous_paper_block"] == 1
 
 
 def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
@@ -129,7 +200,7 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
     first, second = pq.read_table(output).to_pylist()
     assert first["signature_count"] == 4
     assert first["stratum"] == "tiny"
-    assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 2, GOLD: 2}
+    assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 3, GOLD: 2}
     assert second["source_split"] == "holdout"
 
 

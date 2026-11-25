@@ -15,10 +15,16 @@ import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
-from s2and.text import normalize_orcid
+from s2and.text import canonicalize_name_parts, normalize_orcid
 from scripts.common.arrow_roots import _replace_json, generic_dataset_manifests, read_json_object
 from scripts.common.block_roles import normalize_block_key
-from scripts.common.identity_ledger import EvidenceBlock, GoldEvidence, MentionEvidence, evidence_identities
+from scripts.common.identity_ledger import (
+    EvidenceBlock,
+    GoldEvidence,
+    MentionEvidence,
+    RejectedGoldEvidence,
+    evidence_identities,
+)
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
 from scripts.intake.prepare_identity_labels import (
     SignatureJoin,
@@ -27,8 +33,11 @@ from scripts.intake.prepare_identity_labels import (
     _read_arrow_signatures,
     _strict_nonneg_int,
     canonical_gold_block_filter,
+    names_are_compatible,
 )
 from scripts.intake.requests_to_datasets import SNAPSHOT_BINDING
+
+_GOLD_FIELDS = [("orcid", pa.string()), ("scored", pa.bool_()), ("split", pa.string())]
 
 EVIDENCE_SCHEMA = pa.schema(
     [
@@ -36,7 +45,8 @@ EVIDENCE_SCHEMA = pa.schema(
         ("signature_id", pa.string()),
         ("corpus_paper_id", pa.string()),
         ("position", pa.int64()),
-        ("gold", pa.list_(pa.struct([("orcid", pa.string()), ("scored", pa.bool_()), ("split", pa.string())]))),
+        ("gold", pa.list_(pa.struct(_GOLD_FIELDS))),
+        ("rejected_gold", pa.list_(pa.struct([*_GOLD_FIELDS, ("reason", pa.string())]))),
         ("deposited_orcid", pa.string()),
         ("excluded", pa.bool_()),
         ("reviewed_error", pa.bool_()),
@@ -45,21 +55,38 @@ EVIDENCE_SCHEMA = pa.schema(
 )
 
 
-def _read_gold(gold: Path, blocks: Collection[str]) -> dict[str, list[pa.RecordBatch]]:
+def _read_gold(gold: Path, joins: dict[str, SignatureJoin]) -> dict[str, list[dict[str, Any]]]:
     source = ds.dataset(gold, format="parquet")
     required = {"cluster_block_key", "corpus_paper_id", "position", "orcid", "split", "scored"}
     if missing := required - set(source.schema.names):
         raise ValueError(f"Gold evidence is missing columns: {sorted(missing)}")
     names = {"author_first", "author_middle", "author_last", "first", "middle", "last"}
     columns = sorted(required | (names & set(source.schema.names)))
-    selected = source.scanner(columns=columns, filter=canonical_gold_block_filter("cluster_block_key", blocks))
-    partitions: dict[str, list[pa.RecordBatch]] = defaultdict(list)
-    for batch in selected.to_batches():
-        keys = batch.column("cluster_block_key")
-        for raw_key in pc.unique(keys).to_pylist():
-            block = normalize_block_key(raw_key)
-            if block in blocks:
-                partitions[block].append(batch.filter(pc.equal(keys, raw_key)))
+    positions: dict[tuple[str, int], set[str]] = defaultdict(set)
+    for block, join in joins.items():
+        for key in join.positions:
+            positions[key].add(block)
+    papers = {paper for paper, _ in positions}
+    paper_type = source.schema.field("corpus_paper_id").type
+    predicate = canonical_gold_block_filter("cluster_block_key", joins)
+    if pa.types.is_integer(paper_type) or pa.types.is_floating(paper_type):
+        values = pa.array(sorted(int(paper) for paper in papers if paper.isdecimal()), type=paper_type)
+        predicate |= ds.field("corpus_paper_id").isin(values)
+    else:
+        predicate |= pc.utf8_trim_whitespace(ds.field("corpus_paper_id")).isin(sorted(papers))
+    partitions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for batch in source.scanner(columns=columns, filter=predicate).to_batches():
+        for row in batch.to_pylist():
+            block = normalize_block_key(row["cluster_block_key"])
+            paper = _normalize_paper_id(row["corpus_paper_id"])
+            position = _strict_nonneg_int(row["position"])
+            destinations = (
+                positions.get((paper, position), set()) if paper is not None and position is not None else set()
+            )
+            if block in joins:
+                destinations = destinations | {block}
+            for destination in destinations:
+                partitions[destination].append(row)
     return partitions
 
 
@@ -68,37 +95,69 @@ def _normalized_orcid(value: Any) -> str | None:
     return normalize_orcid(text) if text else None
 
 
+def _signature_names(row: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    return (
+        _optional_str(row.get("author_first")),
+        _optional_str(row.get("author_middle")),
+        _optional_str(row.get("author_last")),
+    )
+
+
+def _rotated_key(row: dict[str, Any]) -> str | None:
+    name = canonicalize_name_parts(*_signature_names(row))
+    if name.first and name.last:
+        return f"{name.last[0]} {name.first.split()[0]}"
+    return None
+
+
 def _block_rows(
-    directory: Path, block: str, gold: list[pa.RecordBatch], reviewed_errors: Collection[str]
+    join: SignatureJoin, block: str, gold: list[dict[str, Any]], reviewed_errors: Collection[str]
 ) -> tuple[list[MentionEvidence], Counter[str]]:
-    join = SignatureJoin(_read_arrow_signatures(directory))
     by_signature: dict[str, list[GoldEvidence]] = defaultdict(list)
+    rejected: dict[str, list[RejectedGoldEvidence]] = defaultdict(list)
+    by_paper: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in join.rows:
+        by_paper[row["paper_id_norm"]].append(row)
     counts: Counter[str] = Counter()
-    for batch in gold:
-        for item in batch.to_pylist():
-            counts["gold_rows_scanned"] += 1
-            paper = _normalize_paper_id(item["corpus_paper_id"])
-            position = _strict_nonneg_int(item["position"])
-            orcid = _normalized_orcid(item["orcid"])
-            if paper is None or position is None or orcid is None:
-                counts["invalid_gold_key_or_orcid"] += 1
-                continue
-            matched, reason = join.match(
-                paper,
-                position,
-                normalize_block_key(item["cluster_block_key"]),
-                (
-                    _optional_str(item.get("author_first", item.get("first"))),
-                    _optional_str(item.get("author_middle", item.get("middle"))),
-                    _optional_str(item.get("author_last", item.get("last"))),
-                ),
-            )
-            if matched is None:
-                counts[reason] += 1
-                continue
-            by_signature[matched["signature_id"]].append(
-                {"orcid": orcid, "scored": item["scored"] is True, "split": _optional_str(item["split"])}
-            )
+    for item in gold:
+        counts["gold_rows_scanned"] += 1
+        paper = _normalize_paper_id(item["corpus_paper_id"])
+        position = _strict_nonneg_int(item["position"])
+        orcid = _normalized_orcid(item["orcid"])
+        if paper is None or position is None or orcid is None:
+            counts["invalid_gold_key_or_orcid"] += 1
+            continue
+        gold_block = normalize_block_key(item["cluster_block_key"])
+        names = (
+            _optional_str(item.get("author_first", item.get("first"))),
+            _optional_str(item.get("author_middle", item.get("middle"))),
+            _optional_str(item.get("author_last", item.get("last"))),
+        )
+        entry: GoldEvidence = {"orcid": orcid, "scored": item["scored"] is True, "split": _optional_str(item["split"])}
+        matched, reason = join.match(paper, position, gold_block, names)
+        if matched is not None:
+            by_signature[matched["signature_id"]].append(entry)
+            counts["matched_gold_rows"] += 1
+            continue
+        candidates = [row for row in by_paper.get(paper, ()) if row["pos_norm"] == position]
+        if reason == "dropped_block_key_mismatch" and any(gold_block == _rotated_key(row) for row in candidates):
+            reason = "dropped_name_order_rotation"
+        elif (
+            gold_block == block
+            and reason in {"dropped_unmatched_paper_position", "dropped_name_mismatch"}
+            and any(names)
+        ):
+            shifted = [
+                row
+                for row in by_paper.get(paper, ())
+                if row["pos_norm"] != position and names_are_compatible(*_signature_names(row), *names)
+            ]
+            if len(shifted) == 1:
+                candidates.extend(shifted)
+                reason = "dropped_position_shift"
+        counts[reason] += 1
+        for candidate in candidates:
+            rejected[candidate["signature_id"]].append({**entry, "reason": reason})
 
     known = {row["signature_id"] for row in join.rows}
     if len(known) != len(join.rows) or set(reviewed_errors) - known:
@@ -116,6 +175,7 @@ def _block_rows(
             "corpus_paper_id": paper,
             "position": position,
             "gold": by_signature.get(sid, []),
+            "rejected_gold": rejected.get(sid, []),
             "deposited_orcid": _normalized_orcid(raw.get("author_orcid")),
             "excluded": False,
             "reviewed_error": sid in reviewed_errors,
@@ -154,15 +214,18 @@ def build_identity_evidence(
     intake_digest = sha256_file(snapshot / SNAPSHOT_BINDING)
     if output.exists():
         raise FileExistsError(output)
-    gold_partitions = _read_gold(gold, blocks)
+    joins = {}
+    for block, (_, path) in sorted(blocks.items()):
+        manifest = read_json_object(path)
+        if sha256_file(path.parent / "signatures.arrow") != manifest["files"]["signatures"]["sha256"]:
+            raise ValueError(f"Snapshot signature digest mismatch: {block!r}")
+        joins[block] = SignatureJoin(_read_arrow_signatures(path.parent))
+    gold_partitions = _read_gold(gold, joins)
     output.mkdir(parents=True)
     metadata: dict[str, EvidenceBlock] = {}
     audits: dict[str, dict[str, int]] = {}
     for index, (block, (dataset, path)) in enumerate(sorted(blocks.items())):
-        manifest = read_json_object(path)
-        if sha256_file(path.parent / "signatures.arrow") != manifest["files"]["signatures"]["sha256"]:
-            raise ValueError(f"Snapshot signature digest mismatch: {block!r}")
-        rows, audit = _block_rows(path.parent, block, gold_partitions.pop(block, []), errors.get(block, ()))
+        rows, audit = _block_rows(joins[block], block, gold_partitions.pop(block, []), errors.get(block, ()))
         destination = output / f"block-{index:06d}.parquet"
         pq.write_table(pa.Table.from_pylist(rows, schema=EVIDENCE_SCHEMA), destination)
         metadata[block] = {

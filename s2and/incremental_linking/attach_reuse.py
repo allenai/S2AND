@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Hashable
+from dataclasses import dataclass
 from functools import lru_cache
 from types import TracebackType
 from typing import TYPE_CHECKING, Generic, TypeVar
+
+import numpy as np
 
 from s2and.arrow_inputs import ArrowDataset
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view
@@ -51,6 +54,31 @@ def attachment_dataset_key(dataset: ArrowDataset) -> tuple[ArrowDataset, str, st
     return dataset, dataset.generation_id, None if index is None else index.manifest_sha256
 
 
+@dataclass(frozen=True)
+class ResidualModelDistances:
+    """Model scores in the condensed order of the full attachment query group."""
+
+    positions: dict[str, int]
+    values: np.ndarray
+
+    def fill_subset(self, signatures: list[str], output: np.ndarray) -> bool:
+        """Fill an ordered subset and refuse pairs with changed orientation."""
+        positions = np.fromiter(
+            (self.positions.get(sid, -1) for sid in signatures), dtype=np.intp, count=len(signatures)
+        )
+        if positions[0] < 0 or np.any(positions[1:] <= positions[:-1]):
+            return False
+        offset = 0
+        size = len(self.positions)
+        for row, left in enumerate(positions[:-1]):
+            right = positions[row + 1 :]
+            end = offset + len(right)
+            start = left * (2 * size - left - 1) // 2 - left - 1
+            output[offset:end] = self.values[start + right]
+            offset = end
+        return True
+
+
 class AttachReuse:
     """Own one offline sweep's setup, with separate signature and name-token limits.
 
@@ -58,13 +86,14 @@ class AttachReuse:
     Use a context manager to release native buffers before closing the dataset.
     """
 
-    def __init__(self, *, setup_signature_limit: int = 400_000) -> None:
+    def __init__(self, *, setup_signature_limit: int = 400_000, residual_byte_limit: int = 1 << 30) -> None:
         self.subblocks: _BoundedCache[_AttachmentSubblocks] = _BoundedCache(
             "subblock signatures", setup_signature_limit
         )
         self.blocks: _BoundedCache[_AttachmentBlockState] = _BoundedCache(
             "featurizer signatures", setup_signature_limit
         )
+        self.residuals = _BoundedCache[ResidualModelDistances]("residual bytes", residual_byte_limit)
         self._bucket = lru_cache(maxsize=32_768)(first_name_bucket_from_token_view)
 
     def first_name_buckets(self, tokens: list[str], views: list[str]) -> list[str]:
@@ -83,7 +112,7 @@ class AttachReuse:
         """Log retained sizes and release the caches."""
         for block in self.blocks.entries.values():
             block.release()
-        for cache in (self.blocks, self.subblocks):
+        for cache in (self.blocks, self.subblocks, self.residuals):
             logger.info(
                 "Attachment reuse %s: retained=%d limit=%d entries=%d hits=%d",
                 cache.name,

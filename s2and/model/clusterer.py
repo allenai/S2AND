@@ -338,6 +338,7 @@ class Clusterer:
         cluster_seeds_require: Mapping[str, int | str] | None = None,
         cluster_seeds_disallow: set[tuple[str, str]] | None = None,
         prediction_state: PredictionState | None = None,
+        residual_reuse: incremental._AttachmentBlockState | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict full blocks from an already-built Rust featurizer."""
 
@@ -395,6 +396,7 @@ class Clusterer:
             explicit_cluster_seeds_require=explicit_cluster_seeds_require,
             resolved_cluster_seeds_disallow=resolved_cluster_seeds_disallow,
             prediction_state=prediction_state,
+            residual_reuse=residual_reuse,
         )
 
     _predict_from_prepared_rust_featurizer = bulk._predict_from_prepared_rust_featurizer

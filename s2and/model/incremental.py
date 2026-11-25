@@ -85,6 +85,7 @@ class _AttachmentBlockState:
         self._build_args = (arrow_dataset, list(signature_ids), num_threads)
         self._featurizer: Any | None = None
         self._orcid_info: dict[str, _ArrowIncrementalSignatureInfo] | None = None
+        self.residual_group: tuple[str, ...] | None = None
         self.shared_setup: _AttachmentBlockState | None = None
         self.attach_reuse: AttachReuse | None = None
         self.planner: Any | None = None

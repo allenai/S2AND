@@ -289,6 +289,7 @@ def _predict_from_prepared_rust_featurizer(
     explicit_cluster_seeds_require: dict[str, int | str] | None,
     resolved_cluster_seeds_disallow: set[tuple[str, str]],
     prediction_state: PredictionState | None = None,
+    residual_reuse: _AttachmentBlockState | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
     """Predict with request metadata already exported from a Rust featurizer."""
 
@@ -380,6 +381,7 @@ def _predict_from_prepared_rust_featurizer(
                 total_ram_bytes=total_ram_bytes,
                 signature_index_by_id=signature_index_by_id,
                 prediction_state=block_state,
+                **({"residual_reuse": residual_reuse} if residual_reuse is not None else {}),
             )
             return block_dists, time.perf_counter() - start
 
@@ -680,6 +682,7 @@ def _predict_subblocked_single_letter_groups_from_arrow(
     cluster_seeds_require: Mapping[str, int | str],
     original_blocks: Mapping[str, Sequence[str]],
     attach_reuse: AttachReuse | None = None,
+    cache_residuals: bool = False,
 ) -> dict[str, list[str]]:
     """Attach initial-only groups using already normalized caller supervision."""
 
@@ -714,6 +717,8 @@ def _predict_subblocked_single_letter_groups_from_arrow(
                 state.shared_setup = shared_setup
                 state.attach_reuse = attach_reuse
             block_state = (origin, state)
+        if cache_residuals:
+            block_state[1].residual_group = tuple(group_signature_ids)
         synthetic_seed_map = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
         # Future initial-only groups are not known to this request's planner.
         # Retain the full disallows above and expose only currently addressable
@@ -1051,6 +1056,7 @@ def _predict_from_arrow(
             block_dict_single_letter,
             pred_clusters=pred_clusters,
             cluster_seeds_require=active_cluster_seeds_require,
+            **({"cache_residuals": True} if attach_reuse is not None else {}),
         )
         if orcid_join_enabled(self) and average_linkage_cut(self.cluster_model, cluster_model_params) is not None:
             oversized = {key: members for key, members in block_dict.items() if len(members) > batching_threshold}
@@ -1084,6 +1090,11 @@ def _predict_from_arrow(
             cluster_seeds_require=None,
             cluster_seeds_disallow=cluster_seed_disallows,
             prediction_state=prediction_state,
+            **(
+                {"residual_reuse": attachment_state}
+                if attachment_state is not None and attachment_state.residual_group is not None
+                else {}
+            ),
         )
     predict_seconds = time.perf_counter() - predict_start
     nested_telemetry = dict(prediction_state.telemetry.get("rust_featurizer_predict", {}))

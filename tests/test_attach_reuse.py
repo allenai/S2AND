@@ -2,11 +2,15 @@
 
 import json
 
+import numpy as np
+
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.attach_reuse import AttachReuse
-from s2and.model import Clusterer, FastCluster
+from s2and.model import Clusterer, FastCluster, distances
+from s2and.model.incremental import _AttachmentBlockState
 from s2and.prediction_state import PredictionState
+from s2and.production_model import NativeLightGBMBinaryClassifier
 from tests.incremental_test_helpers import _dataset, attach_tiny_incremental_linker, prepare_seed_arrow_bundle
 from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 from tests.model_helpers import ConstantDistanceClassifier
@@ -59,3 +63,54 @@ def test_setup_reuse_across_eps(tmp_path, monkeypatch):
         assert predict(0.46, reuse, threshold=4) == predict(0.46, threshold=4)
         assert reuse.subblocks.hits == 1
         assert len(reuse.subblocks.entries) == 2
+
+
+def test_residual_model_cache_reapplies_constraints_and_checks_model(tmp_path):
+    names = [("Ada", "", "Smith"), ("Bob", "", "Smith"), ("Ada", "", "Smith"), ("A", "", "Smith")]
+    dataset = _dataset(names, {})
+    prepare_seed_arrow_bundle(dataset, tmp_path / "arrow")
+    info = FeaturizationInfo(["year_diff"])
+
+    def classifier(seed):
+        from tests.promoted_linking_helpers import tiny_binary_booster
+
+        path = tmp_path / f"pairwise-{seed}.txt"
+        tiny_binary_booster(len(info.selected_feature_indices()), seed=seed).booster_.save_model(path)
+        return NativeLightGBMBinaryClassifier(path)
+
+    clusterer = Clusterer(info, classifier(101), cluster_model=FastCluster(linkage="average"), n_jobs=1)
+    clusterer.suppress_orcid = True
+    with ArrowDataset.open(tmp_path / "arrow") as arrow, AttachReuse() as reuse:
+        group = list(dataset.signatures)
+        state = _AttachmentBlockState(arrow, group, frozenset(), 1)
+        state.attach_reuse = reuse
+        state.residual_group = tuple(group)
+
+        def verify(ids, supervision, *, cached=True):
+            args = (clusterer, {"block": ids}, state.featurizer())
+            expected = distances._make_distance_matrices_from_verified_rust_featurizer(
+                *args, partial_supervision=supervision
+            )["block"]
+            observed = distances._make_distance_matrices_from_verified_rust_featurizer(
+                *args, partial_supervision=supervision, residual_reuse=state if cached else None
+            )["block"]
+            np.testing.assert_array_equal(observed, expected)
+            assert observed.tobytes() == expected.tobytes()
+
+        try:
+            verify(group, {})
+            verify(group[1:], {("1", "2"): 0.123})
+            verify(["0", "2", "3"], {("3", "0"): 0.456})
+            assert len(reuse.residuals.entries) == 1
+            assert reuse.residuals.hits == 2
+            verify(list(reversed(group)), {})
+            assert reuse.residuals.hits == 3
+            clusterer.classifier = classifier(102)
+            verify(group[1:], {})
+            assert len(reuse.residuals.entries) == 2
+            assert reuse.residuals.hits == 3
+            clusterer.suppress_orcid = False
+            verify(group[1:], {})
+            assert reuse.residuals.hits == 3
+        finally:
+            state.release()

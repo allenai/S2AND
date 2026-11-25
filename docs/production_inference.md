@@ -616,3 +616,9 @@ Arrow dataset. It retains subblocking, block featurizers and query name metadata
 values. Offline replays can pass an AttachReuse context to the same private Arrow request entry
 point. Use the context manager and close it before the Arrow dataset. It logs retained signatures
 and hits, and computes setup normally when its signature budget is exhausted.
+
+The residual cache retains condensed model distances for initial-only attachment groups when
+ORCID constraints are suppressed and native fused scoring is available. Each pass applies its
+own constraints and overrides, then runs linkage and block corrections at its EPS. The context
+defaults to a 1 GiB residual cache and falls back to ordinary scoring when the matrix exceeds
+the cache or runtime memory budget.

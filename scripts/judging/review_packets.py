@@ -41,6 +41,7 @@ from scripts.common.identity_ledger import (  # noqa: E402
     EVIDENCE_SHA256_FIELD,
     BlockEligibility,
     IdentityLedger,
+    evidence_identities,
     gate_veto_identities,
     ledger_for_roles,
 )
@@ -425,7 +426,14 @@ def _scored_controls(
             if packet_type == "linker" and view.role == "gate_thresh":
                 query_orcid = view.eligibility(str(item["query"]["signature_id"])).score_orcid
                 component_orcids = [view.component_label(candidate["member_signature_ids"]) for candidate in candidates]
-                if not query_orcid or not all(component_orcids):
+                if not query_orcid or any(
+                    not orcid
+                    or not any(
+                        orcid in evidence_identities(view.rows[paper["signature_id"]])
+                        for paper in candidate["exemplars"]
+                    )
+                    for candidate, orcid in zip(candidates, component_orcids, strict=True)
+                ):
                     continue
                 orcids = [
                     query_orcid,
@@ -699,10 +707,10 @@ def build_blind_linker_packets(
         allowed_controls = [
             item for item in control_queries if ledger.roles.role_for(item["block_key"]) in allowed_roles
         ]
-        resolved, seed_digests = resolve_gate_exemplars(
-            [*queries, *allowed_controls], ledger.roles, linker_task_manifest
+        queries, seed_digests = resolve_gate_exemplars(queries, ledger.roles, linker_task_manifest)
+        allowed_controls, _ = resolve_gate_exemplars(
+            allowed_controls, ledger.roles, linker_task_manifest, control_ledger=ledger
         )
-        queries, allowed_controls = resolved[: len(queries)], resolved[len(queries) :]
     else:
         allowed_controls = list(control_queries)
     gate_candidates = _validate_natural_items(queries, ledger, "linker")

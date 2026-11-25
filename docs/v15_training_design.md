@@ -246,8 +246,10 @@ Natural gate threshold candidates can receive blind labels on mixed production c
 with an excluded or foreign-role identity vetoes a candidate. Gate bindings cover every identity
 named by the gate evidence, including rejected gold and reviewed errors. Pass `--linker-task-manifest tasks/linker_tasks.json`
 to use the frozen seed assignments and the bound Arrow papers. Supply candidate keys for gate items.
-The builder selects up to four exemplars per component in frozen seed order and checks the full
-component for control eligibility. The trainer resolves candidate membership from the same seeds
+The builder selects up to four exemplars per component in frozen seed order. For controls, it
+prefers members with matched gold or a deposited ORCID agreeing with gold. Each displayed control
+component needs at least one such exemplar and must pass the full-component eligibility check.
+The trainer resolves candidate membership from the same seeds
 before applying judgments. Rebuild old gate packets and keys to record the frozen seed digest.
 It balances same and different pair controls, or linkable and unlinkable linker requests, within available counts.
 Pass `--balance-controls-by-score-band` and set private `metadata.score_band_v14` on each eligible control

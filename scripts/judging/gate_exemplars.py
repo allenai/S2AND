@@ -13,6 +13,7 @@ import pyarrow.compute as pc
 from s2and.arrow_inputs import ArrowDataset
 from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, BlockRoles, normalize_block_key
+from scripts.common.identity_ledger import IdentityLedger, evidence_identities
 from scripts.common.linker_seeds import PRODUCTION_MAX_EXEMPLARS, members_by_component, read_frozen_seeds
 
 
@@ -53,9 +54,13 @@ def _paper_items(arrow: ArrowDataset, signature_ids: set[str]) -> dict[str, dict
 
 
 def resolve_gate_exemplars(
-    items: Sequence[Mapping[str, Any]], roles: BlockRoles, task_manifest_path: Path | None
+    items: Sequence[Mapping[str, Any]],
+    roles: BlockRoles,
+    task_manifest_path: Path | None,
+    *,
+    control_ledger: IdentityLedger | None = None,
 ) -> tuple[list[Mapping[str, Any]], dict[str, str]]:
-    """Use the first frozen members and their Arrow metadata for each gate candidate."""
+    """Resolve frozen exemplars, preferring verified members when building controls."""
     by_block: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in items:
         block = normalize_block_key(item["block_key"])
@@ -78,7 +83,15 @@ def resolve_gate_exemplars(
         keys = {str(candidate["candidate_key"]) for item in block_items for candidate in item["candidates"]}
         if missing := keys - members.keys():
             raise ValueError(f"Gate candidates have no frozen seed members in {block!r}: {sorted(missing)}")
-        exemplar_ids = {key: members[key][:PRODUCTION_MAX_EXEMPLARS] for key in keys}
+        if control_ledger is None:
+            exemplar_ids = {key: members[key][:PRODUCTION_MAX_EXEMPLARS] for key in keys}
+        else:
+            rows = control_ledger.for_block(block).rows
+            # Eligible controls have one component identity. Preserve seed order within each group.
+            exemplar_ids = {
+                key: sorted(members[key], key=lambda sid: not evidence_identities(rows[sid]))[:PRODUCTION_MAX_EXEMPLARS]
+                for key in keys
+            }
         with ArrowDataset.open(spec["arrow_dir"]) as arrow:
             if arrow.generation_id != spec["arrow_generation_id"]:
                 raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")

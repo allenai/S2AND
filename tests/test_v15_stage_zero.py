@@ -15,10 +15,12 @@ import pyarrow.parquet as pq
 import pytest
 
 from s2and._sha256 import sha256_file
+from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_tables import write_cluster_seeds_arrow, write_name_counts_index
+from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from s2and.production_model import load_production_model
-from scripts.common.block_roles import load_block_roles
-from scripts.common.identity_ledger import ledger_for_roles, load_identity_evidence
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles
+from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles, load_identity_evidence
 from scripts.eps import apply_reviewed_eps, orcid_b3, sweep_eps_on_linking_gold
 from scripts.intake import (
     assign_block_roles,
@@ -33,7 +35,7 @@ from scripts.linker import build_linker_inputs, build_linker_task_tables
 from scripts.linker.train_linker_and_finalize import _apply_blind_gate_labels, _validate_frozen_task_bindings
 from scripts.pairwise import mine_pairwise_pairs
 from tests.test_giant_eps_release import _complete_model
-from tests.test_identity_ledger import DEPOSITED, GOLD, request_bundle
+from tests.test_identity_ledger import DEPOSITED, GOLD, HOLDOUT, request_bundle
 
 pytestmark = pytest.mark.tooling
 
@@ -50,6 +52,143 @@ def _json(path: Path, payload: object) -> Path:
 def _parquet(path: Path, **columns: list) -> Path:
     pq.write_table(pa.table(columns), path)
     return path
+
+
+@pytest.fixture
+def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
+    block = "g schneider"
+    papers = [(str(i), {25: HOLDOUT, 32: GOLD}.get(i)) for i in (11, 13, 14, 21, 22, 23, 24, 25, 31, 32)]
+    bundle = request_bundle(tmp_path / "raw", block, papers)
+    raw = bundle.parent / "g_schneider"
+    with pa.ipc.open_file(raw / "papers.arrow") as reader:
+        table = reader.read_all()
+    table = table.set_column(
+        table.schema.get_field_index("title"), "title", pa.array([f"Study {pid}" for pid, _ in papers])
+    )
+    write_arrow_ipc_table(table, raw / "papers.arrow")
+    with tarfile.open(bundle, "w:gz") as archive:
+        for path in raw.glob("*.arrow"):
+            archive.add(path, arcname=path.name)
+    index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
+    snapshot = tmp_path / "snapshot"
+    allowed = _json(tmp_path / "allowed.json", [paper for paper, _ in papers])
+    _run(
+        requests_to_datasets,
+        bundle,
+        "--output-root",
+        snapshot,
+        "--name-counts-index",
+        Path(index),
+        "--allowed-papers",
+        allowed,
+        "--abstract-allowed-papers",
+        allowed,
+    )
+    gold = _parquet(
+        tmp_path / "gold.parquet",
+        cluster_block_key=[block] * 4,
+        corpus_paper_id=[11, 13, 14, 31],
+        position=[0] * 4,
+        orcid=[HOLDOUT, GOLD, HOLDOUT, HOLDOUT],
+        split=["development"] * 4,
+        scored=[True] * 4,
+    )
+    evidence = tmp_path / "evidence" / "manifest.json"
+    _run(build_identity_evidence, "--snapshot", snapshot, "--gold-parquet", gold, "--output-dir", evidence.parent)
+    gold_blocks = _parquet(tmp_path / "gold-blocks.parquet", cluster_block_key=[block], split=["development"])
+    blocks = tmp_path / "blocks.parquet"
+    _run(build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", gold_blocks, "--output", blocks)
+    freeze = tmp_path / "freeze"
+    _run(
+        assign_block_roles,
+        "--identity-evidence",
+        evidence,
+        "--blocks",
+        blocks,
+        "--output-dir",
+        freeze,
+        "--targets-json",
+        _json(tmp_path / "targets.json", {"gate_thresh": 1}),
+        "--extra-pins-json",
+        _json(tmp_path / "pins.json", {block: "gate_thresh"}),
+    )
+    roles = load_block_roles(freeze / "assignments.json")
+    ledger = ledger_for_roles(evidence, roles)
+    assert ledger is not None
+    seeds = _parquet(
+        tmp_path / "seeds.parquet",
+        signature_id=["21-0", "22-0", "23-0", "24-0", "25-0", "11-0", "31-0", "32-0"],
+        component_key=["other"] * 6 + ["mixed"] * 2,
+    )
+    arrow_dir = snapshot / "datasets" / "g_schneider"
+    with ArrowDataset.open(arrow_dir) as arrow:
+        spec = {
+            "arrow_dir": str(arrow_dir),
+            "arrow_generation_id": arrow.generation_id,
+            "seeds": str(seeds),
+            "seeds_sha256": sha256_file(seeds),
+        }
+    task = _json(
+        tmp_path / "tasks.json",
+        {
+            "tables": {"gate_thresh": {"blocks": {block: spec}}},
+            BLOCK_BINDINGS_FIELD: roles.bindings_for({block}),
+        },
+    )
+    return block, ledger, task
+
+
+def test_gate_controls_show_verified_identity(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    view = ledger.for_block(block)
+    natural = {
+        "block_key": block,
+        "source_id": "natural",
+        "query": {"signature_id": "13-0", "title": "Study 13"},
+        "candidates": [{"candidate_key": "other"}],
+    }
+    controls = [
+        {
+            **natural,
+            "source_id": f"control-{i}",
+            "query": {"signature_id": "14-0" if i % 2 else "13-0", "title": "Study"},
+        }
+        for i in range(10)
+    ]
+    controls.append({**controls[0], "source_id": "mixed", "candidates": [{"candidate_key": "mixed"}]})
+    key = tmp_path / "key.json"
+    summary = review_packets.build_blind_linker_packets(
+        queries=[natural],
+        control_queries=controls,
+        block_roles=ledger.roles,
+        ledger=ledger,
+        allowed_roles={"gate_thresh"},
+        linker_task_manifest=task,
+        output_dir=tmp_path / "packets",
+        answer_key_path=key,
+    )
+    assert summary["control_items"] == 10
+    assert summary["excluded_controls"] == 1
+    assert view.eligibility("25-0").score_orcid is None
+    for item, line in zip(
+        json.loads(key.read_text())["items"],
+        next((tmp_path / "packets/packets").glob("*.jsonl")).read_text().splitlines(),
+        strict=True,
+    ):
+        exemplars = json.loads(line)["candidates"][0]["exemplars"]
+        expected = [25, 11, 21, 22] if item["is_control"] else [21, 22, 23, 24]
+        assert [paper["title"] for paper in exemplars] == [f"Study {pid}" for pid in expected]
+
+    resolved, _ = review_packets.resolve_gate_exemplars(controls[:1], ledger.roles, task)
+    assert not review_packets._scored_controls(
+        resolved,
+        ledger.roles,
+        packet_type="linker",
+        allowed_roles={"gate_thresh"},
+        ledger=ledger,
+    )
 
 
 def _v14_source(tmp_path: Path, index: Path, allowed_abstracts: Path) -> Path:

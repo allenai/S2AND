@@ -27,7 +27,7 @@ from scripts.common.block_roles import load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
 from scripts.common.orcid_references import read_external_reference_identity_evidence
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
-from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
+from scripts.intake.prepare_identity_labels import _normalize_paper_id, canonical_gold_block_filter
 from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
 from scripts.linker.build_linker_task_tables import TASK_ROLES, _read_signatures
 
@@ -66,13 +66,26 @@ def _arrival_requests(
         raise ValueError(f"Arrival table is missing columns: {sorted(missing)}")
     if not pa.types.is_timestamp(source.schema.field("inserted").type):
         raise ValueError("The arrival table inserted column must be a timestamp")
+    paper_type = source.schema.field("corpus_paper_id").type
+    position_type = source.schema.field("position").type
+    if not (
+        pa.types.is_integer(paper_type) or pa.types.is_string(paper_type) or pa.types.is_large_string(paper_type)
+    ) or not pa.types.is_integer(position_type):
+        raise ValueError(f"Invalid arrival key types in {block!r}: {paper_type}, {position_type}")
     by_position = {}
     for batch in source.to_batches(columns=required, filter=canonical_gold_block_filter("cluster_block_key", {block})):
         for row in batch.to_pylist():
             if normalize_block_key(row["cluster_block_key"]) != block:
                 continue
-            key = str(row["corpus_paper_id"]), row["position"]
-            if row["corpus_paper_id"] is None or type(key[1]) is not int or key[1] < 0 or key in by_position:
+            paper_id = _normalize_paper_id(row["corpus_paper_id"])
+            key = paper_id, row["position"]
+            if (
+                paper_id is None
+                or paper_id != str(row["corpus_paper_id"])
+                or key[1] is None
+                or key[1] < 0
+                or key in by_position
+            ):
                 raise ValueError(f"Invalid or duplicate arrival key in {block!r}: {key!r}")
             by_position[key] = (row["inserted"], row["clusterer"])
     candidates = []
@@ -89,13 +102,15 @@ def _arrival_requests(
         else:
             candidates.append((_utc(inserted), sid, clusterer))
     selected = sorted(candidates, key=lambda row: (row[0], row[1]), reverse=True)[:count]
+    if not selected:
+        raise ValueError(f"No eligible arrival requests for {block!r} since {cutoff.isoformat()}")
     stats = {
         "eligible_arrivals": len(candidates),
         "missing_inserted": missing_timestamp,
         "inserted_before_since": before_cutoff,
         "ineligible_after_since": ineligible,
-        "inserted_min": selected[-1][0].isoformat() if selected else None,
-        "inserted_max": selected[0][0].isoformat() if selected else None,
+        "inserted_min": selected[-1][0].isoformat(),
+        "inserted_max": selected[0][0].isoformat(),
         "clusterer_counts": dict(Counter(row[2] or "unknown" for row in selected)),
     }
     return [sid for _, sid, _ in selected], stats

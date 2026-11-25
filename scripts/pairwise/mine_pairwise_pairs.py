@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
-from s2and._sha256 import sha256_file
+from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
@@ -95,10 +95,9 @@ def _eligible_mentions(
 
 
 def _ledger_mentions(
-    ledger: IdentityLedger, spec: BlockInput, block: str
+    ledger: IdentityLedger, spec: BlockInput, block: str, manifest: Mapping[str, Any]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
     view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
-    manifest = read_json_object(spec.assignments.parent / "manifest.json")
     ledger.require_bindings(manifest["binding"], context=f"{block} pairwise assignments")
     if manifest["files"].get(spec.assignments.name) != sha256_file(spec.assignments):
         raise ValueError(f"Assignment digest mismatch: {spec.assignments}")
@@ -222,12 +221,23 @@ def mine_pairs(
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)
 
+    assignment_manifests = {}
+    shared_binding: dict[str, str] = {}
+    if ledger is not None:
+        for block, spec in sorted(normalized.items()):
+            manifest = read_json_object(spec.assignments.parent / "manifest.json")
+            for field in ("model_sha256", "index_sha256"):
+                digest = manifest["binding"].get(field)
+                if not is_lowercase_sha256(digest) or shared_binding.setdefault(field, digest) != digest:
+                    raise ValueError(f"{block!r} pairwise assignments lack a shared {field}")
+            assignment_manifests[block] = manifest
+
     rng = random.Random(seed)
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []
     for block, spec in sorted(normalized.items()):
         identities, gold, clusters, excluded = (
-            _ledger_mentions(ledger, spec, block)
+            _ledger_mentions(ledger, spec, block, assignment_manifests[block])
             if ledger is not None
             else _eligible_mentions(spec, block, roles.block_orcids[block], roles.identity_roles)
         )
@@ -284,6 +294,7 @@ def mine_pairs(
                 "block_role_assignments_sha256": roles.sha256,
                 **(ledger.bindings if ledger is not None else {}),
                 "seed": seed,
+                **shared_binding,
                 "role": "pairwise_train",
                 "pairs_per_block_per_stratum": per_block,
                 "pairs_per_identity_per_stratum": per_identity,

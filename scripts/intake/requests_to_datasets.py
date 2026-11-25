@@ -104,9 +104,10 @@ def _validate_block(path: Path, name: str) -> None:
         raise ValueError(f"Bundle {name!r} does not match its author_block values: {sorted(keys)}")
 
 
-def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowed: frozenset[str]) -> None:
+def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowed: frozenset[str]) -> int:
     paper_ids = pa.array(sorted(allowed), type=pa.string())
     abstract_ids = pa.array(sorted(abstract_allowed), type=pa.string())
+    signatures = 0
     for name, filename in paths.items():
         path = Path(filename)
         gated = path.with_suffix(".gated")
@@ -116,6 +117,8 @@ def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowe
                 for index in range(reader.num_record_batches):
                     batch = reader.get_batch(index)
                     batch = batch.filter(pc.is_in(batch.column("paper_id"), value_set=paper_ids))
+                    if name == "signatures":
+                        signatures += batch.num_rows
                     if name == "papers" and "abstract" in batch.schema.names:
                         field = batch.schema.get_field_index("abstract")
                         values = batch.column(field)
@@ -128,6 +131,7 @@ def _gate_tables(paths: dict[str, str], allowed: frozenset[str], abstract_allowe
                         )
                     writer.write_batch(batch)
         gated.replace(path)
+    return signatures
 
 
 def _permission_digest(papers: frozenset[str]) -> str:
@@ -213,7 +217,8 @@ def _convert_datasets(
                 staging = Path(temp)
                 paths = extract_request_tables(bundle, staging, DATASET_TABLES)
                 _validate_block(Path(paths["signatures"]), name)
-                _gate_tables(paths, allowed_papers, abstract_allowed_papers)
+                if not _gate_tables(paths, allowed_papers, abstract_allowed_papers):
+                    raise ValueError(f"No signatures remain after paper permission filtering for {name!r}")
                 redact_source_tree(staging)
                 _scan_dataset(staging)
                 paths, _ = write_raw_arrow_batch_lookup_indexes(paths, staging)

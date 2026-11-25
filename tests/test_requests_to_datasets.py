@@ -52,6 +52,8 @@ def test_intake_publishes_and_resumes_snapshot(tmp_path: Path) -> None:
     index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     root = tmp_path / "snapshot"
     permissions = {"allowed_papers": frozenset({"p0"}), "abstract_allowed_papers": frozenset()}
+    with pytest.raises(ValueError, match="No signatures.*a_lovelace"):
+        convert_requests([bundle], tmp_path / "empty", Path(index), **{**permissions, "allowed_papers": frozenset()})
     result = convert_requests([bundle], root, Path(index), **permissions)
     assert result["a_lovelace"]["source_bundle_sha256"] == sha256_file(bundle)
     datasets, _, _ = read_arrow_collection_root(root / "manifest.json")

@@ -318,7 +318,10 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     assignments = assignment_root / "assignments.parquet"
     pq.write_table(pa.table({"signature_id": ["2-0", "4-0"], "cluster_id": ["a", "b"]}), assignments)
     manifest = assignment_root / "manifest.json"
-    record = {"binding": ledger.bindings, "files": {assignments.name: sha256_file(assignments)}}
+    record = {
+        "binding": {**ledger.bindings, "model_sha256": "a" * 64, "index_sha256": "b" * 64},
+        "files": {assignments.name: sha256_file(assignments)},
+    }
     manifest.write_text(json.dumps(record))
     specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
     output = tmp_path / "pairs.csv"
@@ -330,6 +333,53 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     manifest.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="does not match"):
         mine_pairs(role_path, specs, tmp_path / "stale.csv", per_block=1, identity_evidence=evidence)
+
+    pq.write_table(pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["development"] * 2}), source)
+    both = tmp_path / "both-blocks.parquet"
+    build_freeze_input(evidence, source, both)
+    role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"pairwise_train": 2})))
+    ledger = ledger_for_roles(evidence, load_block_roles(role_path))
+    assert ledger is not None
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0", "4-0"], "cluster_id": ["a", "a", "b"]}), assignments)
+    other = tmp_path / "other" / assignments.name
+    other.parent.mkdir()
+    pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)
+    for model_sha, path in (("a" * 64, assignments), ("c" * 64, other)):
+        (path.parent / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "binding": {**ledger.bindings, "model_sha256": model_sha, "index_sha256": "b" * 64},
+                    "files": {path.name: sha256_file(path)},
+                }
+            )
+        )
+    specs["g hopper"] = BlockInput(snapshot / "datasets" / "g_hopper", None, other)
+    with pytest.raises(ValueError, match="model_sha256"):
+        mine_pairs(role_path, specs, tmp_path / "mixed-model.csv", per_block=1, identity_evidence=evidence)
+
+
+def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.common import identity_ledger
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    original = pq.read_table(gold)
+    output = tmp_path / "identity"
+    missing = original.slice(0, 1).set_column(1, "corpus_paper_id", pa.array([999]))
+    pq.write_table(pa.concat_tables([original, missing]), gold)
+    with pytest.raises(ValueError, match="a lovelace.*unmatched gold"):
+        build_identity_evidence(snapshot, gold, output)
+    assert not (output / "manifest.json").exists()
+    pq.write_table(missing, gold)
+    with pytest.raises(ValueError, match="No gold rows matched"):
+        build_identity_evidence(snapshot, gold, output, max_unmatched_gold=1)
+    pq.write_table(original, gold)
+    build_identity_evidence(snapshot, gold, output)
+    monkeypatch.setattr(identity_ledger, "EXCLUDED_ORCID_GROUPS", frozenset({GOLD}))
+    with pytest.raises(ValueError, match="excluded ORCID groups"):
+        identity_ledger.load_identity_evidence(output / "manifest.json")
 
 
 def test_gate_arrival_order_uses_inserted_and_production_components(
@@ -371,6 +421,14 @@ def test_gate_arrival_order_uses_inserted_and_production_components(
     assert queries == ["2-0"]
     assert counts["missing_inserted"] == counts["inserted_before_since"] == 1
     assert counts["clusterer_counts"] == {"AltAdFullBlock": 1}
+
+    with pytest.raises(ValueError, match="No.*requests.*a lovelace"):
+        _arrival_requests(arrivals, "a lovelace", mentions, {"1-0"}, datetime(2026, 10, 20, tzinfo=UTC), 1)
+    floats = pq.read_table(arrivals)
+    index = floats.schema.get_field_index("corpus_paper_id")
+    pq.write_table(floats.set_column(index, "corpus_paper_id", floats.column(index).cast(pa.float64())), arrivals)
+    with pytest.raises(ValueError, match="arrival.*key"):
+        _arrival_requests(arrivals, "a lovelace", mentions, mentions.keys(), datetime(2026, 10, 20, tzinfo=UTC), 1)
 
     raw = tmp_path / "a_lovelace"
     seeds = raw / "cluster_seeds.arrow"

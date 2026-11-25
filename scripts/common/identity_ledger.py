@@ -10,11 +10,18 @@ from typing import Literal, NotRequired, TypedDict, cast
 import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
+from s2and.incremental_linking.contracts import canonical_json_digest
 from scripts.common.arrow_roots import read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import BlockRoles, normalize_block_key
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
 
 EVIDENCE_SHA256_FIELD = "identity_evidence_sha256"
 ROLE_SHA256_FIELD = "block_role_assignments_sha256"
+
+
+def excluded_orcid_groups_digest() -> str:
+    """Bind evidence to the current identity exclusions."""
+    return canonical_json_digest(sorted(EXCLUDED_ORCID_GROUPS))
 
 
 class GoldEvidence(TypedDict):
@@ -109,6 +116,8 @@ def load_identity_evidence(path: Path) -> IdentityEvidence:
     payload = read_json_object(path)
     if payload.get("format_version") != 1 or not isinstance(payload.get("blocks"), dict) or not payload["blocks"]:
         raise ValueError(f"Invalid identity evidence manifest: {path}")
+    if payload.get("excluded_orcid_groups_sha256") != excluded_orcid_groups_digest():
+        raise ValueError(f"Identity evidence uses different excluded ORCID groups: {path}")
     return IdentityEvidence(
         path,
         sha256_file(path),
@@ -150,7 +159,7 @@ class BlockEligibility:
             raise ValueError(f"No identity evidence for {self.block!r} signature {signature_id!r}")
         row = self.rows[signature_id]
         identities = evidence_identities(row)
-        if row["excluded"] or row["reviewed_error"]:
+        if row["excluded"] or row["reviewed_error"] or not identities.isdisjoint(EXCLUDED_ORCID_GROUPS):
             return Eligibility(False, None, identities)
         for orcid in identities:
             if orcid not in self.roles.block_orcids[self.block] or orcid not in self.roles.identity_roles:

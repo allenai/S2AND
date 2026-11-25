@@ -16,6 +16,7 @@ from s2and.arrow_inputs import ArrowDataset, arrow_string_array
 from s2and.corrections.block_corrections import correction_fingerprint
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset, release_rust_handle
+from s2and.incremental_linking.attach_reuse import AttachReuse
 from s2and.incremental_linking.completion import ResidualClusterer
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
@@ -37,7 +38,7 @@ from s2and.supervision import (
     normalize_partial_supervision,
     validate_incremental_seed_disallows,
 )
-from s2and.text import canonicalize_name_parts, normalize_orcid_compact
+from s2and.text import CanonicalNameParts, canonicalize_name_parts, normalize_orcid_compact
 from s2and.thread_config import resolve_n_jobs
 
 from ._shared import (
@@ -84,8 +85,16 @@ class _AttachmentBlockState:
         self._build_args = (arrow_dataset, list(signature_ids), num_threads)
         self._featurizer: Any | None = None
         self._orcid_info: dict[str, _ArrowIncrementalSignatureInfo] | None = None
+        self.shared_setup: _AttachmentBlockState | None = None
+        self.attach_reuse: AttachReuse | None = None
         self.planner: Any | None = None
         self.planner_key: tuple[Any, ...] | None = None
+
+    @property
+    def name_parts(self) -> dict[str, tuple[CanonicalNameParts, str | None]]:
+        if not hasattr(self, "_name_parts"):
+            self._name_parts: dict[str, tuple[CanonicalNameParts, str | None]] = {}
+        return self._name_parts
 
     @property
     def arrow_dataset(self) -> ArrowDataset:
@@ -120,7 +129,19 @@ class _AttachmentBlockState:
         self._featurizer = None
         self.planner = None
 
+    def signature_info(
+        self, arrow_lease: Any, signature_ids: Sequence[str]
+    ) -> dict[str, _ArrowIncrementalSignatureInfo]:
+        """Read each query's metadata once across the offline block's passes."""
+        if not hasattr(self, "_signature_info"):
+            self._signature_info: dict[str, _ArrowIncrementalSignatureInfo] = {}
+        missing = [sid for sid in signature_ids if sid not in self._signature_info]
+        self._signature_info.update(_load_arrow_incremental_signature_info(arrow_lease, missing))
+        return {sid: self._signature_info[sid] for sid in signature_ids}
+
     def featurizer(self) -> Any:
+        if self.shared_setup is not None:
+            return self.shared_setup.featurizer()
         if self._featurizer is None:
             arrow_dataset, signature_ids, num_threads = self._build_args
             self._featurizer = build_rust_featurizer_from_arrow_dataset(
@@ -930,7 +951,13 @@ def predict_incremental_from_arrow(
                 else []
             )
             metadata_signature_ids = (*unassigned_signature_ids, *altered_seed_signature_ids)
-            signatures = _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
+            attachment_state = _ARROW_ATTACH_BLOCK_STATE.get()
+            shared_setup = None if attachment_state is None else attachment_state.shared_setup
+            signatures = (
+                _load_arrow_incremental_signature_info(arrow_lease, metadata_signature_ids)
+                if shared_setup is None
+                else shared_setup.signature_info(arrow_lease, metadata_signature_ids)
+            )
             if not bool(getattr(self, "suppress_orcid", False)) and any(
                 (signature_info := signatures.get(signature_id)) is not None
                 and signature_info.author_info_orcid is not None

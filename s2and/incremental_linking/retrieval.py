@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -176,6 +176,7 @@ class RawArrowPlanBundle:
         retrieval_ranks: Any,
         normalized_row_signals: Mapping[str, Any],
         component_member_counts: tuple[int, int] | None = None,
+        first_name_buckets: Callable[[list[str], list[str]], list[str]] | None = None,
     ) -> RawArrowPlanBundle:
         """Own normalized values and derive the runtime-only views once."""
 
@@ -207,7 +208,13 @@ class RawArrowPlanBundle:
             "query_view": row_query_views,
             "query_author": row_query_authors,
             "first_name_bucket": _readonly_array(
-                first_name_bucket_array(owned_normalized_row_signals["query_first_token"], row_query_views),
+                (
+                    first_name_bucket_array(owned_normalized_row_signals["query_first_token"], row_query_views)
+                    if first_name_buckets is None
+                    else first_name_buckets(
+                        owned_normalized_row_signals["query_first_token"].tolist(), row_query_views.tolist()
+                    )
+                ),
                 dtype=object,
             ),
             **owned_normalized_row_signals,
@@ -248,7 +255,12 @@ class RawArrowPlanBundle:
         )
 
     @classmethod
-    def from_native_mapping(cls, plan: Mapping[str, Any]) -> RawArrowPlanBundle:
+    def from_native_mapping(
+        cls,
+        plan: Mapping[str, Any],
+        *,
+        first_name_buckets: Callable[[list[str], list[str]], list[str]] | None = None,
+    ) -> RawArrowPlanBundle:
         """Validate and adopt arrays freshly returned by the native planner.
 
         Native planner results transfer exclusive array ownership to Python.
@@ -378,6 +390,7 @@ class RawArrowPlanBundle:
             retrieval_ranks=retrieval_ranks,
             normalized_row_signals=normalized_row_signals,
             component_member_counts=component_member_counts,
+            first_name_buckets=first_name_buckets,
         )
 
 

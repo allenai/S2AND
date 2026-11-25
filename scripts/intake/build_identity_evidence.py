@@ -27,10 +27,9 @@ from scripts.common.identity_ledger import (
     MentionEvidence,
     RejectedGoldEvidence,
     evidence_identities,
-    excluded_orcid_groups_digest,
     load_identity_evidence,
 )
-from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest
 from scripts.intake.prepare_identity_labels import (
     SignatureJoin,
     _normalize_paper_id,

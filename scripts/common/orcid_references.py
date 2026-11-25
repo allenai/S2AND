@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.text import normalize_orcid
 from scripts.common.block_roles import normalize_block_key
 
@@ -35,6 +36,11 @@ EXCLUDED_ORCID_GROUPS = frozenset(
         "0009-0009-5657-3485",
     }
 )
+
+
+def excluded_orcid_groups_digest() -> str:
+    """Return the digest of the current ORCID exclusions."""
+    return canonical_json_digest(sorted(EXCLUDED_ORCID_GROUPS))
 
 
 def read_external_reference_identity_evidence(

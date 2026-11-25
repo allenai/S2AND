@@ -42,7 +42,7 @@ from scripts.common.identity_ledger import (  # noqa: E402
     evidence_identities,
     load_identity_evidence,
 )
-from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest  # noqa: E402
 from scripts.intake.build_freeze_input import mention_counts  # noqa: E402
 from scripts.intake.requests_to_datasets import INTAKE_LOCK  # noqa: E402
 
@@ -818,6 +818,7 @@ def freeze_identity_roles(
     return {
         **roles,
         "format_version": 2,
+        "excluded_orcid_groups_sha256": excluded_orcid_groups_digest(),
         EVIDENCE_SHA256_FIELD: evidence.sha256,
         "snapshot_sha256": evidence.snapshot_sha256,
         "intake_sha256": evidence.intake_sha256,

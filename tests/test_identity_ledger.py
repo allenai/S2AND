@@ -430,7 +430,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
 def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
     evidence_inputs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from scripts.common import identity_ledger
+    from scripts.common import identity_ledger, orcid_references
     from scripts.intake.build_identity_evidence import build_identity_evidence
 
     snapshot, gold = evidence_inputs
@@ -446,9 +446,51 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
         build_identity_evidence(snapshot, gold, output, max_unmatched_gold=1)
     pq.write_table(original, gold)
     build_identity_evidence(snapshot, gold, output)
-    monkeypatch.setattr(identity_ledger, "EXCLUDED_ORCID_GROUPS", frozenset({GOLD}))
+    monkeypatch.setattr(orcid_references, "EXCLUDED_ORCID_GROUPS", frozenset({GOLD}))
     with pytest.raises(ValueError, match="excluded ORCID groups"):
         identity_ledger.load_identity_evidence(output / "manifest.json")
+
+
+@pytest.mark.parametrize("check", ["load", "train", "subset", "empty"])
+def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
+    check: str, evidence_inputs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.common import orcid_references
+    from scripts.common.block_roles import load_block_roles
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+    from scripts.linker.train_linker_and_finalize import _validate_frozen_task_bindings
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "evidence" / "manifest.json"
+    build_identity_evidence(snapshot, gold, evidence.parent)
+    source = tmp_path / "gold-blocks.parquet"
+    pq.write_table(pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development"] * 2}), source)
+    blocks = tmp_path / "blocks.parquet"
+    build_freeze_input(evidence, source, blocks)
+    path = tmp_path / "assignments.json"
+    path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"linker_train": 2})), encoding="utf-8")
+    roles = load_block_roles(path)
+    manifest = {
+        "tables": {"linker_train": {"blocks": dict.fromkeys(roles.block_to_role)}},
+        "block_bindings": roles.bindings_for(roles.block_to_role),
+    }
+    _validate_frozen_task_bindings(manifest, roles)
+    if check in {"load", "train"}:
+        exclusions = orcid_references.EXCLUDED_ORCID_GROUPS | {HOLDOUT}
+        monkeypatch.setattr(orcid_references, "EXCLUDED_ORCID_GROUPS", exclusions)
+        with pytest.raises(ValueError, match="excluded ORCID groups"):
+            if check == "load":
+                load_block_roles(path)
+            else:
+                _validate_frozen_task_bindings(manifest, roles)
+    else:
+        subset = {"a lovelace": {}} if check == "subset" else {}
+        with pytest.raises(ValueError, match="Missing.*g hopper"):
+            _validate_frozen_task_bindings(
+                {"tables": {"linker_train": {"blocks": subset}}, "block_bindings": roles.bindings_for(subset)}, roles
+            )
 
 
 def test_gate_arrival_order_uses_inserted_and_production_components(

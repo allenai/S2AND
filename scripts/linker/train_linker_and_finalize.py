@@ -2014,12 +2014,16 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
 
 def _validate_frozen_task_bindings(manifest: Mapping[str, Any], roles: BlockRoles) -> None:
     """Check the roles and block provenance of every frozen task table."""
+    roles.require_current_exclusions()
     bound_blocks = set()
     for role, table in manifest["tables"].items():
         blocks = set(table["blocks"])
         assigned = {block for block, assignment in roles.block_to_role.items() if assignment == role}
-        if not blocks <= assigned or (roles.evidence_sha256 is None and blocks != assigned):
-            raise ValueError(f"Linker task {role!r} does not match the frozen block roles")
+        if not blocks or blocks != assigned:
+            raise ValueError(
+                f"Linker task {role!r} does not match the frozen block roles. "
+                f"Missing {sorted(assigned - blocks)}. Unexpected {sorted(blocks - assigned)}."
+            )
         bound_blocks.update(blocks)
     if roles.evidence_sha256 is not None:
         roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")

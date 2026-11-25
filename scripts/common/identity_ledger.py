@@ -13,17 +13,12 @@ from s2and._sha256 import sha256_file
 from s2and.incremental_linking.contracts import canonical_json_digest
 from scripts.common.arrow_roots import read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import BlockRoles, normalize_block_key
-from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
+from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest
 
 EVIDENCE_SHA256_FIELD = "identity_evidence_sha256"
 ROLE_SHA256_FIELD = "block_role_assignments_sha256"
 FREEZE_BINDING = ".role_freeze.json"
 INTAKE_SOURCE_RECORD = "request_source.json"
-
-
-def excluded_orcid_groups_digest() -> str:
-    """Bind evidence to the current identity exclusions."""
-    return canonical_json_digest(sorted(EXCLUDED_ORCID_GROUPS))
 
 
 class GoldEvidence(TypedDict):

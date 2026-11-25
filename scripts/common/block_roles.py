@@ -35,6 +35,16 @@ class BlockRoles:
     snapshot_sha256: str | None = None
     source_splits: dict[str, str] = field(default_factory=dict)
     evidence_blocks: dict[str, str] = field(default_factory=dict)
+    excluded_orcid_groups_sha256: str | None = None
+
+    def require_current_exclusions(self) -> None:
+        """Reject roles built with a different policy or containing excluded ORCIDs."""
+        from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest
+
+        if (
+            self.evidence_sha256 is not None and self.excluded_orcid_groups_sha256 != excluded_orcid_groups_digest()
+        ) or any(not orcids.isdisjoint(EXCLUDED_ORCID_GROUPS) for orcids in self.block_orcids.values()):
+            raise ValueError("Frozen roles use different excluded ORCID groups. Rebuild the evidence and freeze.")
 
     def bindings_for(self, blocks: Collection[str]) -> dict[str, dict[str, str]]:
         """Bind each requested block to its evidence and effective eligibility."""
@@ -120,7 +130,7 @@ def load_block_roles(path: Path) -> BlockRoles:
         or any(split not in {"development", "holdout"} for split in source_splits.values())
     ):
         raise ValueError(f"Expected source splits for every evidence block in {path}")
-    return BlockRoles(
+    result = BlockRoles(
         by_block,
         sha256_file(path),
         block_orcids,
@@ -129,4 +139,7 @@ def load_block_roles(path: Path) -> BlockRoles:
         digests.get("snapshot_sha256"),
         source_splits,
         evidence_blocks,
+        payload.get("excluded_orcid_groups_sha256") if bound else None,
     )
+    result.require_current_exclusions()
+    return result

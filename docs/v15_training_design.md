@@ -114,6 +114,7 @@ For an append, build a new freeze input from the expanded evidence manifest and 
 Use `--overwrite` if writing into the existing freeze directory. Use `--fresh` only to deliberately
 start a new freeze on an already bound snapshot or ledger. Tasks, judging keys, and gate judgments
 remain valid for blocks with the same evidence and eligibility after a re-freeze.
+The freeze records the ORCID exclusion policy digest. Rebuild evidence and freeze again after it changes.
 An identity with evidence outside its role is ineligible for scoring and sampling. Unassigned
 evidence can also make an identity ineligible. Evaluation clustering keeps these mentions as context.
 
@@ -166,8 +167,8 @@ authors before retrieval. Gold-labeled roles check every seed member for identit
 The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.
 Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
 report to the trainer with `--gate-thresh-judgments`. The trainer checks candidate keys against the frozen
-windows and leaves unresolved outcomes unscored. Use `--blocks`
-and a fresh output directory to inspect a subset.
+windows and leaves unresolved outcomes unscored. Use `--blocks` and a fresh output directory to
+inspect a subset. Training requires every frozen block for each task role.
 
 ### 10. Mine pairwise training pairs
 

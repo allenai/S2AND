@@ -22,14 +22,14 @@ All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s
 
 | Pool | Sources & allocation | Fits / tunes | Key guarantees |
 | --- | --- | --- | --- |
-| `fit_pool` | ~110 `orcid-blocks-v2/dev` blocks across size × surname-origin strata, plus the 80% benchmark train split (reclaiming 1.4's ~9% `unused_internal_test`) and fresh augmentation | Main and nameless pairwise heads (benchmarks + mined pairs) and the 53-feature ranker | Mined pairs per block capped at the smaller of 2,000 and 5% of the block's verified within-block pairs, with a floor still to set for tiny blocks. Pairwise validation: benchmark val plus a block-held-out fold of `fit_pool` mined pairs, marked in the freeze; never refit on that fold (rule 4). Ranker replays real `full_name` and `initial_only` queries with real `author_middle`; `no_safe` via whole-author holdout before retrieval. |
+| `fit_pool` | ~110 `orcid-blocks-v2/dev` blocks across size × surname-origin strata, plus the 80% benchmark train split (reclaiming 1.4's ~9% `unused_internal_test`) and fresh augmentation | Main and nameless pairwise heads (benchmarks + mined pairs) and the 53-feature ranker | Cap mining across strata at the smaller of 2,000 and 5% of verified within-block pairs, with a floor of up to 100 verified pairs. Pairwise validation uses benchmark val and the frozen `pairwise_validation_blocks`. Those blocks may supply ranker tasks. Ranker replays real `full_name` and `initial_only` queries with real `author_middle`, with `no_safe` via whole-author holdout before retrieval. |
 | `gate_fit` | 15–25 `orcid-blocks-v2/dev` blocks across the same strata | Gate medians, `StandardScaler`, feature selection (`k`), `C` and logistic weights | Neither the pairwise heads nor the ranker trained on these blocks. Choose `C` and `k` by grouped-block cross-validation: the same recipe with a fixed `C`, refit on 51 instead of 16 blocks, moved end-to-end F1 by 1.5 points. |
 | `eps_cal` | ~40 `orcid-blocks-v2/dev` blocks across the same strata | Production-route EPS, close-pair bonus, subblocking and post-linkage corrections | Disjoint from `fit_pool` and `gate_fit`. Sharing blocks with the gate is untested. |
 | `gate_thresh` | 10–15 disjoint `orcid-blocks-v2/dev` blocks at **natural production request frequencies** + a non-ORCID natural sample for blind review | Operating-point report and blind review of added and removed links | Uses natural requests, including retrieval misses, without constructed author holdouts. Keep the configured weight until explicitly changed. |
 | `dev_test` | ~40 disjoint `orcid-blocks-v2/dev` blocks + legacy giants + 27 Batch 1–6 blocks + fresh paired Sol disagreements | Model-vs-model iteration & go/no-go | Never fitted on. |
 | `final_test_a` and `final_test_b` *(sealed)* | 130–300 fresh `orcid-blocks-v2/holdout` blocks in total (incl. 40–60 fresh giants) + a sealed blind panel + canonical classic outer test (regression report) | Evaluate the frozen candidate on A and keep B sealed for a subsequent candidate | Score verified `holdout` gold labels through the identity ledger. |
 
-**Tooling status.** The commands below still use the earlier role names, and a block holds one role. `fit_pool` needs a tooling change: the miner and the ranker task builder must both accept it, and `train_pairwise.py` must read mined pairs. Freeze roles once from one master assignment and pin it in every step. Evidence and reviews: `D:/local-unsynced/s2and_v15_plan/ROLE_SPLIT_v3.md` and `REVIEW_ROLE_SPLIT_v3_*.md`.
+**Tooling status.** Freeze one master `assignments.json` and pass it unchanged to every stage. The miner and ranker use `fit_pool`, the gate fits on `gate_fit`, and `train_pairwise.py` uses the frozen block fold to split mined pairs.
 
 ### Feature contracts
 
@@ -106,30 +106,31 @@ records each new partition and leaves the earlier partitions intact.
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.intake.build_freeze_input \
-  --identity-evidence evidence/manifest.json --gold-blocks gold/blocks.parquet --output blocks.parquet
+  --identity-evidence evidence/manifest.json --gold-blocks gold/blocks.parquet \
+  --surname-origin-csv surname_origin.csv --output blocks.parquet
 ~~~
 
-Use `--strata-json` to override strata by exported block. The default size bands use Arrow signature
-counts of at most 1,000, 1,001 to 15,000, and above 15,000, with script and region when supplied.
+Strata combine the existing Arrow size bands (at most 1,000, 1,001 to 15,000, and above 15,000)
+and the `broad` origin of the block surname. Missing surnames use `other`.
 
 ### 6. Freeze exported block roles
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.intake.assign_block_roles \
   --blocks blocks.parquet --identity-evidence evidence/manifest.json --targets-json targets.json \
-  --extra-pins-json reviewed-blocks.json --output-dir freeze
+  --extra-pins-json reviewed-blocks.json --giant-caps-json giant-caps.json \
+  --pairwise-validation-fraction 0.15 --output-dir freeze
 ~~~
 
-Use an aggregate `final_test` target or distinct half targets. The allocator reserves feasible
-two-half strata first. Inspect its printed target and stratum shortfalls, cross-role identity counts,
-and cross-role mention counts. Supply new or previously unassigned blocks to `--extra-pins-json`
-on a re-freeze. Raising role targets can also assign previously unassigned blocks.
+Use an aggregate `final_test` target or distinct half targets. Giant caps map role names to counts
+above 15,000 signatures and include pinned blocks. Pass quoted leakage-test block keys to
+`--fit-pool-blocks`. Keep legacy and reviewed `dev_test` keys out of that list. Inspect target and
+stratum shortfalls and cross-role identity and mention counts.
 For an append, build a new freeze input from the expanded evidence manifest and pass the previous
-`assignments.json` with `--pinned-roles-json`. Keep all prior partitions, roles, and exclusions.
-Use `--overwrite` if writing into the existing freeze directory. Use `--fresh` only to deliberately
-start a new freeze on an already bound snapshot or ledger. Tasks, judging keys, and gate judgments
-remain valid for blocks with the same evidence and eligibility after a re-freeze.
-The intake manifest keeps the freeze binding if a freeze receipt goes missing.
+`assignments.json` with `--pinned-roles-json`. Prior roles and pairwise fold membership are pinned.
+Use `--fresh --pinned-roles-json freeze/assignments.json` without allocation options to reproduce
+the master on the same blocks. After an append, rebuild hash-bound artifacts with the new master.
+Judging keys retain their per-block evidence, eligibility, and seed checks.
 The freeze records the ORCID exclusion policy digest. Rebuild evidence and freeze again after it changes.
 An identity with evidence in another assigned role is ineligible for scoring and sampling. Adding
 unassigned blocks preserves existing bindings. Evaluation clustering keeps ineligible mentions as context.
@@ -167,9 +168,10 @@ blocks. Take the latest eligible mentions by `inserted` in each gate threshold b
 shortfall against K, missing timestamps, and the actual timestamp range. Arrival paper keys must be
 nonnegative integers or canonical decimal strings. Invalid arrival keys and empty request sets fail.
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
-For `linker_train` and `gate_fit`, sample eligible scored mentions using `--queries-per-block` and
-recluster eligible remaining mentions with ORCID hidden. Include the pairwise training blocks to
-write 1.4 assignments for mining. Re-run with the same inputs to verify and reuse completed blocks.
+For `fit_pool` and `gate_fit`, sample eligible scored mentions using `--queries-per-block`. The
+ORCID-hidden `fit_pool` partition supplies full assignments for mining and query-excluded seeds for
+retrieval. Cluster the remaining `gate_fit` mentions with ORCID hidden. Re-run with the same inputs
+to verify and reuse completed blocks.
 
 ### 9. Freeze linker and gate tasks
 
@@ -187,18 +189,24 @@ report to the trainer with `--gate-thresh-judgments`. The trainer checks candida
 windows and leaves unresolved outcomes unscored. Use `--blocks` and a fresh output directory to
 inspect a subset. Training requires every frozen block for each task role.
 
-### 10. Mine pairwise training pairs
+### 10. Mine pairs and train the pairwise heads
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.pairwise.mine_pairwise_pairs \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json miner-blocks.json --pairs-per-block 2000 --pairs-per-identity 25 --output mined/pairs.csv
+  --blocks-json miner-blocks.json --pairs-per-block 2000 --verified-pair-fraction 0.05 \
+  --pairs-per-block-floor 100 --output mined/pairs.csv
+uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
+  --model-plan model-plan.json --name-counts-index-root name-counts-index \
+  --mined-pairs mined/pairs.csv --identity-evidence evidence/manifest.json \
+  --block-role-assignments freeze/assignments.json --matrix-work-dir matrix-work \
+  --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
-Map each pairwise training block to its `arrow_dir` and the `assignments` Parquet produced in step 8.
-The reporting population is the disjoint capped frame in each stratum. The manifest gives the raw
-pair count, frame size, sample count, and inclusion probability. Use those probabilities within the
-stated frames.
+Map each `fit_pool` block to its `arrow_dir` and `assignments` entry from step 8. The miner counts
+all pairs of scored mentions, including same and different identities. Random controls use scored
+mentions. The trainer labels both endpoints through the ledger and skips pairs without two scores.
+Inspect each block's cap, sample counts and stratum-frame probabilities in the mining manifest.
 
 ### 11. Sweep and apply production EPS
 

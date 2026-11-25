@@ -266,8 +266,11 @@ The report records ledger bindings for every scored block. Gate labels use their
 for the gate blocks in the judging panel and assigned blocks holding identities named by those
 candidates. The scorer skips controls in a changed control-only block when those gate dependencies
 still match. Changes to gate dependencies invalidate the judgments.
-Each verdict row contains `item_id` and a pair `verdict` or a linker `candidate_verdicts` mapping from packet
-slot to verdict. Use `same`, `different`, or `insufficient_evidence`. List the two primary families first, followed
+Each verdict row contains `item_id`, `display_sha256`, and a pair `verdict` or a linker
+`candidate_verdicts` mapping from packet slot to verdict. Compute `display_sha256` when preparing each
+judge's input by applying `s2and.incremental_linking.contracts.canonical_json_digest` to the full parsed
+blind JSONL record shown to the judge. Rebuild packets and obtain fresh votes for keys and verdicts without
+display hashes. Use `same`, `different`, or `insufficient_evidence`. List the two primary families first, followed
 by any audit families. The report lists audit coverage and checks audit consensus on the candidates
 assigned to an audit family. The scorer aligns independent packet orders
 by private source and candidate IDs. A linker control request succeeds when every candidate verdict is correct.

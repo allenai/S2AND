@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and._sha256 import is_lowercase_sha256  # noqa: E402
 from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
+from s2and.incremental_linking.contracts import canonical_json_digest  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     BLOCK_BINDINGS_FIELD,
@@ -638,6 +639,7 @@ def build_blind_pair_packets(
             {
                 "item_id": item_id,
                 "source_id": str(raw["source_id"]),
+                "display_sha256": canonical_json_digest(blind_records[-1]),
                 "block_key": str(raw["block_key"]),
                 "is_control": is_control,
                 "sides_swapped": swap_sides,
@@ -794,6 +796,7 @@ def build_blind_linker_packets(
             {
                 "item_id": item_id,
                 "source_id": str(raw["source_id"]),
+                "display_sha256": canonical_json_digest(blind_records[-1]),
                 "block_key": str(raw["block_key"]),
                 "is_control": is_control,
                 "query_signature_id": raw["query"].get("signature_id"),
@@ -945,6 +948,8 @@ def _read_judge_verdicts(
     by_item = {row["item_id"]: row for row in key["items"]}
     if len(by_item) != len(key["items"]):
         raise ValueError(f"Duplicate item IDs in {answer_key}")
+    if any(not is_lowercase_sha256(item.get("display_sha256")) for item in by_item.values()):
+        raise ValueError(f"Missing or invalid display hash in {answer_key}")
     verdicts: dict[str, Any] = {}
     with verdicts_path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
@@ -954,6 +959,8 @@ def _read_judge_verdicts(
             item_id = record["item_id"]
             if item_id not in by_item or item_id in verdicts:
                 raise ValueError(f"Unknown or duplicate item {item_id!r} in {verdicts_path}:{line_number}")
+            if record.get("display_sha256") != by_item[item_id]["display_sha256"]:
+                raise ValueError(f"Verdict display hash differs from the key for {item_id!r} in {verdicts_path}")
             verdicts[item_id] = record
 
     by_shard: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)

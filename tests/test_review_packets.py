@@ -22,6 +22,7 @@ from scripts.judging.review_packets import (
 from tests.helpers import write_arrow_tables_bundle
 
 pytestmark = pytest.mark.tooling
+_FIXTURE_DISPLAY_HASH = "a" * 64
 
 
 def _paper(idx: int, *, email: bool = False, text_orcid: bool = False) -> dict:
@@ -324,7 +325,14 @@ def test_score_reports_controls_decided_share_and_directional_skew(tmp_path: Pat
         path = tmp_path / f"{family}.jsonl"
         path.write_text(
             "".join(
-                json.dumps({"item_id": row["item_id"], "verdict": verdicts[row["source_id"]]}) + "\n"
+                json.dumps(
+                    {
+                        "item_id": row["item_id"],
+                        "display_sha256": row["display_sha256"],
+                        "verdict": verdicts[row["source_id"]],
+                    }
+                )
+                + "\n"
                 for row in items
                 if row["source_id"] in verdicts
             ),
@@ -370,6 +378,7 @@ def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path, frozen_s
         orders.append(slots)
         verdicts = {
             "item_id": record["item_id"],
+            "display_sha256": record["display_sha256"],
             "candidate_verdicts": {
                 slot: "same" if candidate == "a" else "different" for slot, candidate in slots.items()
             },
@@ -391,6 +400,7 @@ def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Pat
         verdict_path = tmp_path / f"{family}.jsonl"
         control = {
             "item_id": "control",
+            "display_sha256": _FIXTURE_DISPLAY_HASH,
             "source_id": "control",
             "block_key": "a ross",
             "shard": "s",
@@ -412,9 +422,14 @@ def test_judge_scores_whole_control_requests_and_natural_agreement(tmp_path: Pat
         ]
         key_path.write_text(json.dumps({"packet_type": "linker", "shards": ["s"], "items": [control, natural, *zero]}))
         verdicts = [
-            {"item_id": "control", "candidate_verdicts": dict.fromkeys(slots, "different")},
+            {
+                "item_id": "control",
+                "candidate_verdicts": dict.fromkeys(slots, "different"),
+                "display_sha256": _FIXTURE_DISPLAY_HASH,
+            },
             {
                 "item_id": "natural",
+                "display_sha256": _FIXTURE_DISPLAY_HASH,
                 "candidate_verdicts": {
                     "S0": "different" if family == "sol" else "cannot_tell",
                     "S1": "cannot_tell",
@@ -587,12 +602,15 @@ def test_judge_coverage_requires_matching_natural_keys(tmp_path: Path, check: st
             {"item_id": key, "source_id": key, "block_key": "a smith", "is_control": False}
             for key in (("item-1",) if check == "different_keys" and family == "claude" else ("item-1", "item-2"))
         )
+        for row in records:
+            row["display_sha256"] = _FIXTURE_DISPLAY_HASH
         key_path.write_text(json.dumps({"packet_type": "pair", "shards": ["s"], "items": records}), encoding="utf-8")
         verdict_path.write_text(
             "".join(
                 json.dumps(
                     {
                         "item_id": row["item_id"],
+                        "display_sha256": _FIXTURE_DISPLAY_HASH,
                         "verdict": "abstain" if family == "claude" and row["item_id"] == "item-2" else "same",
                     }
                 )
@@ -624,6 +642,7 @@ def test_paired_judges_reject_inconsistent_strata(tmp_path: Path) -> None:
     for family, stratum in (("left", "small"), ("right", "giant")):
         record = {
             "item_id": "1",
+            "display_sha256": _FIXTURE_DISPLAY_HASH,
             "source_id": "source",
             "block_key": "a smith",
             "is_control": False,
@@ -632,7 +651,9 @@ def test_paired_judges_reject_inconsistent_strata(tmp_path: Path) -> None:
         key = tmp_path / f"{family}.json"
         key.write_text(json.dumps({"packet_type": "pair", "shards": ["s"], "items": [record]}))
         verdict = tmp_path / f"{family}.jsonl"
-        verdict.write_text(json.dumps({"item_id": "1", "verdict": "same"}) + "\n")
+        verdict.write_text(
+            json.dumps({"item_id": "1", "verdict": "same", "display_sha256": _FIXTURE_DISPLAY_HASH}) + "\n"
+        )
         judges.append((family, verdict, key))
     with pytest.raises(ValueError, match="Mismatched strata"):
         score_judges(judges)

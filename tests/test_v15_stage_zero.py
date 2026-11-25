@@ -17,6 +17,7 @@ import pytest
 from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_tables import write_cluster_seeds_arrow, write_name_counts_index
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from s2and.production_model import load_production_model
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles
@@ -290,6 +291,45 @@ def test_mixed_role_packet_resolves_fit_controls_from_frozen_papers(
         assert record["candidates"][0]["exemplars"][0]["title"] == "Study"
 
 
+def test_gate_scorer_rejects_old_votes_for_swapped_query_display(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    output = tmp_path / "packet"
+    report = review_packets.build_blind_linker_packets(
+        queries=[
+            {
+                "block_key": block,
+                "source_id": "swapped-query",
+                "query": {"signature_id": "13-0", "title": "Study 11"},
+                "candidates": [{"candidate_key": "other"}],
+            }
+        ],
+        block_roles=ledger.roles,
+        ledger=ledger,
+        allowed_roles={"gate_thresh"},
+        linker_task_manifest=task,
+        output_dir=output,
+        control_fraction=0,
+    )
+    key = Path(report["answer_key_path"])
+    display = json.loads((output / report["shards"][0]).read_text(encoding="utf-8"))
+    assert display["query"]["title"] == "Study 13"
+    wrong_display = {**display, "query": {**display["query"], "title": "Study 11"}}
+    votes = {"item_id": display["item_id"], "candidate_verdicts": {"C1": "same"}}
+    judges = [(family, tmp_path / f"{family}.jsonl", key) for family in ("one", "two")]
+    for payload in (votes, {**votes, "display_sha256": canonical_json_digest(wrong_display)}):
+        for _, path, _ in judges:
+            _json(path, payload)
+        with pytest.raises(ValueError, match="display hash"):
+            review_packets.score_judges(judges, ledger=ledger)
+    for _, path, _ in judges:
+        _json(path, {**votes, "display_sha256": canonical_json_digest(display)})
+    assert review_packets.score_judges(judges, ledger=ledger)["gate_thresh_labels"] == [
+        {"dataset": block, "query_signature_id": "13-0", "candidate_component_key": "other", "verdict": "same"}
+    ]
+
+
 def test_score_gate_key_after_unrelated_control_change(
     tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
 ) -> None:
@@ -340,7 +380,14 @@ def test_score_gate_key_after_unrelated_control_change(
         verdicts = tmp_path / f"{family}.jsonl"
         verdicts.write_text(
             "".join(
-                json.dumps({"item_id": row["item_id"], "candidate_verdicts": {"C1": "different"}}) + "\n"
+                json.dumps(
+                    {
+                        "item_id": row["item_id"],
+                        "display_sha256": row["display_sha256"],
+                        "candidate_verdicts": {"C1": "different"},
+                    }
+                )
+                + "\n"
                 for row in (gate_item, control)
             ),
             encoding="utf-8",
@@ -681,14 +728,20 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         tmp_path / "audit-key.json", {**answer_key, "items": [{**item, "slot_to_candidate_key": audit_slots}]}
     )
     blind_judges = []
+    display_hash = canonical_json_digest(packet)
     for family in ("sol", "claude"):
         verdict_path = _json(
-            tmp_path / f"gate-{family}.jsonl", {"item_id": item["item_id"], "candidate_verdicts": verdicts}
+            tmp_path / f"gate-{family}.jsonl",
+            {"item_id": item["item_id"], "display_sha256": display_hash, "candidate_verdicts": verdicts},
         )
         blind_judges.extend(["--judge", family, verdict_path, blind_key_path])
     audit_verdict = _json(
         tmp_path / "gate-audit.jsonl",
-        {"item_id": item["item_id"], "candidate_verdicts": {slot: verdicts[slot] for slot in audit_slots}},
+        {
+            "item_id": item["item_id"],
+            "display_sha256": display_hash,
+            "candidate_verdicts": {slot: verdicts[slot] for slot in audit_slots},
+        },
     )
     blind_judges.extend(["--judge", "audit", audit_verdict, audit_key])
     judged_path = tmp_path / "gate-judgments.json"
@@ -782,7 +835,14 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     judge_paths = []
     for family in ("sol", "claude"):
         verdict = tmp_path / f"{family}.jsonl"
-        _json(verdict, {"item_id": key["items"][0]["item_id"], "verdict": "same"})
+        _json(
+            verdict,
+            {
+                "item_id": key["items"][0]["item_id"],
+                "display_sha256": key["items"][0]["display_sha256"],
+                "verdict": "same",
+            },
+        )
         judge_paths.extend(["--judge", family, verdict, answer_key])
     _run(review_packets, "score", *binding, *judge_paths, "--output-json", tmp_path / "judging.json")
     judging = json.loads((tmp_path / "judging.json").read_text())

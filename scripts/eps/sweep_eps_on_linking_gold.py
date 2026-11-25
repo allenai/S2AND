@@ -1088,7 +1088,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(best_params, Mapping) and "eps" in best_params:
             model_eps = float(best_params["eps"])
 
-        from scripts.common.block_roles import load_block_roles
+        from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles
         from scripts.common.identity_ledger import ledger_for_roles
         from scripts.eps.orcid_b3 import (
             ORCID_ERROR_RECORDS,
@@ -1160,7 +1160,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan["score_mode"] = args.score_mode
         plan["reference"] = reference_stats
         if ledger is not None:
-            plan.update(ledger.bindings)
+            plan[BLOCK_BINDINGS_FIELD] = ledger.roles.bindings_for({args.dataset})
         plan[MAP_SHA256_FIELD] = query_sources.sha256
         plan["limited_run"] = args.max_subblocks is not None
         plan["gold_selection"] = dict.fromkeys(("task_splits", "max_queries_per_dataset", "target_kind"))

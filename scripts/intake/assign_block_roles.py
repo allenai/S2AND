@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and._atomic_io import exclusive_file_lock  # noqa: E402
 from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
@@ -37,11 +38,13 @@ from scripts.common.block_roles import (  # noqa: E402
 )
 from scripts.common.identity_ledger import (  # noqa: E402
     EVIDENCE_SHA256_FIELD,
+    FREEZE_BINDING,
     evidence_identities,
     load_identity_evidence,
 )
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
 from scripts.intake.build_freeze_input import mention_counts  # noqa: E402
+from scripts.intake.requests_to_datasets import INTAKE_LOCK  # noqa: E402
 
 PERMANENT_EXCLUDED_BLOCKS = frozenset({"f matsen"})
 LEGACY_DEV_TEST_BLOCKS = frozenset(
@@ -702,6 +705,7 @@ def freeze_identity_roles(
     targets: Mapping[str, int],
     *,
     prior_path: Path | None = None,
+    fresh: bool = False,
     extra_pins: Mapping[str, str] | None = None,
     dev_test_blocks: Collection[str] = (),
     excluded_blocks: Collection[str] = (),
@@ -711,6 +715,20 @@ def freeze_identity_roles(
     import pyarrow.parquet as pq
 
     evidence = load_identity_evidence(evidence_path)
+    if evidence.snapshot_sha256 != sha256_file(evidence.snapshot_root / "manifest.json"):
+        raise ValueError("Snapshot has changed; append its evidence before freezing roles")
+    receipts = [
+        read_json_object(path)["assignments_sha256"]
+        for root in (evidence.snapshot_root, evidence.path.parent)
+        if (path := root / FREEZE_BINDING).exists()
+    ]
+    if fresh and prior_path is not None:
+        raise ValueError("Use either a prior role manifest or --fresh")
+    if receipts and not fresh:
+        if prior_path is None:
+            raise ValueError("Snapshot or evidence already has a freeze binding; pass the prior manifest or --fresh")
+        if set(receipts) != {sha256_file(prior_path)}:
+            raise ValueError("The prior role manifest does not match the latest freeze binding")
     metadata = pq.read_schema(blocks_path).metadata or {}
     for digest_field, digest in {
         EVIDENCE_SHA256_FIELD: evidence.sha256,
@@ -722,10 +740,11 @@ def freeze_identity_roles(
     blocks = load_blocks(blocks_path, require_orcid_lists=True)
     if {block.block_key for block in blocks} != evidence.blocks.keys():
         raise ValueError("Freeze input must cover exactly the exported blocks")
-    evidence_blocks = {block: entry["sha256"] for block, entry in evidence.blocks.items()}
+    evidence_blocks = evidence.block_digests()
     prior = read_json_object(prior_path) if prior_path else None
     pins: dict[str, str] = {}
     prior_exclusions: list[str] = []
+    prior_unassigned: set[str] = set()
     if prior_path is not None and prior is not None:
         if prior.get("format_version") != 2 or prior.get("intake_sha256") != evidence.intake_sha256:
             raise ValueError("Re-freeze requires a prior ledger-backed manifest from the same intake")
@@ -733,6 +752,13 @@ def freeze_identity_roles(
             raise ValueError("Prior evidence partitions changed or are missing")
         pins.update(load_block_roles(prior_path).block_to_role)
         prior_exclusions = prior["excluded_blocks"]
+        prior_unassigned = set(prior["unassigned"])
+        prior_blocks = prior["evidence_blocks"].keys()
+        requested_changes = {
+            normalize_block_key(block) for block in (*dev_test_blocks, *excluded_blocks)
+        } & prior_blocks
+        if requested_changes:
+            raise ValueError(f"Re-freeze cannot move prior blocks: {sorted(requested_changes)}")
     extra = {normalize_block_key(block): role for block, role in (extra_pins or {}).items()}
     if len(extra) != len(extra_pins or {}):
         raise ValueError("Duplicate normalized keys in --extra-pins-json")
@@ -740,7 +766,7 @@ def freeze_identity_roles(
         raise ValueError("Extra pins may only name new exported blocks")
     pins.update(extra)
     roles = assign_block_roles(
-        blocks,
+        [block for block in blocks if block.block_key not in prior_unassigned],
         targets,
         seed=seed,
         extra_dev_test_blocks=dev_test_blocks,
@@ -750,6 +776,7 @@ def freeze_identity_roles(
         enforce_source_splits=True,
         require_pinned_present=True,
     )
+    roles["unassigned"] = sorted(set(roles["unassigned"]) | prior_unassigned)
     mapping = roles["block_to_role"]
     identity_roles: dict[str, set[str]] = defaultdict(set)
     for block in blocks:
@@ -822,34 +849,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--extra-pins-json", type=Path, help="New block-role pins, for a first freeze or re-freeze.")
     parser.add_argument("--dev-test-blocks", nargs="*", default=())
     parser.add_argument("--exclude-blocks", nargs="*", default=())
+    parser.add_argument("--fresh", action="store_true", help="Start a new freeze lineage for this intake.")
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting an existing assignments.json.")
     args = parser.parse_args(argv)
 
-    out_json = args.output_dir / "assignments.json"
-    if out_json.exists() and not args.overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing {out_json}; pass --overwrite or use a fresh directory")
+    evidence = load_identity_evidence(args.identity_evidence)
+    with exclusive_file_lock(evidence.snapshot_root / INTAKE_LOCK):
+        out_json = args.output_dir / "assignments.json"
+        if out_json.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"Refusing to overwrite existing {out_json}; pass --overwrite or use a fresh directory"
+            )
 
-    if out_json.exists() and (
-        args.pinned_roles_json is None or sha256_file(args.pinned_roles_json) != sha256_file(out_json)
-    ):
-        raise ValueError("Pass the existing assignments.json as the prior manifest when re-freezing")
-    result = freeze_identity_roles(
-        args.blocks,
-        args.identity_evidence,
-        read_json_object(args.targets_json),
-        prior_path=args.pinned_roles_json,
-        extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
-        dev_test_blocks=args.dev_test_blocks,
-        excluded_blocks=args.exclude_blocks,
-        seed=args.seed,
-    )
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    _replace_json(out_json, result)
-    with (args.output_dir / "assignments.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["block_key", "role"])
-        for key, role in result["block_to_role"].items():
-            writer.writerow([key, role])
+        if out_json.exists() and (
+            args.pinned_roles_json is None or sha256_file(args.pinned_roles_json) != sha256_file(out_json)
+        ):
+            raise ValueError("Pass the existing assignments.json as the prior manifest when re-freezing")
+        result = freeze_identity_roles(
+            args.blocks,
+            args.identity_evidence,
+            read_json_object(args.targets_json),
+            prior_path=args.pinned_roles_json,
+            fresh=args.fresh,
+            extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
+            dev_test_blocks=args.dev_test_blocks,
+            excluded_blocks=args.exclude_blocks,
+            seed=args.seed,
+        )
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        _replace_json(out_json, result)
+        with (args.output_dir / "assignments.csv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["block_key", "role"])
+            for key, role in result["block_to_role"].items():
+                writer.writerow([key, role])
+        receipt = {"assignments_sha256": sha256_file(out_json)}
+        for root in (evidence.snapshot_root, evidence.path.parent):
+            _replace_json(root / FREEZE_BINDING, receipt)
     print(
         json.dumps(
             {

@@ -15,7 +15,9 @@ import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
+from s2and._atomic_io import exclusive_file_lock
 from s2and._sha256 import sha256_file
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.text import canonicalize_name_parts, normalize_orcid
 from scripts.common.arrow_roots import _replace_json, generic_dataset_manifests, read_json_object
 from scripts.common.block_roles import normalize_block_key
@@ -26,6 +28,7 @@ from scripts.common.identity_ledger import (
     RejectedGoldEvidence,
     evidence_identities,
     excluded_orcid_groups_digest,
+    load_identity_evidence,
 )
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
 from scripts.intake.prepare_identity_labels import (
@@ -37,7 +40,7 @@ from scripts.intake.prepare_identity_labels import (
     canonical_gold_block_filter,
     names_are_compatible,
 )
-from scripts.intake.requests_to_datasets import SNAPSHOT_BINDING
+from scripts.intake.requests_to_datasets import INTAKE_LOCK, SNAPSHOT_BINDING, SOURCE_RECORD
 
 _GOLD_FIELDS = [("orcid", pa.string()), ("scored", pa.bool_()), ("split", pa.string())]
 
@@ -140,10 +143,11 @@ def _block_rows(
         )
         entry: GoldEvidence = {"orcid": orcid, "scored": item["scored"] is True, "split": _optional_str(item["split"])}
         matched, reason = join.match(paper, position, gold_block, names)
-        if matched is not None:
+        if matched is not None and gold_block == block:
             by_signature[matched["signature_id"]].append(entry)
             counts["matched_gold_rows"] += 1
             continue
+        reason = reason or "dropped_block_key_mismatch"
         candidates = [row for row in by_paper.get(paper, ()) if row["pos_norm"] == position]
         if reason == "dropped_block_key_mismatch" and any(gold_block == _rotated_key(row) for row in candidates):
             reason = "dropped_name_order_rotation"
@@ -208,8 +212,23 @@ def build_identity_evidence(
     reviewed_errors: dict[str, list[str]] | None = None,
     *,
     max_unmatched_gold: float = DEFAULT_MAX_UNMATCHED_GOLD,
+    append: bool = False,
 ) -> dict[str, Any]:
-    """Project and scan gold once, then write one verified evidence partition per exported block."""
+    """Write verified evidence partitions for new blocks and preserve existing ones."""
+    snapshot, output = snapshot.resolve(), output.resolve()
+    with exclusive_file_lock(snapshot / INTAKE_LOCK):
+        return _write_evidence(snapshot, gold, output, reviewed_errors, max_unmatched_gold, append=append)
+
+
+def _write_evidence(
+    snapshot: Path,
+    gold: Path,
+    output: Path,
+    reviewed_errors: dict[str, list[str]] | None,
+    max_unmatched_gold: float,
+    *,
+    append: bool,
+) -> dict[str, Any]:
     if not 0 <= max_unmatched_gold <= 1:
         raise ValueError("Maximum unmatched gold share must be in [0, 1]")
     datasets = generic_dataset_manifests(snapshot)
@@ -220,26 +239,43 @@ def build_identity_evidence(
     if len(errors) != len(reviewed_errors or {}) or errors.keys() - blocks.keys():
         raise ValueError("Reviewed errors must name unique exported blocks")
     binding = read_json_object(snapshot / SNAPSHOT_BINDING)
-    if not binding.get("permission_sha256"):
+    if not binding.get("permission_sha256") or not binding.get("snapshot_id"):
         raise ValueError("Identity evidence requires a permission-gated intake snapshot")
     snapshot_digest = sha256_file(snapshot / "manifest.json")
-    intake_digest = sha256_file(snapshot / SNAPSHOT_BINDING)
-    if output.exists():
-        raise FileExistsError(output)
+    index_digest = binding["name_counts_index_sha256"]
+    intake_digest = canonical_json_digest([binding["snapshot_id"], index_digest])
+    gold_digest = sha256_file(gold)
+    manifest_path = output / "manifest.json"
+    metadata: dict[str, EvidenceBlock] = {}
+    audits: dict[str, dict[str, int]] = {}
+    if append:
+        prior = load_identity_evidence(manifest_path)
+        payload = read_json_object(manifest_path)
+        if prior.intake_sha256 != intake_digest or payload["gold_sha256"] != gold_digest:
+            raise ValueError("Evidence append requires the same intake and gold source")
+        if prior.blocks.keys() - blocks.keys():
+            raise ValueError("Prior evidence blocks are missing from the snapshot")
+        for block, entry in prior.blocks.items():
+            if block in errors and canonical_json_digest(sorted(errors[block])) != entry["reviewed_errors_sha256"]:
+                raise ValueError(f"Reviewed errors changed for retained block {block!r}")
+            prior.read_block(block, dataset_dir=blocks[block][1].parent)
+        metadata.update(prior.blocks)
+        audits.update(payload["audit"])
+    elif output.exists():
+        raise FileExistsError(f"Evidence already exists: {output}. Pass --append to add blocks.")
+    new_blocks = {block: spec for block, spec in sorted(blocks.items()) if block not in metadata}
     joins = {}
-    for block, (_, path) in sorted(blocks.items()):
+    for block, (_, path) in new_blocks.items():
         manifest = read_json_object(path)
         if sha256_file(path.parent / "signatures.arrow") != manifest["files"]["signatures"]["sha256"]:
             raise ValueError(f"Snapshot signature digest mismatch: {block!r}")
         joins[block] = SignatureJoin(_read_arrow_signatures(path.parent))
-    gold_partitions = _read_gold(gold, joins)
+    gold_partitions = _read_gold(gold, joins) if joins else {}
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=f".{output.name}.") as tmp:
         staging = Path(tmp) / "evidence"
         staging.mkdir()
-        metadata: dict[str, EvidenceBlock] = {}
-        audits: dict[str, dict[str, int]] = {}
-        for index, (block, (dataset, path)) in enumerate(sorted(blocks.items())):
+        for index, (block, (dataset, path)) in enumerate(new_blocks.items(), start=len(metadata)):
             rows, audit = _block_rows(joins[block], block, gold_partitions.pop(block, []), errors.get(block, ()))
             unmatched = audit["dropped_unmatched_paper_position"]
             total = audit["gold_rows_for_block"]
@@ -250,12 +286,16 @@ def build_identity_evidence(
                 )
             destination = staging / f"block-{index:06d}.parquet"
             pq.write_table(pa.Table.from_pylist(rows, schema=EVIDENCE_SCHEMA), destination)
+            source = path.parent / SOURCE_RECORD
             metadata[block] = {
                 "path": destination.name,
                 "sha256": sha256_file(destination),
                 "signature_count": len(rows),
                 "dataset_manifest_sha256": sha256_file(path),
                 "dataset": dataset,
+                "permission_sha256": read_json_object(source)["permission_sha256"],
+                "request_source_sha256": sha256_file(source),
+                "reviewed_errors_sha256": canonical_json_digest(sorted(errors.get(block, ()))),
             }
             audits[block] = dict(audit)
         if not sum(audit.get("matched_gold_rows", 0) for audit in audits.values()):
@@ -265,12 +305,20 @@ def build_identity_evidence(
             "excluded_orcid_groups_sha256": excluded_orcid_groups_digest(),
             "snapshot_sha256": snapshot_digest,
             "intake_sha256": intake_digest,
-            "name_counts_index_sha256": binding["name_counts_index_sha256"],
+            "name_counts_index_sha256": index_digest,
+            "snapshot_root": str(snapshot),
+            "gold_sha256": gold_digest,
             "blocks": metadata,
             "audit": audits,
         }
-        _replace_json(staging / "manifest.json", result)
-        staging.rename(output)
+        if append:
+            for entry in new_blocks:
+                filename = metadata[entry]["path"]
+                (staging / filename).replace(output / filename)
+            _replace_json(manifest_path, result)
+        else:
+            _replace_json(staging / "manifest.json", result)
+            staging.rename(output)
     return result
 
 
@@ -281,11 +329,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gold-parquet", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--reviewed-errors-json", type=Path)
+    parser.add_argument("--append", action="store_true", help="Verify retained blocks and add new evidence partitions.")
     parser.add_argument("--max-unmatched-gold", type=float, default=DEFAULT_MAX_UNMATCHED_GOLD)
     args = parser.parse_args(argv)
     reviewed = read_json_object(args.reviewed_errors_json) if args.reviewed_errors_json else None
     result = build_identity_evidence(
-        args.snapshot, args.gold_parquet, args.output_dir, reviewed, max_unmatched_gold=args.max_unmatched_gold
+        args.snapshot,
+        args.gold_parquet,
+        args.output_dir,
+        reviewed,
+        max_unmatched_gold=args.max_unmatched_gold,
+        append=args.append,
     )
     print(json.dumps(result["audit"], sort_keys=True))
     return 0

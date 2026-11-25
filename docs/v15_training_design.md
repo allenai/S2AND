@@ -66,8 +66,9 @@ uv run --offline --no-sync python -m scripts.intake.requests_to_datasets request
 Supply a directory or explicit list of full bundles. The builder checks their names against
 `author_block`, removes papers outside the S2AG allowlist, preserves abstract presence with
 `Has Abstract`, and hashes or scrubs emails before writing indexes. It scans retained and new
-datasets for plaintext emails. Re-run with the same permissions and index to verify retained
-datasets and append new blocks. Use complete permission data for every selected block.
+datasets for plaintext emails. Re-run with the same index and allowlists that contain the prior
+permissions to append new blocks. Each block retains the permission digests it had at intake.
+Papers absent from the supplied lists stay restricted.
 
 ### 4. Build the identity evidence table
 
@@ -78,8 +79,11 @@ uv run --offline --no-sync python -m scripts.intake.build_identity_evidence \
 
 Add `--reviewed-errors-json` with a map from block keys to reviewed signature IDs when available.
 The table includes every exported mention, verified gold rows with the original split and scoring
-flag, deposited ORCIDs, conflicts, and exclusions. Inspect the per-block join audit for unmatched
-positions, name mismatches, conflicts, excluded groups, and reviewed errors.
+flag, deposited ORCIDs, conflicts, and exclusions. Rejected gold joins can veto fitting or scoring
+through identity overlap. Only verified gold supplies a score. Inspect the per-block join audit.
+The builder fails above 2% unmatched gold for any block. Use `--max-unmatched-gold` after reviewing
+the mismatch. To append, use `--append` on the same evidence directory with the same gold file.
+The manifest records each new partition and leaves the earlier partitions intact.
 
 ### 5. Build the freeze input
 
@@ -102,7 +106,11 @@ uv run --offline --no-sync python -m scripts.intake.assign_block_roles \
 Use an aggregate `final_test` target or distinct half targets. The allocator reserves feasible
 two-half strata first. Inspect its printed target and stratum shortfalls, cross-role identity counts,
 and cross-role mention counts. Supply only new exported blocks to `--extra-pins-json` on a re-freeze.
-Pass the prior `assignments.json` with `--pinned-roles-json` and keep all prior evidence partitions.
+For an append, build a new freeze input from the expanded evidence manifest and pass the previous
+`assignments.json` with `--pinned-roles-json`. Keep all prior partitions, roles, and exclusions.
+Use `--overwrite` if writing into the existing freeze directory. Use `--fresh` only to deliberately
+start a new freeze on an already bound snapshot or ledger. Tasks, judging keys, and gate judgments
+remain valid for blocks with the same evidence and eligibility after a re-freeze.
 An identity with evidence outside its role is ineligible for scoring and sampling. Unassigned
 evidence can also make an identity ineligible. Evaluation clustering keeps these mentions as context.
 
@@ -118,8 +126,8 @@ uv run --offline --no-sync python -m scripts.intake.check_v14_training_overlap \
 ~~~
 
 Use the source bundle for the deployed 1.4 linker. The inventory includes corpus-keyed training
-queries, all trained candidate component members, and giant gold ORCIDs. Add further identified
-training mentions with `--private-labels`. Map both sealed halves' blocks to their Arrow directories.
+and gate calibration queries, their full candidate component memberships, and giant gold ORCIDs.
+Add further identified training mentions with `--private-labels`. Map both sealed halves' blocks to their Arrow directories.
 The audit checks frozen signature counts and compares corpus paper and author positions and ORCIDs.
 It fails when zero corpus keys can be compared. Benchmark overlap is unobservable because benchmark
 IDs are dataset-local and the benchmarks lack ORCIDs.
@@ -136,8 +144,8 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
 
 Map each block to its `arrow_dir`, with an additional `incremental_request` path for gate threshold
 blocks. Take the latest eligible mentions by `inserted` in each gate threshold block. Review any
-shortfall against K, missing timestamps, and the actual timestamp range. Keep production cluster IDs
-for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
+shortfall against K, missing timestamps, and the actual timestamp range. Invalid arrival keys and
+empty request sets fail. Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `linker_train` and `gate_fit`, sample eligible scored mentions using `--queries-per-block` and
 recluster eligible remaining mentions with ORCID hidden. Include the pairwise training blocks to
 write 1.4 assignments for mining. Re-run with the same inputs to verify and reuse completed blocks.
@@ -151,8 +159,9 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
 ~~~
 
 The builder preserves real names and freezes native top-25 windows. The fitting roles hold out whole
-authors before retrieval. Check every seed component member before labeling it. Gate threshold
-windows carry no gold supervision. Use blind judging for their candidate verdicts. Pass the bound score
+authors before retrieval. Gold-labeled roles check every seed member for identity purity.
+The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.
+Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
 report to the trainer with `--gate-thresh-judgments`. The trainer checks candidate keys against the frozen
 windows and leaves unresolved outcomes unscored. Use `--blocks`
 and a fresh output directory to inspect a subset.
@@ -225,7 +234,9 @@ Keep each answer key private.
 
 Run `review_packets.py score --identity-evidence evidence/manifest.json --block-role-assignments assignments.json --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json`.
 Each verdict row contains `item_id` and a pair `verdict` or a linker `candidate_verdicts` mapping from packet
-slot to verdict. Use `same`, `different`, or `insufficient_evidence`. The scorer aligns independent packet orders
+slot to verdict. Use `same`, `different`, or `insufficient_evidence`. List the two primary families first, followed
+by any audit families. The report lists audit coverage and checks audit consensus on the candidates
+assigned to an audit family. The scorer aligns independent packet orders
 by private source and candidate IDs. A linker control request succeeds when every candidate verdict is correct.
 The control bar requires at least 10 control requests, both request classes and at least 90% accuracy
 overall and within each request and verdict class. The builder rejects a shortfall in balanced controls

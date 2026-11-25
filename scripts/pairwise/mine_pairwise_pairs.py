@@ -24,7 +24,7 @@ from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
-from scripts.common.block_roles import load_block_roles, normalize_block_key
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 
@@ -98,7 +98,7 @@ def _ledger_mentions(
     ledger: IdentityLedger, spec: BlockInput, block: str, manifest: Mapping[str, Any]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
     view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
-    ledger.require_bindings(manifest["binding"], context=f"{block} pairwise assignments")
+    ledger.roles.require_bindings(manifest["binding"], {block}, context=f"{block} pairwise assignments")
     if manifest["files"].get(spec.assignments.name) != sha256_file(spec.assignments):
         raise ValueError(f"Assignment digest mismatch: {spec.assignments}")
     decisions = {sid: view.eligibility(sid) for sid in view.rows}
@@ -291,8 +291,11 @@ def mine_pairs(
     with manifest_path.open("x", encoding="utf-8", newline="\n") as handle:
         json.dump(
             {
-                "block_role_assignments_sha256": roles.sha256,
-                **(ledger.bindings if ledger is not None else {}),
+                **(
+                    {BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys())}
+                    if ledger is not None
+                    else {"block_role_assignments_sha256": roles.sha256}
+                ),
                 "seed": seed,
                 **shared_binding,
                 "role": "pairwise_train",

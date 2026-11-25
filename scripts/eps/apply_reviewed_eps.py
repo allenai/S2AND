@@ -100,8 +100,7 @@ def _require_test_separated_reference(
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
     if block_roles is not None:
-        role_digest = stats.get(BLOCK_ROLE_SHA256_FIELD)
-        if role_digest != block_roles.sha256:
+        if block_roles.evidence_sha256 is None and stats.get(BLOCK_ROLE_SHA256_FIELD) != block_roles.sha256:
             raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
         orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
         if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
@@ -174,8 +173,8 @@ def _validated_sweep_plans(
         plan_path = sweep_root / dataset / "plan.json"
         plan, curve = read_sweep_curve(sweep_root, dataset)
         if ledger is not None:
-            ledger.require_bindings(plan, context=f"{dataset} EPS sweep")
-            ledger.require_bindings(plan["reference"], context=f"{dataset} EPS reference")
+            ledger.roles.require_bindings(plan, {dataset}, context=f"{dataset} EPS sweep")
+            ledger.roles.require_bindings(plan["reference"], {dataset}, context=f"{dataset} EPS reference")
         if plan["model_manifest_sha256"] != source_hash:
             raise ValueError(f"The EPS sweep uses a different model: {dataset}")
         if plan["limited_run"]:

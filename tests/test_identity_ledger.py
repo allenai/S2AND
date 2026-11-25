@@ -319,7 +319,11 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     pq.write_table(pa.table({"signature_id": ["2-0", "4-0"], "cluster_id": ["a", "b"]}), assignments)
     manifest = assignment_root / "manifest.json"
     record = {
-        "binding": {**ledger.bindings, "model_sha256": "a" * 64, "index_sha256": "b" * 64},
+        "binding": {
+            "block_bindings": ledger.roles.bindings_for({"a lovelace"}),
+            "model_sha256": "a" * 64,
+            "index_sha256": "b" * 64,
+        },
         "files": {assignments.name: sha256_file(assignments)},
     }
     manifest.write_text(json.dumps(record))
@@ -329,7 +333,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     with output.open(newline="", encoding="utf-8") as source_file:
         (row,) = csv.DictReader(source_file)
     assert {row["signature_id_1"], row["signature_id_2"]} == {"2-0", "4-0"}
-    record["binding"]["block_role_assignments_sha256"] = "old"
+    record["binding"]["block_bindings"]["a lovelace"]["role_sha256"] = "old"
     manifest.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="does not match"):
         mine_pairs(role_path, specs, tmp_path / "stale.csv", per_block=1, identity_evidence=evidence)
@@ -344,11 +348,15 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     other = tmp_path / "other" / assignments.name
     other.parent.mkdir()
     pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)
-    for model_sha, path in (("a" * 64, assignments), ("c" * 64, other)):
+    for block, model_sha, path in (("a lovelace", "a" * 64, assignments), ("g hopper", "c" * 64, other)):
         (path.parent / "manifest.json").write_text(
             json.dumps(
                 {
-                    "binding": {**ledger.bindings, "model_sha256": model_sha, "index_sha256": "b" * 64},
+                    "binding": {
+                        "block_bindings": ledger.roles.bindings_for({block}),
+                        "model_sha256": model_sha,
+                        "index_sha256": "b" * 64,
+                    },
                     "files": {path.name: sha256_file(path)},
                 }
             )

@@ -69,6 +69,8 @@ def test_intake_publishes_and_resumes_snapshot(tmp_path: Path) -> None:
     assert papers["paper_id"].to_pylist() == ["p0"]
     assert papers["abstract"].to_pylist() == ["Has Abstract"]
     assert convert_requests([bundle], root, Path(index), **permissions)["a_lovelace"]["reused"]
+    with pytest.raises(ValueError, match="superset"):
+        convert_requests([bundle], root, Path(index), **{**permissions, "allowed_papers": frozenset()})
     (dataset / "papers.arrow").write_bytes(b"damaged")
     with pytest.raises(ValueError, match="papers"):
         convert_requests([bundle], root, Path(index), **permissions)

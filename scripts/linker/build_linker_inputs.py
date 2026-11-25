@@ -23,7 +23,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_tables import read_cluster_seeds_arrow
 from s2and.production_model import load_production_model
 from scripts.common.arrow_roots import _replace_json, read_json_object, resolved_manifest_artifact_path
-from scripts.common.block_roles import load_block_roles, normalize_block_key
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
 from scripts.common.orcid_references import read_external_reference_identity_evidence
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
@@ -205,8 +205,7 @@ def build_linker_inputs(
             common_binding = {
                 "index_sha256": sha256_file(index_path / "manifest.json"),
                 "model_sha256": model_digest,
-                "roles_sha256": roles.sha256,
-                **(ledger.bindings if ledger is not None else {}),
+                **({"roles_sha256": roles.sha256} if ledger is None else {}),
             }
             if ledger is not None and common_binding["index_sha256"] != ledger.evidence.name_counts_index_sha256:
                 raise ValueError(f"Linker input name-counts index does not match intake for {block!r}")
@@ -215,10 +214,11 @@ def build_linker_inputs(
                 if not path.is_file():
                     _replace_json(path, common_binding)
                 elif read_json_object(path) != common_binding:
-                    raise ValueError(f"Existing linker inputs use a different model, roles, or index: {output_dir}")
+                    raise ValueError(f"Existing linker inputs differ in model, index, or roles: {output_dir}")
             binding = {
                 "generation": arrow.generation_id,
                 **common_binding,
+                **({BLOCK_BINDINGS_FIELD: roles.bindings_for({block})} if ledger is not None else {}),
                 "labels_sha256": sha256_file(label_path) if label_path is not None else None,
                 "request_sha256": sha256_file(request) if request is not None else None,
                 "queries_per_block": queries_per_block,

@@ -92,9 +92,8 @@ from s2and.production_training_contract import (  # noqa: E402
 )
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
-from scripts.common.block_roles import BlockRoles, load_block_roles  # noqa: E402
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, BlockRoles, load_block_roles  # noqa: E402
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
-from scripts.common.identity_ledger import EVIDENCE_SHA256_FIELD, ROLE_SHA256_FIELD  # noqa: E402
 from scripts.common.initial_query_sources import (  # noqa: E402
     MAP_RELATIVE_PATH,
     MAP_SHA256_FIELD,
@@ -1981,8 +1980,6 @@ def _release_table_plan(
 
 def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], roles: BlockRoles) -> pd.DataFrame:
     """Attach agreed blind outcomes to the matching frozen production window."""
-    if report.get(EVIDENCE_SHA256_FIELD) != roles.evidence_sha256 or report.get(ROLE_SHA256_FIELD) != roles.sha256:
-        raise ValueError("Gate threshold judgments use different evidence or frozen roles")
     if not rows["label"].isna().all() or rows["query_gold_scored"].any() or rows["candidate_gold_scored"].any():
         raise ValueError("Frozen production requests must have no pre-existing labels")
     keys = ["dataset", "query_signature_id", "candidate_component_key"]
@@ -1993,6 +1990,14 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
     decisions = judged.set_index(keys)["verdict"]
     if not indexed.is_unique or len(decisions.index.difference(indexed)):
         raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
+    bound_blocks = report.get(BLOCK_BINDINGS_FIELD)
+    if (
+        not isinstance(bound_blocks, dict)
+        or set(judged["dataset"]) - bound_blocks.keys()
+        or bound_blocks.keys() - set(rows["dataset"])
+    ):
+        raise ValueError("Gate threshold judgments do not cover the declared frozen blocks")
+    roles.require_bindings(report, bound_blocks.keys(), context="Gate threshold judgments")
     labeled = rows.copy()
     verdicts = decisions.reindex(indexed).reset_index(drop=True)
     known = verdicts.notna()
@@ -2002,6 +2007,21 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
     labeled["query_gold_scored"] = grouped["candidate_gold_scored"].transform("all")
     labeled["gold_safe_target"] = grouped["label"].transform("any")
     return labeled
+
+
+def _validate_frozen_task_bindings(manifest: Mapping[str, Any], roles: BlockRoles) -> None:
+    """Check the roles and block provenance of every frozen task table."""
+    bound_blocks = set()
+    for role, table in manifest["tables"].items():
+        blocks = set(table["blocks"])
+        assigned = {block for block, assignment in roles.block_to_role.items() if assignment == role}
+        if not blocks <= assigned or (roles.evidence_sha256 is None and blocks != assigned):
+            raise ValueError(f"Linker task {role!r} does not match the frozen block roles")
+        bound_blocks.update(blocks)
+    if roles.evidence_sha256 is not None:
+        roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")
+    elif manifest["block_role_assignments_sha256"] != roles.sha256:
+        raise ValueError("The linker task tables must use the same frozen block roles")
 
 
 def _materialize_frozen_linker_tasks(
@@ -2023,25 +2043,19 @@ def _materialize_frozen_linker_tasks(
         or manifest.get("s2and_version") != __version__
     ):
         raise ValueError("Frozen linker tasks use a different distance policy or package version. Rebuild the tasks.")
-    if manifest["block_role_assignments_sha256"] != roles.sha256:
-        raise ValueError("The linker task tables must use the same frozen block roles")
     if roles.evidence_sha256 is not None and (
-        manifest.get(EVIDENCE_SHA256_FIELD) != roles.evidence_sha256
-        or gate_judgments is None
-        or manifest.get("gate_label_source") != "blind_judging"
+        gate_judgments is None or manifest.get("gate_label_source") != "blind_judging"
     ):
-        raise ValueError("Ledger-backed linker tasks require the same identity evidence and --gate-thresh-judgments")
+        raise ValueError("Ledger-backed linker tasks require --gate-thresh-judgments")
     if gate_judgments is not None and roles.evidence_sha256 is None:
         raise ValueError("Gate threshold judgments require ledger-backed linker tasks")
     if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
         raise ValueError("The linker manifest must contain exactly linker_train, gate_fit and gate_thresh at top-25")
+    _validate_frozen_task_bindings(manifest, roles)
     tasks: dict[str, pd.DataFrame] = {}
     summaries = []
     for role in TASK_ROLES:
         table = manifest["tables"][role]
-        blocks = {block for block, assignment in roles.block_to_role.items() if assignment == role}
-        if set(table["blocks"]) != blocks:
-            raise ValueError(f"Linker task {role!r} does not match the frozen block roles")
         table_path = manifest_path.parent / table["path"]
         if sha256_file(table_path) != table["sha256"]:
             raise ValueError(f"Frozen linker table changed: {table_path}")

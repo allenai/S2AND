@@ -10,13 +10,14 @@ import tarfile
 import tempfile
 from collections.abc import Collection, Sequence
 from pathlib import Path, PurePosixPath
-from typing import TypedDict
+from typing import Any, TypedDict
+from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from s2and._atomic_io import exclusive_file_lock
-from s2and._sha256 import sha256_file
+from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.arrow_inputs import (
     ArrowDataset,
     build_arrow_artifact_manifest,
@@ -40,6 +41,7 @@ REQUEST_SUFFIX = ".arrow.tar.gz"
 DATASET_TABLES = ("signatures", "papers", "paper_authors", "specter")
 SOURCE_RECORD = "request_source.json"
 SNAPSHOT_BINDING = "intake_manifest.json"
+INTAKE_LOCK = ".intake.lock"
 
 
 class IntakeResult(TypedDict):
@@ -152,23 +154,33 @@ def convert_requests(
         raise ValueError("Supply at least one request bundle and no duplicate block names")
     root, name_counts_index = root.resolve(), name_counts_index.resolve()
     index_digest = sha256_file(name_counts_index / "manifest.json")
-    binding: dict[str, object] = {
-        "name_counts_index_sha256": index_digest,
-        "permission_sha256": {
-            "s2ag": _permission_digest(allowed_papers),
-            "abstracts": _permission_digest(abstract_allowed_papers),
-        },
-    }
-    with exclusive_file_lock(root / ".intake.lock"):
-        snapshot_binding = root / SNAPSHOT_BINDING
-        if snapshot_binding.exists() or (root / "manifest.json").exists():
-            if read_json_object(snapshot_binding) != binding:
-                raise ValueError("Existing snapshot has different name-counts index or paper permissions")
+    permissions = {"s2ag": allowed_papers, "abstracts": abstract_allowed_papers}
+    permission_sha256 = {key: _permission_digest(papers) for key, papers in permissions.items()}
+    with exclusive_file_lock(root / INTAKE_LOCK):
+        binding_path = root / SNAPSHOT_BINDING
+        prior = {}
+        if binding_path.exists() or (root / "manifest.json").exists():
+            prior = read_json_object(binding_path)
+            if prior.get("name_counts_index_sha256") != index_digest or "snapshot_id" not in prior:
+                raise ValueError("Existing snapshot has different name-counts index or lacks its intake binding")
+            for key, papers in permissions.items():
+                prior_papers = frozenset(prior["permission_papers"][key])
+                if _permission_digest(prior_papers) != prior["permission_sha256"][key] or not prior_papers <= papers:
+                    raise ValueError(f"Existing snapshot requires a superset of its prior {key} paper permissions")
+            snapshot_id = prior["snapshot_id"]
         else:
-            _replace_json(snapshot_binding, binding)
+            snapshot_id = uuid4().hex
         require_name_counts_index_artifact(
             name_counts_index, context="request intake", producer_hint="Supply the production index", verify=True
         )
+        binding = {
+            "snapshot_id": snapshot_id,
+            "name_counts_index_sha256": index_digest,
+            "permission_sha256": permission_sha256,
+        }
+        intake = {**binding, "permission_papers": {key: sorted(papers) for key, papers in permissions.items()}}
+        if not binding_path.exists() or prior != intake:
+            _replace_json(binding_path, intake)
         return _convert_datasets(by_name, root, name_counts_index, binding, allowed_papers, abstract_allowed_papers)
 
 
@@ -176,7 +188,7 @@ def _convert_datasets(
     by_name: dict[str, Path],
     root: Path,
     name_counts_index: Path,
-    binding: dict[str, object],
+    binding: dict[str, Any],
     allowed_papers: frozenset[str],
     abstract_allowed_papers: frozenset[str],
 ) -> dict[str, IntakeResult]:
@@ -185,11 +197,16 @@ def _convert_datasets(
     published = generic_dataset_manifests(root) if (root / "manifest.json").exists() else {}
     manifests = {name: path.relative_to(root).as_posix() for name, path in published.items()}
 
-    def verify_retained(manifest: Path) -> dict[str, str]:
+    def verify_retained(manifest: Path) -> dict[str, Any]:
         record = read_json_object(manifest.parent / SOURCE_RECORD)
-        if any(record.get(key) != value for key, value in binding.items()) or record.get(
-            "dataset_manifest_sha256"
-        ) != sha256_file(manifest):
+        permissions = record.get("permission_sha256", {})
+        if (
+            record.get("snapshot_id") != binding["snapshot_id"]
+            or record.get("name_counts_index_sha256") != binding["name_counts_index_sha256"]
+            or permissions.keys() != binding["permission_sha256"].keys()
+            or not all(is_lowercase_sha256(digest) for digest in permissions.values())
+            or record.get("dataset_manifest_sha256") != sha256_file(manifest)
+        ):
             raise ValueError(f"Existing dataset has different inputs or manifest: {manifest.parent}")
         index = resolved_manifest_artifact_path(
             manifest, read_json_object(manifest)["paths"]["name_counts_index"], key="name_counts_index"

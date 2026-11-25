@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast
@@ -17,6 +17,8 @@ from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS
 
 EVIDENCE_SHA256_FIELD = "identity_evidence_sha256"
 ROLE_SHA256_FIELD = "block_role_assignments_sha256"
+FREEZE_BINDING = ".role_freeze.json"
+INTAKE_SOURCE_RECORD = "request_source.json"
 
 
 def excluded_orcid_groups_digest() -> str:
@@ -53,6 +55,9 @@ class EvidenceBlock(TypedDict):
     signature_count: int
     dataset_manifest_sha256: str
     dataset: str
+    request_source_sha256: str
+    permission_sha256: dict[str, str]
+    reviewed_errors_sha256: str
 
 
 def evidence_identities(row: MentionEvidence) -> frozenset[str]:
@@ -74,6 +79,11 @@ class IdentityEvidence:
     intake_sha256: str
     name_counts_index_sha256: str
     blocks: dict[str, EvidenceBlock]
+    snapshot_root: Path
+
+    def block_digests(self) -> dict[str, str]:
+        """Return the binding for each evidence partition and its intake inputs."""
+        return {block: canonical_json_digest(entry) for block, entry in self.blocks.items()}
 
     def read_block(self, block: str, *, dataset_dir: Path | None = None) -> dict[str, MentionEvidence]:
         """Return evidence keyed by signature and reject a different dataset generation."""
@@ -88,6 +98,8 @@ class IdentityEvidence:
             manifest = dataset_dir / "manifest.json"
             if sha256_file(manifest) != metadata["dataset_manifest_sha256"]:
                 raise ValueError(f"Identity evidence was built for a different dataset generation: {block!r}")
+            if sha256_file(dataset_dir / INTAKE_SOURCE_RECORD) != metadata["request_source_sha256"]:
+                raise ValueError(f"Identity evidence intake permissions changed: {block!r}")
             arrow_manifest = read_json_object(manifest)
             signature_path = resolved_manifest_artifact_path(
                 manifest, arrow_manifest["paths"]["signatures"], key="signatures"
@@ -111,7 +123,7 @@ class IdentityEvidence:
 
 
 def load_identity_evidence(path: Path) -> IdentityEvidence:
-    """Load the manifest of one immutable evidence table."""
+    """Load one evidence manifest and verify the exclusion policy."""
     path = path.resolve()
     payload = read_json_object(path)
     if payload.get("format_version") != 1 or not isinstance(payload.get("blocks"), dict) or not payload["blocks"]:
@@ -125,6 +137,7 @@ def load_identity_evidence(path: Path) -> IdentityEvidence:
         payload["intake_sha256"],
         payload["name_counts_index_sha256"],
         payload["blocks"],
+        Path(payload["snapshot_root"]),
     )
 
 
@@ -214,12 +227,6 @@ class IdentityLedger:
         """Return the provenance fields shared by downstream manifests."""
         return {EVIDENCE_SHA256_FIELD: self.evidence.sha256, ROLE_SHA256_FIELD: self.roles.sha256}
 
-    def require_bindings(self, payload: Mapping[str, object], *, context: str) -> None:
-        """Reject outputs built against any other evidence or role assignment."""
-        for key, expected in self.bindings.items():
-            if payload.get(key) != expected:
-                raise ValueError(f"{context} {key} does not match the identity ledger")
-
     def for_block(self, block: str, *, dataset_dir: Path | None = None) -> BlockEligibility:
         """Return the eligibility view for an assigned block."""
         block = normalize_block_key(block)
@@ -236,6 +243,10 @@ def ledger_for_roles(path: Path | None, roles: BlockRoles | None) -> IdentityLed
     if path is None or roles is None:
         raise ValueError("Ledger-backed roles require --identity-evidence and --block-role-assignments")
     evidence = load_identity_evidence(path)
-    if evidence.sha256 != roles.evidence_sha256 or evidence.snapshot_sha256 != roles.snapshot_sha256:
+    if (
+        evidence.sha256 != roles.evidence_sha256
+        or evidence.snapshot_sha256 != roles.snapshot_sha256
+        or evidence.block_digests() != roles.evidence_blocks
+    ):
         raise ValueError("Frozen roles do not match the identity evidence and intake snapshot")
     return IdentityLedger(evidence, roles)

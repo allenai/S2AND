@@ -27,7 +27,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
-from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
+from scripts.common.block_roles import (  # noqa: E402
+    BLOCK_BINDINGS_FIELD,
+    BlockRoles,
+    load_block_roles,
+    normalize_block_key,
+)
 from scripts.common.email_redaction import find_plaintext_emails, scrub_text_emails  # noqa: E402
 from scripts.common.identity_ledger import (  # noqa: E402
     EVIDENCE_SHA256_FIELD,
@@ -599,8 +604,13 @@ def build_blind_pair_packets(
         for _ in shard:
             next(key_items)["shard"] = shard_paths[-1]
 
+    bindings = (
+        {BLOCK_BINDINGS_FIELD: ledger.roles.bindings_for({item["block_key"] for item in answer_key})}
+        if ledger is not None
+        else {}
+    )
     key_payload = {
-        **(ledger.bindings if ledger is not None else {}),
+        **bindings,
         "packet_type": "pair",
         "order_seed": int(seed),
         "control_seed": int(effective_control_seed),
@@ -612,7 +622,7 @@ def build_blind_pair_packets(
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(json.dumps(key_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return {
-        **(ledger.bindings if ledger is not None else {}),
+        **bindings,
         "packet_type": "pair",
         "output_dir": str(output_dir),
         "answer_key_path": str(key_path),
@@ -735,8 +745,13 @@ def build_blind_linker_packets(
         for _ in shard:
             next(key_items)["shard"] = shard_paths[-1]
 
+    bindings = (
+        {BLOCK_BINDINGS_FIELD: ledger.roles.bindings_for({item["block_key"] for item in answer_key})}
+        if ledger is not None
+        else {}
+    )
     key_payload = {
-        **(ledger.bindings if ledger is not None else {}),
+        **bindings,
         "packet_type": "linker",
         "order_seed": int(seed),
         "control_seed": int(effective_control_seed),
@@ -748,7 +763,7 @@ def build_blind_linker_packets(
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(json.dumps(key_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return {
-        **(ledger.bindings if ledger is not None else {}),
+        **bindings,
         "packet_type": "linker",
         "output_dir": str(output_dir),
         "answer_key_path": str(key_path),
@@ -980,8 +995,10 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
         key = json.loads(key_path.read_text(encoding="utf-8"))
         if ledger is not None:
-            ledger.require_bindings(key, context=f"{family} judging key")
-        elif EVIDENCE_SHA256_FIELD in key:
+            ledger.roles.require_bindings(
+                key, {item["block_key"] for item in key["items"]}, context=f"{family} judging key"
+            )
+        elif BLOCK_BINDINGS_FIELD in key or EVIDENCE_SHA256_FIELD in key:
             raise ValueError("Ledger-backed judging keys require frozen roles and identity evidence")
         report, aligned, natural_requests = _read_judge_verdicts(verdict_path, key_path)
         reports.append({"family": family, "verdicts": str(verdict_path), **report})
@@ -1053,8 +1070,9 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                 },
             }
         )
-    report = {**(ledger.bindings if ledger is not None else {}), "judges": reports, "cross_family_agreement": agreement}
-    if gate_votes:
+    report = {"judges": reports, "cross_family_agreement": agreement}
+    if ledger is not None and gate_votes:
+        report[BLOCK_BINDINGS_FIELD] = ledger.roles.bindings_for({block for block, _, _ in gate_votes})
         primary = tuple(dict.fromkeys(families))[:2]
         primary_candidates = {key for key, votes in gate_votes.items() if any(family in votes for family in primary)}
         audit_coverage = {}

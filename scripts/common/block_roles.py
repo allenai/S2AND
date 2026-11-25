@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from s2and._sha256 import is_lowercase_sha256, sha256_file
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.text import normalize_orcid
 
+BLOCK_BINDINGS_FIELD = "block_bindings"
 FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
 _WHITESPACE_OR_UNDERSCORE = re.compile(r"[\s_]+")
 
@@ -31,6 +34,24 @@ class BlockRoles:
     evidence_sha256: str | None = None
     snapshot_sha256: str | None = None
     source_splits: dict[str, str] = field(default_factory=dict)
+    evidence_blocks: dict[str, str] = field(default_factory=dict)
+
+    def bindings_for(self, blocks: Collection[str]) -> dict[str, dict[str, str]]:
+        """Bind each requested block to its evidence and effective eligibility."""
+        bindings = {}
+        for block in sorted({normalize_block_key(key) for key in blocks}):
+            role = self.role_for(block)
+            outside_role = sorted(orcid for orcid in self.block_orcids[block] if self.identity_roles[orcid] != {role})
+            bindings[block] = {
+                "evidence_sha256": self.evidence_blocks[block],
+                "role_sha256": canonical_json_digest([role, self.source_splits[block], outside_role]),
+            }
+        return bindings
+
+    def require_bindings(self, payload: Mapping[str, object], blocks: Collection[str], *, context: str) -> None:
+        """Check that an artifact has current bindings for exactly its blocks."""
+        if payload.get(BLOCK_BINDINGS_FIELD) != self.bindings_for(blocks):
+            raise ValueError(f"{context} block provenance does not match the identity ledger")
 
     def role_for(self, block_key: str) -> str:
         """Return the assigned role or reject an unassigned block."""
@@ -69,7 +90,14 @@ def load_block_roles(path: Path) -> BlockRoles:
         raise ValueError(f"Inconsistent block_to_role and roles in {path}")
     bound = payload.get("format_version") == 2
     raw_orcids = payload.get("block_orcids")
-    expected = set(payload["evidence_blocks"]) if bound else set(by_block)
+    evidence_blocks = payload.get("evidence_blocks", {}) if bound else {}
+    if bound and (
+        not isinstance(evidence_blocks, dict)
+        or not evidence_blocks
+        or not all(is_lowercase_sha256(digest) for digest in evidence_blocks.values())
+    ):
+        raise ValueError(f"Invalid identity evidence partition digests in {path}")
+    expected = set(evidence_blocks) if bound else set(by_block)
     if not isinstance(raw_orcids, dict) or set(raw_orcids) != expected or by_block.keys() - raw_orcids.keys():
         raise ValueError(f"Expected identity coverage for every frozen block in {path}")
     block_orcids: dict[str, frozenset[str]] = {}
@@ -100,4 +128,5 @@ def load_block_roles(path: Path) -> BlockRoles:
         digests.get("identity_evidence_sha256"),
         digests.get("snapshot_sha256"),
         source_splits,
+        evidence_blocks,
     )

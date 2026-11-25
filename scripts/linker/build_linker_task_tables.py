@@ -28,7 +28,12 @@ from s2and.incremental_linking.contracts import DEFAULT_RETRIEVAL_TOP_K  # noqa:
 from s2and.incremental_linking.feature_block_arrow import temporary_cluster_seed_sidecars  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import read_json_object  # noqa: E402
-from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key  # noqa: E402
+from scripts.common.block_roles import (  # noqa: E402
+    BLOCK_BINDINGS_FIELD,
+    BlockRoles,
+    load_block_roles,
+    normalize_block_key,
+)
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.common.identity_ledger import BlockEligibility, ledger_for_roles  # noqa: E402
 from scripts.common.orcid_references import (  # noqa: E402
@@ -290,7 +295,8 @@ def build_linker_task_tables(
     common_binding = None
     if ledger is not None:
         common_binding = read_json_object(inputs_path.parent / "inputs_binding.json")
-        ledger.require_bindings(common_binding, context="Linker inputs")
+        if common_binding.get("index_sha256") != ledger.evidence.name_counts_index_sha256:
+            raise ValueError("Linker inputs use a different name-counts index")
     tables: dict[str, Any] = {}
     output_dir.mkdir(parents=True, exist_ok=False)
     for role in TASK_ROLES:
@@ -320,6 +326,7 @@ def build_linker_task_tables(
                     eligibility = ledger.for_block(block, dataset_dir=arrow_dir)
                     input_manifest = read_json_object(inputs_path.parent / spec["input_manifest"])
                     observed = input_manifest["binding"]
+                    roles.require_bindings(observed, {block}, context="Linker inputs")
                     if common_binding is None or any(
                         observed.get(key) != value for key, value in common_binding.items()
                     ):
@@ -360,8 +367,11 @@ def build_linker_task_tables(
             raise ValueError(f"No candidate rows in frozen role {role!r}")
         tables[role] = {"path": role_path.name, "sha256": sha256_file(role_path), "blocks": block_records}
     manifest = {
-        "block_role_assignments_sha256": roles.sha256,
-        **(ledger.bindings if ledger is not None else {}),
+        **(
+            {BLOCK_BINDINGS_FIELD: roles.bindings_for(required)}
+            if ledger is not None
+            else {"block_role_assignments_sha256": roles.sha256}
+        ),
         "distance_policy_version": DISTANCE_POLICY_VERSION,
         "s2and_version": __version__,
         "retrieval_top_k": DEFAULT_RETRIEVAL_TOP_K,

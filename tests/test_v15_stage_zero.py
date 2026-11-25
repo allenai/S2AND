@@ -360,6 +360,7 @@ def test_score_gate_key_after_unrelated_control_change(
 ) -> None:
     block, ledger, task = gate_packet_inputs
     control_block = "a lovelace"
+    fit_block = "p dirac"
     holder = "e noether"
     key = tmp_path / "key.json"
     review_packets.build_blind_linker_packets(
@@ -381,10 +382,10 @@ def test_score_gate_key_after_unrelated_control_change(
     )
     roles = replace(
         ledger.roles,
-        block_to_role={**ledger.roles.block_to_role, control_block: "gate_fit"},
-        source_splits={**ledger.roles.source_splits, control_block: "development"},
-        evidence_blocks={**ledger.roles.evidence_blocks, control_block: "a" * 64},
-        block_orcids={**ledger.roles.block_orcids, control_block: frozenset({DEPOSITED})},
+        block_to_role={**ledger.roles.block_to_role, fit_block: "gate_fit"},
+        source_splits={**ledger.roles.source_splits, fit_block: "development"},
+        evidence_blocks={**ledger.roles.evidence_blocks, fit_block: "d" * 64, control_block: "a" * 64},
+        block_orcids={**ledger.roles.block_orcids, fit_block: frozenset(), control_block: frozenset({DEPOSITED})},
         identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"gate_fit"})},
     )
     payload = json.loads(key.read_text())
@@ -426,6 +427,28 @@ def test_score_gate_key_after_unrelated_control_change(
     assert after["gate_thresh_labels"] == before["gate_thresh_labels"]
     assert after["judges"][0]["overall"]["control_requests"] == 0
     assert after[BLOCK_BINDINGS_FIELD] == roles.bindings_for({block})
+
+    fit_key = _json(
+        tmp_path / "fit-key.json",
+        {
+            "packet_type": "linker",
+            "shards": payload["shards"],
+            "items": [{**gate_item, "block_key": fit_block, "source_id": "fit"}, control],
+            BLOCK_BINDINGS_FIELD: roles.bindings_for({fit_block, control_block}),
+        },
+    )
+    fit_judges = []
+    for family, original, _ in judges:
+        path = tmp_path / f"{family}-fit.jsonl"
+        path.write_bytes(original.read_bytes())
+        fit_judges.append((family, path, fit_key))
+    combined = review_packets.score_judges([*judges, *fit_judges], ledger=replace(ledger, roles=changed))
+    assert combined["gate_thresh_labels"] == before["gate_thresh_labels"]
+    assert [judge["overall"]["control_requests"] for judge in combined["judges"]] == [0, 0, 0, 0]
+    assert combined[BLOCK_BINDINGS_FIELD] == roles.bindings_for({block, fit_block})
+    changed_fit = replace(changed, evidence_blocks={**changed.evidence_blocks, fit_block: "e" * 64})
+    with pytest.raises(ValueError, match="judging key block provenance"):
+        review_packets.score_judges([*judges, *fit_judges], ledger=replace(ledger, roles=changed_fit))
 
     relevant = replace(
         changed,

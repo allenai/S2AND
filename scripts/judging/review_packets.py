@@ -1128,13 +1128,14 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                     raise ValueError(f"{family} gate judging key block provenance does not match the identity ledger")
                 for block, identities in candidates.items():
                     gate_candidates[block].update(identities)
+            if key["packet_type"] == "linker":
                 # A changed control-only block cannot supply accuracy metrics for the current ledger.
                 saved = key.get(BLOCK_BINDINGS_FIELD)
                 current = ledger.roles.bindings_for(blocks & ledger.roles.block_to_role.keys())
                 if (
                     not isinstance(saved, dict)
                     or saved.keys() != blocks
-                    or any(saved[block] != current[block] for block in natural_blocks)
+                    or any(saved[block] != current.get(block) for block in natural_blocks)
                 ):
                     raise ValueError(f"{family} judging key block provenance does not match the identity ledger")
                 stale_control_blocks = {

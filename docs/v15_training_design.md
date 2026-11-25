@@ -266,8 +266,8 @@ Keep each answer key private.
 Run `review_packets.py score --identity-evidence evidence/manifest.json --block-role-assignments assignments.json --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json`.
 The report records ledger bindings for every scored block. Gate labels use their own bindings
 for the gate blocks in the judging panel and assigned blocks holding identities named by those
-candidates. The scorer skips controls in a changed control-only block when those gate dependencies
-still match. Changes to gate dependencies invalidate the judgments.
+candidates. The scorer checks each linker key independently and skips stale control-only blocks
+when its natural blocks and any gate dependencies still match. Changes to those dependencies invalidate the judgments.
 Each verdict row contains `item_id`, `display_sha256`, and a pair `verdict` or a linker
 `candidate_verdicts` mapping from packet slot to verdict. Compute `display_sha256` when preparing each
 judge's input by applying `s2and.incremental_linking.contracts.canonical_json_digest` to the full parsed

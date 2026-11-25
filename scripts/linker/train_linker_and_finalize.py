@@ -100,14 +100,19 @@ from scripts.common.initial_query_sources import (  # noqa: E402
     InitialQuerySources,
     load_initial_query_sources,
 )
-from scripts.linker.build_linker_task_tables import TASK_ROLES, read_seed_components  # noqa: E402
+from scripts.common.linker_seeds import (  # noqa: E402
+    GATE_SEED_DIGESTS,
+    PRODUCTION_MAX_EXEMPLARS,
+    members_by_component,
+    read_frozen_seeds,
+)
+from scripts.linker.build_linker_task_tables import TASK_ROLES  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
 evaluate_classic = evaluate_linker
 fit_classic = fit_linker
 
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
-PRODUCTION_MAX_EXEMPLARS = 4
 PRODUCTION_PAIRWISE_MODEL_NAN_POLICY = "preserve"
 PRODUCTION_PAIRWISE_AGGREGATE_NAN_POLICY = "zero"
 PRODUCTION_ROW_NAN_POLICY = "finite"
@@ -1978,7 +1983,9 @@ def _release_table_plan(
     return training_keys, calibration_query_ids, evaluation_keys
 
 
-def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], roles: BlockRoles) -> pd.DataFrame:
+def _apply_blind_gate_labels(
+    rows: pd.DataFrame, report: Mapping[str, Any], roles: BlockRoles, blocks: Mapping[str, Any]
+) -> pd.DataFrame:
     """Attach agreed blind outcomes to the matching frozen production window."""
     if not rows["label"].isna().all() or rows["query_gold_scored"].any() or rows["candidate_gold_scored"].any():
         raise ValueError("Frozen production requests must have no pre-existing labels")
@@ -1997,6 +2004,17 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
     if not isinstance(bound_blocks, dict) or set(judged["dataset"]) - bound_blocks.keys():
         raise ValueError("Gate threshold judgments do not cover the declared frozen blocks")
     roles.require_bindings(report, bound_blocks.keys(), context="Gate threshold judgments")
+    seed_digests = report.get(GATE_SEED_DIGESTS)
+    if (
+        not isinstance(seed_digests, dict)
+        or set(judged["dataset"]) - seed_digests.keys()
+        or any(block not in blocks or digest != blocks[block]["seeds_sha256"] for block, digest in seed_digests.items())
+    ):
+        raise ValueError("Gate threshold judgments do not match the frozen seed assignments")
+    for block, block_rows in rows.groupby("dataset", sort=False):
+        members = members_by_component(read_frozen_seeds(blocks[block]))
+        if missing := set(block_rows["candidate_component_key"]) - members.keys():
+            raise ValueError(f"Gate candidates have no frozen seed members in {block!r}: {sorted(missing)}")
     labeled = rows.copy()
     verdicts = decisions.reindex(indexed).reset_index(drop=True)
     known = verdicts.notna() & ~vetoes.reset_index(drop=True)
@@ -2064,7 +2082,9 @@ def _materialize_frozen_linker_tasks(
             raise ValueError(f"Frozen linker table changed: {table_path}")
         rows = pd.read_parquet(table_path)
         if role == "gate_thresh" and gate_judgments is not None:
-            rows = _apply_blind_gate_labels(rows, json.loads(gate_judgments.read_text(encoding="utf-8")), roles)
+            rows = _apply_blind_gate_labels(
+                rows, json.loads(gate_judgments.read_text(encoding="utf-8")), roles, table["blocks"]
+            )
         expected_counts = {
             block: spec["counts"]["rows"] for block, spec in table["blocks"].items() if spec["counts"]["rows"]
         }
@@ -2075,13 +2095,8 @@ def _materialize_frozen_linker_tasks(
         materialized = []
         for block, block_rows in rows.groupby("dataset", sort=False):
             spec = table["blocks"][block]
-            seed_path = Path(spec["seeds"])
-            if sha256_file(seed_path) != spec["seeds_sha256"]:
-                raise ValueError(f"Frozen linker seed assignments changed: {seed_path}")
-            seeds = read_seed_components(seed_path)
-            members: dict[str, list[str]] = {}
-            for signature, component in seeds.items():
-                members.setdefault(component, []).append(signature)
+            seeds = read_frozen_seeds(spec)
+            members = members_by_component(seeds)
             with ArrowDataset.open(spec["arrow_dir"], require_specter=True, require_name_counts_index=True) as arrow:
                 if arrow.generation_id != spec["arrow_generation_id"]:
                     raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
@@ -2092,7 +2107,7 @@ def _materialize_frozen_linker_tasks(
                     pairwise_component_scope="block-local",
                     runtime_context=build_runtime_context("joint_safe_link_arrow_rust_featureization", backend="rust"),
                     arrow_dataset=arrow,
-                    component_members={key: tuple(value) for key, value in members.items()},
+                    component_members=members,
                     cluster_seeds_require=seeds,
                     cluster_seeds_disallow=frozenset(),
                     max_block_component_size=max(map(len, members.values())),

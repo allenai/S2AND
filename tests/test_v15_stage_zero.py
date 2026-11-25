@@ -306,7 +306,9 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
                 "candidates": [
                     {
                         "candidate_key": candidate,
-                        "exemplars": [{"signature_id": exemplar, "paper_id": exemplar.split("-")[0], "title": "Study"}],
+                        "exemplars": [
+                            {"signature_id": query, "paper_id": query.split("-")[0], "title": "Mislabeled exemplar"}
+                        ],
                     },
                     {
                         "candidate_key": other,
@@ -321,19 +323,16 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     natural_item = json.loads(blind_items.read_text())[0]
     for sid in ("502-0", "503-0"):
         vetoed_key = seed_map[sid]
-        for exemplars in ([(sid, sid.split("-")[0])], [(exemplar, exemplar.split("-")[0])]):
-            bad_candidate = {
-                "candidate_key": vetoed_key,
-                "member_signature_ids": [sid, *(paper_sid for paper_sid, _ in exemplars if paper_sid != sid)],
-                "exemplars": [
-                    {"signature_id": paper_sid, "paper_id": paper_id, "title": "Study"}
-                    for paper_sid, paper_id in exemplars
-                ],
-            }
-            with pytest.raises(ValueError, match="vetoed identity"):
-                review_packets._validate_natural_items(
-                    [{**natural_item, "candidates": [bad_candidate]}], ledger, "linker"
-                )
+        bad_candidate = {"candidate_key": vetoed_key, "member_signature_ids": [], "exemplars": []}
+        with pytest.raises(ValueError, match="vetoed identity"):
+            review_packets.build_blind_linker_packets(
+                queries=[{**natural_item, "candidates": [bad_candidate]}],
+                ledger=ledger,
+                block_roles=roles,
+                allowed_roles={"gate_thresh"},
+                linker_task_manifest=tasks / build_linker_task_tables.TASK_MANIFEST,
+                output_dir=tmp_path / "vetoed-packet",
+            )
     blind_key_path = tmp_path / "gate-key.json"
     _run(
         review_packets,
@@ -345,6 +344,8 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "linker",
         "--items-json",
         blind_items,
+        "--linker-task-manifest",
+        tasks / build_linker_task_tables.TASK_MANIFEST,
         "--output-dir",
         tmp_path / "gate-packets",
         "--answer-key-path",
@@ -352,6 +353,8 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--control-fraction",
         "0",
     )
+    packet = json.loads(next((tmp_path / "gate-packets/packets").glob("*.jsonl")).read_text())
+    assert all(paper["title"] != "Mislabeled exemplar" for c in packet["candidates"] for paper in c["exemplars"])
     answer_key = json.loads(blind_key_path.read_text())
     (item,) = answer_key["items"]
     verdicts = {
@@ -376,7 +379,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     _run(review_packets, "score", *binding, *blind_judges, "--output-json", judged_path)
     report = json.loads(judged_path.read_text())
     gate_table = pq.read_table(tasks / "gate_thresh.parquet").to_pandas()
-    scored = _apply_blind_gate_labels(gate_table, report, roles)
+    task_manifest = json.loads((tasks / build_linker_task_tables.TASK_MANIFEST).read_text())
+    gate_blocks = task_manifest["tables"]["gate_thresh"]["blocks"]
+    stale_seed_report = {**report, "gate_seed_sha256": {gate: "0" * 64}}
+    with pytest.raises(ValueError, match="frozen seed assignments"):
+        _apply_blind_gate_labels(gate_table, stale_seed_report, roles, gate_blocks)
+    scored = _apply_blind_gate_labels(gate_table, report, roles, gate_blocks)
     assert scored["label"].sum() == 1
     assert scored["candidate_gold_scored"].sum() == 2
     assert report["gate_thresh_audit_coverage"]["audit"]["planned_share"] == 0.5
@@ -389,12 +397,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     vetoed_votes = vetoed[["dataset", "query_signature_id", "candidate_component_key"]].assign(verdict="same")
     unsafe_report = {**report, "gate_thresh_labels": [*report["gate_thresh_labels"], *vetoed_votes.to_dict("records")]}
-    assert _apply_blind_gate_labels(gate_table, unsafe_report, roles).equals(scored)
+    assert _apply_blind_gate_labels(gate_table, unsafe_report, roles, gate_blocks).equals(scored)
     with pytest.raises(ValueError, match="candidate identity vetoes"):
-        _apply_blind_gate_labels(gate_table.drop(columns="candidate_has_vetoed_identity"), report, roles)
+        _apply_blind_gate_labels(gate_table.drop(columns="candidate_has_vetoed_identity"), report, roles, gate_blocks)
     report["gate_thresh_labels"][0]["candidate_component_key"] = "outside-window"
     with pytest.raises(ValueError, match="outside the frozen windows"):
-        _apply_blind_gate_labels(gate_table, report, roles)
+        _apply_blind_gate_labels(gate_table, report, roles, gate_blocks)
 
     pairs = tmp_path / "pairs.csv"
     assignments = inputs / "a_lovelace" / "assignments.parquet"
@@ -467,7 +475,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     _run(review_packets, "score", *binding, *blind_judges, *judge_paths, "--output-json", mixed_report)
     judged = json.loads(mixed_report.read_text())
     assert judged["block_bindings"] == roles.bindings_for({gate, "b ross"})
-    assert _apply_blind_gate_labels(gate_table, judged, roles).equals(scored)
+    assert _apply_blind_gate_labels(gate_table, judged, roles, gate_blocks).equals(scored)
 
     eps_root = tmp_path / "eps"
     eps_output = eps_root / "b_ross"
@@ -602,7 +610,6 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     with pytest.raises(ValueError, match="absent from the frozen role assignments"):
         newer_roles.bindings_for({"z last"})
     assert {path: sha256_file(path) for path in filenames} == old_files
-    task_manifest = json.loads((tasks / build_linker_task_tables.TASK_MANIFEST).read_text())
     _validate_frozen_task_bindings(task_manifest, newer_roles)
     foreign_roles = replace(
         newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test_b"})}
@@ -610,8 +617,10 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     with pytest.raises(ValueError, match="block provenance"):
         _validate_frozen_task_bindings(task_manifest, foreign_roles)
     with pytest.raises(ValueError, match="block provenance"):
-        _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), foreign_roles)
-    assert _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), newer_roles).equals(scored)
+        _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), foreign_roles, gate_blocks)
+    assert _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), newer_roles, gate_blocks).equals(
+        scored
+    )
     newer_judged = tmp_path / "gate-judgments-after-append.json"
     _run(
         review_packets,

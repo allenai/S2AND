@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and._sha256 import is_lowercase_sha256  # noqa: E402
 from s2and.consts import PLACEHOLDER_YEARS, normalize_paper_year  # noqa: E402
 from s2and.text import ORCID_DASH_CLASS, ORCID_PATTERN, normalize_orcid  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
@@ -40,7 +41,9 @@ from scripts.common.identity_ledger import (  # noqa: E402
     IdentityLedger,
     ledger_for_roles,
 )
+from scripts.common.linker_seeds import GATE_SEED_DIGESTS  # noqa: E402
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS  # noqa: E402
+from scripts.judging.gate_exemplars import resolve_gate_exemplars  # noqa: E402
 
 ORCID_REDACTED_TOKEN = "[ORCID_REDACTED]"
 # Note: signature_id and paper_id are intentionally EXCLUDED from blind payloads (kept only in answer_key)
@@ -363,11 +366,7 @@ def _validate_natural_items(
                 if views[block].role != "gate_thresh":
                     papers.extend(exemplars)
                     continue
-                members = candidate.get("member_signature_ids", [])
-                if not isinstance(members, list):
-                    raise ValueError("Expected a list of gate candidate member signature IDs")
-                signatures = {str(paper["signature_id"]) for paper in exemplars} | set(map(str, members))
-                if any(views[block].eligibility(sid).identity_veto for sid in signatures):
+                if any(views[block].eligibility(sid).identity_veto for sid in candidate["member_signature_ids"]):
                     raise ValueError(f"Natural judging item {item['source_id']!r} contains a vetoed identity")
         if any(not views[block].eligibility(str(paper["signature_id"])).fit_ok for paper in papers):
             raise ValueError(f"Natural judging item {item['source_id']!r} contains an ineligible signature")
@@ -409,10 +408,24 @@ def _scored_controls(
             if key not in views:
                 views[key] = ledger.for_block(key)
             view = views[key]
-            orcids = [view.eligibility(str(paper["signature_id"])).score_orcid for paper in papers]
+            if packet_type == "linker" and view.role == "gate_thresh":
+                query_orcid = view.eligibility(str(item["query"]["signature_id"])).score_orcid
+                component_orcids = [view.component_label(candidate["member_signature_ids"]) for candidate in candidates]
+                if not query_orcid or not all(component_orcids):
+                    continue
+                orcids = [
+                    query_orcid,
+                    *(
+                        orcid
+                        for candidate, orcid in zip(candidates, component_orcids, strict=True)
+                        for _ in candidate["exemplars"]
+                    ),
+                ]
+            else:
+                orcids = [view.eligibility(str(paper["signature_id"])).score_orcid for paper in papers]
             if not all(orcids):
                 continue
-            if any(
+            if view.role != "gate_thresh" and any(
                 not isinstance(candidate.get("member_signature_ids"), list)
                 or not {str(paper["signature_id"]) for paper in candidate["exemplars"]}.issubset(
                     candidate["member_signature_ids"]
@@ -654,6 +667,7 @@ def build_blind_linker_packets(
     block_roles: BlockRoles | None = None,
     allowed_roles: Collection[str] = (),
     ledger: IdentityLedger | None = None,
+    linker_task_manifest: Path | None = None,
 ) -> dict[str, Any]:
     """Build leak-checked blind linker candidate packets with shuffled neutral candidate slots."""
     if not 0.0 <= control_fraction <= 0.5:
@@ -666,9 +680,20 @@ def build_blind_linker_packets(
     effective_control_seed = seed if control_seed is None else control_seed
     _validate_packet_roles(queries, block_roles, allowed_roles)
     _require_ledger_packet_roles(block_roles, ledger)
+    seed_digests: dict[str, str] = {}
+    if ledger is not None:
+        allowed_controls = [
+            item for item in control_queries if ledger.roles.role_for(item["block_key"]) in allowed_roles
+        ]
+        resolved, seed_digests = resolve_gate_exemplars(
+            [*queries, *allowed_controls], ledger.roles, linker_task_manifest
+        )
+        queries, allowed_controls = resolved[: len(queries)], resolved[len(queries) :]
+    else:
+        allowed_controls = list(control_queries)
     _validate_natural_items(queries, ledger, "linker")
     eligible_controls = _scored_controls(
-        control_queries, block_roles, packet_type="linker", allowed_roles=allowed_roles, ledger=ledger
+        allowed_controls, block_roles, packet_type="linker", allowed_roles=allowed_roles, ledger=ledger
     )
     chosen_controls = _select_controls(
         len(queries),
@@ -754,8 +779,14 @@ def build_blind_linker_packets(
         if ledger is not None
         else {}
     )
+    packet_blocks = {normalize_block_key(item["block_key"]) for item in answer_key}
     key_payload = {
         **bindings,
+        **(
+            {GATE_SEED_DIGESTS: {block: seed_digests[block] for block in packet_blocks & seed_digests.keys()}}
+            if seed_digests
+            else {}
+        ),
         "packet_type": "linker",
         "order_seed": int(seed),
         "control_seed": int(effective_control_seed),
@@ -996,6 +1027,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
     verdicts = []
     requests = []
     scored_blocks: set[str] = set()
+    gate_seed_digests: dict[str, str] = {}
     gate_votes: dict[tuple[str, str, str], dict[str, set[str | None]]] = defaultdict(lambda: defaultdict(set))
     for family, (_, verdict_path, key_path) in zip(families, judges, strict=True):
         key = json.loads(key_path.read_text(encoding="utf-8"))
@@ -1014,6 +1046,9 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                 block = normalize_block_key(item["block_key"])
                 if item["is_control"] or ledger.roles.role_for(block) != "gate_thresh":
                     continue
+                digest = key.get(GATE_SEED_DIGESTS, {}).get(block)
+                if not is_lowercase_sha256(digest) or gate_seed_digests.setdefault(block, digest) != digest:
+                    raise ValueError("Gate threshold judging keys must use the same frozen seed assignments")
                 signature = item["query_signature_id"]
                 if not isinstance(signature, str) or not signature:
                     raise ValueError("Gate threshold judging keys must identify each query signature")
@@ -1104,6 +1139,7 @@ def score_judges(judges: Sequence[tuple[str, Path, Path]], *, ledger: IdentityLe
                     "verdict": next(iter(consensus)),
                 }
             )
+        report[GATE_SEED_DIGESTS] = gate_seed_digests
         report["gate_thresh_labels"] = labels
         report["gate_thresh_planned_candidates"] = len(primary_candidates)
         report["gate_thresh_primary_families"] = list(primary)
@@ -1124,6 +1160,9 @@ def main(argv: list[str] | None = None) -> int:
     build_p.add_argument("--items-json", type=Path, required=True)
     build_p.add_argument("--controls-json", type=Path, default=None)
     build_p.add_argument("--identity-evidence", type=Path)
+    build_p.add_argument(
+        "--linker-task-manifest", type=Path, help="Frozen linker_tasks.json for ledger-backed gate packets."
+    )
     build_p.add_argument("--block-role-assignments", type=Path, required=True)
     build_p.add_argument("--allowed-role", action="append", required=True)
     build_p.add_argument("--output-dir", type=Path, required=True)
@@ -1202,6 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
             block_roles=block_roles,
             allowed_roles=args.allowed_role,
             ledger=ledger,
+            linker_task_manifest=args.linker_task_manifest,
         )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

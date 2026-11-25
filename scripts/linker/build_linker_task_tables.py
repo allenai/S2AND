@@ -36,6 +36,7 @@ from scripts.common.block_roles import (  # noqa: E402
 )
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION  # noqa: E402
 from scripts.common.identity_ledger import BlockEligibility, ledger_for_roles  # noqa: E402
+from scripts.common.linker_seeds import read_seed_components  # noqa: E402
 from scripts.common.orcid_references import (  # noqa: E402
     EXCLUDED_ORCID_GROUPS,
     read_external_reference_identity_evidence,
@@ -60,18 +61,6 @@ _TASK_COLUMNS = (
     "query_gold_scored",
     "whole_author_holdout",
 )
-
-
-def read_seed_components(path: Path) -> dict[str, str]:
-    """Read one pre-attachment component assignment per seed signature."""
-    rows = pq.read_table(path, columns=["signature_id", "component_key"]).to_pylist()
-    components = {row["signature_id"]: row["component_key"] for row in rows}
-    if len(components) != len(rows) or any(
-        not isinstance(signature, str) or not signature or not isinstance(component, str) or not component
-        for signature, component in components.items()
-    ):
-        raise ValueError(f"Invalid or duplicate seed assignments in {path}")
-    return components
 
 
 def _read_signatures(

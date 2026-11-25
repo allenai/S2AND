@@ -474,6 +474,16 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
         identity_ledger.load_identity_evidence(output / "manifest.json")
 
 
+def test_unmatched_gold_limit_ignores_vetoed_same_paper_rows() -> None:
+    from scripts.intake.build_identity_evidence import unmatched_gold_over_limit
+
+    # A Vietnamese block with many same-surname coauthors must not fail on its vetoed rows alone.
+    assert unmatched_gold_over_limit({"ambiguous_paper_block": 50}, 100, 0.02) is None
+    assert unmatched_gold_over_limit({"ambiguous_paper_block": 50, "position_shift": 3}, 100, 0.02) == 3
+    assert unmatched_gold_over_limit({"absent_from_export": 2}, 100, 0.02) is None
+    assert unmatched_gold_over_limit({}, 0, 0.02) is None
+
+
 def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:

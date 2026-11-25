@@ -88,6 +88,8 @@ Only verified gold supplies a score. Freeze identity lists and seed purity
 use matched gold and deposited identities. Inspect the per-block join audit.
 The builder defaults to at most 2% unmatched gold per block. The audit records missing export
 papers, shifted positions, other failed joins, and papers removed by that block's intake permissions.
+Gold rows on a paper with two mentions in the block stay vetoed but do not count toward the limit,
+so blocks with many same-surname coauthors (common in Vietnamese and South Asian names) are kept.
 Only papers actually removed at intake are excluded from the denominator. An incomplete permission
 list can leave a small, unrepresentative sample. Review the reason counts and the permission source
 before using `--max-unmatched-gold` for a specific replay.

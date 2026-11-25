@@ -6,7 +6,7 @@ import argparse
 import json
 import tempfile
 from collections import Counter, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -49,6 +49,24 @@ _GOLD_FIELDS = [("orcid", pa.string()), ("scored", pa.bool_()), ("split", pa.str
 
 DEFAULT_MAX_UNMATCHED_GOLD = 0.02
 _UNMATCHED_REASON_PREFIX = "unmatched_gold_"
+# Gold rows on a paper with two mentions in the block are vetoed by design, not failed joins.
+# Same-surname coauthors are common in Vietnamese and South Asian blocks, so capping these
+# rows would drop exactly those blocks from the freeze.
+_UNCAPPED_UNMATCHED_REASONS = frozenset({"ambiguous_paper_block"})
+
+
+def unmatched_gold_over_limit(reasons: Mapping[str, int], total: int, limit: float) -> int | None:
+    """Return the capped unmatched count when it exceeds ``limit``, else None.
+
+    Args:
+        reasons: Unmatched gold row counts by reason for one block.
+        total: Gold rows for the block, excluding rows removed by intake permissions.
+        limit: Largest allowed share of capped unmatched rows.
+    """
+
+    capped = sum(count for reason, count in reasons.items() if reason not in _UNCAPPED_UNMATCHED_REASONS)
+    return capped if total and capped / total > limit else None
+
 
 EVIDENCE_SCHEMA = pa.schema(
     [
@@ -335,12 +353,12 @@ def _write_evidence(
                 for key, count in sorted(audit.items())
                 if key.startswith(_UNMATCHED_REASON_PREFIX) and count
             }
-            unmatched = sum(reasons.values())
-            audit["unmatched_gold_rows"] = unmatched
+            audit["unmatched_gold_rows"] = sum(reasons.values())
             total = audit["gold_rows_for_block"] - audit["permission_filtered_gold_rows"]
-            if total and unmatched / total > max_unmatched_gold:
+            capped = unmatched_gold_over_limit(reasons, total, max_unmatched_gold)
+            if capped is not None:
                 raise ValueError(
-                    f"{block!r} has {unmatched}/{total} unmatched gold rows ({unmatched / total:.2%}); "
+                    f"{block!r} has {capped}/{total} unmatched gold rows ({capped / total:.2%}); "
                     f"--max-unmatched-gold is {max_unmatched_gold:.2%}. Reasons: {reasons}"
                 )
             destination = staging / f"block-{index:06d}.parquet"

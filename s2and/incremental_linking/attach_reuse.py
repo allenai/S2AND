@@ -5,18 +5,16 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable
 from dataclasses import dataclass
-from functools import lru_cache
 from types import TracebackType
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
 
 from s2and.arrow_inputs import ArrowDataset
-from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view
 
 if TYPE_CHECKING:
     from s2and.model.bulk import _AttachmentSubblocks
-    from s2and.model.incremental import _AttachmentBlockState
+    from s2and.model.incremental import _AttachmentBlockSetup
 
 logger = logging.getLogger("s2and")
 T = TypeVar("T")
@@ -80,7 +78,7 @@ class ResidualModelDistances:
 
 
 class AttachReuse:
-    """Own one offline sweep's setup, with separate signature and name-token limits.
+    """Own one offline sweep's setup and residual model scores.
 
     Limits count retained signature memberships, including native block rows.
     Use a context manager to release native buffers before closing the dataset.
@@ -90,15 +88,10 @@ class AttachReuse:
         self.subblocks: _BoundedCache[_AttachmentSubblocks] = _BoundedCache(
             "subblock signatures", setup_signature_limit
         )
-        self.blocks: _BoundedCache[_AttachmentBlockState] = _BoundedCache(
+        self.blocks: _BoundedCache[_AttachmentBlockSetup] = _BoundedCache(
             "featurizer signatures", setup_signature_limit
         )
         self.residuals = _BoundedCache[ResidualModelDistances]("residual bytes", residual_byte_limit)
-        self._bucket = lru_cache(maxsize=32_768)(first_name_bucket_from_token_view)
-
-    def first_name_buckets(self, tokens: list[str], views: list[str]) -> list[str]:
-        """Classify repeated native query tokens without repeating normalization."""
-        return [self._bucket(token, view) for token, view in zip(tokens, views, strict=True)]
 
     def __enter__(self) -> AttachReuse:
         return self
@@ -123,5 +116,3 @@ class AttachReuse:
             )
             cache.entries.clear()
             cache.size = 0
-        logger.info("Attachment reuse first-name buckets: %s", self._bucket.cache_info())
-        self._bucket.cache_clear()

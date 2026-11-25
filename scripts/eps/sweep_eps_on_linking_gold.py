@@ -1029,7 +1029,7 @@ def _production_assignments_for_eps(
             batching_threshold=int(args.batching_threshold),
             total_ram_bytes=int(args.total_ram_bytes),
             bulk_clusters=bulk_clusters,
-            **({} if attach_reuse is None else {"attach_reuse": attach_reuse}),
+            attach_reuse=attach_reuse,
         )
     assignments: dict[str, str] = {}
     for cluster_id, members in clusters.items():

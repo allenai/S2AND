@@ -1635,14 +1635,7 @@ def _predict_incremental_promoted_linker_from_arrow(
             if len(refreshed_batch) < len(first_batch):
                 scoring_batch_size = len(refreshed_batch)
                 raw_batch_memory_replan_count += 1
-            attach_reuse = None if attachment_state is None else attachment_state.attach_reuse
-            raw_plan_bundle = (
-                RawArrowPlanBundle.from_native_mapping(raw_candidate_plan)
-                if attach_reuse is None
-                else RawArrowPlanBundle.from_native_mapping(
-                    raw_candidate_plan, first_name_buckets=attach_reuse.first_name_buckets
-                )
-            )
+            raw_plan_bundle = RawArrowPlanBundle.from_native_mapping(raw_candidate_plan)
             del raw_candidate_plan
             featurizer_start = time.perf_counter()
             signature_ids = raw_plan_bundle.signature_order.signature_ids
@@ -1901,9 +1894,9 @@ def _predict_incremental_promoted_linker_from_arrow(
         ):
             # Links from one pass do not see each other during scoring. Keep the
             # higher-priority link when two new links to one cluster conflict.
-            shared_setup = None if attachment_state is None else attachment_state.shared_setup
+            setup = None if attachment_state is None else attachment_state.setup
             conflict, conflict_key = _new_link_name_conflict(
-                dataset, partial_supervision, None if shared_setup is None else shared_setup.name_parts
+                dataset, partial_supervision, None if setup is None else setup.name_parts
             )
             linked_signature_clusters, name_check_rejected = reject_conflicting_new_links(
                 linked_signature_clusters,

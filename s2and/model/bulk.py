@@ -87,7 +87,7 @@ from .constraints import (
     _RustFeaturizerPredictDataset,
 )
 from .distances import _CONCURRENT_DISTANCE_BLOCK_MAX_SIZE, _CONCURRENT_DISTANCE_BLOCKS
-from .incremental import _AttachmentBlockState, _signature_batch_indices_for_request
+from .incremental import _AttachmentBlockSetup, _AttachmentBlockState, _signature_batch_indices_for_request
 
 if TYPE_CHECKING:
     from .clusterer import Clusterer
@@ -381,7 +381,7 @@ def _predict_from_prepared_rust_featurizer(
                 total_ram_bytes=total_ram_bytes,
                 signature_index_by_id=signature_index_by_id,
                 prediction_state=block_state,
-                **({"residual_reuse": residual_reuse} if residual_reuse is not None else {}),
+                residual_reuse=residual_reuse,
             )
             return block_dists, time.perf_counter() - start
 
@@ -705,17 +705,16 @@ def _predict_subblocked_single_letter_groups_from_arrow(
                 block_state[1].release()
             block_state = None
             members = [str(signature_id) for signature_id in original_blocks[origin]]
-            shared_setup = None
+            state = _AttachmentBlockState(arrow_dataset, members, name_tuples, self.n_jobs)
             if attach_reuse is not None:
                 key = (attachment_dataset_key(arrow_dataset), tuple(members), name_tuples)
-                shared_setup = attach_reuse.blocks.get(key)
-                if shared_setup is None and attach_reuse.blocks.fits(len(members)):
-                    shared_setup = _AttachmentBlockState(arrow_dataset, members, name_tuples, self.n_jobs)
-                    attach_reuse.blocks.store(key, shared_setup, len(members))
-            state = _AttachmentBlockState(arrow_dataset, members, name_tuples, self.n_jobs)
-            if shared_setup is not None:
-                state.shared_setup = shared_setup
-                state.attach_reuse = attach_reuse
+                setup = attach_reuse.blocks.get(key)
+                if setup is None and attach_reuse.blocks.fits(len(members)):
+                    setup = _AttachmentBlockSetup()
+                    attach_reuse.blocks.store(key, setup, len(members))
+                if setup is not None:
+                    state.setup = setup
+                    state.attach_reuse = attach_reuse
             block_state = (origin, state)
         if cache_residuals:
             block_state[1].residual_group = tuple(group_signature_ids)
@@ -1039,7 +1038,7 @@ def _predict_from_arrow(
             name_tuples=prediction_name_tuples,
             cluster_seeds_disallow=cluster_seed_disallows,
             original_blocks=block_dict,
-            **({} if attach_reuse is None else {"attach_reuse": attach_reuse}),
+            attach_reuse=attach_reuse,
         )
         pred_clusters = self._reunite_no_middle_dead_ends(
             pred_clusters,
@@ -1056,7 +1055,7 @@ def _predict_from_arrow(
             block_dict_single_letter,
             pred_clusters=pred_clusters,
             cluster_seeds_require=active_cluster_seeds_require,
-            **({"cache_residuals": True} if attach_reuse is not None else {}),
+            cache_residuals=attach_reuse is not None,
         )
         if orcid_join_enabled(self) and average_linkage_cut(self.cluster_model, cluster_model_params) is not None:
             oversized = {key: members for key, members in block_dict.items() if len(members) > batching_threshold}
@@ -1090,10 +1089,10 @@ def _predict_from_arrow(
             cluster_seeds_require=None,
             cluster_seeds_disallow=cluster_seed_disallows,
             prediction_state=prediction_state,
-            **(
-                {"residual_reuse": attachment_state}
+            residual_reuse=(
+                attachment_state
                 if attachment_state is not None and attachment_state.residual_group is not None
-                else {}
+                else None
             ),
         )
     predict_seconds = time.perf_counter() - predict_start

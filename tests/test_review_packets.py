@@ -199,8 +199,16 @@ def test_build_blind_linker_packets_and_validator_catches_nested_leaks(tmp_path:
             "block_key": "b_lee",
             "query": _paper(i),
             "candidates": [
-                {"candidate_key": f"cand_{i}_a", "exemplars": [_paper(50 + i)]},
-                {"candidate_key": f"cand_{i}_b", "exemplars": [_paper(60 + i)]},
+                {
+                    "candidate_key": f"cand_{i}_a",
+                    "member_signature_ids": [f"visibleq:s{50 + i}"],
+                    "exemplars": [_paper(50 + i)],
+                },
+                {
+                    "candidate_key": f"cand_{i}_b",
+                    "member_signature_ids": [f"visibleq:s{60 + i}"],
+                    "exemplars": [_paper(60 + i)],
+                },
             ],
         }
         for i in range(6)
@@ -362,8 +370,8 @@ def test_score_aligns_linker_slots_across_packet_orders(tmp_path: Path, frozen_s
         "block_key": "a smith",
         "query": _paper(1),
         "candidates": [
-            {"candidate_key": "a", "exemplars": [_paper(2)]},
-            {"candidate_key": "b", "exemplars": [_paper(3)]},
+            {"candidate_key": "a", "member_signature_ids": ["visibleq:s2"], "exemplars": [_paper(2)]},
+            {"candidate_key": "b", "member_signature_ids": ["visibleq:s3"], "exemplars": [_paper(3)]},
         ],
     }
     judges = []
@@ -499,7 +507,13 @@ def test_packet_controls_reject_truth_that_contradicts_verified_orcids(
                 "source_id": "control",
                 "block_key": "a smith",
                 "query": pair["paper_a"],
-                "candidates": [{"candidate_key": "different", "exemplars": [pair["paper_b"]]}],
+                "candidates": [
+                    {
+                        "candidate_key": "different",
+                        "member_signature_ids": [pair["paper_b"]["signature_id"]],
+                        "exemplars": [pair["paper_b"]],
+                    }
+                ],
                 "metadata": {"gold_candidate_keys": ["different"]},
             }
             build_blind_linker_packets(queries=[{**linker, "source_id": "natural"}], control_queries=[linker], **kwargs)

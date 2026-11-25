@@ -234,6 +234,8 @@ Use ORCID Gold v2 and classic benchmarks for bulk pairwise training, ranker trai
 
 Provide signature references for pair sides, linker queries, and exemplars. The builder reads their
 display fields from the ledger's frozen Arrow snapshot, or from `--snapshot` for builds without a ledger.
+Supply full `member_signature_ids` for any linker component resolved outside the frozen gate seed assignments.
+The builder rejects a linker query that belongs to any candidate component.
 - **Strict field allowlist:** Paper metadata only for pair packets (never predicted-cluster summaries, scores, ranks, split names, cluster IDs, or ORCIDs).
 - **Isolated passes across judge families** with independently randomized A/B or candidate order. Report agreement and Cohen's κ on jointly decided items, the jointly decided share, and missing verdicts.
 - **10–15% embedded ORCID gold controls** per packet (re-examine when the family fails the 90% control bar) + **10–20% cross-family model audit** on sealed test packets and classic benchmarks.

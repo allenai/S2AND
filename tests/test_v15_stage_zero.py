@@ -330,6 +330,31 @@ def test_gate_scorer_rejects_old_votes_for_swapped_query_display(
     ]
 
 
+@pytest.mark.parametrize("control", [False, True])
+def test_gate_builder_rejects_query_hidden_in_candidate_members(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path], control: bool
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    natural = {
+        "block_key": block,
+        "source_id": "natural",
+        "query": {"signature_id": "13-0"},
+        "candidates": [{"candidate_key": "other"}],
+    }
+    overlap = {**natural, "source_id": "overlap", "query": {"signature_id": "25-0"}}
+    with pytest.raises(ValueError, match="query.*member of candidate"):
+        review_packets.build_blind_linker_packets(
+            queries=[natural if control else overlap],
+            control_queries=[overlap] if control else (),
+            block_roles=ledger.roles,
+            ledger=ledger,
+            allowed_roles={"gate_thresh"},
+            linker_task_manifest=task,
+            output_dir=tmp_path / "packet",
+            control_fraction=0,
+        )
+
+
 def test_score_gate_key_after_unrelated_control_change(
     tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
 ) -> None:

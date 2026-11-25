@@ -560,6 +560,21 @@ def _load_packet_displays(
     return {key: sanitize_paper_item(paper, max_abstract_chars=max_abstract_chars) for key, paper in papers.items()}
 
 
+def _validate_linker_membership(items: Sequence[Mapping[str, Any]]) -> None:
+    for item in items:
+        query = str(item["query"]["signature_id"])
+        for candidate in item["candidates"]:
+            members = candidate.get("member_signature_ids")
+            if not isinstance(members, (list, tuple)) or not members:
+                raise ValueError(f"Linker candidate {candidate['candidate_key']!r} requires component members")
+            member_ids = set(members)
+            exemplars = {str(paper["signature_id"]) for paper in candidate.get("exemplars", ())}
+            if query in member_ids or query in exemplars:
+                raise ValueError(f"Linker query {query!r} is a member of candidate {candidate['candidate_key']!r}")
+            if not exemplars <= member_ids:
+                raise ValueError(f"Linker candidate {candidate['candidate_key']!r} has exemplars outside its component")
+
+
 def build_blind_pair_packets(
     *,
     items: Sequence[Mapping[str, Any]],
@@ -732,16 +747,17 @@ def build_blind_linker_packets(
     _validate_packet_roles(queries, block_roles, allowed_roles)
     _require_ledger_packet_roles(block_roles, ledger)
     seed_digests: dict[str, str] = {}
+    roles = ledger.roles if ledger is not None else block_roles
+    allowed_controls = [
+        item for item in control_queries if roles is None or roles.role_for(item["block_key"]) in allowed_roles
+    ]
     if ledger is not None:
-        allowed_controls = [
-            item for item in control_queries if ledger.roles.role_for(item["block_key"]) in allowed_roles
-        ]
         queries, seed_digests = resolve_gate_exemplars(queries, ledger.roles, linker_task_manifest)
         allowed_controls, _ = resolve_gate_exemplars(
             allowed_controls, ledger.roles, linker_task_manifest, control_ledger=ledger
         )
-    else:
-        allowed_controls = list(control_queries)
+    _validate_linker_membership(queries)
+    _validate_linker_membership(allowed_controls)
     gate_candidates = _validate_natural_items(queries, ledger, "linker")
     eligible_controls = _scored_controls(
         allowed_controls, block_roles, packet_type="linker", allowed_roles=allowed_roles, ledger=ledger

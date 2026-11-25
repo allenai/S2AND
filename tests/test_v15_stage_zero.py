@@ -65,7 +65,18 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
     table = table.set_column(
         table.schema.get_field_index("title"), "title", pa.array([f"Study {pid}" for pid, _ in papers])
     )
+    table = table.set_column(
+        table.schema.get_field_index("venue"), "venue", pa.array([f"Venue {pid}" for pid, _ in papers])
+    ).append_column("year", pa.array([2000 + int(pid) for pid, _ in papers]))
     write_arrow_ipc_table(table, raw / "papers.arrow")
+    with pa.ipc.open_file(raw / "paper_authors.arrow") as reader:
+        authors = reader.read_all()
+    authors = authors.set_column(
+        authors.schema.get_field_index("author_name"),
+        "author_name",
+        pa.array([f"G Schneider {pid}" for pid, _ in papers]),
+    )
+    write_arrow_ipc_table(authors, raw / "paper_authors.arrow")
     with tarfile.open(bundle, "w:gz") as archive:
         for path in raw.glob("*.arrow"):
             archive.add(path, arcname=path.name)
@@ -189,6 +200,46 @@ def test_gate_controls_show_verified_identity(
         allowed_roles={"gate_thresh"},
         ledger=ledger,
     )
+
+
+def test_gate_query_metadata_follows_frozen_signature(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    item = {
+        "block_key": block,
+        "source_id": "swapped-query",
+        "query": {
+            "signature_id": "13-0",
+            "paper_id": "11",
+            "title": "Study 11",
+            "venue": "Venue 11",
+            "year": 2011,
+            "authors": ["G Schneider 11"],
+            "coauthors": ["Caller input"],
+            "abstract": "Caller input",
+        },
+        "candidates": [{"candidate_key": "other"}],
+    }
+    packets = tmp_path / "packets"
+    review_packets.build_blind_linker_packets(
+        queries=[item],
+        block_roles=ledger.roles,
+        ledger=ledger,
+        allowed_roles={"gate_thresh"},
+        linker_task_manifest=task,
+        output_dir=packets,
+        control_fraction=0,
+    )
+    query = json.loads(next((packets / "packets").glob("*.jsonl")).read_text())["query"]
+    assert query == {
+        "title": "Study 13",
+        "venue": "Venue 13",
+        "year": 2013,
+        "authors": ["G Schneider 13"],
+        "author_name": "g schneider",
+        "affiliations": [],
+    }
 
 
 def _v14_source(tmp_path: Path, index: Path, allowed_abstracts: Path) -> Path:

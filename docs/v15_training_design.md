@@ -245,7 +245,8 @@ The builder derives pair and linker control truth from the verified ORCIDs and c
 Natural gate threshold candidates can receive blind labels on mixed production clusters. A member
 with an excluded or foreign-role identity vetoes a candidate. Gate bindings cover every identity
 named by the gate evidence, including rejected gold and reviewed errors. Pass `--linker-task-manifest tasks/linker_tasks.json`
-to use the frozen seed assignments and the bound Arrow papers. Supply candidate keys for gate items.
+to use the frozen seed assignments and the bound Arrow papers. Supply query signature IDs and
+candidate keys for gate items. The builder looks up all displayed query metadata in the bound Arrow dataset.
 The builder selects up to four exemplars per component in frozen seed order. For controls, it
 prefers members with matched gold or a deposited ORCID agreeing with gold. Each displayed control
 component needs at least one such exemplar and must pass the full-component eligibility check.

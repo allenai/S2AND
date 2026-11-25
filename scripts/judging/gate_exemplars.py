@@ -1,4 +1,4 @@
-"""Resolve blind gate exemplars from the frozen production seeds."""
+"""Resolve blind gate papers from the frozen Arrow dataset and production seeds."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _paper_items(arrow: ArrowDataset, signature_ids: set[str]) -> dict[str, dict
         "signatures", "signature_id", signature_ids, ["signature_id", "paper_id", *names, "author_affiliations"]
     )
     if {row["signature_id"] for row in signatures} != signature_ids:
-        raise ValueError("Frozen exemplar signatures are missing from the Arrow dataset")
+        raise ValueError("Frozen query or exemplar signatures are missing from the Arrow dataset")
     paper_ids = {row["paper_id"] for row in signatures}
     papers = {
         row["paper_id"]: row
@@ -60,7 +60,7 @@ def resolve_gate_exemplars(
     *,
     control_ledger: IdentityLedger | None = None,
 ) -> tuple[list[Mapping[str, Any]], dict[str, str]]:
-    """Resolve frozen exemplars, preferring verified members when building controls."""
+    """Resolve frozen query papers and exemplars, preferring verified control members."""
     by_block: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in items:
         block = normalize_block_key(item["block_key"])
@@ -92,10 +92,12 @@ def resolve_gate_exemplars(
                 key: sorted(members[key], key=lambda sid: not evidence_identities(rows[sid]))[:PRODUCTION_MAX_EXEMPLARS]
                 for key in keys
             }
+        query_ids = {str(item["query"]["signature_id"]) for item in block_items}
+        displayed_ids = query_ids | {sid for signatures in exemplar_ids.values() for sid in signatures}
         with ArrowDataset.open(spec["arrow_dir"]) as arrow:
             if arrow.generation_id != spec["arrow_generation_id"]:
                 raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
-            papers = _paper_items(arrow, {sid for signatures in exemplar_ids.values() for sid in signatures})
+            papers = _paper_items(arrow, displayed_ids)
         for item in block_items:
             candidates = []
             for candidate in item["candidates"]:
@@ -107,6 +109,6 @@ def resolve_gate_exemplars(
                         "exemplars": [papers[sid] for sid in exemplar_ids[key]],
                     }
                 )
-            resolved[id(item)] = {**item, "candidates": candidates}
+            resolved[id(item)] = {**item, "query": papers[str(item["query"]["signature_id"])], "candidates": candidates}
         seed_digests[block] = spec["seeds_sha256"]
     return [resolved.get(id(item), item) for item in items], seed_digests

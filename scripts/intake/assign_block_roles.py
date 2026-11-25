@@ -761,9 +761,9 @@ def freeze_identity_roles(
         prior_exclusions = prior["excluded_blocks"]
         prior_unassigned = set(prior["unassigned"])
         prior_blocks = prior["evidence_blocks"].keys()
-        requested_changes = {
-            normalize_block_key(block) for block in (*dev_test_blocks, *excluded_blocks)
-        } & prior_blocks
+        requested_changes = (
+            {normalize_block_key(block) for block in dev_test_blocks} & (prior_blocks - prior_unassigned)
+        ) | ({normalize_block_key(block) for block in excluded_blocks} & prior_blocks)
         if requested_changes:
             raise ValueError(f"Re-freeze cannot move prior blocks: {sorted(requested_changes)}")
     extra = {normalize_block_key(block): role for block, role in (extra_pins or {}).items()}

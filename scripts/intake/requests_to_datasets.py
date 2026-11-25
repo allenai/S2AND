@@ -187,9 +187,15 @@ def convert_requests(
             "permission_sha256": permission_sha256,
         }
         intake = {**prior, **binding, "permission_papers": {key: sorted(papers) for key, papers in permissions.items()}}
-        if not prior:
-            _replace_json(binding_path, intake)
-        results = _convert_datasets(by_name, root, name_counts_index, binding, allowed_papers, abstract_allowed_papers)
+        results = _convert_datasets(
+            by_name,
+            root,
+            name_counts_index,
+            binding,
+            allowed_papers,
+            abstract_allowed_papers,
+            initial_intake=None if prior else intake,
+        )
         if prior and prior != intake:
             _replace_json(binding_path, intake)
         return results
@@ -202,6 +208,8 @@ def _convert_datasets(
     binding: dict[str, Any],
     allowed_papers: frozenset[str],
     abstract_allowed_papers: frozenset[str],
+    *,
+    initial_intake: dict[str, Any] | None,
 ) -> dict[str, IntakeResult]:
     datasets = root / "datasets"
     datasets.mkdir(parents=True, exist_ok=True)
@@ -263,6 +271,9 @@ def _convert_datasets(
                 pending[staging] = target
             manifests[name] = manifest.relative_to(root).as_posix()
             results[name] = {"source_bundle_sha256": digest, "reused": reused}
+        if initial_intake is not None:
+            # Publish the receipt only once all conversions have succeeded.
+            _replace_json(root / SNAPSHOT_BINDING, initial_intake)
         for staging, target in pending.items():
             staging.rename(target)
 

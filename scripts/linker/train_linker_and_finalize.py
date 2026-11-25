@@ -2021,7 +2021,7 @@ def _apply_blind_gate_labels(
     ):
         raise ValueError("Gate threshold judgments do not match the frozen seed assignments")
     for block, block_rows in rows.groupby("dataset", sort=False):
-        members = members_by_component(read_frozen_seeds(blocks[block]))
+        members = members_by_component(read_frozen_seeds(blocks[str(block)]))
         if missing := set(block_rows["candidate_component_key"]) - members.keys():
             raise ValueError(f"Gate candidates have no frozen seed members in {block!r}: {sorted(missing)}")
     labeled = rows.copy()

@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from s2and._sha256 import is_lowercase_sha256, sha256_file
 from s2and.incremental_linking.contracts import canonical_json_digest
@@ -176,7 +177,7 @@ def load_block_roles(path: Path) -> BlockRoles:
                 or not block_orcids[block].issubset(orcids)
             ):
                 raise ValueError(f"Invalid gate ORCID list for {block!r} in {path}")
-            gate_block_orcids[block] = frozenset(orcids)
+            gate_block_orcids[block] = frozenset(cast(list[str], orcids))
     result = BlockRoles(
         by_block,
         sha256_file(path),

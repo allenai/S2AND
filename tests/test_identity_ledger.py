@@ -727,3 +727,50 @@ def test_v14_inventory_includes_null_orcid_candidate_members(tmp_path: Path) -> 
     build_training_inventory(gold, [], output, linker_sources=[root])
     observed = {row["signature_id"]: row["orcid"] for row in pq.read_table(output).to_pylist()}
     assert observed == {"10-0": GOLD, "20-0": None, "30-0": None, "50-0": None, "193154881-0": None, "99-0": DEPOSITED}
+
+
+def test_first_intake_failure_allows_a_narrower_retry(tmp_path: Path) -> None:
+    from scripts.intake.requests_to_datasets import SNAPSHOT_BINDING, convert_requests
+
+    bundle = request_bundle(tmp_path / "bundles", "a lovelace", [("1", None)])
+    broken = request_bundle(tmp_path / "bundles", "g hopper", [("3", None)])
+    index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
+    snapshot = tmp_path / "snapshot"
+    with pytest.raises(ValueError, match="No signatures remain"):
+        convert_requests(
+            [bundle, broken],
+            snapshot,
+            Path(index),
+            allowed_papers=frozenset({"1", "2"}),
+            abstract_allowed_papers=frozenset(),
+        )
+    assert not (snapshot / SNAPSHOT_BINDING).exists()
+    result = convert_requests(
+        [bundle], snapshot, Path(index), allowed_papers=frozenset({"1"}), abstract_allowed_papers=frozenset()
+    )
+    assert set(result) == {"a_lovelace"}
+
+
+def test_refreeze_can_declare_a_previously_unassigned_dev_test_block(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "evidence" / "manifest.json"
+    build_identity_evidence(snapshot, gold, evidence.parent, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
+    source = tmp_path / "gold-blocks.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
+    )
+    blocks = tmp_path / "blocks.parquet"
+    build_freeze_input(evidence, source, blocks)
+    targets = {"final_test_a": 1}
+    prior = freeze_identity_roles(blocks, evidence, targets)
+    assert "a lovelace" in prior["unassigned"]
+    path = tmp_path / "prior.json"
+    path.write_text(json.dumps(prior), encoding="utf-8")
+    refrozen = freeze_identity_roles(blocks, evidence, targets, prior_path=path, dev_test_blocks=["a_lovelace"])
+    assert refrozen["block_to_role"]["a lovelace"] == "dev_test"

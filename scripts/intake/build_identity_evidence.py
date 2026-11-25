@@ -8,7 +8,7 @@ import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Collection
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -312,7 +312,7 @@ def _write_evidence(
                     f"Intake for {block!r} lacks its permission-filtered papers. Re-intake the raw bundle."
                 )
             retained = _retained_papers(path, read_json_object(path))
-            filtered_papers = frozenset(filtered)
+            filtered_papers = frozenset(cast(list[str], filtered))
             if (
                 record.get("snapshot_id") != binding["snapshot_id"]
                 or record.get("name_counts_index_sha256") != index_digest

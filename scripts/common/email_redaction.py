@@ -26,8 +26,8 @@ _HASHED_EMAIL = re.compile(r"[0-9a-f]{64}@[0-9a-f]{64}|(?:hmac-sha256|sha256):[0
 # Matches ASCII and internationalized emails, fullwidth @, Unicode dashes (DASH_CHARS + \u2015),
 # brace-grouped locals ({a,b}@domain), quoted locals ("a"@domain), and malformed "@." forms.
 _EXTRA_DASHES = re.escape(DASH_CHARS + "\u2015")
-_EMAIL_LOCAL_CHARS = rf"A-Za-z0-9\u00C0-\u024F._%+{_EXTRA_DASHES}"
-_EMAIL_DOMAIN_LABEL = rf"[A-Za-z0-9\u00C0-\u024F{_EXTRA_DASHES}]+"
+_EMAIL_LOCAL_CHARS = rf"\w.%+{_EXTRA_DASHES}"
+_EMAIL_DOMAIN_LABEL = rf"(?:[^\W_]|[{_EXTRA_DASHES}])+"
 _AT_CHARS = r"[@\uFF20]"
 _PLAINTEXT_EMAIL_RE = re.compile(
     rf"(?:"
@@ -35,7 +35,7 @@ _PLAINTEXT_EMAIL_RE = re.compile(
     rf"|\"[^\s\"@]+\""
     rf"|(?<![{_EMAIL_LOCAL_CHARS}])[{_EMAIL_LOCAL_CHARS}]+"
     rf")"
-    rf"{_AT_CHARS}\.?(?:{_EMAIL_DOMAIN_LABEL}\.)+[A-Za-z\u00C0-\u024F]{{2,}}"
+    rf"{_AT_CHARS}\.?(?:{_EMAIL_DOMAIN_LABEL}\.)+[^\W\d_]{{2,}}"
 )
 # Avoid flagging chemical nanoparticle formulas like "Fe3O4@SiO2.The" in abstracts.
 _CHEMICAL_FORMULA_PREFIX_RE = re.compile(r"^[A-Z][a-z]?\d+(?:[A-Z][a-z]?\d*)*[@\uFF20](?:[A-Z][a-z]?\d*)+\.")

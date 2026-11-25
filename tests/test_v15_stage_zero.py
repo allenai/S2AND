@@ -98,7 +98,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "b ross": [(str(i), None) for i in range(201, 206)],
         "d hopper": [("301", None)],
         "e turing": [("401", None)],
-        "g schneider": [(str(i), gate_a if i == 501 else None) for i in range(500, 533)],
+        "g schneider": [(str(i), {501: gate_a, 502: GOLD, 503: excluded}.get(i)) for i in range(500, 533)],
     }
     gold_rows = [
         ("a lovelace", 101, GOLD, "development", True),
@@ -289,10 +289,11 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     exemplar = "501-0"
     assert not ledger.for_block(gate).eligibility(exemplar).fit_ok
     assert seed_map[exemplar] == candidate
+    vetoed_components = {"seed-502", "seed-503"}
     other = next(
         row["candidate_component_key"]
         for row in rows
-        if row["query_signature_id"] == query and row["candidate_component_key"] != candidate
+        if row["query_signature_id"] == query and row["candidate_component_key"] not in vetoed_components | {candidate}
     )
     other_exemplar = next(sid for sid, component in seed_map.items() if component == other)
     blind_items = _json(
@@ -317,6 +318,22 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
             }
         ],
     )
+    natural_item = json.loads(blind_items.read_text())[0]
+    for sid in ("502-0", "503-0"):
+        vetoed_key = seed_map[sid]
+        for exemplars in ([(sid, sid.split("-")[0])], [(exemplar, exemplar.split("-")[0])]):
+            bad_candidate = {
+                "candidate_key": vetoed_key,
+                "member_signature_ids": [sid, *(paper_sid for paper_sid, _ in exemplars if paper_sid != sid)],
+                "exemplars": [
+                    {"signature_id": paper_sid, "paper_id": paper_id, "title": "Study"}
+                    for paper_sid, paper_id in exemplars
+                ],
+            }
+            with pytest.raises(ValueError, match="vetoed identity"):
+                review_packets._validate_natural_items(
+                    [{**natural_item, "candidates": [bad_candidate]}], ledger, "linker"
+                )
     blind_key_path = tmp_path / "gate-key.json"
     _run(
         review_packets,
@@ -365,6 +382,16 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert report["gate_thresh_audit_coverage"]["audit"]["planned_share"] == 0.5
     assert scored["query_gold_scored"].sum() == 0
     assert scored.loc[scored["label"].eq(1), "candidate_gold_mixed"].all()
+    vetoed = gate_table.loc[gate_table["candidate_component_key"].isin(vetoed_components)]
+    assert set(vetoed["candidate_component_key"]) == vetoed_components
+    assert gate_table["candidate_has_vetoed_identity"].equals(
+        gate_table["candidate_component_key"].isin(vetoed_components)
+    )
+    vetoed_votes = vetoed[["dataset", "query_signature_id", "candidate_component_key"]].assign(verdict="same")
+    unsafe_report = {**report, "gate_thresh_labels": [*report["gate_thresh_labels"], *vetoed_votes.to_dict("records")]}
+    assert _apply_blind_gate_labels(gate_table, unsafe_report, roles).equals(scored)
+    with pytest.raises(ValueError, match="candidate identity vetoes"):
+        _apply_blind_gate_labels(gate_table.drop(columns="candidate_has_vetoed_identity"), report, roles)
     report["gate_thresh_labels"][0]["candidate_component_key"] = "outside-window"
     with pytest.raises(ValueError, match="outside the frozen windows"):
         _apply_blind_gate_labels(gate_table, report, roles)

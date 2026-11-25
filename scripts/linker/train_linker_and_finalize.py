@@ -1982,6 +1982,9 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
     """Attach agreed blind outcomes to the matching frozen production window."""
     if not rows["label"].isna().all() or rows["query_gold_scored"].any() or rows["candidate_gold_scored"].any():
         raise ValueError("Frozen production requests must have no pre-existing labels")
+    vetoes = rows.get("candidate_has_vetoed_identity")
+    if vetoes is None or not pd.api.types.is_bool_dtype(vetoes) or vetoes.isna().any():
+        raise ValueError("Frozen gate tasks must record candidate identity vetoes. Rebuild the tasks.")
     keys = ["dataset", "query_signature_id", "candidate_component_key"]
     judged = pd.DataFrame.from_records(report.get("gate_thresh_labels", []), columns=[*keys, "verdict"])
     if judged.empty or judged.duplicated(keys).any() or not judged["verdict"].isin({"same", "different"}).all():
@@ -2000,8 +2003,8 @@ def _apply_blind_gate_labels(rows: pd.DataFrame, report: Mapping[str, Any], role
     roles.require_bindings(report, bound_blocks.keys(), context="Gate threshold judgments")
     labeled = rows.copy()
     verdicts = decisions.reindex(indexed).reset_index(drop=True)
-    known = verdicts.notna()
-    labeled["label"] = verdicts.eq("same").astype("int8").to_numpy()
+    known = verdicts.notna() & ~vetoes.reset_index(drop=True)
+    labeled["label"] = (verdicts.eq("same") & known).astype("int8").to_numpy()
     labeled["candidate_gold_scored"] = known.to_numpy()
     grouped = labeled.groupby("query_group_id", sort=False)
     labeled["query_gold_scored"] = grouped["candidate_gold_scored"].transform("all")

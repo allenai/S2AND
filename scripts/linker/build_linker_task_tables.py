@@ -137,13 +137,16 @@ def _freeze_block_rows(
     members: dict[str, list[str]] = defaultdict(list)
     components_by_orcid: dict[str, set[str]] = defaultdict(set)
     identities_by_component: dict[str, set[str]] = defaultdict(set)
+    vetoed_components: set[str] = set()
     for sid, component in seeds.items():
         members[component].append(sid)
-        evidence_ids = (
-            eligibility.eligibility(sid).identities
-            if eligibility is not None
-            else {identities.get(sid), signatures[sid][1]}
-        )
+        if eligibility is None:
+            evidence_ids = {identities.get(sid), signatures[sid][1]}
+        else:
+            decision = eligibility.eligibility(sid)
+            evidence_ids = decision.identities
+            if decision.identity_veto:
+                vetoed_components.add(component)
         for orcid in evidence_ids:
             if orcid is not None:
                 components_by_orcid[orcid].add(component)
@@ -253,10 +256,12 @@ def _freeze_block_rows(
         mixed_components = {component for component, ids in identities_by_component.items() if len(ids) > 1}
         frame["label"] = pd.Series(pd.NA, index=frame.index, dtype="Int8")
         frame["candidate_gold_mixed"] = frame["candidate_component_key"].isin(mixed_components)
+        frame["candidate_has_vetoed_identity"] = frame["candidate_component_key"].isin(vetoed_components)
         counts["mixed_candidate_components"] = frame.loc[
             frame["candidate_gold_mixed"], "candidate_component_key"
         ].nunique()
         counts["mixed_candidate_rows"] = int(frame["candidate_gold_mixed"].sum())
+        counts["vetoed_candidate_rows"] = int(frame["candidate_has_vetoed_identity"].sum())
     return frame, {"rows": len(frame), "requested_queries": len(query_ids), "planned_queries": len(queries), **counts}
 
 

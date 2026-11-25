@@ -358,13 +358,17 @@ def _validate_natural_items(
             papers = [item["paper_a"], item["paper_b"]]
         else:
             papers = [item["query"]]
-            exemplars = [paper for candidate in item["candidates"] for paper in candidate["exemplars"]]
-            if views[block].role == "gate_thresh":
-                # Production exemplars may carry conflicting identities. Verify their provenance.
-                for paper in exemplars:
-                    views[block].eligibility(str(paper["signature_id"]))
-            else:
-                papers.extend(exemplars)
+            for candidate in item["candidates"]:
+                exemplars = candidate["exemplars"]
+                if views[block].role != "gate_thresh":
+                    papers.extend(exemplars)
+                    continue
+                members = candidate.get("member_signature_ids", [])
+                if not isinstance(members, list):
+                    raise ValueError("Expected a list of gate candidate member signature IDs")
+                signatures = {str(paper["signature_id"]) for paper in exemplars} | set(map(str, members))
+                if any(views[block].eligibility(sid).identity_veto for sid in signatures):
+                    raise ValueError(f"Natural judging item {item['source_id']!r} contains a vetoed identity")
         if any(not views[block].eligibility(str(paper["signature_id"])).fit_ok for paper in papers):
             raise ValueError(f"Natural judging item {item['source_id']!r} contains an ineligible signature")
 

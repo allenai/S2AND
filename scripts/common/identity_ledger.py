@@ -148,6 +148,7 @@ class Eligibility:
     fit_ok: bool
     score_orcid: str | None
     identities: frozenset[str]
+    identity_veto: bool
 
 
 @dataclass(frozen=True)
@@ -172,23 +173,21 @@ class BlockEligibility:
             raise ValueError(f"No identity evidence for {self.block!r} signature {signature_id!r}")
         row = self.rows[signature_id]
         identities = evidence_identities(row)
-        if row["excluded"] or row["reviewed_error"] or not identities.isdisjoint(EXCLUDED_ORCID_GROUPS):
-            return Eligibility(False, None, identities)
-        for orcid in identities:
-            if orcid not in self.roles.block_orcids[self.block] or orcid not in self.roles.identity_roles:
-                raise ValueError(f"Unknown evidence identity {orcid!r} in frozen block {self.block!r}")
-        fit_ok = (
-            not row.get("rejected_gold")
-            and len(identities) <= 1
-            and all(self.roles.identity_roles[orcid] == {self.role} for orcid in identities)
-        )
+        if row["excluded"] or not identities.isdisjoint(EXCLUDED_ORCID_GROUPS):
+            return Eligibility(False, None, identities, True)
+        if not row["reviewed_error"]:
+            for orcid in identities:
+                if orcid not in self.roles.block_orcids[self.block] or orcid not in self.roles.identity_roles:
+                    raise ValueError(f"Unknown evidence identity {orcid!r} in frozen block {self.block!r}")
+        foreign = any(self.roles.identity_roles.get(orcid, frozenset()) - {self.role} for orcid in identities)
+        fit_ok = not row["reviewed_error"] and not row.get("rejected_gold") and len(identities) <= 1 and not foreign
         score_orcid = None
         if fit_ok and identities:
             score_orcid = next(
                 (gold["orcid"] for gold in row["gold"] if gold["scored"] and gold["split"] == self.expected_split),
                 None,
             )
-        return Eligibility(fit_ok, score_orcid, identities)
+        return Eligibility(fit_ok, score_orcid, identities, foreign)
 
     def scored(self) -> dict[str, str]:
         """Return score-eligible gold labels for this block."""

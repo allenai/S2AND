@@ -60,7 +60,6 @@ from s2and.feature_port import build_rust_featurizer_from_arrow_dataset as build
 from s2and.feature_port import release_rust_handle as release_rust_handle
 from s2and.featurizer import FeaturizationInfo as FeaturizationInfo
 from s2and.featurizer import many_pairs_featurize as many_pairs_featurize
-from s2and.incremental_linking.attach_reuse import _estimator_cache_fingerprint as _estimator_cache_fingerprint
 from s2and.incremental_linking.completion import ResidualClusterer as ResidualClusterer
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,  # noqa: F401
@@ -224,6 +223,7 @@ from .incremental import _cacheable_value as _cacheable_value
 from .incremental import _can_skip_orcid_homogeneous_altered_presplit as _can_skip_orcid_homogeneous_altered_presplit
 from .incremental import _cluster_seeds_require_inverse as _cluster_seeds_require_inverse
 from .incremental import _dataset_altered_cluster_signatures as _dataset_altered_cluster_signatures
+from .incremental import _estimator_cache_fingerprint as _estimator_cache_fingerprint
 from .incremental import _get_altered_presplit_cache_entry as _get_altered_presplit_cache_entry
 from .incremental import _has_in_profile_pair as _has_in_profile_pair
 from .incremental import _IncrementalSeedSetup as _IncrementalSeedSetup

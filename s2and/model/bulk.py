@@ -683,7 +683,6 @@ def _predict_subblocked_single_letter_groups_from_arrow(
     original_blocks: Mapping[str, Sequence[str]],
     attach_reuse: AttachReuse | None = None,
     cache_residuals: bool = False,
-    first_passes: set[str] | None = None,
 ) -> dict[str, list[str]]:
     """Attach initial-only groups using already normalized caller supervision."""
 
@@ -718,9 +717,6 @@ def _predict_subblocked_single_letter_groups_from_arrow(
                 state.shared_setup = shared_setup
                 state.attach_reuse = attach_reuse
             block_state = (origin, state)
-        if first_passes is not None:
-            block_state[1].snapshot_first_pass = origin not in first_passes
-            first_passes.add(origin)
         if cache_residuals:
             block_state[1].residual_group = tuple(group_signature_ids)
         synthetic_seed_map = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
@@ -1033,10 +1029,6 @@ def _predict_from_arrow(
         # for each initial-only group. Release the bulk native state first so
         # the two large representations never overlap in memory.
         del rust_featurizer
-        first_passes: set[str] | None = None
-        if attach_reuse is not None and attach_reuse.snapshot_eps == getattr(self.cluster_model, "eps", None):
-            if attach_reuse.snapshots.limit:
-                first_passes = set()
         attach_from_arrow = partial(
             self._predict_subblocked_single_letter_groups_from_arrow,
             arrow_dataset=arrow_dataset,
@@ -1048,7 +1040,6 @@ def _predict_from_arrow(
             cluster_seeds_disallow=cluster_seed_disallows,
             original_blocks=block_dict,
             **({} if attach_reuse is None else {"attach_reuse": attach_reuse}),
-            **({} if first_passes is None else {"first_passes": first_passes}),
         )
         pred_clusters = self._reunite_no_middle_dead_ends(
             pred_clusters,

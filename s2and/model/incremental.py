@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import pickle
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -14,7 +16,7 @@ from s2and.arrow_inputs import ArrowDataset, arrow_string_array
 from s2and.corrections.block_corrections import correction_fingerprint
 from s2and.data import ANDData
 from s2and.feature_port import build_rust_featurizer_from_arrow_dataset, release_rust_handle
-from s2and.incremental_linking.attach_reuse import AttachReuse, _estimator_cache_fingerprint
+from s2and.incremental_linking.attach_reuse import AttachReuse
 from s2and.incremental_linking.completion import ResidualClusterer
 from s2and.incremental_linking.completion_metadata import (
     name_tuples_for_incremental_rules as _name_tuples_for_incremental_rules,
@@ -84,7 +86,6 @@ class _AttachmentBlockState:
         self._featurizer: Any | None = None
         self._orcid_info: dict[str, _ArrowIncrementalSignatureInfo] | None = None
         self.residual_group: tuple[str, ...] | None = None
-        self.snapshot_first_pass = False
         self.shared_setup: _AttachmentBlockState | None = None
         self.attach_reuse: AttachReuse | None = None
         self.planner: Any | None = None
@@ -232,6 +233,43 @@ def _model_presplit_cache_fingerprint(clusterer: Any) -> tuple[Any, ...]:
         _cacheable_value(correction_fingerprint(clusterer)),
         _orcid_name_waiver_setting(clusterer),
     )
+
+
+def _estimator_cache_fingerprint(estimator: Any) -> Any:
+    if estimator is None:
+        return None
+    inner = getattr(estimator, "classifier", None)
+    if inner is not None and inner is not estimator:
+        return (
+            "wrapped",
+            type(estimator).__module__,
+            type(estimator).__qualname__,
+            _estimator_cache_fingerprint(inner),
+        )
+    cache_fingerprint = getattr(estimator, "cache_fingerprint", None)
+    if callable(cache_fingerprint):
+        return (
+            type(estimator).__module__,
+            type(estimator).__qualname__,
+            tuple(cache_fingerprint()),
+        )
+    booster = getattr(estimator, "booster_", None)
+    model_to_string = getattr(booster, "model_to_string", None)
+    if callable(model_to_string):
+        model_string = str(model_to_string())
+        return (
+            type(estimator).__module__,
+            type(estimator).__qualname__,
+            hashlib.blake2b(model_string.encode("utf-8"), digest_size=16).hexdigest(),
+        )
+    estimator_type = (type(estimator).__module__, type(estimator).__qualname__)
+    try:
+        serialized = pickle.dumps(estimator, protocol=pickle.HIGHEST_PROTOCOL)
+    except (AttributeError, pickle.PickleError, RecursionError, TypeError):
+        # An estimator without a complete stable representation cannot safely
+        # reuse results produced by an earlier state.
+        return (*estimator_type, object())
+    return (*estimator_type, hashlib.blake2b(serialized, digest_size=16).hexdigest())
 
 
 def _altered_presplit_cache_state(

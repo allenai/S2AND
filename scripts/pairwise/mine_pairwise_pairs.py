@@ -32,6 +32,7 @@ Pair = tuple[str, str]
 DEFAULT_PAIRS_PER_BLOCK = 2_000
 DEFAULT_VERIFIED_PAIR_FRACTION = 0.05
 DEFAULT_PAIRS_PER_BLOCK_FLOOR = 100
+JUDGE_ONLY_STRATUM = "merged_unlabeled"
 
 
 @dataclass(frozen=True)
@@ -274,7 +275,7 @@ def mine_pairs(
             ("false_merge", false_merges.size, false_merges.pair),
             ("missed_link", missed_links.size, missed_links.pair),
             ("random", verified_pairs, partial(_random_pair, labeled)),
-            ("merged_unlabeled", merged_unlabeled.size, merged_unlabeled.pair),
+            (JUDGE_ONLY_STRATUM, merged_unlabeled.size, merged_unlabeled.pair),
         ):
             frame = (
                 _capped_frame(
@@ -291,7 +292,11 @@ def mine_pairs(
             )
             frames.append((stratum, population, frame))
             seen_pairs.update(frame)
-        quotas = _stratum_quotas([len(frame) for _, _, frame in frames], cap)
+        # Only ledger-labeled strata can be fitted, so the cap covers them. Merged-unlabeled pairs go to the
+        # judges instead and get their own budget of the same size, so they never displace fitted pairs.
+        fitted = [frame for stratum, _, frame in frames if stratum != JUDGE_ONLY_STRATUM]
+        quotas = [*_stratum_quotas([len(frame) for frame in fitted], cap), min(cap, len(frames[-1][2]))]
+        assert frames[-1][0] == JUDGE_ONLY_STRATUM
         for (stratum, population, frame), quota in zip(frames, quotas, strict=True):
             sample = rng.sample(frame, quota)
             frame_size = len(frame)

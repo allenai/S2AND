@@ -220,7 +220,8 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
         )
         inputs[block] = BlockInput(snapshot / "datasets" / name, None, assignments)
     mined = tmp_path / "mined.csv"
-    assert mine_pairs(role_path, inputs, mined, identity_evidence=evidence) == 12
+    # Each block yields all 6 labeled pairs under the cap plus 4 judge-only pairs with its unlabeled mention.
+    assert mine_pairs(role_path, inputs, mined, identity_evidence=evidence) == 20
 
     args = pairwise_training_args(
         tmp_path,
@@ -245,8 +246,8 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
     mined_blocks, _ = train_pairwise._load_mined_pairs(args)
     assert {block for block, spec in mined_blocks.items() if spec.split == "val"} == roles.pairwise_validation_blocks
     for spec in mined_blocks.values():
-        assert sorted(label for _, _, label in spec.pairs) == [0, 0, 1, 1]
-        assert spec.unscored_pairs == 2
+        assert len(spec.pairs) == 6 and {label for _, _, label in spec.pairs} == {0, 1}
+        assert spec.unscored_pairs == 4
 
     benchmark, files = _arrow_plan_dataset(tmp_path / "data", "qian", tmp_path / "benchmarks", name_counts)
     args.model_plan = tmp_path / "plan.json"
@@ -282,8 +283,8 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
     summary = result["training_summary"]
     for head in ("main", "nameless"):
         for split, benchmark_pairs in zip(("train", "val"), expected, strict=True):
-            assert summary[f"{head}_{split}_rows"] == len(benchmark_pairs) + 4
-    assert sum(spec["unscored_pairs"] for spec in summary["mined_pairs_by_block"].values()) == 4
+            assert summary[f"{head}_{split}_rows"] == len(benchmark_pairs) + 6
+    assert sum(spec["unscored_pairs"] for spec in summary["mined_pairs_by_block"].values()) == 8
     config = json.loads((args.output_dir / "reproducibility" / "pairwise_training_config.json").read_text("utf-8"))
     assert config["mined_pairs"][ROLE_SHA256_FIELD] == roles.sha256
     assert config["mined_pairs"]["pairwise_validation_blocks"] == sorted(roles.pairwise_validation_blocks)

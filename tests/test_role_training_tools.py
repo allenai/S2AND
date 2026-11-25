@@ -130,7 +130,8 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
     assert list(rows["block_key"].unique()) == [block]
     assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == len(rows)
     assert (rows["signature_id_1"] < rows["signature_id_2"]).all()
-    assert len(rows) == 6
+    assert rows["stratum"].ne("merged_unlabeled").sum() == 6
+    assert rows["stratum"].eq("merged_unlabeled").sum() <= 6
     assert rows["inclusion_probability"].between(0, 1, inclusive="right").all()
     manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
     assert manifest["pairs_per_block"] == 6
@@ -216,7 +217,15 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_
     assert info["verified_signatures"] == 4
     assert info["verified_within_block_pairs"] == 6
     assert info["pair_cap"] == 6
-    assert mined <= 6
+    strata = info["strata"]
+    fitted = [name for name in strata if name != "merged_unlabeled"]
+    # Judge-only pairs have their own budget and never displace ledger-labeled pairs.
+    assert sum(strata[name]["sampled_pairs"] for name in fitted) == min(
+        6, sum(strata[name]["frame_pairs"] for name in fitted)
+    )
+    assert strata["merged_unlabeled"]["sampled_pairs"] == min(6, strata["merged_unlabeled"]["frame_pairs"])
+    assert strata["merged_unlabeled"]["sampled_pairs"] > 0
+    assert mined <= 12
     random = rows.loc[rows["stratum"].eq("random")]
     author = {"q_full", "q_initial", "s00"}
     assert (random["signature_id_1"].isin(author) | random["signature_id_2"].isin(author)).sum() <= 2

@@ -19,8 +19,6 @@ import pandas as pd  # noqa: F401
 import pyarrow.parquet as pq  # noqa: F401
 from lightgbm import Booster as Booster
 from lightgbm import LGBMClassifier as LGBMClassifier
-from sklearn.linear_model import LogisticRegression as LogisticRegression
-from sklearn.preprocessing import StandardScaler as StandardScaler
 
 from s2and.consts import MAX_FAST_PLAN_LEAVES as MAX_FAST_PLAN_LEAVES
 from s2and.incremental_linking.artifact import IncrementalLinkingArtifact as IncrementalLinkingArtifact
@@ -36,11 +34,6 @@ from s2and.incremental_linking.linker_pairwise import (
     promoted_pairwise_aggregate_columns as promoted_pairwise_aggregate_columns,
 )
 from s2and.incremental_linking.logistic_gate import LOGISTIC_GATE_ERROR_WEIGHTS as LOGISTIC_GATE_ERROR_WEIGHTS
-from s2and.incremental_linking.logistic_gate import LOGISTIC_GATE_FINAL_C as LOGISTIC_GATE_FINAL_C
-from s2and.incremental_linking.logistic_gate import LOGISTIC_GATE_SELECTION_C as LOGISTIC_GATE_SELECTION_C
-from s2and.incremental_linking.logistic_gate import (
-    LOGISTIC_GATE_SELECTION_FEATURE_COUNT as LOGISTIC_GATE_SELECTION_FEATURE_COUNT,
-)
 from s2and.incremental_linking.logistic_gate import NumpyLogisticGate as NumpyLogisticGate
 from s2and.incremental_linking.logistic_gate import build_logistic_gate_matrix as build_logistic_gate_matrix
 from s2and.incremental_linking.logistic_gate import (
@@ -51,7 +44,6 @@ from s2and.incremental_linking.logistic_gate import (
 )
 from s2and.incremental_linking.logistic_gate import load_logistic_gate_config as load_logistic_gate_config
 from s2and.incremental_linking.logistic_gate import logistic_gate_config as logistic_gate_config
-from s2and.incremental_linking.logistic_gate import outcome_labels as outcome_labels
 from s2and.thread_config import resolve_n_jobs as resolve_n_jobs
 
 from .evaluate import CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET as CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET
@@ -71,7 +63,6 @@ from .evaluate import _read_classic_stratified_source_rows as _read_classic_stra
 from .evaluate import _refresh_stratified_metadata_from_active_labels as _refresh_stratified_metadata_from_active_labels
 from .evaluate import _score_classic_stratified_rows as _score_classic_stratified_rows
 from .evaluate import _score_eval_candidate_rows as _score_eval_candidate_rows
-from .evaluate import _score_frozen_gate_rows as _score_frozen_gate_rows
 from .evaluate import _select_classic_stratified_eval_rows as _select_classic_stratified_eval_rows
 from .evaluate import _summarize_classic_stratified_predictions as _summarize_classic_stratified_predictions
 from .evaluate import (
@@ -82,18 +73,13 @@ from .evaluate import _validate_unique_stratified_candidate_rows as _validate_un
 from .evaluate import _write_query_predictions as _write_query_predictions
 from .evaluate import evaluate_linker as evaluate_linker
 from .fit import fit_linker as fit_linker
-from .gate import _FALSE_ABSTAIN_REPORT_WEIGHTS as _FALSE_ABSTAIN_REPORT_WEIGHTS
 from .gate import _GATE_BUCKETS as _GATE_BUCKETS
-from .gate import _MISSING_LOGISTIC_CLASS_LOGIT as _MISSING_LOGISTIC_CLASS_LOGIT
 from .gate import _PROMOTED_LOGISTIC_GATE_MODE as _PROMOTED_LOGISTIC_GATE_MODE
 from .gate import _UNSUPPORTED_STRATIFIED_THRESHOLD_GATE_KEYS as _UNSUPPORTED_STRATIFIED_THRESHOLD_GATE_KEYS
 from .gate import WEIGHTED_ERROR_WEIGHTS as WEIGHTED_ERROR_WEIGHTS
 from .gate import _apply_logistic_gate_predictions as _apply_logistic_gate_predictions
 from .gate import _apply_promoted_logistic_gate_to_candidate_rows as _apply_promoted_logistic_gate_to_candidate_rows
 from .gate import _classic_gate_first_name_bucket as _classic_gate_first_name_bucket
-from .gate import _fit_multiclass_logistic_gate as _fit_multiclass_logistic_gate
-from .gate import _fit_promoted_logistic_gate as _fit_promoted_logistic_gate
-from .gate import _fold_standard_scaler_into_logistic as _fold_standard_scaler_into_logistic
 from .gate import _gate_bucket_split_counts as _gate_bucket_split_counts
 from .gate import _promoted_stratified_gate_spec as _promoted_stratified_gate_spec
 from .gate import _query_first_token as _query_first_token
@@ -101,7 +87,6 @@ from .gate import _query_gate_bucket as _query_gate_bucket
 from .gate import _summarize_predictions as _summarize_predictions
 from .gate import _summarize_training_gate_buckets as _summarize_training_gate_buckets
 from .gate import _weighted_error_metrics as _weighted_error_metrics
-from .gate import report_logistic_gate_error_weights as report_logistic_gate_error_weights
 from .ranker import DEFAULT_CLASSIC_N_JOBS as DEFAULT_CLASSIC_N_JOBS
 from .ranker import PROMOTED_NON_PAIRWISE_COLUMNS as PROMOTED_NON_PAIRWISE_COLUMNS
 from .ranker import PROMOTED_PAIRWISE_COLUMNS as PROMOTED_PAIRWISE_COLUMNS

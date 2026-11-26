@@ -14,10 +14,8 @@ import pandas as pd
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.artifact import INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
 from s2and.incremental_linking_training.gate import (
-    _FALSE_ABSTAIN_REPORT_WEIGHTS,
     _apply_promoted_logistic_gate_to_candidate_rows,
     _summarize_predictions,
-    report_logistic_gate_error_weights,
 )
 from s2and.incremental_linking_training.ranker import (
     _classic_feature_matrix,
@@ -140,7 +138,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     predictions = _apply_promoted_logistic_gate_to_candidate_rows(rows, choices, probabilities, gate)
     requested = sum(block["counts"]["requested_queries"] for block in table["blocks"].values())
     judged = int(choices["chosen_candidate_gold_scored"].sum())
-    gate_config = read_json_object(artifact.artifact_dir / "metadata.json")["gate_config"]
     result = {
         "model_manifest_sha256": sha256_file(args.model_path / "manifest.json"),
         "task_manifest_sha256": sha256_file(args.linker_task_manifest),
@@ -153,9 +150,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             "share_of_requests_with_judged_choice": judged / requested,
         },
         "resolved_window_metrics": summarize_blind_gate_predictions(predictions),
-        "false_abstain_weight_report": report_logistic_gate_error_weights(
-            gate_config, rows, choices, probabilities, false_abstain_weights=_FALSE_ABSTAIN_REPORT_WEIGHTS
-        ),
     }
     print(json.dumps(result, indent=2, sort_keys=True))
 

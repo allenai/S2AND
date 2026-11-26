@@ -34,6 +34,9 @@ COMMON_TRAINING_ARGS = (
     "pairwise-stage",
     "--target-json",
     "target.json",
+    "--gate-cutoffs",
+    "0.7",
+    "0.72",
     "--name-counts-index-root",
     "name-counts-index",
     "--n-jobs",
@@ -48,23 +51,6 @@ FULL_MATERIALIZATION_SUMMARIES = tuple(
     {"table_key": key, "rows": 1, "label_filtering": {"train_holdout": {"rows_removed": 0}}}
     for key in promoted_train.REQUIRED_TABLE_KEYS
 )
-
-
-def test_frozen_smoke_sample_covers_marked_gate_blocks() -> None:
-    marked = frozenset(f"block {i}" for i in range(1, 5))
-    rows = pd.DataFrame(
-        [
-            {"dataset": block, "query_group_id": f"{block}:{query}", "label": label}
-            for block in ["block 0", *sorted(marked)]
-            for query in range(8)
-            for label in (0, query % 2)
-        ]
-    )
-    sampled = promoted_train._sample_query_groups_for_smoke(rows, 8, gate_training_blocks=marked)
-    assert set(sampled["dataset"]) == marked
-    assert sampled.groupby("dataset")["query_group_id"].nunique().to_dict() == dict.fromkeys(marked, 2)
-    assert sampled.groupby(["dataset", "query_group_id"])["label"].max().groupby("dataset").sum().eq(1).all()
-    assert sampled.groupby("query_group_id").size().eq(2).all()
 
 
 def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,15 +77,6 @@ def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
         promoted_train,
         "validate_source_bundle_support_files",
         lambda *_args, **_kwargs: ["test-support"],
-    )
-    monkeypatch.setattr(
-        promoted_train,
-        "_release_table_plan",
-        lambda _bundle: (
-            ("train_path", "classic_gate_source_path"),
-            {},
-            ("s2and_eval_path", "hwang_eval_path"),
-        ),
     )
 
 
@@ -315,7 +292,7 @@ def test_arrow_rust_materialization_passes_dataset_handle_to_native_planner(
 
 
 def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tmp_path: Path) -> None:
-    source_classic = {"retrieval_top_k": 7, "classic_gate_calibration_retrieval_limit": 5}
+    source_classic = {"retrieval_top_k": 7}
     retrieval_top_k = 7
     source_root = tmp_path / "source"
     output_root = tmp_path / "output"
@@ -370,12 +347,10 @@ def test_finalized_arrow_materialization_bundle_loads_all_optional_eval_paths(tm
     )
 
     assert bundle.models["classic"]["retrieval_top_k"] == retrieval_top_k
-    assert bundle.models["classic"]["classic_gate_calibration_retrieval_limit"] == retrieval_top_k
     assert bundle.models["classic"]["feature_columns"] == ["f0"]
     assert bundle.models["classic"]["best_params"] == {"n_estimators": 10}
     persisted = json.loads((output_root / "bundle.json").read_text(encoding="utf-8"))
     assert persisted["models"]["classic"]["retrieval_top_k"] == retrieval_top_k
-    assert persisted["models"]["classic"]["classic_gate_calibration_retrieval_limit"] == retrieval_top_k
     assert source_bundle.models == {"classic": source_classic}
     assert {path: (source_root / path).read_bytes() for path in source_bytes} == source_bytes
     assert bundle.assets["corrected_feature_rows"]["root"] == "features_corrected"
@@ -559,10 +534,10 @@ def test_release_serializes_complete_bundle_before_evaluation(
         stage = "materialize_training" if "materialize_training" not in order else "materialize_evaluation"
         if stage == "materialize_training":
             training_authorities.append(_kwargs["holdout_identities"])
-            assert _kwargs["query_ids_by_table"] == {"s2and_eval_path": {"cal:q1", "s2and:q1"}}
+            assert _kwargs["table_keys"] == ("train_path",)
         else:
             assert "holdout_identities" not in _kwargs
-            assert set(_kwargs["table_keys"]) == {"s2and_eval_path", "hwang_eval_path"}
+            assert set(_kwargs["table_keys"]) == {"classic_gate_source_path", "s2and_eval_path", "hwang_eval_path"}
         order.append(stage)
         stage_summaries[stage] = [{**item, "stage": stage} for item in FULL_MATERIALIZATION_SUMMARIES]
         return bundle, stage_summaries[stage]
@@ -583,12 +558,11 @@ def test_release_serializes_complete_bundle_before_evaluation(
     )
 
     def fit_linker(_bundle: Any, **_kwargs: Any) -> Any:
+        assert _kwargs["gate_config"]["training_summary"] == {"t_full": 0.7, "t_init": 0.72}
         if problem == "frozen":
             assert set(_kwargs["frozen_task_rows"]) == {"fit_pool"}
-            assert len(_kwargs["gate_training_blocks"]) == 1
             assert "holdout_identities" not in _kwargs
             assert not _bundle.assets
-            assert _bundle.models["classic"]["promoted_stratified_gate"] == {"false_abstain_weight": 0.3}
         else:
             assert _kwargs["holdout_identities"] is training_authorities[0]
             assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
@@ -668,8 +642,6 @@ def test_release_serializes_complete_bundle_before_evaluation(
                 str(manifest),
                 "--block-role-assignments",
                 str(roles),
-                "--false-abstain-weight",
-                "0.3",
             ]
         )
 
@@ -806,8 +778,8 @@ def _fixed_ranker_source_fixture(tmp_path: Path) -> Path:
     return source
 
 
-@pytest.mark.parametrize("check", ["run", "contract", "opt_in", "source_manifest", "legacy_frozen"])
-def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
+@pytest.mark.parametrize("check", ["run", "contract", "source_manifest", "legacy_frozen"])
+def test_fixed_ranker_run_preserves_booster_with_cutoff_gate(
     tmp_path: Path, check: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from s2and._sha256 import sha256_file
@@ -833,15 +805,16 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
             str(fixed),
             "--expected-ranker-sha256",
             digest,
+            "--gate-cutoffs",
+            "0.7",
+            "0.72",
             "--n-jobs",
             "1",
-            *([] if check == "opt_in" else ["--use-legacy-gate-calibration"]),
         ]
     )
     if check == "legacy_frozen":
         roles = tmp_path / "roles.json"
         roles.write_text(json.dumps(assign_block_roles([BlockSpec("a ross", 1, frozenset())], {"fit_pool": 1})))
-        args.use_legacy_gate_calibration = False
         args.linker_task_manifest = tmp_path / "frozen.json"
         args.block_role_assignments = roles
 
@@ -849,17 +822,11 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
             pytest.fail("contract-1 ranker reached frozen task materialization")
 
         monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", reject_task_read)
-        with pytest.raises(ValueError, match="Contract-1 fixed ranker requires legacy calibration"):
+        with pytest.raises(ValueError, match="Contract-1 fixed ranker requires legacy source inputs"):
             promoted_train.run(args)
         assert not output.exists()
         return
-    if check == "opt_in":
-        try:
-            with pytest.raises(ValueError, match="requires --use-legacy-gate-calibration"):
-                promoted_train.run(args)
-        finally:
-            assert not output.exists()
-    elif check == "source_manifest":
+    if check == "source_manifest":
         path = fixed / "manifest.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         path.write_text(json.dumps({**payload, "format_version": 999}), encoding="utf-8")
@@ -911,7 +878,7 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
         assert set(query_years) == {1800}
         assert set(linker_year_gaps) == {20.0}
         training_tables = {summary["table_key"] for summary in report["feature_materialization_summaries"]["training"]}
-        assert training_tables == {"classic_gate_source_path", "s2and_eval_path"}
+        assert not training_tables
         complete = Path(report["complete_model_path"])
         assert report["evaluation_summary"]["training_summary"]["ranker_refit"] is False
         fixed_booster, _, _ = promoted_train._load_fixed_ranker(fixed, digest)
@@ -923,7 +890,8 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
         assert (complete / booster).read_bytes() == (fixed / booster).read_bytes()
         reloaded = load_production_model(complete).incremental_linker_artifact
         assert reloaded is not None and reloaded.feature_contract_version == 1
-        assert report["artifact_summary"]["gate_config"]["training_summary"]["calibration_queries"] == 2
+        assert report["artifact_summary"]["gate_config"]["training_summary"] == {"t_full": 0.7, "t_init": 0.72}
+        assert report["evaluation_summary"]["abstain_rule"]["internal_eval_metrics"]["n_queries"] == 1
 
 
 @pytest.mark.parametrize("corrupt", ["digest", "staged_copy"])

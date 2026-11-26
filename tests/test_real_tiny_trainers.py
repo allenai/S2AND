@@ -11,6 +11,7 @@ import pytest
 from s2and._sha256 import sha256_file
 from s2and.data import ANDData
 from s2and.incremental_linking_training.classic import fit_classic
+from s2and.incremental_linking_training.gate import cutoff_gate_config
 from s2and.production_training_contract import (
     ModelDataset,
     ProductionArtifactAuthority,
@@ -24,9 +25,10 @@ from tests.training_helpers import write_classic_tiny_bundle
 pytestmark = pytest.mark.tooling
 
 
-def test_fit_classic_fits_real_booster_and_logistic_gate(tmp_path: Path) -> None:
+def test_fit_classic_fits_real_booster(tmp_path: Path) -> None:
     fitted = fit_classic(
         write_classic_tiny_bundle(tmp_path / "classic-bundle"),
+        gate_config=cutoff_gate_config(0.7, 0.72),
         n_jobs=1,
     )
 
@@ -34,12 +36,6 @@ def test_fit_classic_fits_real_booster_and_logistic_gate(tmp_path: Path) -> None
     assert fitted.model.n_features_in_ == 1
     assert fitted.training_summary["rows"] == 22
     assert fitted.training_summary["rows_removed_above_retrieval_top_k"] == 12
-    assert fitted.gate_config["training_summary"]["calibration_queries"] == 4
-    assert fitted.gate_config["feature_names"]
-    gate_weights = np.asarray(fitted.gate_config["weights"], dtype=np.float64)
-    assert gate_weights.shape == (len(fitted.gate_config["feature_names"]), 3)
-    assert np.isfinite(gate_weights).all()
-    assert np.any(gate_weights != 0)
 
 
 def _arrow_plan_dataset(

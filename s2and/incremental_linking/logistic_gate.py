@@ -16,9 +16,6 @@ from s2and.incremental_linking.gate_buckets import first_name_bucket_array
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 
 LOGISTIC_GATE_MODEL_TYPE = "multiclass_logistic_numpy_v1"
-LOGISTIC_GATE_SELECTION_FEATURE_COUNT = 240
-LOGISTIC_GATE_SELECTION_C = 3.0
-LOGISTIC_GATE_FINAL_C = 0.03
 LOGISTIC_GATE_ERROR_WEIGHTS = {
     "false_abstain": 0.25,
     "false_link": 1.0,
@@ -458,14 +455,6 @@ def ranked_query_rows(
         score_margins=score_margins,
         has_runner_up=has_runner_up,
     )
-
-
-def outcome_labels(query_safe_target: Sequence[Any], chosen_candidate_target: Sequence[Any]) -> np.ndarray:
-    """Return logistic gate class labels: 0=no safe, 1=top wrong, 2=top correct."""
-
-    safe = np.asarray(query_safe_target, dtype=np.int8)
-    chosen = np.asarray(chosen_candidate_target, dtype=np.int8)
-    return np.select([safe == 0, chosen == 0], [0, 1], default=2).astype(np.int8)
 
 
 def logistic_gate_config(

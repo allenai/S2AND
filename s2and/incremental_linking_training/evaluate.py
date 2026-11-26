@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -751,30 +751,10 @@ def _score_eval_candidate_rows(
     return pd.concat(frames, ignore_index=True)
 
 
-def _score_frozen_gate_rows(
-    fit_pool: pd.DataFrame,
-    gate_training_blocks: Collection[str],
-    predict: Callable[[Any], np.ndarray],
-    feature_columns: tuple[str, ...],
-) -> ClassicStratifiedEvalScores:
-    """Score complete windows and keep only verified outcomes for gate fitting."""
-    rows = fit_pool.loc[fit_pool["dataset"].isin(gate_training_blocks)].assign(split="fit_pool")
-    probabilities = predict(_classic_feature_matrix(rows, feature_columns))
-    choices = _score_query_choices(rows, probabilities, query_id_column="query_group_id", include_margin=True)
-    choices["split"] = "fit_pool"
-    keep_choices = choices["chosen_candidate_gold_scored"]
-    query_ids = set(choices.loc[keep_choices, "query_case_id"])
-    keep_rows = rows["query_group_id"].isin(query_ids).to_numpy(dtype=bool)
-    return ClassicStratifiedEvalScores(
-        rows.loc[keep_rows], probabilities[keep_rows], choices.loc[keep_choices], pd.DataFrame()
-    )
-
-
 def _classic_internal_eval(
     bundle: OfficialBundle,
     spec: dict[str, Any],
-    predict: Callable[[Any], np.ndarray],
-    feature_columns: tuple[str, ...],
+    predict_rows: Callable[[pd.DataFrame], np.ndarray],
     retrieval_top_k: int,
     gate: NumpyLogisticGate,
 ) -> dict[str, Any]:
@@ -787,7 +767,7 @@ def _classic_internal_eval(
         retrieval_top_k=retrieval_top_k,
         context="classic_gate_source",
     )
-    probabilities = predict(_classic_feature_matrix(rows, feature_columns))
+    probabilities = predict_rows(rows)
     choices = _score_eval_candidate_rows(rows, probabilities, include_margin=True, limits=(retrieval_top_k,))
     groups_path = _resolve_path(bundle, spec["classic_gate_internal_eval_base_groups_path"])
     groups = set(_read_csv(groups_path)["base_group_id"].astype(str))
@@ -904,7 +884,10 @@ def evaluate_linker(
     summary = {
         "model": "classic",
         "training_summary": calibrated.training_summary,
-        "abstain_rule": calibrated.abstain_rule_summary,
+        "abstain_rule": {
+            **calibrated.abstain_rule_summary,
+            "internal_eval_metrics": _classic_internal_eval(bundle, spec, predict_rows, retrieval_top_k, gate),
+        },
         "overall_s2and_eval": s2and_eval_summary,
         "hwang_cleaned_eval": hwang_cleaned_eval,
         "stratified_eval_test_split": stratified_eval_test_summary,

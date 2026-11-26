@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from typing import Any, cast
 
@@ -16,6 +17,26 @@ from s2and.incremental_linking.logistic_gate import (
     load_logistic_gate_config,
     logistic_gate_config,
 )
+from s2and.incremental_linking_training.gate import cutoff_gate_config
+
+
+def test_cutoff_gate_round_trip_and_strict_boundaries() -> None:
+    for t_full, t_init in ((0.7015587970127316, 0.7201976329118557), (0.8, 0.6), (0.0, 1.0), (0.1, 0.9)):
+        config = json.loads(json.dumps(cutoff_gate_config(t_full, t_init)))
+        assert config["training_summary"] == {"t_full": t_full, "t_init": t_init}
+        gate = load_logistic_gate_config(config)
+        assert gate.feature_names == ("chosen_probability", "query_view_initial_only")
+        for view, cutoff in enumerate((t_full, t_init)):
+            probabilities = np.clip([0.0, cutoff - 2e-15, cutoff, cutoff + 2e-15, 1.0], 0.0, 1.0)
+            matrix = np.column_stack((probabilities, np.full(len(probabilities), view)))
+            np.testing.assert_array_equal(gate.predict_link(matrix), probabilities > cutoff)
+
+    t_full, t_init = 0.7015587970127316, 0.7201976329118557
+    gate = load_logistic_gate_config(cutoff_gate_config(t_full, t_init))
+    for view, cutoff in enumerate((t_full, t_init)):
+        probabilities = [np.nextafter(cutoff, 0.0), cutoff, np.nextafter(cutoff, 1.0)]
+        matrix = np.column_stack((probabilities, [view] * 3))
+        np.testing.assert_array_equal(gate.predict_link(matrix), [False, False, True])
 
 
 def test_load_logistic_gate_config_rejects_unknown_model_type() -> None:

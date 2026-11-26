@@ -21,10 +21,12 @@ from s2and.incremental_linking.logistic_gate import (
     feature_values_from_candidate_frame,
 )
 from s2and.incremental_linking.policy import NAME_COUNTS_MANIFEST_SHA256_FIELD
+from s2and.production_model import load_production_model
+from s2and.production_training_contract import load_packaged_artifact_authority
 from scripts.common.block_roles import BlockRoles
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION
 from scripts.common.identity_ledger import BlockEligibility, MentionEvidence
-from scripts.linker import build_linker_inputs
+from scripts.linker import build_linker_inputs, train_linker_and_finalize
 from scripts.linker.build_linker_task_tables import (
     TASK_MANIFEST,
     _freeze_block_rows,
@@ -34,6 +36,7 @@ from scripts.linker.build_linker_task_tables import (
 )
 from scripts.linker.train_linker_and_finalize import _materialize_frozen_linker_tasks
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
+from tests.promoted_linking_helpers import write_synthetic_pairwise_bundle
 from tests.stage0_world import build_stage0_world
 
 pytestmark = pytest.mark.tooling
@@ -234,9 +237,10 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(
         build_linker_inputs, "load_production_model", lambda *_a, **_kw: SimpleNamespace(predict_from_arrow=predict)
     )
     input_dir, output = tmp_path / "inputs", tmp_path / "tasks"
-    build_linker_inputs.build_linker_inputs(
-        world.ledger, world.inputs.keys(), input_dir, tmp_path / "model", queries_per_block=1
-    )
+    authority = load_packaged_artifact_authority(name_counts_index_root=world.name_counts)
+    pairwise = tmp_path / "pairwise"
+    write_synthetic_pairwise_bundle(pairwise, artifact_hashes=authority.hashes, release_version="9.9")
+    build_linker_inputs.build_linker_inputs(world.ledger, world.inputs.keys(), input_dir, pairwise, queries_per_block=1)
     manifest = build_linker_task_tables(
         world.roles_path,
         input_dir / "inputs.json",
@@ -293,6 +297,46 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(
         matrix[:, bucket_column], fit_rows.iloc[choices.best_rows]["query_view"].eq("initial_only")
     )
     manifest_path = output / TASK_MANIFEST
+    features = promoted_linker_feature_columns()
+    target = tmp_path / "target.json"
+    target.write_text(
+        json.dumps(
+            {"feature_count": len(features), "features": features, "params": {"n_estimators": 2}, "metrics": {}}
+        ),
+        encoding="utf-8",
+    )
+    args = train_linker_and_finalize.build_parser().parse_args(
+        [
+            "--linker-task-manifest",
+            str(manifest_path),
+            "--block-role-assignments",
+            str(world.roles_path),
+            "--pairwise-model-path",
+            str(pairwise),
+            "--name-counts-index-root",
+            str(world.name_counts),
+            "--target-json",
+            str(target),
+            "--output-dir",
+            str(tmp_path / "linker"),
+            "--gate-cutoffs",
+            "0.6",
+            "0.8",
+            "--max-query-groups-per-table",
+            "2",
+            "--n-jobs",
+            "1",
+        ]
+    )
+    report = train_linker_and_finalize.run(args)
+    assert report["training_summary"]["ranker_refit"]
+    assert report["artifact_summary"]["gate_config"]["training_summary"] == {"t_full": 0.6, "t_init": 0.8}
+    model_path = Path(report["complete_model_path"])
+    assert model_path.name == "smoke_model_DO_NOT_SHIP"
+    artifact = load_production_model(model_path).incremental_linker_artifact
+    assert artifact is not None
+    np.testing.assert_array_equal(artifact.gate_model.predict_link(np.array([[0.7, 0], [0.7, 1]])), [True, False])
+
     original_manifest = manifest_path.read_bytes()
     manifest_path.write_text(
         json.dumps({**manifest, "distance_policy_version": DISTANCE_POLICY_VERSION - 1}), encoding="utf-8"

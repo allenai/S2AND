@@ -11,9 +11,7 @@ import pandas as pd
 import pytest
 
 from s2and.incremental_linking.logistic_gate import (
-    LOGISTIC_GATE_CLASSES,
     LOGISTIC_GATE_ERROR_WEIGHTS,
-    NumpyLogisticGate,
     load_logistic_gate_config,
     logistic_gate_config,
 )
@@ -26,8 +24,6 @@ from s2and.incremental_linking_training.classic import (
     _evaluate_logistic_manual_holdout,
     _evaluate_logistic_scored_windows,
     _filter_candidate_rows_to_retrieval_top_k,
-    _fit_multiclass_logistic_gate,
-    _fold_standard_scaler_into_logistic,
     _promoted_stratified_gate_spec,
     _resolve_classic_monotone_constraints,
     _resolve_path,
@@ -40,35 +36,6 @@ from s2and.incremental_linking_training.classic import (
 from s2and.incremental_linking_training.classic import (
     _read_csv as _read_official_table,
 )
-
-
-def test_fold_standard_scaler_binary_logistic_matches_sklearn() -> None:
-    labels = np.asarray([1, 2] * 15, dtype=np.int8)
-    rng = np.random.default_rng(20260518 + int(labels[0]))
-    matrix = rng.normal(size=(len(labels), 5)).astype(np.float64)
-    matrix[:, 0] += np.where(labels == int(labels.max()), 0.7, -0.7)
-    matrix[0, 1] = np.nan
-
-    model, scaler, medians = _fit_multiclass_logistic_gate(matrix, labels, c_value=0.2)
-    filled = matrix.copy()
-    row_indices, col_indices = np.nonzero(~np.isfinite(filled))
-    filled[row_indices, col_indices] = medians[col_indices]
-    weights, bias = _fold_standard_scaler_into_logistic(scaler, model)
-    gate = NumpyLogisticGate(
-        feature_names=tuple(f"f{index}" for index in range(matrix.shape[1])),
-        weights=weights,
-        bias=bias,
-        missing_values=medians,
-        classes=LOGISTIC_GATE_CLASSES,
-        error_weights=LOGISTIC_GATE_ERROR_WEIGHTS,
-    )
-
-    expected = np.zeros((len(labels), len(LOGISTIC_GATE_CLASSES)), dtype=np.float64)
-    sklearn_probabilities = model.predict_proba(scaler.transform(filled))
-    for class_position, class_value in enumerate(model.classes_):
-        expected[:, int(class_value)] = sklearn_probabilities[:, class_position]
-
-    np.testing.assert_allclose(gate.predict_proba(matrix), expected, rtol=1e-12, atol=1e-12)
 
 
 def test_official_table_loader_reads_parquet_with_usecols(tmp_path: Path) -> None:

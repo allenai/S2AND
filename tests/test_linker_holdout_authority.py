@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from s2and.incremental_linking_training import classic, fit
+from s2and.incremental_linking_training.gate import cutoff_gate_config
 from scripts.common.initial_query_sources import InitialQuerySources
 from scripts.linker import train_linker_and_finalize as release
 from tests.training_helpers import write_classic_tiny_bundle
@@ -119,6 +120,7 @@ def test_real_fit_requires_early_holdout_exclusion_and_retains_counts(
 ) -> None:
     bundle = write_classic_tiny_bundle(tmp_path / "bundle")
     identities = classic.read_classic_holdout_identities(bundle)
+    gate_config = cutoff_gate_config(0.7, 0.72)
 
     rows = pd.read_csv(bundle.root / "train.csv.gz")
 
@@ -129,7 +131,11 @@ def test_real_fit_requires_early_holdout_exclusion_and_retains_counts(
         patch.setattr(fit, "_build_classic_classifier", no_classifier)
         with pytest.raises(ValueError, match="Materialized training rows overlap"):
             classic.fit_classic(
-                bundle, n_jobs=1, holdout_identities=identities, pre_materialization_holdout_summary={"rows_removed": 2}
+                bundle,
+                gate_config=gate_config,
+                n_jobs=1,
+                holdout_identities=identities,
+                pre_materialization_holdout_summary={"rows_removed": 2},
             )
 
     rows, early = classic._apply_classic_train_holdout_filter(
@@ -144,26 +150,13 @@ def test_real_fit_requires_early_holdout_exclusion_and_retains_counts(
     # until evaluation. The supplied full authority must avoid reopening it.
     bundle.models["classic"]["s2and_eval_path"] = "not-materialized.csv.gz"
     fitted = classic.fit_classic(
-        bundle, n_jobs=1, holdout_identities=identities, pre_materialization_holdout_summary=early
+        bundle,
+        gate_config=gate_config,
+        n_jobs=1,
+        holdout_identities=identities,
+        pre_materialization_holdout_summary=early,
     )
     assert fitted.training_summary["train_holdout_filter_summary"] == early
-
-
-def test_fit_rejects_gate_window_mismatch_before_classifier(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle = write_classic_tiny_bundle(tmp_path / "bundle")
-    bundle.models["classic"].pop("retrieval_top_k")
-    bundle.models["classic"]["classic_gate_calibration_retrieval_limit"] = 5
-    assert bundle.models["classic"].get("retrieval_top_k", classic.DEFAULT_RETRIEVAL_TOP_K) == 25
-
-    def no_classifier(*args: Any, **kwargs: Any) -> Any:
-        pytest.fail("classifier construction must not precede gate window rejection")
-
-    monkeypatch.setattr(fit, "_build_classic_classifier", no_classifier)
-    with pytest.raises(ValueError, match="5 != 25"):
-        classic.fit_classic(bundle, n_jobs=1)
 
 
 @pytest.mark.parametrize("remove_all", [False, True])

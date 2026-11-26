@@ -131,26 +131,6 @@ def test_pairwise_validation_blocks_are_stratified_and_order_independent(tmp_pat
         load_block_roles(path)
 
 
-def test_gate_training_blocks_are_stratified_frozen_and_can_overlap_validation(tmp_path: Path) -> None:
-    blocks = [BlockSpec(f"{origin} {i}", 500, stratum=f"<=1000|{origin}") for origin in "ab" for i in range(14)]
-    targets = {"fit_pool": 24, "gate_thresh": 4}
-    result = assign_block_roles(blocks, targets)
-    marked = result["gate_training_blocks"]
-    assert len(set(marked)) == len(marked) == 20
-    assert set(marked) <= set(result["roles"]["fit_pool"])
-    assert [sum(key.startswith(f"{origin} ") for key in marked) for origin in "ab"] == [10, 10]
-    assert marked == assign_block_roles(blocks[::-1], targets)["gate_training_blocks"]
-    all_fit = assign_block_roles(blocks, targets, gate_training_block_count=24)
-    assert set(all_fit["pairwise_validation_blocks"]) <= set(all_fit["gate_training_blocks"])
-    path = tmp_path / "assignments.json"
-    path.write_text(json.dumps(result), encoding="utf-8")
-    roles = load_block_roles(path)
-    assert roles.gate_training_blocks == set(marked)
-    path.write_text(json.dumps({**result, "gate_training_blocks": result["roles"]["gate_thresh"]}), encoding="utf-8")
-    with pytest.raises(ValueError, match="Gate training blocks outside fit_pool"):
-        load_block_roles(path)
-
-
 def test_giant_caps_include_pins_and_fit_pool_pins_cannot_override_dev_test() -> None:
     blocks = [
         BlockSpec("a khan", 15_001, stratum="giant"),

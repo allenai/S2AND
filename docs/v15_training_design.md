@@ -36,7 +36,7 @@ uv run --offline --no-sync python -m scripts.intake.build_freeze_input \
 uv run --offline --no-sync python -m scripts.intake.assign_block_roles \
   --blocks blocks.parquet --identity-evidence evidence/manifest.json --targets-json targets.json \
   --extra-pins-json reviewed-blocks.json --giant-caps-json giant-caps.json \
-  --pairwise-validation-fraction 0.15 --gate-training-block-count 20 --output-dir freeze
+  --pairwise-validation-fraction 0.15 --output-dir freeze
 ~~~
 
 Intake filters non-S2AG papers, preserves restricted abstracts as `Has Abstract`, hashes structured
@@ -49,8 +49,8 @@ above 15,000 signatures in `giant-caps.json`. Check freeze shortfalls and cross-
 
 To append, reuse the index and allowlists, append evidence with `--append` and the same gold file, and rebuild
 the freeze input. Pass the prior assignment with `--pinned-roles-json` to preserve roles and validation folds.
-Change `--gate-training-block-count` only to select new gate marks. Rebuild hash-bound artifacts after a
-change to the master. Use `--fresh --pinned-roles-json` on the same evidence and blocks to reproduce the master.
+Rebuild hash-bound artifacts after a change to the master. Use `--fresh --pinned-roles-json` on the same
+evidence and blocks to reproduce the master.
 Rebuild evidence and freeze after an ORCID exclusion policy change.
 
 Check sealed overlap against the deployed 1.4 linker source and its Gold ORCID training labels. Add known
@@ -118,7 +118,7 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
 uv run --offline --no-sync python -m scripts.linker.train_linker_and_finalize \
   --linker-task-manifest linker-tasks/linker_tasks.json --block-role-assignments freeze/assignments.json \
   --target-json linker-target.json --pairwise-model-path calibrated-pairwise-1.5 \
-  --name-counts-index-root inference/name_counts_index --output-dir finalized-1.5 --n-jobs N
+  --name-counts-index-root inference/name_counts_index --output-dir finalized-1.5 --gate-cutoffs T_FULL T_INIT --n-jobs N
 ~~~
 
 Freeze native top-25 windows with real names and native first tokens. Hold out whole authors before
@@ -154,10 +154,7 @@ Keep agreed candidate verdicts. Score an abstention only when every candidate ha
 An abstention is correct when all verdicts are `different`. Review judged-choice coverage, undecided share,
 control accuracy, and agreement on jointly decided items.
 
-Keep the configured false-abstain weight unless review approves a change. Match the shipped model's
-initial-only link rate on the same `eps_cal` giants by default. A looser offset requires blind judging of
-new links on unseen giants against an absolute wrong-rate bar with an upper confidence bound. Pass
-reviewed settings with `--false-abstain-weight` or `--initial-only-offset`.
+Pass the reviewed full-name and initial-only ranker probability cutoffs with `--gate-cutoffs T_FULL T_INIT`.
 
 ### 4. Sweep production EPS and score the frozen candidate
 

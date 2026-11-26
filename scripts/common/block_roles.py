@@ -61,7 +61,6 @@ class BlockRoles:
     excluded_orcid_groups_sha256: str | None = None
     gate_block_orcids: dict[str, frozenset[str]] = field(default_factory=dict)
     pairwise_validation_blocks: frozenset[str] = frozenset()
-    gate_training_blocks: frozenset[str] = frozenset()
 
     def require_assignment(self, payload: Mapping[str, object], *, context: str) -> None:
         """Check that an artifact was built with this exact role assignment."""
@@ -164,13 +163,6 @@ def load_block_roles(path: Path) -> BlockRoles:
         or len(set(validation)) != len(validation)
     ):
         raise ValueError(f"Expected unique fit_pool keys in pairwise_validation_blocks in {path}")
-    gate_training = payload.get("gate_training_blocks")
-    if (
-        not isinstance(gate_training, list)
-        or any(not isinstance(block, str) for block in gate_training)
-        or len(set(gate_training)) != len(gate_training)
-    ):
-        raise ValueError(f"Expected unique block keys in gate_training_blocks in {path}. Reassign blocks.")
     bound = payload.get("format_version") == 2
     raw_orcids = payload.get("block_orcids")
     evidence_blocks = payload.get("evidence_blocks", {}) if bound else {}
@@ -226,10 +218,6 @@ def load_block_roles(path: Path) -> BlockRoles:
         payload.get("excluded_orcid_groups_sha256") if bound else None,
         gate_block_orcids,
         frozenset(cast(list[str], validation)),
-        frozenset(cast(list[str], gate_training)),
     )
-    from scripts.common.stage0_invariants import require_gate_training_subset
-
-    require_gate_training_subset(result)
     result.require_current_exclusions()
     return result

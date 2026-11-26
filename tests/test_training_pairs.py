@@ -145,7 +145,6 @@ def test_empty_fit_pool_fails_at_both_boundaries(tmp_path: Path) -> None:
     payload["roles"]["fit_pool"] = []
     payload["block_to_role"] = {"c lane": "gate_thresh"}
     payload["pairwise_validation_blocks"] = []
-    payload["gate_training_blocks"] = []
     world.roles_path.write_text(json.dumps(payload), encoding="utf-8")
     roles = load_block_roles(world.roles_path)
     ledger = ledger_for_roles(world.evidence_path, roles)

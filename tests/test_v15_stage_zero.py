@@ -142,11 +142,8 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
         _json(tmp_path / "targets.json", {"gate_thresh": 1, "fit_pool": 1}),
         "--extra-pins-json",
         _json(tmp_path / "pins.json", {block: "gate_thresh", fit: "fit_pool"}),
-        "--gate-training-block-count",
-        "1",
     )
     roles = load_block_roles(freeze / "assignments.json")
-    assert roles.gate_training_blocks == {fit}
     ledger = ledger_for_roles(evidence, roles)
     assert ledger is not None
     seeds = _parquet(

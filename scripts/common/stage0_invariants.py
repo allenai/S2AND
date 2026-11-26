@@ -31,13 +31,6 @@ def require_fit_pool_coverage(roles: BlockRoles, blocks: Collection[str]) -> Non
         )
 
 
-def require_gate_training_subset(roles: BlockRoles) -> None:
-    """Require each marked gate training block to belong to fit_pool."""
-    outside = sorted(block for block in roles.gate_training_blocks if roles.block_to_role.get(block) != "fit_pool")
-    if outside:
-        raise ValueError(f"Gate training blocks outside fit_pool: {outside}. Reassign blocks.")
-
-
 def read_fit_pool_queries(path: Path, block: str, receipt: Mapping[str, object]) -> set[str]:
     """Read the query IDs bound to the assignment receipt."""
     files = receipt.get("files")

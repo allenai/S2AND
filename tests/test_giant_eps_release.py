@@ -477,7 +477,9 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     dataset = _curve(tmp_path / "curves", sha256_file(manifest), with_source_map=True, test_signature="r2")
 
     with pytest.raises(ValueError, match="EPS review datasets must be unique"):
-        _apply(tmp_path, source, datasets=("unit", "unit"))
+        _apply(tmp_path, source, datasets=("unit", "Unit"))
+    assert not (tmp_path / "output").exists()
+    assert not (tmp_path / "review.json").exists()
     with pytest.raises(ValueError, match="contains final-test records"):
         _apply(tmp_path, source)
 

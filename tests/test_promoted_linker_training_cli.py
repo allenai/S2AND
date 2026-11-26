@@ -479,7 +479,7 @@ def test_query_prediction_export_is_deterministic(tmp_path: Path) -> None:
     assert written["query_safe_target_source"].tolist() == ["manual_override", "retrieved_window"]
 
 
-@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group", "frozen", "non-top25"])
+@pytest.mark.parametrize("problem", [None, "unreviewed-singletons", "missing-test-group", "frozen"])
 def test_release_serializes_complete_bundle_before_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -501,11 +501,6 @@ def test_release_serializes_complete_bundle_before_evaluation(
     if problem == "missing-test-group":
         labels = source_root / "labels" / "hwang_eval.parquet"
         pd.read_parquet(labels).assign(query_group_id="hwang:other").to_parquet(labels, index=False)
-    if problem == "non-top25":
-        source_manifest = source_root / "bundle.json"
-        source_config = json.loads(source_manifest.read_text(encoding="utf-8"))
-        source_config["models"]["classic"]["retrieval_top_k"] = 7
-        source_manifest.write_text(json.dumps(source_config), encoding="utf-8")
     bundle = promoted_train.load_bundle(source_root)
     bundle.models["classic"]["best_params"] = {"n_estimators": 1}
     map_path = bundle.root / "incremental_patent_tasks" / "initial_query_source_map.jsonl"
@@ -591,6 +586,9 @@ def test_release_serializes_complete_bundle_before_evaluation(
         if problem == "frozen":
             assert set(_kwargs["frozen_task_rows"]) == {"fit_pool"}
             assert len(_kwargs["gate_training_blocks"]) == 1
+            assert "holdout_identities" not in _kwargs
+            assert not _bundle.assets
+            assert _bundle.models["classic"]["promoted_stratified_gate"] == {"false_abstain_weight": 0.3}
         else:
             assert _kwargs["holdout_identities"] is training_authorities[0]
             assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
@@ -644,14 +642,18 @@ def test_release_serializes_complete_bundle_before_evaluation(
     )
     args = [
         *COMMON_TRAINING_ARGS,
-        "--source-bundle-root",
-        str(source_root),
         "--name-counts-index-root",
         str(source_root / "name_counts_index"),
         "--output-dir",
         str(output_dir),
     ]
-    if problem in {"frozen", "non-top25"}:
+    if problem == "frozen":
+
+        def reject_source(*_args: Any, **_kwargs: Any) -> Any:
+            pytest.fail("Frozen fit accessed 1.4 inputs or evaluation")
+
+        for name in ("load_bundle", "preflight_source_rows", "evaluate_linker"):
+            monkeypatch.setattr(promoted_train, name, reject_source)
         role_names = ("fit_pool", "gate_thresh")
         roles = tmp_path / "roles.json"
         roles.write_text(
@@ -659,26 +661,30 @@ def test_release_serializes_complete_bundle_before_evaluation(
             encoding="utf-8",
         )
         manifest = tmp_path / "tasks.json"
-        if problem == "frozen":
-            manifest.write_text("{}", encoding="utf-8")
-        args.extend(["--linker-task-manifest", str(manifest), "--block-role-assignments", str(roles)])
+        manifest.write_text("{}", encoding="utf-8")
+        args.extend(
+            [
+                "--linker-task-manifest",
+                str(manifest),
+                "--block-role-assignments",
+                str(roles),
+                "--false-abstain-weight",
+                "0.3",
+            ]
+        )
 
         def materialize_frozen_tasks(
             path: Path, *_args: Any, **_kwargs: Any
         ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
-            assert problem == "frozen", "Fetched frozen task rows before validating the source window"
             assert path == manifest
             order.append("materialize_training")
             stage_summaries["materialize_training"] = []
             return {"fit_pool": pd.DataFrame()}, []
 
         monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", materialize_frozen_tasks)
-        if problem == "non-top25":
-            with pytest.raises(ValueError, match="Frozen linker tasks require top-25"):
-                promoted_train.main(args)
-            assert not order
-            return
-    elif problem is not None:
+    else:
+        args.extend(["--source-bundle-root", str(source_root)])
+    if problem in {"unreviewed-singletons", "missing-test-group"}:
         message = {
             "unreviewed-singletons": "0/10 marked negative_singleton_orcid views",
             "missing-test-group": "did not all match source rows.*hwang:q1",
@@ -692,6 +698,12 @@ def test_release_serializes_complete_bundle_before_evaluation(
     promoted_train.main(args)
 
     result = json.loads(capsys.readouterr().out)
+    if problem == "frozen":
+        assert order == ["materialize_training", "fit", "serialize", "finalize", "reload"]
+        assert result["training_summary"] == summary["training_summary"]
+        assert result["feature_materialization_summaries"]["evaluation"] == []
+        assert json.loads((output_dir / "linker_training_report.json").read_text()) == result
+        return
     assert order == [
         "materialize_training",
         "fit",

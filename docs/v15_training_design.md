@@ -193,6 +193,9 @@ Agreed blind verdicts supply the gate threshold labels, including for mixed cand
 with `python -m scripts.linker.blind_gate_metrics`. Pass its `--model-path`, `--linker-task-manifest`,
 `--block-role-assignments`, `--gate-thresh-judgments`, `--name-counts-index-root`, and `--n-jobs`.
 The report checks the judgment bindings and gives judged-choice coverage across the requested queries.
+Run `scripts.linker.train_linker_and_finalize` with the frozen task manifest, role assignments, linker target,
+name-counts index, and pairwise bundle. The frozen fit writes `linker_training_report.json`.
+Use `--false-abstain-weight` or `--initial-only-offset` to pass a reviewed gate setting explicitly.
 Use `--blocks` and a fresh output directory to inspect a subset. Training requires every frozen
 `fit_pool` block. Keep the linker input
 receipts available so the trainer can check the input model, name-counts index, and seed digests.

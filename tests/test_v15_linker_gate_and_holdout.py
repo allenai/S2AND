@@ -254,7 +254,6 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
                 "feature_columns": ["feature"],
                 "best_params": {},
                 "promoted_stratified_gate": gate,
-                "stratified_eval_test_split": {},
             }
         },
     )
@@ -263,7 +262,6 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     result = classic_training.fit_classic(
         bundle,
         n_jobs=1,
-        holdout_identities=classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
         frozen_task_rows={"fit_pool": fit_pool},
         gate_training_blocks={f"block {i}" for i in range(4)},
         **ranker_args,

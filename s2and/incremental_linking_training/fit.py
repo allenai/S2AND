@@ -115,7 +115,13 @@ def fit_linker(
         train_df["label"] = pd.to_numeric(train_df["label"], errors="coerce").fillna(0).astype(np.int8)
         if pre_materialization_holdout_summary is not None and holdout_identities is None:
             raise ValueError("Pre-materialization holdout summary requires complete holdout identities")
-        identities = read_classic_holdout_identities(bundle) if holdout_identities is None else holdout_identities
+        identities = holdout_identities
+        if identities is None:
+            identities = (
+                read_classic_holdout_identities(bundle)
+                if frozen_task_rows is None
+                else ClassicHoldoutIdentities(frozenset(), frozenset(), ())
+            )
         train_df, train_holdout_filter_summary = _apply_classic_train_holdout_filter(
             train_df,
             holdout_query_group_ids=set(identities.query_group_ids),
@@ -179,7 +185,7 @@ def fit_linker(
     promoted_gate_summary: dict[str, Any] | None = None
     if promoted_gate_config is None:
         raise ValueError("classic.promoted_stratified_gate is required")
-    if spec.get("stratified_eval_test_split") is None:
+    if frozen_task_rows is None and spec.get("stratified_eval_test_split") is None:
         raise ValueError("classic.promoted_stratified_gate requires classic.stratified_eval_test_split")
 
     if frozen_task_rows is None:

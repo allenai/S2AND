@@ -223,10 +223,10 @@ Rebuild older task tables to include the receipt paths and native query first to
 The gate selects logistic `C` and feature count `k` by four-fold cross-validation grouped by block, minimizing binary safe-link log loss across at least four marked blocks with scored queries.
 The gate keeps `query_view_initial_only` and adds `classic.promoted_stratified_gate.initial_only_offset` (default `0.0`) to its safe-class weight after folding the scaler into the weights.
 The offset sets the initial-only operating point in subblocked giants, where 99.6% of runtime gate calls are initial-only.
-Blind judging passed +2.5 on the 51-block CV gate, a 52% runtime initial-only link rate per call.
 The logit value does not transfer across refits: a 16-block gate already links 42% without an offset.
-For each refit, pick the offset on `eps_cal` giants that reaches at most that judged link rate.
-Confirm it with the sized `gate_thresh` blind review before release.
+By default, set the offset so that the refit's runtime initial-only link rate on `eps_cal` giants matches the shipped model's rate on the same blocks.
+That reproduces an operating point that has already shipped. When 1.4 was recreated with this machinery, the recreated gate matched shipped 1.4's 44% rate at offset +1.22 and scored +0.035 B3 F1 [−0.11, +0.20] against it on 13 unseen giants.
+A more liberal operating point requires blind judging of the links it adds on unseen giants, against an absolute wrong-rate bar with an upper confidence bound.
 
 ### 10. Mine pairs and train the pairwise heads
 

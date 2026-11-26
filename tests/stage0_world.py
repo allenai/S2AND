@@ -52,6 +52,7 @@ def build_stage0_world(
     empty_block: bool = False,
     all_ineligible_block: bool = False,
     validation_blocks: tuple[str, ...] = ("b crane",),
+    gate_block_outside_fit_pool: bool = False,
     sampling_hazard: str | None = None,
     with_query: bool = False,
 ) -> Stage0World:
@@ -104,7 +105,7 @@ def build_stage0_world(
         freeze_input = directory / "freeze.parquet"
         build_freeze_input(evidence, source, freeze_input)
         frozen = freeze_identity_roles(
-            freeze_input, evidence, {"fit_pool": len(clusters), "gate_fit": 1}, extra_pins={"c lane": "gate_fit"}
+            freeze_input, evidence, {"fit_pool": len(clusters), "gate_thresh": 1}, extra_pins={"c lane": "gate_thresh"}
         )
         frozen["pairwise_validation_blocks"] = list(validation_blocks)
         _write_json(roles_path, frozen)
@@ -244,4 +245,8 @@ def build_stage0_world(
 
     ledger = ledger_for_roles(evidence, roles)
     assert ledger is not None
+    if gate_block_outside_fit_pool:
+        payload = json.loads(roles_path.read_text(encoding="utf-8"))
+        payload["gate_training_blocks"].append("c lane")
+        _write_json(roles_path, payload)
     return Stage0World(roles_path, evidence, name_counts, inputs, mined, manifest_path, roles, ledger)

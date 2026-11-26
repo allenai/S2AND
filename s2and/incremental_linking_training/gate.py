@@ -37,6 +37,12 @@ _GATE_BUCKETS = (
 
 
 _MISSING_LOGISTIC_CLASS_LOGIT = -30.0
+_SAFE_LINK_CLASS = 2
+_INITIAL_ONLY_FEATURE = "query_view_initial_only"
+_GATE_CV_FOLDS = 4
+_GATE_CV_SEED = 20261125
+_GATE_CV_C = (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0)
+_GATE_CV_K = (60, 120, 240, "all")
 
 
 _PROMOTED_LOGISTIC_GATE_MODE = "promoted_logistic_topk_multiclass_l2"
@@ -154,6 +160,11 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
         if not np.isfinite(weight) or weight <= 0:
             raise ValueError("classic.promoted_stratified_gate.false_abstain_weight must be finite and positive")
         out["false_abstain_weight"] = weight
+    if "initial_only_offset" in out:
+        offset = float(out["initial_only_offset"])
+        if not np.isfinite(offset):
+            raise ValueError("classic.promoted_stratified_gate.initial_only_offset must be finite")
+        out["initial_only_offset"] = offset
     return out
 
 
@@ -351,26 +362,29 @@ def _fold_standard_scaler_into_logistic(
     return weights, bias
 
 
+def _fill_gate_matrix(matrix: np.ndarray, medians: np.ndarray) -> np.ndarray:
+    """Replace nonfinite gate features with the fitted column medians."""
+    filled = np.array(matrix, dtype=np.float64, copy=True)
+    rows, columns = np.nonzero(~np.isfinite(filled))
+    filled[rows, columns] = medians[columns]
+    return filled
+
+
 def _fit_multiclass_logistic_gate(
     matrix: np.ndarray,
     labels: np.ndarray,
     *,
     c_value: float,
 ) -> tuple[LogisticRegression, StandardScaler, np.ndarray]:
-    """Fit the sklearn calibration model and return the filled raw matrix."""
+    """Fit the gate and return the fitted scaler and imputation medians."""
 
     raw_matrix = np.asarray(matrix, dtype=np.float64)
     finite = np.isfinite(raw_matrix)
     medians = np.zeros(raw_matrix.shape[1], dtype=np.float64)
     for column_index in np.flatnonzero(finite.any(axis=0)):
         medians[column_index] = np.median(raw_matrix[finite[:, column_index], column_index])
-    filled = raw_matrix.copy()
-    invalid = ~np.isfinite(filled)
-    if np.any(invalid):
-        row_indices, col_indices = np.nonzero(invalid)
-        filled[row_indices, col_indices] = medians[col_indices]
     scaler = StandardScaler()
-    scaled = scaler.fit_transform(filled)
+    scaled = scaler.fit_transform(_fill_gate_matrix(raw_matrix, medians))
     model = LogisticRegression(
         C=float(c_value),
         l1_ratio=0.0,
@@ -380,6 +394,86 @@ def _fit_multiclass_logistic_gate(
     )
     model.fit(scaled, labels)
     return model, scaler, medians
+
+
+def _rank_gate_features(
+    matrix: np.ndarray, labels: np.ndarray, names: tuple[str, ...], selection_c: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rank features by their largest absolute standardized class coefficient."""
+    model, _, _ = _fit_multiclass_logistic_gate(matrix, labels, c_value=selection_c)
+    importance = np.max(np.abs(np.asarray(model.coef_, dtype=np.float64)), axis=0)
+    return np.lexsort((np.asarray(names, dtype=object), -importance)), importance
+
+
+def _select_gate_columns(ranked: np.ndarray, count: int, initial_only_index: int) -> np.ndarray:
+    """Keep the initial-only feature within the selected feature budget."""
+    selected = ranked[:count].copy()
+    if initial_only_index not in selected:
+        selected[-1] = initial_only_index
+    return selected
+
+
+def _choose_gate_hyperparameters(
+    matrix: np.ndarray,
+    labels: np.ndarray,
+    blocks: np.ndarray,
+    names: tuple[str, ...],
+    selection_c: float,
+) -> tuple[int, float, dict[str, Any]]:
+    """Choose k and final C by query-weighted binary safe-link log loss across block folds."""
+    block_names, counts = np.unique(blocks, return_counts=True)
+    if len(block_names) < _GATE_CV_FOLDS:
+        raise ValueError(
+            f"Gate cross-validation requires at least {_GATE_CV_FOLDS} fit_pool blocks with scored queries, "
+            f"found {len(block_names)}"
+        )
+    folds: list[list[str]] = [[] for _ in range(_GATE_CV_FOLDS)]
+    loads = [0] * _GATE_CV_FOLDS
+    # Balance query counts and break equal-count ties with a fixed block permutation.
+    shuffled = np.random.default_rng(_GATE_CV_SEED).permutation(len(block_names))
+    for index in shuffled[np.argsort(-counts[shuffled], kind="stable")]:
+        slot = int(np.argmin(loads))
+        folds[slot].append(str(block_names[index]))
+        loads[slot] += int(counts[index])
+
+    initial_only_index = names.index(_INITIAL_ONLY_FEATURE)
+    feature_counts = [k if isinstance(k, int) else len(names) for k in _GATE_CV_K]
+    losses = np.empty((_GATE_CV_FOLDS, len(feature_counts), len(_GATE_CV_C)))
+    for fold_index, held_out in enumerate(folds):
+        test = np.isin(blocks, held_out)
+        train_matrix, train_labels = matrix[~test], labels[~test]
+        test_matrix, safe = matrix[test], labels[test] == _SAFE_LINK_CLASS
+        if np.unique(train_labels).size < 2:
+            raise ValueError(f"Gate cross-validation needs two outcome classes outside held-out blocks {held_out}")
+        ranked, _ = _rank_gate_features(train_matrix, train_labels, names, selection_c)
+        for ki, count in enumerate(feature_counts):
+            columns = _select_gate_columns(ranked, count, initial_only_index)
+            train_features, test_features = train_matrix[:, columns], test_matrix[:, columns]
+            for ci, c in enumerate(_GATE_CV_C):
+                model, scaler, medians = _fit_multiclass_logistic_gate(train_features, train_labels, c_value=c)
+                proba = model.predict_proba(scaler.transform(_fill_gate_matrix(test_features, medians)))
+                # An absent safe class contributes zero predicted probability before clipping.
+                p_safe = np.clip(proba[:, model.classes_ == _SAFE_LINK_CLASS].sum(axis=1), 1e-9, 1 - 1e-9)
+                losses[fold_index, ki, ci] = -np.mean(np.where(safe, np.log(p_safe), np.log1p(-p_safe)))
+
+    means = np.average(losses, weights=loads, axis=0)
+    ki, ci = np.unravel_index(np.argmin(means), means.shape)
+    return (
+        feature_counts[ki],
+        _GATE_CV_C[ci],
+        {
+            "seed": _GATE_CV_SEED,
+            "k_grid": list(_GATE_CV_K),
+            "c_grid": list(_GATE_CV_C),
+            "folds": [
+                {"blocks": held_out, "queries": loads[i], "log_loss": losses[i].tolist()}
+                for i, held_out in enumerate(folds)
+            ],
+            "mean_log_loss": means.tolist(),
+            "selected_k": _GATE_CV_K[ki],
+            "selected_c": _GATE_CV_C[ci],
+        },
+    )
 
 
 def _apply_logistic_gate_predictions(choices: pd.DataFrame, link: np.ndarray) -> pd.DataFrame:
@@ -412,12 +506,16 @@ def _fit_promoted_logistic_gate(
     selection_feature_count: int = LOGISTIC_GATE_SELECTION_FEATURE_COUNT,
     selection_c: float = LOGISTIC_GATE_SELECTION_C,
     final_c: float = LOGISTIC_GATE_FINAL_C,
+    grouped_cv: bool = False,
+    initial_only_offset: float = 0.0,
 ) -> dict[str, Any]:
     """Fit the prod-safe NumPy logistic gate on configured calibration/fit splits.
 
     When ``fit_splits`` and ``validation_splits`` are separated, feature selection and
     model weights are fit strictly on ``fit_splits`` and out-of-sample ``validation_metrics``
-    are computed on ``validation_splits``.
+    are computed on ``validation_splits``. Grouped CV selects the feature count and
+    final regularization within the fit splits. The initial-only offset adjusts
+    the fitted safe-link weight in raw feature space.
     """
 
     all_feature_names = default_logistic_gate_feature_names()
@@ -465,15 +563,20 @@ def _fit_promoted_logistic_gate(
         raise ValueError(f"logistic gate requires non-empty validation splits: {list(active_val_splits)}")
     labels = outcome_labels(choices["query_safe_target"], choices["chosen_candidate_target"])
 
-    selection_model, _selection_scaler, _selection_medians = _fit_multiclass_logistic_gate(
-        full_matrix[fit_mask],
-        labels[fit_mask],
-        c_value=float(selection_c),
+    fit_matrix, fit_labels = full_matrix[fit_mask], labels[fit_mask]
+    cv_summary = None
+    if grouped_cv:
+        selection_feature_count, final_c, cv_summary = _choose_gate_hyperparameters(
+            fit_matrix,
+            fit_labels,
+            choices.loc[fit_mask, "dataset"].astype(str).to_numpy(),
+            all_feature_names,
+            selection_c,
+        )
+    ranked_indices, importance = _rank_gate_features(fit_matrix, fit_labels, all_feature_names, selection_c)
+    selected_indices = _select_gate_columns(
+        ranked_indices, selection_feature_count, all_feature_names.index(_INITIAL_ONLY_FEATURE)
     )
-    selection_coef = np.asarray(selection_model.coef_, dtype=np.float64)
-    importance = np.max(np.abs(selection_coef), axis=0)
-    ranked_indices = np.lexsort((np.asarray(all_feature_names, dtype=object), -importance))
-    selected_indices = ranked_indices[: int(selection_feature_count)]
     selected_feature_names = tuple(all_feature_names[int(index)] for index in selected_indices)
     selected_matrix = full_matrix[:, selected_indices]
 
@@ -483,17 +586,21 @@ def _fit_promoted_logistic_gate(
         c_value=float(final_c),
     )
     weights, bias = _fold_standard_scaler_into_logistic(final_scaler, final_model)
+    if initial_only_offset:
+        weights[selected_feature_names.index(_INITIAL_ONLY_FEATURE), _SAFE_LINK_CLASS] += initial_only_offset
     resolved_error_weights = dict(LOGISTIC_GATE_ERROR_WEIGHTS if error_weights is None else error_weights)
     training_summary: dict[str, Any] = {
         "calibration_splits": [str(split) for split in calibration_splits],
         "selection_feature_count": int(selection_feature_count),
         "selection_c": float(selection_c),
         "final_c": float(final_c),
+        "initial_only_offset": float(initial_only_offset),
         "all_feature_count": int(len(all_feature_names)),
         "selected_feature_count": int(len(selected_feature_names)),
         "calibration_queries": int(calibration_mask.sum()),
     }
-    # Preserve exact 1.4 metadata keys when fit_splits/validation_splits are not separated.
+    if cv_summary is not None:
+        training_summary["grouped_cv"] = cv_summary
     if fit_splits is not None or validation_splits is not None:
         training_summary.update(
             {

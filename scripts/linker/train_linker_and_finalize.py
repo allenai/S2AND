@@ -115,7 +115,7 @@ from scripts.common.linker_seeds import (  # noqa: E402
 )
 from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
 from scripts.linker.blind_gate_metrics import update_blind_gate_metrics  # noqa: E402
-from scripts.linker.build_linker_task_tables import TASK_BLOCK_ROLES, TASK_ROLES  # noqa: E402
+from scripts.linker.build_linker_task_tables import TASK_ROLES  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
 evaluate_classic = evaluate_linker
@@ -1332,7 +1332,9 @@ def _finalize_arrow_rust_bundle_metadata(
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target)
 
 
-def _sample_query_groups_for_smoke(labels: pd.DataFrame, max_query_groups: int) -> pd.DataFrame:
+def _sample_query_groups_for_smoke(
+    labels: pd.DataFrame, max_query_groups: int, *, gate_training_blocks: frozenset[str] = frozenset()
+) -> pd.DataFrame:
     """Deterministically cap a row table to at most ``max_query_groups`` query groups.
 
     Preserves both positive-bearing and all-negative query groups when both exist so
@@ -1348,8 +1350,18 @@ def _sample_query_groups_for_smoke(labels: pd.DataFrame, max_query_groups: int) 
         return labels
     if "label" in labels.columns and max_query_groups >= 2:
         has_pos = labels.groupby(query_ids)["label"].max() > 0
-        pos_qids = sorted(str(qid) for qid, flag in has_pos.items() if bool(flag))
-        neg_qids = sorted(str(qid) for qid, flag in has_pos.items() if not bool(flag))
+        if gate_training_blocks:
+            # Spread each label across marked blocks to give grouped CV usable folds.
+            blocks = labels["dataset"].groupby(query_ids).first()
+            order = pd.DataFrame(
+                {
+                    "unmarked": ~blocks.isin(gate_training_blocks),
+                    "position": has_pos.groupby([blocks, has_pos]).cumcount(),
+                }
+            ).sort_values(["unmarked", "position"])
+            has_pos = has_pos.reindex(order.index)
+        pos_qids = [str(qid) for qid, flag in has_pos.items() if bool(flag)]
+        neg_qids = [str(qid) for qid, flag in has_pos.items() if not bool(flag)]
         selected: list[str] = []
         pos_idx = 0
         neg_idx = 0
@@ -2047,7 +2059,7 @@ def _validate_frozen_task_bindings(
     bound_blocks = set()
     for role, table in manifest["tables"].items():
         blocks = set(table["blocks"])
-        assigned = {block for block, assignment in roles.block_to_role.items() if assignment in TASK_BLOCK_ROLES[role]}
+        assigned = {block for block, assignment in roles.block_to_role.items() if assignment == role}
         if not blocks or blocks != assigned:
             raise ValueError(
                 f"Linker task {role!r} does not match the frozen block roles. "
@@ -2093,7 +2105,7 @@ def _materialize_frozen_linker_tasks(
     if gate_judgments is not None and roles.evidence_sha256 is None:
         raise ValueError("Gate threshold judgments require ledger-backed linker tasks")
     if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
-        raise ValueError("The linker manifest must contain exactly fit_pool, gate_fit and gate_thresh at top-25")
+        raise ValueError("The linker manifest must contain exactly fit_pool and gate_thresh at top-25")
     index_sha256 = (
         clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] if roles.evidence_sha256 is not None else None
     )
@@ -2116,7 +2128,11 @@ def _materialize_frozen_linker_tasks(
         if rows["dataset"].value_counts().to_dict() != expected_counts:
             raise ValueError(f"Frozen linker rows do not match block counts: {table_path}")
         if max_query_groups is not None:
-            rows = _sample_query_groups_for_smoke(rows, max_query_groups)
+            rows = _sample_query_groups_for_smoke(
+                rows,
+                max_query_groups,
+                gate_training_blocks=roles.gate_training_blocks if role == "fit_pool" else frozenset(),
+            )
         materialized = []
         for block, block_rows in rows.groupby("dataset", sort=False):
             spec = table["blocks"][block]
@@ -2281,6 +2297,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 **({"gate_judgments": gate_judgments} if gate_judgments is not None else {}),
             )
             fit_kwargs["frozen_task_rows"] = task_rows
+            fit_kwargs["gate_training_blocks"] = block_roles.gate_training_blocks
             if gate_judgments is not None:
                 blind_gate_rows = task_rows["gate_thresh"]
         else:
@@ -2445,9 +2462,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--gate-thresh-judgments", type=Path, help="Bound blind judging consensus for production requests."
     )
-    parser.add_argument(
-        "--linker-task-manifest", type=Path, help="Use frozen fit_pool, gate_fit and gate_thresh tasks."
-    )
+    parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen fit_pool and gate_thresh tasks.")
     parser.add_argument("--block-role-assignments", type=Path, help="Role manifest used to build the linker tables.")
     parser.add_argument(
         "--expected-initial-query-map-sha256",

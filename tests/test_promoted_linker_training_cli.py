@@ -50,6 +50,23 @@ FULL_MATERIALIZATION_SUMMARIES = tuple(
 )
 
 
+def test_frozen_smoke_sample_covers_marked_gate_blocks() -> None:
+    marked = frozenset(f"block {i}" for i in range(1, 5))
+    rows = pd.DataFrame(
+        [
+            {"dataset": block, "query_group_id": f"{block}:{query}", "label": label}
+            for block in ["block 0", *sorted(marked)]
+            for query in range(8)
+            for label in (0, query % 2)
+        ]
+    )
+    sampled = promoted_train._sample_query_groups_for_smoke(rows, 8, gate_training_blocks=marked)
+    assert set(sampled["dataset"]) == marked
+    assert sampled.groupby("dataset")["query_group_id"].nunique().to_dict() == dict.fromkeys(marked, 2)
+    assert sampled.groupby(["dataset", "query_group_id"])["label"].max().groupby("dataset").sum().eq(1).all()
+    assert sampled.groupby("query_group_id").size().eq(2).all()
+
+
 def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         promoted_train,
@@ -572,7 +589,8 @@ def test_release_serializes_complete_bundle_before_evaluation(
 
     def fit_linker(_bundle: Any, **_kwargs: Any) -> Any:
         if problem == "frozen":
-            assert set(_kwargs["frozen_task_rows"]) == {"fit_pool", "gate_fit", "gate_thresh"}
+            assert set(_kwargs["frozen_task_rows"]) == {"fit_pool", "gate_thresh"}
+            assert len(_kwargs["gate_training_blocks"]) == 1
         else:
             assert _kwargs["holdout_identities"] is training_authorities[0]
             assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
@@ -634,10 +652,10 @@ def test_release_serializes_complete_bundle_before_evaluation(
         str(output_dir),
     ]
     if problem in {"frozen", "non-top25"}:
-        role_names = ("fit_pool", "gate_fit", "gate_thresh")
+        role_names = ("fit_pool", "gate_thresh")
         roles = tmp_path / "roles.json"
         roles.write_text(
-            json.dumps(assign_block_roles([BlockSpec(f"test {i}", 2) for i in range(3)], dict.fromkeys(role_names, 1))),
+            json.dumps(assign_block_roles([BlockSpec(f"test {i}", 2) for i in range(2)], dict.fromkeys(role_names, 1))),
             encoding="utf-8",
         )
         manifest = tmp_path / "tasks.json"
@@ -810,7 +828,7 @@ def test_fixed_ranker_run_preserves_booster_and_calibrates_gate(
     )
     if check == "legacy_frozen":
         roles = tmp_path / "roles.json"
-        roles.write_text(json.dumps(assign_block_roles([BlockSpec("a ross", 1, frozenset())], {"gate_fit": 1})))
+        roles.write_text(json.dumps(assign_block_roles([BlockSpec("a ross", 1, frozenset())], {"fit_pool": 1})))
         args.use_legacy_gate_calibration = False
         args.linker_task_manifest = tmp_path / "frozen.json"
         args.block_role_assignments = roles

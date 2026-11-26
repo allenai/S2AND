@@ -140,11 +140,14 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
         "--output-dir",
         freeze,
         "--targets-json",
-        _json(tmp_path / "targets.json", {"gate_thresh": 1, "gate_fit": 1}),
+        _json(tmp_path / "targets.json", {"gate_thresh": 1, "fit_pool": 1}),
         "--extra-pins-json",
-        _json(tmp_path / "pins.json", {block: "gate_thresh", fit: "gate_fit"}),
+        _json(tmp_path / "pins.json", {block: "gate_thresh", fit: "fit_pool"}),
+        "--gate-training-block-count",
+        "1",
     )
     roles = load_block_roles(freeze / "assignments.json")
+    assert roles.gate_training_blocks == {fit}
     ledger = ledger_for_roles(evidence, roles)
     assert ledger is not None
     seeds = _parquet(
@@ -311,7 +314,7 @@ def test_mixed_role_packet_resolves_fit_controls_from_frozen_papers(
         control_queries=controls,
         block_roles=ledger.roles,
         ledger=ledger,
-        allowed_roles={"gate_thresh", "gate_fit"},
+        allowed_roles={"gate_thresh", "fit_pool"},
         linker_task_manifest=task,
         output_dir=output,
     )
@@ -416,11 +419,11 @@ def test_score_gate_key_after_unrelated_control_change(
     )
     roles = replace(
         ledger.roles,
-        block_to_role={**ledger.roles.block_to_role, fit_block: "gate_fit"},
+        block_to_role={**ledger.roles.block_to_role, fit_block: "fit_pool"},
         source_splits={**ledger.roles.source_splits, fit_block: "development"},
         evidence_blocks={**ledger.roles.evidence_blocks, fit_block: "d" * 64, control_block: "a" * 64},
         block_orcids={**ledger.roles.block_orcids, fit_block: frozenset(), control_block: frozenset({DEPOSITED})},
-        identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"gate_fit"})},
+        identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"fit_pool"})},
     )
     payload = json.loads(key.read_text())
     gate_item = payload["items"][0]

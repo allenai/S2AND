@@ -61,12 +61,12 @@ ASSIGNABLE_ROLES = (
     *FINAL_TEST_ROLES,
     "eps_cal",
     "gate_thresh",
-    "gate_fit",
     "fit_pool",
     "dev_test",
 )
-TRAINING_AND_TUNING_ROLES = frozenset({"fit_pool", "gate_fit", "gate_thresh", "eps_cal"})
+TRAINING_AND_TUNING_ROLES = frozenset({"fit_pool", "gate_thresh", "eps_cal"})
 DEFAULT_PAIRWISE_VALIDATION_FRACTION = 0.15
+DEFAULT_GATE_TRAINING_BLOCK_COUNT = 20
 
 
 @dataclass(frozen=True)
@@ -431,17 +431,28 @@ def _pairwise_validation_fold(
     if fraction and len(fit) >= 2:
         target = max(1, target)
     # Keep at least one fitting block, including when the prior pool was empty.
-    draws = max(0, target - len(prior_validation))
+    return _select_fit_pool_blocks(blocks, fit.difference(prior_fit), target, seed, "validation", prior_validation)
+
+
+def _select_fit_pool_blocks(
+    blocks: Mapping[str, BlockSpec],
+    eligible: Collection[str],
+    target: int,
+    seed: int,
+    subset: str,
+    prior: Collection[str] = (),
+) -> list[str]:
+    """Fill the requested subset proportionally across the eligible strata."""
     selected: dict[str, str] = {}
     _allocate_strata(
-        [(key,) for key in fit.difference(prior_fit)],
+        [(key,) for key in eligible],
         blocks,
-        {"validation": draws},
+        {subset: max(0, target - len(prior))},
         selected,
         seed=seed,
         enforce_source_splits=False,
     )
-    return sorted(set(prior_validation) | selected.keys())
+    return sorted(set(prior) | selected.keys())
 
 
 def assign_block_roles(
@@ -455,6 +466,7 @@ def assign_block_roles(
     excluded_blocks: Collection[str] = (),
     giant_caps: Mapping[str, int] | None = None,
     pairwise_validation_fraction: float = DEFAULT_PAIRWISE_VALIDATION_FRACTION,
+    gate_training_block_count: int = DEFAULT_GATE_TRAINING_BLOCK_COUNT,
     closure_mode: Literal["strict", "block_only"] = "strict",
     enforce_source_splits: bool = False,
     require_pinned_present: bool = False,
@@ -472,6 +484,7 @@ def assign_block_roles(
         excluded_blocks: Extra blocks to exclude alongside ``PERMANENT_EXCLUDED_BLOCKS``.
         giant_caps: Maximum number of blocks above 15,000 signatures per specified role, including pins.
         pairwise_validation_fraction: Fraction of fit_pool blocks held out from pairwise fitting.
+        gate_training_block_count: Target number of fit_pool blocks marked for gate training.
         closure_mode: Use block-only allocation or require identity-disjoint blocks.
         enforce_source_splits: When True, both final test halves accept only ``holdout`` blocks and
             training/tuning roles accept only ``development`` blocks.
@@ -492,6 +505,8 @@ def assign_block_roles(
             raise ValueError(f"Target count for {role!r} must be >= 0, got {count}")
     if not 0 <= pairwise_validation_fraction < 1:
         raise ValueError("Pairwise validation fraction must be in [0, 1)")
+    if gate_training_block_count < 0:
+        raise ValueError("Gate training block count must be nonnegative")
     caps = dict(giant_caps or {})
     for role, cap in caps.items():
         if role not in VALID_ROLES or type(cap) is not int or cap < 0:
@@ -741,6 +756,10 @@ def assign_block_roles(
         "pairwise_validation_blocks": _pairwise_validation_fold(
             by_key, block_to_role, pairwise_validation_fraction, seed
         ),
+        "gate_training_block_count": gate_training_block_count,
+        "gate_training_blocks": _select_fit_pool_blocks(
+            by_key, roles["fit_pool"], gate_training_block_count, seed, "gate_training"
+        ),
         "block_orcids": {key: sorted(by_key[key].orcids) for key in sorted(block_to_role)},
         "block_signature_counts": {key: by_key[key].signature_count for key in sorted(block_to_role)},
         "unassigned": sorted(by_key.keys() - block_to_role.keys()),
@@ -845,6 +864,7 @@ def freeze_identity_roles(
     excluded_blocks: Collection[str] = (),
     giant_caps: Mapping[str, int] | None = None,
     pairwise_validation_fraction: float | None = None,
+    gate_training_block_count: int | None = None,
     seed: int = 20261123,
 ) -> dict[str, Any]:
     """Freeze only exported blocks and discard every cross-role identity from scoring."""
@@ -864,6 +884,7 @@ def freeze_identity_roles(
         or excluded_blocks
         or giant_caps is not None
         or pairwise_validation_fraction is not None
+        or gate_training_block_count is not None
     ):
         raise ValueError("--fresh reuses the master assignment and cannot take allocation options")
     if receipts:
@@ -891,15 +912,17 @@ def freeze_identity_roles(
     prior_unassigned: set[str] = set()
     prior_fit: Collection[str] = ()
     prior_validation: Collection[str] = ()
+    prior_gate_training: frozenset[str] = frozenset()
     if prior_path is not None and prior is not None:
+        prior_roles = load_block_roles(prior_path)
         if prior.get("format_version") != 2 or prior.get("intake_sha256") != evidence.intake_sha256:
             raise ValueError("Re-freeze requires a prior ledger-backed manifest from the same intake")
         if any(evidence_blocks.get(block) != digest for block, digest in prior["evidence_blocks"].items()):
             raise ValueError("Prior evidence partitions changed or are missing")
-        prior_roles = load_block_roles(prior_path)
         pins.update(prior_roles.block_to_role)
         prior_fit = prior["roles"]["fit_pool"]
         prior_validation = prior_roles.pairwise_validation_blocks
+        prior_gate_training = prior_roles.gate_training_blocks
         prior_exclusions = prior["excluded_blocks"]
         prior_unassigned = set(prior["unassigned"])
         prior_blocks = prior["evidence_blocks"].keys()
@@ -929,6 +952,13 @@ def freeze_identity_roles(
         if prior is not None
         else DEFAULT_PAIRWISE_VALIDATION_FRACTION
     )
+    gate_count = (
+        gate_training_block_count
+        if gate_training_block_count is not None
+        else prior["gate_training_block_count"]
+        if prior is not None
+        else DEFAULT_GATE_TRAINING_BLOCK_COUNT
+    )
     if fresh:
         assert prior is not None
         roles = prior
@@ -943,19 +973,30 @@ def freeze_identity_roles(
             excluded_blocks=(*prior_exclusions, *excluded_blocks),
             giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
             pairwise_validation_fraction=fraction,
+            gate_training_block_count=gate_count,
             closure_mode="block_only",
             enforce_source_splits=True,
             require_pinned_present=True,
         )
         if prior_fit:
+            by_key = {block.block_key: block for block in blocks}
             roles["pairwise_validation_blocks"] = _pairwise_validation_fold(
-                {block.block_key: block for block in blocks},
+                by_key,
                 roles["block_to_role"],
                 fraction,
                 seed,
                 prior_fit=prior_fit,
                 prior_validation=prior_validation,
             )
+            if gate_training_block_count is None:
+                roles["gate_training_blocks"] = _select_fit_pool_blocks(
+                    by_key,
+                    set(roles["roles"]["fit_pool"]) - prior_gate_training,
+                    gate_count,
+                    seed,
+                    "gate_training",
+                    prior_gate_training,
+                )
     mapping = roles["block_to_role"]
     block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
     identity_roles = assigned_identity_roles(block_orcids, mapping)
@@ -1039,6 +1080,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--pairwise-validation-fraction", type=float, help="Holdout fraction within fit_pool (default 0.15)."
     )
+    parser.add_argument(
+        "--gate-training-block-count", type=int, help="Target gate training blocks within fit_pool (default 20)."
+    )
     parser.add_argument("--exclude-blocks", nargs="*", default=())
     parser.add_argument(
         "--fresh", action="store_true", help="Reproduce the master assignment without allocating blocks."
@@ -1072,6 +1116,7 @@ def main(argv: list[str] | None = None) -> int:
             excluded_blocks=args.exclude_blocks,
             giant_caps=read_json_object(args.giant_caps_json) if args.giant_caps_json else None,
             pairwise_validation_fraction=args.pairwise_validation_fraction,
+            gate_training_block_count=args.gate_training_block_count,
             seed=args.seed,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)

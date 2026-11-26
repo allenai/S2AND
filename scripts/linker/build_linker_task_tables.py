@@ -44,12 +44,7 @@ from scripts.common.orcid_references import (  # noqa: E402
 )
 from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
 
-TASK_BLOCK_ROLES = {
-    "fit_pool": frozenset({"fit_pool"}),
-    "gate_fit": frozenset({"gate_fit"}),
-    "gate_thresh": frozenset({"gate_thresh"}),
-}
-TASK_ROLES = tuple(TASK_BLOCK_ROLES)
+TASK_ROLES = ("fit_pool", "gate_thresh")
 TASK_MANIFEST = "linker_tasks.json"
 _PLAN_BATCH_SIZE = 128
 _TASK_COLUMNS = (
@@ -294,10 +289,7 @@ def build_linker_task_tables(
     by_block = {normalize_block_key(key): spec for key, spec in inputs.items()}
     if len(inputs) != len(by_block):
         raise ValueError("Duplicate normalized block keys in linker inputs")
-    task_blocks = {
-        task: {block for block, role in roles.block_to_role.items() if role in allowed}
-        for task, allowed in TASK_BLOCK_ROLES.items()
-    }
+    task_blocks = {task: {block for block, role in roles.block_to_role.items() if role == task} for task in TASK_ROLES}
     required = set().union(*task_blocks.values())
     if blocks is not None:
         requested = {normalize_block_key(block) for block in blocks}

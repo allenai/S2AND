@@ -26,7 +26,7 @@ def assignment_digest(path: Path) -> str:
 GATE_BINDINGS_FIELD = "gate_thresh_block_bindings"
 GATE_CANDIDATE_ORCIDS = "gate_thresh_candidate_orcids"
 FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
-VALID_ROLES = ("fit_pool", "gate_fit", "eps_cal", "gate_thresh", "dev_test", *FINAL_TEST_ROLES)
+VALID_ROLES = ("fit_pool", "eps_cal", "gate_thresh", "dev_test", *FINAL_TEST_ROLES)
 _WHITESPACE_OR_UNDERSCORE = re.compile(r"[\s_]+")
 
 
@@ -61,6 +61,7 @@ class BlockRoles:
     excluded_orcid_groups_sha256: str | None = None
     gate_block_orcids: dict[str, frozenset[str]] = field(default_factory=dict)
     pairwise_validation_blocks: frozenset[str] = frozenset()
+    gate_training_blocks: frozenset[str] = frozenset()
 
     def require_assignment(self, payload: Mapping[str, object], *, context: str) -> None:
         """Check that an artifact was built with this exact role assignment."""
@@ -132,10 +133,15 @@ def load_block_roles(path: Path) -> BlockRoles:
     """Load the scored assignments and reject inconsistent manifests."""
     content = path.read_bytes()
     payload = json.loads(content.decode("utf-8"))
+    roles = payload.get("roles")
+    block_to_role = payload.get("block_to_role")
+    if (isinstance(roles, dict) and "gate_fit" in roles) or (
+        isinstance(block_to_role, dict) and "gate_fit" in block_to_role.values()
+    ):
+        raise ValueError(f"Block role manifest {path} uses the retired gate_fit role. Reassign blocks.")
     verification = payload.get("verification", {})
     if not isinstance(verification, dict) or verification.get("cross_role_orcid_overlap") != 0:
         raise ValueError(f"Block role manifest {path} does not certify zero cross-role ORCID overlap for scoring")
-    roles = payload.get("roles")
     if not isinstance(roles, dict):
         raise ValueError(f"Block role manifest {path} is missing roles")
     by_block: dict[str, str] = {}
@@ -158,6 +164,13 @@ def load_block_roles(path: Path) -> BlockRoles:
         or len(set(validation)) != len(validation)
     ):
         raise ValueError(f"Expected unique fit_pool keys in pairwise_validation_blocks in {path}")
+    gate_training = payload.get("gate_training_blocks")
+    if (
+        not isinstance(gate_training, list)
+        or any(not isinstance(block, str) for block in gate_training)
+        or len(set(gate_training)) != len(gate_training)
+    ):
+        raise ValueError(f"Expected unique block keys in gate_training_blocks in {path}. Reassign blocks.")
     bound = payload.get("format_version") == 2
     raw_orcids = payload.get("block_orcids")
     evidence_blocks = payload.get("evidence_blocks", {}) if bound else {}
@@ -213,6 +226,10 @@ def load_block_roles(path: Path) -> BlockRoles:
         payload.get("excluded_orcid_groups_sha256") if bound else None,
         gate_block_orcids,
         frozenset(cast(list[str], validation)),
+        frozenset(cast(list[str], gate_training)),
     )
+    from scripts.common.stage0_invariants import require_gate_training_subset
+
+    require_gate_training_subset(result)
     result.require_current_exclusions()
     return result

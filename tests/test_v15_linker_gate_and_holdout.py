@@ -225,7 +225,6 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     rows = rows.assign(feature=probabilities, candidate_gold_scored=True)
     rows.loc[rows["query_group_id"].isin({"q_000", "q_049"}), "candidate_gold_scored"] = False
     marked = rows.loc[rows["split"].eq("calibration_fit")]
-    gate_thresh = rows.loc[rows["split"].eq("calibration_check")]
     extra = marked.assign(dataset="unmarked", query_group_id=lambda frame: "extra_" + frame["query_group_id"])
     fit_pool = pd.concat([marked, extra], ignore_index=True)
     fitted_rows = []
@@ -265,10 +264,7 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
         bundle,
         n_jobs=1,
         holdout_identities=classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
-        frozen_task_rows={
-            "fit_pool": fit_pool,
-            "gate_thresh": gate_thresh,
-        },
+        frozen_task_rows={"fit_pool": fit_pool},
         gate_training_blocks={f"block {i}" for i in range(4)},
         **ranker_args,
     )
@@ -278,7 +274,7 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
         assert result.training_summary["ranker_refit"] is False
     summary = result.gate_config["training_summary"]
     assert summary["fit_queries"] == 39
-    assert summary["validation_queries"] == 20
+    assert summary["validation_queries"] == 0
     assert summary["initial_only_offset"] == offset
     assert "query_view_initial_only" in result.gate_config["feature_names"]
     cv = summary["grouped_cv"]
@@ -296,8 +292,7 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     assert cv["selected_c"] == cv["c_grid"][ci] == summary["final_c"]
     assert result.gate_config["error_weights"]["false_abstain"] == (configured_weight or 0.25)
     report = result.abstain_rule_summary["promoted_logistic_gate"]["false_abstain_weight_report"]
-    assert report["n_queries"] == 20
-    assert report["configured_false_abstain_weight"] == result.gate_config["error_weights"]["false_abstain"]
+    assert report is None
 
 
 def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path: Path) -> None:

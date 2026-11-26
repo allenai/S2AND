@@ -95,8 +95,6 @@ from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 from scripts.common.arrow_roots import read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
-    GATE_BINDINGS_FIELD,
-    GATE_CANDIDATE_ORCIDS,
     BlockRoles,
     load_block_roles,
 )
@@ -108,14 +106,11 @@ from scripts.common.initial_query_sources import (  # noqa: E402
     load_initial_query_sources,
 )
 from scripts.common.linker_seeds import (  # noqa: E402
-    GATE_SEED_DIGESTS,
     PRODUCTION_MAX_EXEMPLARS,
     members_by_component,
     read_frozen_seeds,
 )
 from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
-from scripts.linker.blind_gate_metrics import update_blind_gate_metrics  # noqa: E402
-from scripts.linker.build_linker_task_tables import TASK_ROLES  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
 evaluate_classic = evaluate_linker
@@ -2004,60 +1999,19 @@ def _release_table_plan(
     return training_keys, calibration_query_ids, evaluation_keys
 
 
-def _apply_blind_gate_labels(
-    rows: pd.DataFrame, report: Mapping[str, Any], roles: BlockRoles, blocks: Mapping[str, Any]
-) -> pd.DataFrame:
-    """Attach agreed blind outcomes to the matching frozen production window."""
-    if not rows["label"].isna().all() or rows["query_gold_scored"].any() or rows["candidate_gold_scored"].any():
-        raise ValueError("Frozen production requests must have no pre-existing labels")
-    vetoes = rows.get("candidate_has_vetoed_identity")
-    if vetoes is None or not pd.api.types.is_bool_dtype(vetoes) or vetoes.isna().any():
-        raise ValueError("Frozen gate tasks must record candidate identity vetoes. Rebuild the tasks.")
-    keys = ["dataset", "query_signature_id", "candidate_component_key"]
-    judged = pd.DataFrame.from_records(report.get("gate_thresh_labels", []), columns=[*keys, "verdict"])
-    if judged.empty or judged.duplicated(keys).any() or not judged["verdict"].isin({"same", "different"}).all():
-        raise ValueError("Expected unique, agreed gate threshold verdicts")
-    indexed = pd.MultiIndex.from_frame(rows[keys])
-    decisions = judged.set_index(keys)["verdict"]
-    if not indexed.is_unique or len(decisions.index.difference(indexed)):
-        raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
-    candidates = report.get(GATE_CANDIDATE_ORCIDS)
-    if (
-        not isinstance(candidates, dict)
-        or set(judged["dataset"]) - candidates.keys()
-        or report.get(GATE_BINDINGS_FIELD) != roles.gate_judgment_bindings(candidates)
-    ):
-        raise ValueError("Gate threshold judgments block provenance does not match the identity ledger")
-    seed_digests = report.get(GATE_SEED_DIGESTS)
-    if (
-        not isinstance(seed_digests, dict)
-        or candidates.keys() != seed_digests.keys()
-        or any(block not in blocks or digest != blocks[block]["seeds_sha256"] for block, digest in seed_digests.items())
-    ):
-        raise ValueError("Gate threshold judgments do not match the frozen seed assignments")
-    for block, block_rows in rows.groupby("dataset", sort=False):
-        members = members_by_component(read_frozen_seeds(blocks[str(block)]))
-        if missing := set(block_rows["candidate_component_key"]) - members.keys():
-            raise ValueError(f"Gate candidates have no frozen seed members in {block!r}: {sorted(missing)}")
-    labeled = rows.copy()
-    verdicts = decisions.reindex(indexed).reset_index(drop=True)
-    known = verdicts.notna() & ~vetoes.reset_index(drop=True)
-    labeled["label"] = (verdicts.eq("same") & known).astype("int8").to_numpy()
-    labeled["candidate_gold_scored"] = known.to_numpy()
-    grouped = labeled.groupby("query_group_id", sort=False)
-    labeled["query_gold_scored"] = grouped["candidate_gold_scored"].transform("all")
-    labeled["gold_safe_target"] = grouped["label"].transform("any")
-    return labeled
-
-
 def _validate_frozen_task_bindings(
-    manifest: Mapping[str, Any], roles: BlockRoles, *, index_sha256: str | None = None
+    manifest: Mapping[str, Any], roles: BlockRoles, *, task_role: str | None = None, index_sha256: str | None = None
 ) -> None:
     """Check the roles and block provenance of every frozen task table."""
     roles.require_current_exclusions()
     roles.require_assignment(manifest, context="Frozen linker tasks")
     bound_blocks = set()
-    for role, table in manifest["tables"].items():
+    tables = manifest["tables"]
+    if task_role is not None:
+        if task_role not in tables:
+            raise ValueError(f"Missing frozen linker table for {task_role!r}")
+        tables = {task_role: tables[task_role]}
+    for role, table in tables.items():
         blocks = set(table["blocks"])
         assigned = {block for block, assignment in roles.block_to_role.items() if assignment == role}
         if not blocks or blocks != assigned:
@@ -2069,7 +2023,7 @@ def _validate_frozen_task_bindings(
     if roles.evidence_sha256 is not None:
         roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")
         common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
-        for table in manifest["tables"].values():
+        for table in tables.values():
             for block, spec in table["blocks"].items():
                 path = spec.get("input_manifest")
                 if not isinstance(path, str) or not path:
@@ -2089,7 +2043,7 @@ def _materialize_frozen_linker_tasks(
     n_jobs: int,
     total_ram_bytes: int,
     max_query_groups: int | None,
-    gate_judgments: Path | None = None,
+    role: str = "fit_pool",
 ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
     """Verify frozen inputs and attach model features without changing candidate windows."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -2098,88 +2052,73 @@ def _materialize_frozen_linker_tasks(
         or manifest.get("s2and_version") != __version__
     ):
         raise ValueError("Frozen linker tasks use a different distance policy or package version. Rebuild the tasks.")
-    if roles.evidence_sha256 is not None and (
-        gate_judgments is None or manifest.get("gate_label_source") != "blind_judging"
-    ):
-        raise ValueError("Ledger-backed linker tasks require --gate-thresh-judgments")
-    if gate_judgments is not None and roles.evidence_sha256 is None:
-        raise ValueError("Gate threshold judgments require ledger-backed linker tasks")
-    if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
-        raise ValueError("The linker manifest must contain exactly fit_pool and gate_thresh at top-25")
+    if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K:
+        raise ValueError("Frozen linker tasks require top-25 windows")
     index_sha256 = (
         clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] if roles.evidence_sha256 is not None else None
     )
-    _validate_frozen_task_bindings(manifest, roles, index_sha256=index_sha256)
-    tasks: dict[str, pd.DataFrame] = {}
+    _validate_frozen_task_bindings(manifest, roles, task_role=role, index_sha256=index_sha256)
     summaries = []
-    for role in TASK_ROLES:
-        table = manifest["tables"][role]
-        table_path = manifest_path.parent / table["path"]
-        if sha256_file(table_path) != table["sha256"]:
-            raise ValueError(f"Frozen linker table changed: {table_path}")
-        rows = pd.read_parquet(table_path)
-        if role == "gate_thresh" and gate_judgments is not None:
-            rows = _apply_blind_gate_labels(
-                rows, json.loads(gate_judgments.read_text(encoding="utf-8")), roles, table["blocks"]
+    table = manifest["tables"][role]
+    table_path = manifest_path.parent / table["path"]
+    if sha256_file(table_path) != table["sha256"]:
+        raise ValueError(f"Frozen linker table changed: {table_path}")
+    rows = pd.read_parquet(table_path)
+    expected_counts = {
+        block: spec["counts"]["rows"] for block, spec in table["blocks"].items() if spec["counts"]["rows"]
+    }
+    if rows["dataset"].value_counts().to_dict() != expected_counts:
+        raise ValueError(f"Frozen linker rows do not match block counts: {table_path}")
+    if max_query_groups is not None:
+        rows = _sample_query_groups_for_smoke(
+            rows,
+            max_query_groups,
+            gate_training_blocks=roles.gate_training_blocks if role == "fit_pool" else frozenset(),
+        )
+    materialized = []
+    for block, block_rows in rows.groupby("dataset", sort=False):
+        spec = table["blocks"][block]
+        seeds = read_frozen_seeds(spec)
+        members = members_by_component(seeds)
+        with ArrowDataset.open(spec["arrow_dir"], require_specter=True, require_name_counts_index=True) as arrow:
+            if arrow.generation_id != spec["arrow_generation_id"]:
+                raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
+            require_arrow_name_counts_index_for_clusterer(clusterer, arrow, context=f"frozen linker task {block!r}")
+            context = ArrowRustDatasetContext(
+                dataset_name=str(block),
+                row_component_scope="block-local",
+                pairwise_component_scope="block-local",
+                runtime_context=build_runtime_context("joint_safe_link_arrow_rust_featureization", backend="rust"),
+                arrow_dataset=arrow,
+                component_members=members,
+                cluster_seeds_require=seeds,
+                cluster_seeds_disallow=frozenset(),
+                max_block_component_size=max(map(len, members.values())),
+                shard_query_signature_ids=frozenset(block_rows["query_signature_id"]),
             )
-        expected_counts = {
-            block: spec["counts"]["rows"] for block, spec in table["blocks"].items() if spec["counts"]["rows"]
-        }
-        if rows["dataset"].value_counts().to_dict() != expected_counts:
-            raise ValueError(f"Frozen linker rows do not match block counts: {table_path}")
-        if max_query_groups is not None:
-            rows = _sample_query_groups_for_smoke(
-                rows,
-                max_query_groups,
-                gate_training_blocks=roles.gate_training_blocks if role == "fit_pool" else frozenset(),
-            )
-        materialized = []
-        for block, block_rows in rows.groupby("dataset", sort=False):
-            spec = table["blocks"][block]
-            seeds = read_frozen_seeds(spec)
-            members = members_by_component(seeds)
-            with ArrowDataset.open(spec["arrow_dir"], require_specter=True, require_name_counts_index=True) as arrow:
-                if arrow.generation_id != spec["arrow_generation_id"]:
-                    raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
-                require_arrow_name_counts_index_for_clusterer(clusterer, arrow, context=f"frozen linker task {block!r}")
-                context = ArrowRustDatasetContext(
-                    dataset_name=str(block),
-                    row_component_scope="block-local",
-                    pairwise_component_scope="block-local",
-                    runtime_context=build_runtime_context("joint_safe_link_arrow_rust_featureization", backend="rust"),
-                    arrow_dataset=arrow,
-                    component_members=members,
-                    cluster_seeds_require=seeds,
-                    cluster_seeds_disallow=frozenset(),
-                    max_block_component_size=max(map(len, members.values())),
-                    shard_query_signature_ids=frozenset(block_rows["query_signature_id"]),
-                )
-                try:
-                    group_codes = pd.factorize(block_rows["query_group_id"], sort=False)[0]
-                    for _, shard in block_rows.groupby(group_codes // 128, sort=False):
-                        features, summary, _ = _materialize_arrow_rust_dataset_rows(
-                            context=context,
-                            rows=shard,
-                            target_features=target_features,
-                            name_tuples=name_tuples,
-                            clusterer=clusterer,
-                            n_jobs=n_jobs,
-                            total_ram_bytes=total_ram_bytes,
-                            max_exemplars=PRODUCTION_MAX_EXEMPLARS,
-                            pairwise_model_nan_value=float("nan"),
-                            pairwise_aggregate_nan_value=0.0,
-                            frozen_retrieval=True,
-                        )
-                        feature_rows = _rows_with_materialized_target_features(shard, features, target_features)
-                        _validate_materialized_target_features(
-                            feature_rows, target_features, context=f"{role}: {block}"
-                        )
-                        materialized.append(feature_rows)
-                        summaries.append({"table_key": role, **summary})
-                finally:
-                    _release_arrow_rust_dataset_context(context)
-        tasks[role] = pd.concat(materialized, ignore_index=True)
-    return tasks, summaries
+            try:
+                group_codes = pd.factorize(block_rows["query_group_id"], sort=False)[0]
+                for _, shard in block_rows.groupby(group_codes // 128, sort=False):
+                    features, summary, _ = _materialize_arrow_rust_dataset_rows(
+                        context=context,
+                        rows=shard,
+                        target_features=target_features,
+                        name_tuples=name_tuples,
+                        clusterer=clusterer,
+                        n_jobs=n_jobs,
+                        total_ram_bytes=total_ram_bytes,
+                        max_exemplars=PRODUCTION_MAX_EXEMPLARS,
+                        pairwise_model_nan_value=float("nan"),
+                        pairwise_aggregate_nan_value=0.0,
+                        frozen_retrieval=True,
+                    )
+                    feature_rows = _rows_with_materialized_target_features(shard, features, target_features)
+                    _validate_materialized_target_features(feature_rows, target_features, context=f"{role}: {block}")
+                    materialized.append(feature_rows)
+                    summaries.append({"table_key": role, **summary})
+            finally:
+                _release_arrow_rust_dataset_context(context)
+    return {role: pd.concat(materialized, ignore_index=True)}, summaries
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -2196,9 +2135,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     source_bundle = load_bundle(args.source_bundle_root)
     frozen_manifest = getattr(args, "linker_task_manifest", None)
     roles_path = getattr(args, "block_role_assignments", None)
-    gate_judgments = getattr(args, "gate_thresh_judgments", None)
-    if gate_judgments is not None and frozen_manifest is None:
-        raise ValueError("--gate-thresh-judgments requires frozen linker tasks")
     if (frozen_manifest is None) != (roles_path is None):
         raise ValueError("--linker-task-manifest and --block-role-assignments must be used together")
     block_roles = load_block_roles(roles_path) if roles_path is not None else None
@@ -2277,7 +2213,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Never publish a normal production_model_vX bundle from a smoke run.
             complete_model_dir = output_dir / "smoke_model_DO_NOT_SHIP"
         fit_kwargs: dict[str, Any] = {}
-        blind_gate_rows: pd.DataFrame | None = None
         if frozen_manifest is not None and block_roles is not None:
             feature_bundle = _bundle_with_promoted_target(source_bundle, target)
             if (
@@ -2294,12 +2229,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 n_jobs=int(args.n_jobs),
                 total_ram_bytes=int(args.total_ram_bytes),
                 max_query_groups=max_query_groups,
-                **({"gate_judgments": gate_judgments} if gate_judgments is not None else {}),
             )
             fit_kwargs["frozen_task_rows"] = task_rows
             fit_kwargs["gate_training_blocks"] = block_roles.gate_training_blocks
-            if gate_judgments is not None:
-                blind_gate_rows = task_rows["gate_thresh"]
         else:
             feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
                 source_bundle=source_bundle,
@@ -2340,13 +2272,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             **({"fixed_ranker": fixed_ranker} if fixed_ranker is not None else {}),
             **fit_kwargs,
         )
-        if blind_gate_rows is not None:
-            update_blind_gate_metrics(
-                calibrated,
-                blind_gate_rows,
-                tuple(feature_bundle.models["classic"]["feature_columns"]),
-                int(args.n_jobs),
-            )
         artifact_metadata = save_incremental_linking_artifact(
             calibrated.model,
             artifact_dir,
@@ -2459,10 +2384,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--use-legacy-gate-calibration", action="store_true", help="Fit with the source M1 calibration rows."
     )
-    parser.add_argument(
-        "--gate-thresh-judgments", type=Path, help="Bound blind judging consensus for production requests."
-    )
-    parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen fit_pool and gate_thresh tasks.")
+    parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen fit_pool tasks.")
     parser.add_argument("--block-role-assignments", type=Path, help="Role manifest used to build the linker tables.")
     parser.add_argument(
         "--expected-initial-query-map-sha256",

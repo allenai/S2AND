@@ -22,7 +22,6 @@ from s2and.thread_config import resolve_n_jobs
 
 from .evaluate import _classic_internal_eval, _score_classic_stratified_rows, _score_frozen_gate_rows
 from .gate import (
-    _FALSE_ABSTAIN_REPORT_WEIGHTS,
     _PROMOTED_LOGISTIC_GATE_MODE,
     _fit_promoted_logistic_gate,
     _promoted_stratified_gate_spec,
@@ -69,7 +68,7 @@ def fit_linker(
             may omit this when the bundle retains complete holdout tables.
         pre_materialization_holdout_summary: Earlier exclusion counts to report.
             When supplied, any remaining overlap is a materialization failure.
-        frozen_task_rows: Optional featureized fit_pool and gate_thresh windows.
+        frozen_task_rows: Optional featureized fit_pool windows.
         gate_training_blocks: Frozen fit_pool blocks marked for gate training.
         fixed_ranker: Verified source booster to reuse without fitting.
 
@@ -198,10 +197,12 @@ def fit_linker(
             retrieval_top_k=retrieval_top_k,
         )
     else:
-        calibration_splits = ("fit_pool", "gate_thresh")
+        calibration_splits = ("fit_pool",)
         fit_splits = ("fit_pool",)
-        validation_splits = ("gate_thresh",)
-        stratified_scores = _score_frozen_gate_rows(frozen_task_rows, gate_training_blocks, predict, feature_columns)
+        validation_splits = None
+        stratified_scores = _score_frozen_gate_rows(
+            frozen_task_rows["fit_pool"], gate_training_blocks, predict, feature_columns
+        )
     calibration_split_label = "+".join(calibration_splits)
     selected_gate_result = _fit_promoted_logistic_gate(
         stratified_scores.rows,
@@ -221,8 +222,6 @@ def fit_linker(
     )
     logistic_gate_config = dict(selected_gate_result["gate_config"])
     fa_grid = promoted_gate_config.get("tune_false_abstain_weights")
-    if frozen_task_rows is not None and fa_grid is None:
-        fa_grid = _FALSE_ABSTAIN_REPORT_WEIGHTS
     weight_report: dict[str, Any] | None = None
     if fa_grid is not None and validation_splits is not None:
         val_splits = tuple(str(s) for s in validation_splits)
@@ -281,7 +280,7 @@ def fit_linker(
             bundle, spec, predict, feature_columns, retrieval_top_k, load_logistic_gate_config(logistic_gate_config)
         )
         if frozen_task_rows is None
-        else dict(selected_gate_result["validation_metrics"])
+        else None
     )
     return CalibratedClassicModel(
         model=model,

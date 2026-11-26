@@ -189,10 +189,12 @@ The builder preserves real names and native first tokens for gate features and f
 authors before retrieval. Ledger-backed fitting tasks require scored queries and seed assignments
 for every eligible non-query signature. Gold-labeled roles check every seed member for identity purity.
 The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.
-Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
-report to the trainer with `--gate-thresh-judgments`. The trainer checks candidate keys against the frozen
-windows and leaves unresolved outcomes unscored. Use `--blocks` and a fresh output directory to
-inspect a subset. Training requires every frozen block for each task role. Keep the linker input
+Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Score the fitted bundle
+with `python -m scripts.linker.blind_gate_metrics`. Pass its `--model-path`, `--linker-task-manifest`,
+`--block-role-assignments`, `--gate-thresh-judgments`, `--name-counts-index-root`, and `--n-jobs`.
+The report checks the judgment bindings and gives judged-choice coverage across the requested queries.
+Use `--blocks` and a fresh output directory to inspect a subset. Training requires every frozen
+`fit_pool` block. Keep the linker input
 receipts available so the trainer can check the input model, name-counts index, and seed digests.
 Rebuild older ledger-backed task tables to include the receipt paths.
 The gate selects logistic `C` and feature count `k` by four-fold cross-validation grouped by block, minimizing binary safe-link log loss across at least four marked blocks with scored queries.

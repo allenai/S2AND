@@ -589,7 +589,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
 
     def fit_linker(_bundle: Any, **_kwargs: Any) -> Any:
         if problem == "frozen":
-            assert set(_kwargs["frozen_task_rows"]) == {"fit_pool", "gate_thresh"}
+            assert set(_kwargs["frozen_task_rows"]) == {"fit_pool"}
             assert len(_kwargs["gate_training_blocks"]) == 1
         else:
             assert _kwargs["holdout_identities"] is training_authorities[0]
@@ -670,7 +670,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
             assert path == manifest
             order.append("materialize_training")
             stage_summaries["materialize_training"] = []
-            return {role: pd.DataFrame() for role in role_names}, []
+            return {"fit_pool": pd.DataFrame()}, []
 
         monkeypatch.setattr(promoted_train, "_materialize_frozen_linker_tasks", materialize_frozen_tasks)
         if problem == "non-top25":

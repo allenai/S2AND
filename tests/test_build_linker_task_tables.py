@@ -264,6 +264,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
     assert not natural["whole_author_holdout"].any()
     assert int(natural.loc[natural["query_signature_id"].eq("q_full"), "label"].sum()) == 2
     assert not natural.loc[natural["query_signature_id"].eq("q_outside_home"), "candidate_gold_scored"].any()
+    (output / "gate_thresh.parquet").unlink()
 
     clusterer = SimpleNamespace(
         classifier=_Pairwise(),
@@ -282,8 +283,8 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
         total_ram_bytes=1_000_000_000,
         max_query_groups=None,
     )
-    assert set(feature_rows) == set(TASK_ROLES)
-    assert sum(s["rows"] for s in summaries) == 125
+    assert set(feature_rows) == {"fit_pool"}
+    assert sum(s["rows"] for s in summaries) == 50
     for role, rows in feature_rows.items():
         frozen_rows = pd.read_parquet(output / f"{role}.parquet")
         assert rows["candidate_component_key"].tolist() == frozen_rows["candidate_component_key"].tolist()

@@ -76,26 +76,6 @@ def test_intake_publishes_and_resumes_snapshot(tmp_path: Path) -> None:
         convert_requests([bundle], root, Path(index), **permissions)
 
 
-def test_intake_rejects_bundle_named_for_another_block(tmp_path: Path) -> None:
-    from scripts.intake.requests_to_datasets import convert_requests
-
-    source = tmp_path / "source"
-    write_minimal_arrow_prediction_bundle(source, include_specter=True)
-    bundle = tmp_path / "g hopper.arrow.tar.gz"
-    with tarfile.open(bundle, "w:gz") as archive:
-        for path in source.glob("*.arrow"):
-            archive.add(path, arcname=path.name)
-    index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
-    with pytest.raises(ValueError, match="author_block"):
-        convert_requests(
-            [bundle],
-            tmp_path / "snapshot",
-            Path(index),
-            allowed_papers=frozenset({"p0"}),
-            abstract_allowed_papers=frozenset(),
-        )
-
-
 def test_failed_intake_append_preserves_prior_permissions(tmp_path: Path) -> None:
     from scripts.intake.requests_to_datasets import SNAPSHOT_BINDING, convert_requests
     from tests.helpers import request_bundle

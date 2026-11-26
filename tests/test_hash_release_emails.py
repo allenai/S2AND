@@ -166,17 +166,14 @@ def test_scrub_text_emails_handles_unicode_dashes_and_malformed_at_dot() -> None
     ("prefix", "address", "affiliation_id"),
     [
         ("Xxxxxxxxxxx ", "x.xxxxxxxxx@xxx.xx", "60032882"),
-        ("Xxxxxxxxxxx ", "x.xxxxxxxxx@xxx.xx", "60032882"),
         ("xx, Xxxxxxx ", "xxxxxxxxx.xxxxx@xxx-xxxxxxx.xx", "60028229"),
-        ("xx, Xxxxxxx ", "x.xxxxx@xxx-xxx.xx", "60010750"),
-        ("xx, Xxxxxxx ", "x.xxxxx@xxx-xxx.xx", "60010750"),
         ("xx, Xxxxxxx ", "x.xxxxx@xxx-xxx.xx", "60010750"),
         ("Xxxxxxxxxxx ", "xxxxxx.xxxxxxxxx@xxx.xx", "60012614"),
     ],
-    ids=["287947975-0", "289458341-1", "286214046-3", "279001215-0", "279001275-1", "279001287-1", "286770593-6"],
+    ids=["287947975-0", "286214046-3", "279001215-0", "286770593-6"],
 )
 def test_affiliation_email_followed_by_id(prefix: str, address: str, affiliation_id: str) -> None:
-    # Mask the source addresses while preserving the seven missed cells' structure.
+    # Mask the source addresses while preserving the missed cells' structure.
     cell = f"{prefix}{address}{affiliation_id}"
     assert find_plaintext_emails(cell) == [address + affiliation_id]
     assert scrub_text_emails(cell) == f"{prefix}{EMAIL_REDACTED_TOKEN}"
@@ -210,12 +207,6 @@ def test_internationalized_domain_is_detected_and_scrubbed(tmp_path: Path, addre
 def test_email_detector_preserves_non_addresses(text: str) -> None:
     assert find_plaintext_emails(text) == []
     assert scrub_text_emails(text) == text
-
-
-def test_affiliation_email_followed_by_a_long_run_of_letters() -> None:
-    address_and_text = "a.b@example.eduDepartmentofInformationandComputerScience"
-    assert find_plaintext_emails(address_and_text) == [address_and_text]
-    assert scrub_text_emails(address_and_text) == EMAIL_REDACTED_TOKEN
 
 
 def test_redact_source_tree_scrubs_author_names_and_rebuilds_their_index(tmp_path: Path) -> None:

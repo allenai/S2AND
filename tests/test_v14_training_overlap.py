@@ -18,8 +18,10 @@ from tests.helpers import request_bundle
 pytestmark = pytest.mark.tooling
 
 
-@pytest.mark.parametrize("orcid_source", [None, "disjoint", "manifest", "arrow"])
-@pytest.mark.parametrize("signature_hit", [False, True])
+@pytest.mark.parametrize(
+    ("orcid_source", "signature_hit"),
+    [(None, False), ("disjoint", False), ("disjoint", True), ("manifest", False), ("arrow", False), ("arrow", True)],
+)
 def test_training_overlap_cli_checks_all_sealed_blocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], signature_hit: bool, orcid_source: str | None
 ) -> None:

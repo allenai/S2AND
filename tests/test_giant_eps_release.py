@@ -735,7 +735,7 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
             BlockSpec("unit", 3, frozenset({shared, local}), source_split="development"),
             BlockSpec("sealed", 2, frozenset({shared}), source_split="holdout"),
         ],
-        {"eps_cal": 1, "final_test_a": 1},
+        {"eps_cal": 1, "final_test": 1},
         closure_mode="block_only",
         enforce_source_splits=True,
     )
@@ -1063,8 +1063,8 @@ def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mod
         json.dumps(
             assign_block_roles(
                 [BlockSpec(block, 2, frozenset({home})), BlockSpec("b ross", 2, frozenset({sealed}))],
-                {"eps_cal": 1, "final_test_a": 1},
-                pinned_roles={block: "eps_cal", "b ross": "final_test_a"},
+                {"eps_cal": 1, "final_test": 1},
+                pinned_roles={block: "eps_cal", "b ross": "final_test"},
                 closure_mode=mode,
             )
         ),

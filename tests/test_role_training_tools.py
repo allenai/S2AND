@@ -29,8 +29,8 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
             BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME})),
             BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
         ],
-        {"eps_cal": 1, "final_test_a": 1},
-        pinned_roles={block: "eps_cal", "sealed": "final_test_a"},
+        {"eps_cal": 1, "final_test": 1},
+        pinned_roles={block: "eps_cal", "sealed": "final_test"},
         closure_mode="block_only",
     )
     roles_path.write_text(json.dumps(result), encoding="utf-8")
@@ -54,7 +54,7 @@ def test_role_b3_masks_shared_orcids_and_rejects_other_roles(tmp_path: Path) -> 
                 tmp_path,
                 block,
                 roles_path=roles_path,
-                role="final_test_a",
+                role="final_test",
                 assignments=assignments,
                 eps=0.38,
             )
@@ -173,8 +173,8 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_
                     BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME})),
                     BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
                 ],
-                {"fit_pool": 1, "final_test_a": 1},
-                pinned_roles={block: "fit_pool", "sealed": "final_test_a"},
+                {"fit_pool": 1, "final_test": 1},
+                pinned_roles={block: "fit_pool", "sealed": "final_test"},
                 closure_mode="block_only",
             )
         ),

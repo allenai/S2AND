@@ -16,7 +16,7 @@ pytestmark = pytest.mark.tooling
 
 @pytest.mark.parametrize("orcid_source", [None, "manifest", "arrow"])
 @pytest.mark.parametrize("signature_hit", [False, True])
-def test_training_overlap_cli_checks_both_sealed_halves(
+def test_training_overlap_cli_checks_all_sealed_blocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], signature_hit: bool, orcid_source: str | None
 ) -> None:
     from scripts.intake.check_v14_training_overlap import main
@@ -36,7 +36,7 @@ def test_training_overlap_cli_checks_both_sealed_halves(
                     BlockSpec("b ross", 1, frozenset({b_orcid}), source_split="holdout"),
                 ],
                 {"final_test": 2},
-                pinned_roles={"a ross": "final_test_a", "b ross": "final_test_b"},
+                pinned_roles={"a ross": "final_test", "b ross": "final_test"},
                 enforce_source_splits=True,
             )
         ),
@@ -87,18 +87,11 @@ def test_training_overlap_cli_checks_both_sealed_halves(
     assert report["training_shards"][0]["rows"] == 3
     assert report["distinct_training_orcids"] == int(orcid_hit)
     assert report["sealed_roles"] == {
-        "final_test_a": {
-            "signatures": 1,
-            "orcids": 1,
+        "final_test": {
+            "signatures": 2,
+            "orcids": 3,
             "signature_overlap": 0,
             "paper_position_overlap": int(signature_hit),
-            "orcid_overlap": 0,
-        },
-        "final_test_b": {
-            "signatures": 1,
-            "orcids": 2,
-            "signature_overlap": 0,
-            "paper_position_overlap": 0,
             "orcid_overlap": int(orcid_hit),
         },
     }

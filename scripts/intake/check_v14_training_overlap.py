@@ -1,4 +1,4 @@
-"""Check both sealed test halves against the 1.4 training signature inventory."""
+"""Check the sealed test role against the 1.4 training signature inventory."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from s2and.text.normalize import ORCID_PATTERN
 from scripts.common.arrow_roots import read_json_object
-from scripts.common.block_roles import FINAL_TEST_ROLES, load_block_roles, normalize_block_key
+from scripts.common.block_roles import FINAL_TEST_ROLE, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import evidence_identities, ledger_for_roles
 
 
@@ -100,12 +100,12 @@ def check_training_overlap(
     allow_no_training_orcids: bool = False,
     identity_evidence: Path | None = None,
 ) -> dict[str, Any]:
-    """Count distinct signature, paper-position and ORCID overlaps for both sealed halves."""
+    """Count distinct signature, paper-position and ORCID overlaps for the sealed test role."""
     roles = load_block_roles(roles_path)
     ledger = ledger_for_roles(identity_evidence, roles)
     counts = read_json_object(roles_path).get("block_signature_counts")
     by_block = {normalize_block_key(block): root for block, root in sealed_blocks.items()}
-    expected = {block for block, role in roles.block_to_role.items() if role in FINAL_TEST_ROLES}
+    expected = {block for block, role in roles.block_to_role.items() if role == FINAL_TEST_ROLE}
     if len(by_block) != len(sealed_blocks) or by_block.keys() != expected:
         raise ValueError(
             "The input must contain every sealed block exactly once. "
@@ -117,11 +117,10 @@ def check_training_overlap(
         raise ValueError("Re-freeze to record a valid signature count for every sealed block")
     if not training_paths or len({path.resolve() for path in training_paths}) != len(training_paths):
         raise ValueError("Supply distinct 1.4 training inventory shards")
-    signatures = {role: set[str]() for role in FINAL_TEST_ROLES}
-    positions = {role: set[tuple[str, int]]() for role in FINAL_TEST_ROLES}
-    orcids = {role: set[str]() for role in FINAL_TEST_ROLES}
+    signatures: set[str] = set()
+    positions: set[tuple[str, int]] = set()
+    orcids: set[str] = set()
     for block, root in sorted(by_block.items()):
-        role = roles.role_for(block)
         if ledger is None:
             block_signatures, block_positions, block_orcids = _read_sealed_block(root, block)
         else:
@@ -131,17 +130,17 @@ def check_training_overlap(
             block_orcids = {orcid for row in block_rows.values() for orcid in evidence_identities(row)}
         if len(block_signatures) != counts[block]:
             raise ValueError(f"Sealed block {block!r} has {len(block_signatures)} signatures, expected {counts[block]}")
-        if any(block_signatures & seen for seen in signatures.values()):
+        if block_signatures & signatures:
             raise ValueError(f"Signature IDs occur in multiple sealed blocks including {block!r}")
-        signatures[role].update(block_signatures)
-        positions[role].update(block_positions)
-        orcids[role].update(block_orcids | roles.block_orcids[block])
-    if any(not ids for ids in signatures.values()):
-        raise ValueError("Both sealed halves must contain signatures")
+        signatures.update(block_signatures)
+        positions.update(block_positions)
+        orcids.update(block_orcids | roles.block_orcids[block])
+    if not signatures:
+        raise ValueError("The sealed role must contain signatures")
 
-    signature_overlap = {role: set[str]() for role in FINAL_TEST_ROLES}
-    position_overlap = {role: set[tuple[str, int]]() for role in FINAL_TEST_ROLES}
-    orcid_overlap = {role: set[str]() for role in FINAL_TEST_ROLES}
+    signature_overlap: set[str] = set()
+    position_overlap: set[tuple[str, int]] = set()
+    orcid_overlap: set[str] = set()
     training_orcids: set[str] = set()
     training = []
     for path in training_paths:
@@ -169,10 +168,9 @@ def check_training_overlap(
                         batch_positions.add(paper_position(pid, pos, path))
                         compared_positions += 1
             training_orcids.update(batch_orcids)
-            for role in FINAL_TEST_ROLES:
-                signature_overlap[role].update(signatures[role] & ids)
-                position_overlap[role].update(positions[role] & batch_positions)
-                orcid_overlap[role].update(orcids[role] & batch_orcids)
+            signature_overlap.update(signatures & ids)
+            position_overlap.update(positions & batch_positions)
+            orcid_overlap.update(orcids & batch_orcids)
             count += batch.num_rows
         training.append(
             {
@@ -195,18 +193,17 @@ def check_training_overlap(
         "training_shards": training,
         "distinct_training_orcids": len(training_orcids),
         "passed": (bool(training_orcids) or allow_no_training_orcids)
-        and not any(signature_overlap.values())
-        and not any(position_overlap.values())
-        and not any(orcid_overlap.values()),
+        and not signature_overlap
+        and not position_overlap
+        and not orcid_overlap,
         "sealed_roles": {
-            role: {
-                "signatures": len(signatures[role]),
-                "orcids": len(orcids[role]),
-                "signature_overlap": len(signature_overlap[role]),
-                "paper_position_overlap": len(position_overlap[role]),
-                "orcid_overlap": len(orcid_overlap[role]),
+            FINAL_TEST_ROLE: {
+                "signatures": len(signatures),
+                "orcids": len(orcids),
+                "signature_overlap": len(signature_overlap),
+                "paper_position_overlap": len(position_overlap),
+                "orcid_overlap": len(orcid_overlap),
             }
-            for role in FINAL_TEST_ROLES
         },
     }
 
@@ -216,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
-    parser.add_argument("--blocks-json", type=Path, required=True, help="Map both halves' blocks to Arrow directories.")
+    parser.add_argument("--blocks-json", type=Path, required=True, help="Map the sealed blocks to Arrow directories.")
     parser.add_argument("--training-parquet", type=Path, action="append", required=True)
     parser.add_argument("--allow-no-training-orcids", action="store_true")
     args = parser.parse_args(argv)

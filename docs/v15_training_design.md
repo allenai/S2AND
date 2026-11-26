@@ -16,7 +16,7 @@ This design addresses the data-split, leakage, distribution, and release-enginee
 5. **Redact and gate once at intake.** Hash email fields, strip plaintext emails from free text (`affiliations`, `title`, `abstract`), filter non-S2AG papers, and redact unshareable abstracts to `"Has Abstract"` (preserving `has_abstract` and redacting correction history) *before* Arrow conversion or pair sampling. The `write_release_bundles.py` CLI scans final bundles automatically by default (deleting output on failure).
 6. **Freeze native top-25 windows before labeling.** Use ORCID-hidden reclustered seeds for fitting and the incremental export's production seeds for gate threshold evaluation.
 
-## Development pools and sealed test halves
+## Development pools and sealed test
 
 All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s lee`, `s park`, `s feldman`) and the 27 Batch 1–6 blocks are permanently assigned to `dev_test` (regression/iteration only). `f matsen` (1 scored identity) is excluded.
 
@@ -26,7 +26,7 @@ All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s
 | `eps_cal` | ~40 `orcid-blocks-v2/dev` blocks across the same strata | Production-route EPS, close-pair bonus, subblocking and post-linkage corrections | Disjoint from `fit_pool`. |
 | `gate_thresh` | 10–15 disjoint `orcid-blocks-v2/dev` blocks at **natural production request frequencies** + a non-ORCID natural sample for blind review | Operating-point report and blind review of added and removed links | Uses natural requests, including retrieval misses, without constructed author holdouts. Keep the configured weight until explicitly changed. Budget about 850 blind-judged items per arm: a 5-point wrong-rate gap needs about 600 consensus verdicts, and about 70% of items reach consensus. |
 | `dev_test` | ~40 disjoint `orcid-blocks-v2/dev` blocks + legacy giants + 27 Batch 1–6 blocks + fresh paired Sol disagreements | Model-vs-model iteration & go/no-go | Never fitted on. Include at least 30 giants (pins supply 21); giants carry 88–98% of the paired variance. |
-| `final_test_a` and `final_test_b` *(sealed)* | About 100 fresh `orcid-blocks-v2/holdout` blocks per half, including about 30 giants (±0.3 F1 paired intervals; ±0.15 would need 80–110 giants per half) + a sealed blind panel + canonical classic outer test (regression report) | Evaluate the frozen candidate on A and keep B sealed for a subsequent candidate | Score verified `holdout` gold labels through the identity ledger. |
+| `final_test` *(sealed)* | About 200 fresh `orcid-blocks-v2/holdout` blocks, including about 60 giants, plus a sealed blind panel and the canonical classic outer test regression report | Evaluate the frozen candidate and append fresh holdout blocks for the next candidate | Score verified `holdout` gold labels through the identity ledger. |
 
 **Tooling status.** Freeze one master `assignments.json` and pass it unchanged to every stage. The miner and ranker use `fit_pool`. The gate uses only marked `fit_pool` blocks, and `train_pairwise.py` uses the frozen block fold to split mined pairs. Reassign blocks before using a manifest with the retired gate role.
 
@@ -154,7 +154,7 @@ uv run --offline --no-sync python -m scripts.intake.check_v14_training_overlap \
 
 Use the source bundle for the deployed 1.4 linker. The inventory includes corpus-keyed training
 and gate calibration queries, their full candidate component memberships, and giant gold ORCIDs.
-Add further identified training mentions with `--private-labels`. Map both sealed halves' blocks to their Arrow directories.
+Add further identified training mentions with `--private-labels`. Map the sealed blocks to their Arrow directories.
 The audit checks frozen signature counts and compares corpus paper and author positions and ORCIDs.
 It fails when zero corpus keys can be compared. Benchmark overlap is unobservable because benchmark
 IDs are dataset-local and the benchmarks lack ORCIDs.

@@ -104,7 +104,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
     frozen = tmp_path / "roles.json"
-    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {role: 1, "final_test_a": 1})
+    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {role: 1, "final_test": 1})
     frozen.write_text(json.dumps(roles), encoding="utf-8")
     ledger = ledger_for_roles(evidence / "manifest.json", load_block_roles(frozen))
     assert ledger is not None
@@ -118,7 +118,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     if role == "gate_thresh":
         assert DEPOSITED not in ledger.roles.identity_roles
         refrozen = replace(
-            ledger.roles, identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"final_test_a"})}
+            ledger.roles, identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"final_test"})}
         )
         assert ledger.roles.bindings_for({"a lovelace"}) != refrozen.bindings_for({"a lovelace"})
 
@@ -258,7 +258,7 @@ def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold
     assert view.component_label(fitting_seeds) == GOLD
 
 
-def test_freeze_masks_shared_identities_and_reserves_both_halves(
+def test_freeze_masks_shared_identities_and_reserves_sealed_strata(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:
     from scripts.common.block_roles import load_block_roles
@@ -275,7 +275,7 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     )
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
-    targets = {"fit_pool": 1, "final_test_a": 1}
+    targets = {"fit_pool": 1, "final_test": 1}
     frozen = freeze_identity_roles(blocks, evidence / "manifest.json", targets)
     manifest = tmp_path / "assignments.json"
     manifest.write_text(json.dumps(frozen))
@@ -302,7 +302,8 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
         {"final_test": 2},
         closure_mode="block_only",
     )
-    assert allocation["unassigned"] == ["a block"]
+    assert "a block" in allocation["roles"]["final_test"]
+    assert not allocation["stratum_shortfalls"]
 
 
 def test_eligibility_blocks_conflicting_and_cross_role_mentions(
@@ -325,7 +326,7 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     blocks = tmp_path / "freeze.parquet"
     build_freeze_input(evidence, source, blocks)
     frozen = tmp_path / "roles.json"
-    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
+    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(frozen))
     assert ledger is not None
     block = ledger.for_block("a lovelace")
@@ -364,7 +365,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence, source, blocks)
     role_path = tmp_path / "roles.json"
-    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
+    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
     assignment_root = tmp_path / "assignments"
@@ -794,7 +795,7 @@ def test_refreeze_can_declare_a_previously_unassigned_dev_test_block(
     )
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence, source, blocks)
-    targets = {"final_test_a": 1}
+    targets = {"final_test": 1}
     prior = freeze_identity_roles(blocks, evidence, targets)
     assert "a lovelace" in prior["unassigned"]
     path = tmp_path / "prior.json"

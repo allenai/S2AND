@@ -594,7 +594,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     targets = _json(tmp_path / "targets.json", {"fit_pool": 1, "eps_cal": 1, "final_test": 2})
     pins = _json(
         tmp_path / "pins.json",
-        {"a lovelace": "fit_pool", "b ross": "eps_cal", "d hopper": "final_test_a", "e turing": "final_test_b"},
+        {"a lovelace": "fit_pool", "b ross": "eps_cal", "d hopper": "final_test", "e turing": "final_test"},
     )
     gate = "g schneider"
     raw_gate = exports[gate].parent / "g_schneider"
@@ -1173,14 +1173,14 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     newer_roles = load_block_roles(appended_path)
     assert newer_roles.block_to_role == roles.block_to_role
     assert newer_roles.bindings_for({"d hopper", "e turing"}) == roles.bindings_for({"d hopper", "e turing"})
-    assert newer_roles.identity_roles[other_orcid] == {"final_test_b"}
+    assert newer_roles.identity_roles[other_orcid] == {"final_test"}
     with pytest.raises(ValueError, match="absent from the frozen role assignments"):
         newer_roles.bindings_for({"z last"})
     assert {path: sha256_file(path) for path in filenames} == old_files
     with pytest.raises(ValueError, match="master block role assignment"):
         _validate_frozen_task_bindings(task_manifest, newer_roles)
     foreign_roles = replace(
-        newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test_b"})}
+        newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test"})}
     )
     with pytest.raises(ValueError, match="block provenance"):
         _validate_frozen_task_bindings({**task_manifest, ROLE_SHA256_FIELD: foreign_roles.sha256}, foreign_roles)
@@ -1204,9 +1204,9 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert newer_judged.read_bytes() == judged_path.read_bytes()
     raised_targets = _json(
         tmp_path / "raised-targets.json",
-        {"fit_pool": 2, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
+        {"fit_pool": 2, "eps_cal": 1, "final_test": 3},
     )
-    new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test_b"})
+    new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test"})
     raised = tmp_path / "raised-freeze"
     _run(
         assign_block_roles,
@@ -1226,7 +1226,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert load_block_roles(raised / "assignments.json").block_to_role == {
         **roles.block_to_role,
         "f aba": "fit_pool",
-        "z last": "final_test_b",
+        "z last": "final_test",
     }
     assert load_block_roles(raised / "assignments.json").pairwise_validation_blocks == {"f aba"}
     for directory in (snapshot, evidence.parent):

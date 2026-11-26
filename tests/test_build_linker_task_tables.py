@@ -236,7 +236,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
     frozen = assign_block_roles(
         specs,
         dict.fromkeys(TASK_ROLES, 1),
-        pinned_roles={**{key: role for role, key in blocks.items()}, "sealed": "final_test_a"},
+        pinned_roles={**{key: role for role, key in blocks.items()}, "sealed": "final_test"},
         closure_mode="block_only",
     )
     roles_path, inputs_path, output = tmp_path / "roles.json", tmp_path / "inputs.json", tmp_path / "tasks"
@@ -394,7 +394,7 @@ def _freeze_fixture(
             BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
         ],
         {"fit_pool": 1},
-        pinned_roles={block: "fit_pool", "sealed": "final_test_a"},
+        pinned_roles={block: "fit_pool", "sealed": "final_test"},
         closure_mode="block_only",
     )
     path.write_text(json.dumps(roles), encoding="utf-8")
@@ -428,7 +428,7 @@ def test_joined_identity_evidence_reaches_task_builder(tmp_path: Path, check: st
             BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
         ],
         dict.fromkeys(TASK_ROLES, 1),
-        pinned_roles={**{block: role for role, block in blocks.items()}, "sealed": "final_test_a"},
+        pinned_roles={**{block: role for role, block in blocks.items()}, "sealed": "final_test"},
         closure_mode="block_only",
     )
     roles_path, inputs_path = tmp_path / "roles.json", tmp_path / "inputs.json"

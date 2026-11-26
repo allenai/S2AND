@@ -25,8 +25,8 @@ def assignment_digest(path: Path) -> str:
 
 GATE_BINDINGS_FIELD = "gate_thresh_block_bindings"
 GATE_CANDIDATE_ORCIDS = "gate_thresh_candidate_orcids"
-FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
-VALID_ROLES = ("fit_pool", "eps_cal", "gate_thresh", "dev_test", *FINAL_TEST_ROLES)
+FINAL_TEST_ROLE = "final_test"
+VALID_ROLES = ("fit_pool", "eps_cal", "gate_thresh", "dev_test", FINAL_TEST_ROLE)
 _WHITESPACE_OR_UNDERSCORE = re.compile(r"[\s_]+")
 
 

@@ -571,7 +571,7 @@ def test_eps_sweep_rejects_sealed_dataset_before_reference_collection(tmp_path, 
     from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 
     roles = tmp_path / "roles.json"
-    roles.write_text(json.dumps(assign_block_roles([BlockSpec("dummy", 2)], {"final_test_a": 1})), encoding="utf-8")
+    roles.write_text(json.dumps(assign_block_roles([BlockSpec("dummy", 2)], {"final_test": 1})), encoding="utf-8")
     args = sweep_eps_on_linking_gold.parse_args(
         _cli(
             "--score-mode",

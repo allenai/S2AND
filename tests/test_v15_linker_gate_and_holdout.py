@@ -319,7 +319,7 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
     role_manifest.write_text(
         json.dumps(
             {
-                "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test_a": ["c_park"]},
+                "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test": ["c_park"]},
                 "pairwise_validation_blocks": [],
                 "gate_training_blocks": [],
                 "verification": {"cross_role_orcid_overlap": 0},

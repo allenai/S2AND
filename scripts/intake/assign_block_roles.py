@@ -33,7 +33,7 @@ from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
-    FINAL_TEST_ROLES,
+    FINAL_TEST_ROLE,
     VALID_ROLES,
     assigned_identity_roles,
     assignment_digest,
@@ -58,7 +58,7 @@ LEGACY_DEV_TEST_BLOCKS = frozenset(
     {"a khan", "a silva", "h wang", "j smith", "s feldman", "s gupta", "s lee", "s park"}
 )
 ASSIGNABLE_ROLES = (
-    *FINAL_TEST_ROLES,
+    FINAL_TEST_ROLE,
     "eps_cal",
     "gate_thresh",
     "fit_pool",
@@ -163,7 +163,7 @@ def verify_role_assignments(
             raise ValueError(f"Assigned block {key!r} missing from block metadata")
         if enforce_source_splits:
             split = by_key[key].source_split
-            if role in FINAL_TEST_ROLES and split != "holdout":
+            if role == FINAL_TEST_ROLE and split != "holdout":
                 raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter {role!r}")
             if role in TRAINING_AND_TUNING_ROLES and split != "development":
                 raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter {role!r}")
@@ -245,7 +245,7 @@ def _allocate_strata(
         sizes[group] += len(component)
 
     for role, target in remaining.items():
-        allowed = "holdout" if role in FINAL_TEST_ROLES else "development"
+        allowed = "holdout" if role == FINAL_TEST_ROLE else "development"
         eligible = {
             group for group, size in sizes.items() if size and (not enforce_source_splits or group[1] == allowed)
         }
@@ -300,12 +300,9 @@ def _reserve_role_strata(
 
     covered = {(role, by_key[key].stratum) for key, role in assignments.items()}
     reserved = set()
-    paired = all(role in remaining for role in FINAL_TEST_ROLES)
     for (stratum, split), queue in sorted(groups.items(), key=lambda item: (len(item[1]), item[0])):
         for role in remaining:
-            if paired and role in FINAL_TEST_ROLES:
-                continue
-            expected_split = "holdout" if role in FINAL_TEST_ROLES else "development"
+            expected_split = "holdout" if role == FINAL_TEST_ROLE else "development"
             if split and split != expected_split:
                 continue
             if (role, stratum) not in covered and remaining[role]:
@@ -328,93 +325,6 @@ def _reserve_role_strata(
                     assignments[key] = role
                     covered.add((role, by_key[key].stratum))
     return [component for component in components if component[0] not in reserved]
-
-
-def _allocate_sealed_pairs(
-    components: Sequence[tuple[str, ...]],
-    by_key: Mapping[str, BlockSpec],
-    remaining: dict[str, int],
-    assignments: dict[str, str],
-    *,
-    seed: int,
-    enforce_source_splits: bool,
-    giant_caps: _GiantCaps | None = None,
-) -> list[tuple[str, ...]]:
-    left, right = FINAL_TEST_ROLES
-    if left not in remaining or right not in remaining:
-        return list(components)
-    strata: dict[str, deque[tuple[str, ...]]] = defaultdict(deque)
-    for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
-        if enforce_source_splits and any(by_key[key].source_split != "holdout" for key in component):
-            continue
-        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
-        strata[by_key[primary].stratum].append(component)
-    counts = Counter((role, by_key[key].stratum) for key, role in assignments.items())
-    sizes = {stratum: sum(map(len, queue)) for stratum, queue in strata.items()}
-    total = sum(sizes.values())
-    pair_target = min(remaining[left], remaining[right])
-    assigned: set[str] = set()
-
-    def take(role: str, queue: deque[tuple[str, ...]], component: tuple[str, ...] | None = None) -> None:
-        if component is None:
-            component = queue.popleft()
-        else:
-            queue.remove(component)
-        if giant_caps is not None:
-            giant_caps.take(role, component)
-        assigned.add(component[0])
-        remaining[role] -= len(component)
-        for key in component:
-            assignments[key] = role
-            counts[role, by_key[key].stratum] += 1
-
-    def fits(role: str, component: tuple[str, ...]) -> bool:
-        return len(component) <= remaining[role] and (giant_caps is None or giant_caps.allows(role, component))
-
-    # Cover feasible rare strata before spending proportional quotas.
-    for stratum in sorted(
-        strata,
-        key=lambda value: (
-            len(strata[value]) == 1 and all(not counts[role, value] for role in FINAL_TEST_ROLES),
-            sizes[value],
-            value,
-        ),
-    ):
-        queue = strata[stratum]
-        missing = [role for role in FINAL_TEST_ROLES if not counts[role, stratum]]
-        if len(queue) == 1 and len(missing) == 2:
-            role = max(missing, key=lambda role: (fits(role, queue[0]), remaining[role]))
-            if fits(role, queue[0]):
-                take(role, queue)
-        elif len(queue) >= len(missing) and all(
-            fits(role, component) for role, component in zip(missing, queue, strict=False)
-        ):
-            for role in missing:
-                take(role, queue)
-        elif giant_caps is not None:
-            for role in missing:
-                if component := next((comp for comp in queue if fits(role, comp)), None):
-                    take(role, queue, component)
-
-    # Fill both halves together so rounding cannot send the rare stratum to one half.
-    deficits = {
-        stratum: pair_target * size - total * max(counts[left, stratum], counts[right, stratum])
-        for stratum, size in sizes.items()
-    }
-    while remaining[left] and remaining[right]:
-        eligible = [
-            stratum
-            for stratum, queue in strata.items()
-            if len(queue) >= 2 and fits(left, queue[0]) and fits(right, queue[1])
-        ]
-        if not eligible:
-            break
-        stratum = max(eligible, key=lambda value: (deficits[value], value))
-        queue = strata[stratum]
-        deficits[stratum] -= total * max(len(queue[0]), len(queue[1]))
-        take(left, queue)
-        take(right, queue)
-    return [component for component in components if component[0] not in assigned]
 
 
 def _pairwise_validation_fold(
@@ -492,11 +402,6 @@ def assign_block_roles(
             is absent from ``blocks``.
     """
     role_targets = dict(role_targets)
-    if "final_test" in role_targets:
-        if any(role in role_targets for role in FINAL_TEST_ROLES):
-            raise ValueError("Specify an aggregate final_test target or individual half targets")
-        total = role_targets.pop("final_test")
-        role_targets.update(final_test_a=(total + 1) // 2, final_test_b=total // 2)
     invalid_targets = sorted(set(role_targets) - set(ASSIGNABLE_ROLES))
     if invalid_targets:
         raise ValueError(f"Unsupported target roles: {invalid_targets}")
@@ -632,39 +537,15 @@ def assign_block_roles(
             for block in active_blocks
             if block_to_role.get(block.block_key) == role
             or (
-                (role not in FINAL_TEST_ROLES or block.block_key not in block_to_role)
+                (role != FINAL_TEST_ROLE or block.block_key not in block_to_role)
                 and (
                     not enforce_source_splits
-                    or block.source_split == ("holdout" if role in FINAL_TEST_ROLES else "development")
+                    or block.source_split == ("holdout" if role == FINAL_TEST_ROLE else "development")
                 )
             )
         }
         for role in target_order
     }
-    if closure_mode != "block_only" and all(role in role_targets for role in FINAL_TEST_ROLES):
-        sealed_counts = Counter(
-            block.stratum
-            for block in active_blocks
-            if block_to_role.get(block.block_key) in FINAL_TEST_ROLES
-            or (block.block_key not in block_to_role and (not enforce_source_splits or block.source_split == "holdout"))
-        )
-        for role in FINAL_TEST_ROLES:
-            if role in caps:
-                continue
-            pinned_strata = {by_key[key].stratum for key, assigned in block_to_role.items() if assigned == role}
-            required = pinned_strata | {stratum for stratum in strata_by_role[role] if sealed_counts[stratum] > 1}
-            if role_targets[role] < len(required):
-                raise ValueError("Sealed targets must allow at least one block per stratum in each half")
-
-    free_components = _allocate_sealed_pairs(
-        free_components,
-        by_key,
-        remaining,
-        block_to_role,
-        seed=seed,
-        enforce_source_splits=enforce_source_splits,
-        giant_caps=giant_budget,
-    )
     # Reserve coverage before proportional sampling can discard a rare stratum.
     free_components = _reserve_role_strata(
         free_components,
@@ -687,9 +568,9 @@ def assign_block_roles(
         )
     else:
         cohorts = (
-            {FINAL_TEST_ROLES[0]: FINAL_TEST_ROLES, "fit_pool": TRAINING_AND_TUNING_ROLES, "dev_test": ("dev_test",)}
+            {FINAL_TEST_ROLE: (FINAL_TEST_ROLE,), "fit_pool": TRAINING_AND_TUNING_ROLES, "dev_test": ("dev_test",)}
             if enforce_source_splits
-            else {FINAL_TEST_ROLES[0]: ASSIGNABLE_ROLES}
+            else {FINAL_TEST_ROLE: ASSIGNABLE_ROLES}
         )
         targets_by_cohort = {
             cohort: {role: count for role, count in remaining.items() if role in members}

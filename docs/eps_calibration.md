@@ -29,9 +29,8 @@ The precision-weighted review score, (2 × precision + recall) / 3, therefore ca
 Use the model plan's `precision_f1_tolerance` instead, in benchmark calibration and in this review.
 
 Pass the plan's tolerance to `apply_reviewed_eps.py` as `--precision-f1-tolerance`.
-The command then rejects an EPS whose pooled giant-block F1 is more than the tolerance below the best swept F1.
-Benchmark calibration picks the most precise EPS within the tolerance on validation; this check keeps that choice within the same tolerance on giant blocks.
-If it rejects the EPS, review the next higher value on the grid.
+The command records the smallest swept EPS within the tolerance of the best pooled giant-block F1.
+To apply another swept value, pass `--override-eps-rule` and explain the choice in `--review-note`.
 Sweep enough EPS values around the candidate for the best swept F1 to be meaningful.
 
 ## Freeze populations

@@ -277,6 +277,7 @@ uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
 
 Sweep all `eps_cal` blocks, with one folder per snapshot dataset. Pass each dataset once to the EPS
 review. Tolerances above `0.005` require `--allow-wide-tolerance`.
+With the plan's tolerance, apply records the smallest swept EPS within tolerance of peak pooled B3 F1 and requires `--override-eps-rule` with a review note for any other swept value.
 The role freeze excludes blocks without a repeated scored ORCID and records the reason.
 Production clustering hides ORCID
 and keeps the full population. B3 scores verified, eligible mentions only. Apply verifies both

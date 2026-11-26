@@ -127,20 +127,3 @@ def require_linker_input_receipt(
 def pairwise_fold(roles: BlockRoles, block: str) -> Fold:
     """Return the fold chosen by the master assignment."""
     return "val" if block in roles.pairwise_validation_blocks else "train"
-
-
-def require_pairwise_fold(roles: BlockRoles, block: str, declared: object) -> Fold:
-    """Check the manifest's fold and return the frozen fold."""
-    fold = pairwise_fold(roles, block)
-    if declared != fold:
-        raise ValueError(f"Mined fold for {block!r} is {declared!r}, expected {fold!r}")
-    return fold
-
-
-def require_unique_pair(block: str, stratum: str, pair: PairId, seen: Collection[PairId]) -> None:
-    """Require one canonical pair ID across all of a block's strata."""
-    left, right = pair
-    if not left or not right or left >= right:
-        raise ValueError(f"Invalid mined pair {pair!r} in {block!r} stratum {stratum!r}")
-    if pair in seen:
-        raise ValueError(f"Duplicate mined pair {pair!r} in {block!r} stratum {stratum!r}")

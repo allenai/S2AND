@@ -49,11 +49,11 @@ PAIR_COLUMNS = ("block_key", "signature_id_1", "signature_id_2", "stratum", "inc
 class SamplingPolicy:
     """Keep the sampling inputs needed to replay each block."""
 
-    seed: int
-    pairs_per_block: int
-    verified_pair_fraction: float
-    pairs_per_block_floor: int
-    pairs_per_identity_per_stratum: int
+    seed: int = 20261123
+    pairs_per_block: int = DEFAULT_PAIRS_PER_BLOCK
+    verified_pair_fraction: float = DEFAULT_VERIFIED_PAIR_FRACTION
+    pairs_per_block_floor: int = DEFAULT_PAIRS_PER_BLOCK_FLOOR
+    pairs_per_identity_per_stratum: int = 25
 
     def __post_init__(self) -> None:
         if (
@@ -69,17 +69,26 @@ class SamplingPolicy:
             raise ValueError("Invalid pair sampling policy")
 
     @classmethod
-    def from_manifest(cls, manifest: Mapping[str, Any]) -> SamplingPolicy:
-        """Require the mining policy fields before replaying a sample."""
-        if cls.__dataclass_fields__.keys() - manifest.keys():
-            raise ValueError("Missing pair sampling policy. Re-mine pairs.")
+    def from_args(cls, args: argparse.Namespace) -> SamplingPolicy:
+        """Read the common pair sampling options."""
         return cls(
-            manifest["seed"],
-            manifest["pairs_per_block"],
-            manifest["verified_pair_fraction"],
-            manifest["pairs_per_block_floor"],
-            manifest["pairs_per_identity_per_stratum"],
+            seed=getattr(args, "seed", cls.seed),
+            pairs_per_block=getattr(args, "pairs_per_block", cls.pairs_per_block),
+            verified_pair_fraction=getattr(args, "verified_pair_fraction", cls.verified_pair_fraction),
+            pairs_per_block_floor=getattr(args, "pairs_per_block_floor", cls.pairs_per_block_floor),
+            pairs_per_identity_per_stratum=getattr(
+                args, "pairs_per_identity_per_stratum", cls.pairs_per_identity_per_stratum
+            ),
         )
+
+
+def add_sampling_arguments(parser: argparse.ArgumentParser) -> None:
+    """Configure the same sampling policy for reports and training."""
+    parser.add_argument("--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK)
+    parser.add_argument("--verified-pair-fraction", type=float, default=DEFAULT_VERIFIED_PAIR_FRACTION)
+    parser.add_argument("--pairs-per-block-floor", type=int, default=DEFAULT_PAIRS_PER_BLOCK_FLOOR)
+    parser.add_argument("--pairs-per-identity", type=int, dest="pairs_per_identity_per_stratum", default=25)
+    parser.add_argument("--seed", type=int, default=20261123, help="Seed for choosing mined pairs.")
 
 
 @dataclass(frozen=True)
@@ -357,7 +366,6 @@ class FrozenMiningBlock:
 
     sample: BlockSample
     gold: dict[str, str]
-    queries: set[str]
     assignments_digest: str
 
 
@@ -378,7 +386,18 @@ def sample_frozen_block(
     sample = select_block_pairs(
         block, identities, gold, clusters, len(view.rows) - len(eligible), policy, excluded_queries=len(queries)
     )
-    return FrozenMiningBlock(sample, gold, queries, digest)
+    return FrozenMiningBlock(sample, gold, digest)
+
+
+def fit_pool_receipts(ledger: IdentityLedger, blocks: Mapping[str, BlockInput]) -> tuple[dict[str, Any], str]:
+    """Read partition receipts and require one seed model and intake index."""
+    receipts = {block: read_json_object(spec.assignments.with_name("manifest.json")) for block, spec in blocks.items()}
+    model = require_assignment_receipts(
+        ledger.roles,
+        {block: receipt.get("binding") for block, receipt in receipts.items()},
+        intake_index_sha256=ledger.evidence.name_counts_index_sha256,
+    )
+    return receipts, model
 
 
 def mine_pairs(
@@ -410,14 +429,7 @@ def mine_pairs(
     if ledger is not None:
         intake_index = ledger.evidence.name_counts_index_sha256
         shared_binding["index_sha256"] = intake_index
-        assignment_manifests = {
-            block: read_json_object(spec.assignments.parent / "manifest.json") for block, spec in normalized.items()
-        }
-        shared_binding["model_sha256"] = require_assignment_receipts(
-            roles,
-            {block: receipt.get("binding") for block, receipt in assignment_manifests.items()},
-            intake_index_sha256=intake_index,
-        )
+        assignment_manifests, shared_binding["model_sha256"] = fit_pool_receipts(ledger, normalized)
 
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []
@@ -504,13 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
     parser.add_argument("--block-inputs", type=Path, required=True, help="Linker inputs.json with frozen seeds.")
-    parser.add_argument(
-        "--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK, help="Cap per fitted and judge sample."
-    )
-    parser.add_argument("--verified-pair-fraction", type=float, default=DEFAULT_VERIFIED_PAIR_FRACTION)
-    parser.add_argument("--pairs-per-block-floor", type=int, default=DEFAULT_PAIRS_PER_BLOCK_FLOOR)
-    parser.add_argument("--pairs-per-identity", type=int, default=25, help="Maximum per stratum and identity.")
-    parser.add_argument("--seed", type=int, default=20261123)
+    add_sampling_arguments(parser)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     ledger = load_identity_ledger(args.identity_evidence, load_block_roles(args.block_role_assignments))
@@ -523,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
         verified_pair_fraction=args.verified_pair_fraction,
         per_block_floor=args.pairs_per_block_floor,
         identity_evidence=args.identity_evidence,
-        per_identity=args.pairs_per_identity,
+        per_identity=args.pairs_per_identity_per_stratum,
         seed=args.seed,
     )
     print(json.dumps({"blocks": len(blocks), "pairs": count}))

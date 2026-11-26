@@ -236,8 +236,9 @@ uv run --offline --no-sync python -m scripts.pairwise.mine_pairwise_pairs \
   --pairs-per-block-floor 100 --output mined/pairs.csv
 uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --model-plan model-plan.json --name-counts-index-root name-counts-index \
-  --mined-pairs mined/pairs.csv --identity-evidence evidence/manifest.json \
+  --block-inputs mining-inputs/inputs.json --identity-evidence evidence/manifest.json \
   --block-role-assignments freeze/assignments.json --matrix-work-dir matrix-work \
+  --pairs-per-block 2000 --verified-pair-fraction 0.05 --pairs-per-block-floor 100 \
   --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
@@ -251,12 +252,10 @@ The fitted strata are `false_merge`, `missed_link`, and `random`. The trainer re
 scores for each fitted pair and uses them to compute the label. `merged_unlabeled` pairs require
 at least one unscored endpoint and go to judging only. Each block uses its own random sequence
 derived from the run seed and block key. Judge-only pairs have a separate `--pairs-per-block` budget.
-The trainer replays selection from the ledger, frozen assignments, and recorded policy. It checks
-pair IDs, strata, inclusion probabilities, and the report counts against the replay. Training
-requires at least one fitted mined pair in the frozen validation fold. Set
-`--min-mined-validation-pairs` to require more. The report
-counts drops by reason from the eligible population through the frame and sample. Re-mine older
-samples before training.
+The trainer samples directly from the ledger, seed partitions, and sampling options. Run the miner
+with the same options to produce a CSV report for review. The report counts drops by reason from the
+eligible population through the frame and sample. Training requires at least one fitted mined pair in
+the frozen validation fold. Set `--min-mined-validation-pairs` to require more.
 
 ### 11. Sweep and apply production EPS
 

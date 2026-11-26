@@ -886,6 +886,15 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     gate_blocks = task_manifest["tables"]["gate_thresh"]["blocks"]
     index_digest = ledger.evidence.name_counts_index_sha256
     _validate_frozen_task_bindings(task_manifest, roles, index_sha256=index_digest)
+    fitting_manifest = build_linker_task_tables.build_linker_task_tables(
+        role_path, inputs / "inputs.json", tmp_path / "fit-tasks", blocks=["a lovelace"], identity_evidence=evidence
+    )
+    _validate_frozen_task_bindings(fitting_manifest, roles, task_role="fit_pool", pairwise_model_path=model)
+    wrong_model = tmp_path / "wrong-pairwise-model"
+    wrong_model.mkdir()
+    (wrong_model / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="Frozen seeds use a different pairwise model"):
+        _validate_frozen_task_bindings(fitting_manifest, roles, task_role="fit_pool", pairwise_model_path=wrong_model)
     for field, error in (
         ("index_sha256", "Linker inputs use a different name-counts index"),
         ("model_sha256", "Input model, index, or role digest mismatch"),

@@ -157,6 +157,14 @@ IDs are dataset-local and the benchmarks lack ORCIDs.
 
 ### 8. Build linker inputs and gate requests
 
+Run the 1.5 training passes in this order.
+
+1. Cluster `fit_pool` without its queries using the 1.4 pairwise model.
+2. Mine pairs from that partition and fit the 1.5 pairwise heads.
+3. Recluster the same `fit_pool` seed population with the calibrated 1.5 pairwise bundle. Write to a fresh directory.
+4. Build tasks from that second pass and fit the ranker and gate. The trainer requires the seeds' model digest to match its pairwise bundle.
+5. Sweep EPS on `eps_cal` using the finalized 1.5 bundle.
+
 ~~~sh
 uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
@@ -243,13 +251,13 @@ samples before training.
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.eps.sweep_eps_on_linking_gold \
-  --dataset a_ross --arrow-root snapshot --model-path inference/production_model_v1.4 \
+  --dataset a_ross --arrow-root snapshot --model-path finalized-1.5 \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
   --allow-all-reference-identities --route production --batching-threshold 15000 \
   --eps-start 0.34 --eps-stop 0.42 --eps-step 0.02 --compute-missing-dists --allow-full-run \
   --output-dir eps/a_ross --n-jobs N
 uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
-  --source-model inference/production_model_v1.4 --output-model reviewed-model \
+  --source-model finalized-1.5 --output-model reviewed-model \
   --sweep-root eps --datasets a_ross --expected-batching-threshold 15000 \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
   --eps 0.38 --precision-f1-tolerance 0.001 --review-note "Record the review decision." \

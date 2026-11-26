@@ -111,6 +111,7 @@ from scripts.common.linker_seeds import (  # noqa: E402
     read_frozen_seeds,
 )
 from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
+from scripts.eps.sweep_eps_on_linking_gold import _hash_directory  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
 evaluate_classic = evaluate_linker
@@ -2001,7 +2002,12 @@ def _release_table_plan(
 
 
 def _validate_frozen_task_bindings(
-    manifest: Mapping[str, Any], roles: BlockRoles, *, task_role: str | None = None, index_sha256: str | None = None
+    manifest: Mapping[str, Any],
+    roles: BlockRoles,
+    *,
+    task_role: str | None = None,
+    index_sha256: str | None = None,
+    pairwise_model_path: Path | None = None,
 ) -> None:
     """Check the roles and block provenance of every frozen task table."""
     roles.require_current_exclusions()
@@ -2024,6 +2030,8 @@ def _validate_frozen_task_bindings(
     if roles.evidence_sha256 is not None:
         roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")
         common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
+        if pairwise_model_path is not None and common["model_sha256"] != _hash_directory(pairwise_model_path)[2]:
+            raise ValueError("Frozen seeds use a different pairwise model. Rebuild linker inputs and tasks.")
         for table in tables.values():
             for block, spec in table["blocks"].items():
                 path = spec.get("input_manifest")
@@ -2045,6 +2053,7 @@ def _materialize_frozen_linker_tasks(
     total_ram_bytes: int,
     max_query_groups: int | None,
     role: str = "fit_pool",
+    pairwise_model_path: Path | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
     """Verify frozen inputs and attach model features without changing candidate windows."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -2058,7 +2067,9 @@ def _materialize_frozen_linker_tasks(
     index_sha256 = (
         clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] if roles.evidence_sha256 is not None else None
     )
-    _validate_frozen_task_bindings(manifest, roles, task_role=role, index_sha256=index_sha256)
+    _validate_frozen_task_bindings(
+        manifest, roles, task_role=role, index_sha256=index_sha256, pairwise_model_path=pairwise_model_path
+    )
     summaries = []
     table = manifest["tables"][role]
     table_path = manifest_path.parent / table["path"]
@@ -2239,6 +2250,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 n_jobs=int(args.n_jobs),
                 total_ram_bytes=int(args.total_ram_bytes),
                 max_query_groups=max_query_groups,
+                pairwise_model_path=Path(args.pairwise_model_path),
             )
             fit_kwargs["frozen_task_rows"] = task_rows
             fit_kwargs["gate_training_blocks"] = block_roles.gate_training_blocks

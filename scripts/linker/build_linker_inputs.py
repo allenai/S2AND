@@ -22,6 +22,8 @@ from s2and._atomic_io import exclusive_file_lock
 from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_tables import read_cluster_seeds_arrow
+from s2and.incremental_linking_training.data_loading import load_clusterer
+from s2and.production_bundle_contract import PAIRWISE_ONLY_BUNDLE_KIND, infer_bundle_kind
 from s2and.production_model import load_production_model
 from scripts.common.arrow_roots import _replace_json, read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
@@ -296,7 +298,14 @@ def build_linker_inputs(
                     request_stats["unseeded_remaining"] = len(remaining) - len(production)
                 else:
                     if model is None:
-                        model = load_production_model(model_path, n_jobs=n_jobs)
+                        if (
+                            model_path.is_dir()
+                            and infer_bundle_kind(read_json_object(model_path / "manifest.json")["sha256"])
+                            == PAIRWISE_ONLY_BUNDLE_KIND
+                        ):
+                            model = load_clusterer(model_path, n_jobs=n_jobs)
+                        else:
+                            model = load_production_model(model_path, n_jobs=n_jobs)
                     free = _write_orcid_free_dataset(arrow_dir, output_dir / "orcid_free_arrow" / name)
                     with ArrowDataset.open(free, require_specter=True, require_name_counts_index=True) as hidden:
                         clusters, _ = model.predict_from_arrow(

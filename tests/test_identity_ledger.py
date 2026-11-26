@@ -306,6 +306,31 @@ def test_freeze_masks_shared_identities_and_reserves_sealed_strata(
     assert not allocation["stratum_shortfalls"]
 
 
+def test_freeze_excludes_eps_block_without_repeated_scored_orcid(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "evidence" / "manifest.json"
+    build_identity_evidence(snapshot, gold, evidence.parent, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
+    source = tmp_path / "source.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
+    )
+    blocks = tmp_path / "freeze.parquet"
+    build_freeze_input(evidence, source, blocks)
+    frozen = freeze_identity_roles(
+        blocks, evidence, {"eps_cal": 1, "final_test": 1}, extra_pins={"a lovelace": "eps_cal"}
+    )
+    assert frozen["roles"]["eps_cal"] == []
+    assert frozen["roles"]["final_test"] == ["g hopper"]
+    assert frozen["shortfalls"] == {"eps_cal": 1}
+    assert frozen["excluded_block_reasons"] == {"a lovelace": "no_repeated_scored_orcid"}
+
+
 def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:

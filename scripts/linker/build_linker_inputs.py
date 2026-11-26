@@ -270,7 +270,8 @@ def build_linker_inputs(
                 elif request:
                     queries = _request_queries(request)
                 else:
-                    limit = min(queries_per_block, max(0, len(eligible) - 1))
+                    # Keep enough scored mentions to label seeds and mine pairs.
+                    limit = min(queries_per_block, len(scored) // 2)
                     queries = sorted(
                         scored, key=lambda sid: (hashlib.sha256(f"{seed}:{block}:{sid}".encode()).digest(), sid)
                     )[:limit]

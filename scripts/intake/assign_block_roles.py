@@ -35,6 +35,7 @@ from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: 
 from scripts.common.block_roles import (  # noqa: E402
     FINAL_TEST_ROLE,
     VALID_ROLES,
+    BlockRoles,
     assigned_identity_roles,
     assignment_digest,
     load_block_roles,
@@ -45,6 +46,7 @@ from scripts.common.identity_ledger import (  # noqa: E402
     FREEZE_BINDING,
     FREEZE_SHA256_FIELD,
     SNAPSHOT_BINDING,
+    IdentityLedger,
     evidence_identities,
     gate_veto_identities,
     load_identity_evidence,
@@ -840,25 +842,49 @@ def freeze_identity_roles(
         if prior is not None
         else DEFAULT_GATE_TRAINING_BLOCK_COUNT
     )
+    block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
+    excluded_reasons: dict[str, str] = dict(prior.get("excluded_block_reasons", {})) if prior is not None else {}
     if fresh:
         assert prior is not None
         roles = prior
     else:
-        roles = assign_block_roles(
-            blocks,
-            targets,
-            seed=seed,
-            extra_dev_test_blocks=dev_test_blocks,
-            fit_pool_blocks=fit_pool_blocks,
-            pinned_roles=pins,
-            excluded_blocks=(*prior_exclusions, *excluded_blocks),
-            giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
-            pairwise_validation_fraction=fraction,
-            gate_training_block_count=gate_count,
-            closure_mode="block_only",
-            enforce_source_splits=True,
-            require_pinned_present=True,
-        )
+        while True:
+            roles = assign_block_roles(
+                blocks,
+                targets,
+                seed=seed,
+                extra_dev_test_blocks=dev_test_blocks,
+                fit_pool_blocks=fit_pool_blocks,
+                pinned_roles=pins,
+                excluded_blocks=(*prior_exclusions, *excluded_blocks, *excluded_reasons),
+                giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
+                pairwise_validation_fraction=fraction,
+                gate_training_block_count=gate_count,
+                closure_mode="block_only",
+                enforce_source_splits=True,
+                require_pinned_present=True,
+            )
+            mapping = roles["block_to_role"]
+            ledger = IdentityLedger(
+                evidence,
+                BlockRoles(
+                    mapping,
+                    "",
+                    {block: frozenset(orcids) for block, orcids in block_orcids.items()},
+                    identity_roles=assigned_identity_roles(block_orcids, mapping),
+                    source_splits={block.block_key: cast(str, block.source_split) for block in blocks},
+                ),
+            )
+            sparse = {
+                block
+                for block in roles["roles"]["eps_cal"]
+                if max(Counter(ledger.for_block(block).scored().values()).values(), default=0) < 2
+            }
+            if not sparse:
+                break
+            # Keep surviving assignments while filling any resulting EPS shortfall.
+            excluded_reasons.update(dict.fromkeys(sorted(sparse), "no_repeated_scored_orcid"))
+            pins = {block: role for block, role in mapping.items() if block not in sparse}
         if prior_fit:
             by_key = {block.block_key: block for block in blocks}
             roles["pairwise_validation_blocks"] = _pairwise_validation_fold(
@@ -879,7 +905,6 @@ def freeze_identity_roles(
                     prior_gate_training,
                 )
     mapping = roles["block_to_role"]
-    block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
     identity_roles = assigned_identity_roles(block_orcids, mapping)
     cross_role = {orcid for orcid, assigned in identity_roles.items() if len(assigned) > 1}
     identities_by_role: dict[str, set[str]] = defaultdict(set)
@@ -923,6 +948,7 @@ def freeze_identity_roles(
     roles["verification"]["cross_role_mentions_by_role"] = {role: mentions_by_role[role] for role in VALID_ROLES}
     return {
         **roles,
+        **({"excluded_block_reasons": excluded_reasons} if excluded_reasons else {}),
         "format_version": 2,
         "excluded_orcid_groups_sha256": excluded_orcid_groups_digest(),
         EVIDENCE_SHA256_FIELD: evidence.sha256,

@@ -748,7 +748,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--requests-per-block",
         "2",
         "--queries-per-block",
-        "1",
+        "300",
     )
     built = json.loads((inputs / "inputs.json").read_text())
     fit_inputs = built["a lovelace"]

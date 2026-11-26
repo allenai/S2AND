@@ -131,6 +131,8 @@ def _freeze_block_rows(
             }
             if unscored := query_set - scored.keys():
                 raise ValueError(f"Unscored fitting queries in {block!r}: {sorted(unscored)[:5]}")
+            if len(query_set) > len(scored) // 2:
+                raise ValueError(f"Fitting queries take more than half the scored signatures in {block!r}")
             expected_seeds = eligible - query_set
             if seeds.keys() != expected_seeds:
                 raise ValueError(

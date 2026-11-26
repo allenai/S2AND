@@ -262,6 +262,42 @@ def test_redact_source_tree_scrubs_author_names_and_rebuilds_their_index(tmp_pat
     assert files["paper_authors_batch_index"]["sha256"] == sha256_file(authors_idx)
 
 
+def test_redact_source_tree_scrubs_classified_arrow_text(tmp_path: Path) -> None:
+    names = ("author_first", "author_middle", "author_last", "author_suffix")
+    publication = ("venue", "journal_name")
+    email = "contact@example.org"
+
+    def write(table_name: str, table: pa.Table, *, root: Path = tmp_path) -> Path:
+        path = root / f"{table_name}.arrow"
+        with pa.OSFile(str(path), "wb") as sink, pa.ipc.new_file(sink, table.schema) as writer:
+            writer.write_table(table)
+        return path
+
+    signatures = {"signature_id": ["s1"], "author_email": [email], **dict.fromkeys(names, [email])}
+    signature_path = write("signatures", pa.table(signatures))
+    paper_path = write("papers", pa.table({"paper_id": ["p1"], **dict.fromkeys(publication, [email])}))
+    assert len(scan_tree_for_plaintext_emails(tmp_path)) == 7
+    counts = redact_source_tree(tmp_path)
+    assert counts["signature_arrow_values"] == 5
+    assert counts["paper_arrow_values"] == 2
+    assert not scan_tree_for_plaintext_emails(tmp_path)
+    with pa.memory_map(str(signature_path)) as source:
+        rows = pa.ipc.open_file(source).read_all()
+        assert rows["signature_id"].to_pylist() == ["s1"]
+        assert rows["author_email"].to_pylist() == [hash_feature_email(email)]
+        assert all(rows[name].to_pylist() == [EMAIL_REDACTED_TOKEN] for name in names)
+    with pa.memory_map(str(paper_path)) as source:
+        rows = pa.ipc.open_file(source).read_all()
+        assert rows["paper_id"].to_pylist() == ["p1"]
+        assert all(rows[name].to_pylist() == [EMAIL_REDACTED_TOKEN] for name in publication)
+
+    unknown = tmp_path / "unknown"
+    unknown.mkdir()
+    write("papers", pa.table({"paper_id": ["p1"], "unknown_text": [email]}), root=unknown)
+    with pytest.raises(ValueError, match="Unclassified Arrow string column papers.arrow:unknown_text"):
+        redact_source_tree(unknown)
+
+
 def test_dynamic_dataset_discovery_redact_source_tree_and_plaintext_scan(tmp_path: Path) -> None:
     # Non-hardcoded dataset name (not in legacy 7-giant list) is discovered and redacted,
     # including rebuilding papers_batch_index and refreshing source inventory!

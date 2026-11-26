@@ -22,7 +22,7 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -33,8 +33,9 @@ from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import _replace_json, read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
-    FINAL_TEST_ROLES,
+    FINAL_TEST_ROLE,
     VALID_ROLES,
+    BlockRoles,
     assigned_identity_roles,
     assignment_digest,
     load_block_roles,
@@ -45,6 +46,7 @@ from scripts.common.identity_ledger import (  # noqa: E402
     FREEZE_BINDING,
     FREEZE_SHA256_FIELD,
     SNAPSHOT_BINDING,
+    IdentityLedger,
     evidence_identities,
     gate_veto_identities,
     load_identity_evidence,
@@ -58,7 +60,7 @@ LEGACY_DEV_TEST_BLOCKS = frozenset(
     {"a khan", "a silva", "h wang", "j smith", "s feldman", "s gupta", "s lee", "s park"}
 )
 ASSIGNABLE_ROLES = (
-    *FINAL_TEST_ROLES,
+    FINAL_TEST_ROLE,
     "eps_cal",
     "gate_thresh",
     "fit_pool",
@@ -81,29 +83,6 @@ class BlockSpec:
     orcid_mention_counts: Mapping[str, int] = field(default_factory=dict)
 
 
-class _UnionFind:
-    def __init__(self, items: Sequence[str]) -> None:
-        self.parent = {item: item for item in items}
-
-    def find(self, item: str) -> str:
-        root = item
-        while self.parent[root] != root:
-            root = self.parent[root]
-        while self.parent[item] != root:
-            nxt = self.parent[item]
-            self.parent[item] = root
-            item = nxt
-        return root
-
-    def union(self, left: str, right: str) -> None:
-        ra, rb = self.find(left), self.find(right)
-        if ra != rb:
-            if ra < rb:
-                self.parent[rb] = ra
-            else:
-                self.parent[ra] = rb
-
-
 def _clean_orcids(orcids: Collection[str]) -> frozenset[str]:
     cleaned: set[str] = set()
     for raw in orcids:
@@ -117,37 +96,15 @@ def _hash_rank(seed: int, key: str) -> str:
     return hashlib.sha256(f"{seed}:{key}".encode()).hexdigest()
 
 
-def build_orcid_components(blocks: Sequence[BlockSpec]) -> list[tuple[str, ...]]:
-    """Group blocks connected by any shared valid, non-excluded ORCID into atomic components."""
-    norm_keys = [normalize_block_key(block.block_key) for block in blocks]
-    if len(norm_keys) != len(set(norm_keys)):
-        raise ValueError("Duplicate normalized block keys in input")
-    uf = _UnionFind(sorted(norm_keys))
-    orcid_owner: dict[str, str] = {}
-    for block in sorted(blocks, key=lambda item: normalize_block_key(item.block_key)):
-        key = normalize_block_key(block.block_key)
-        for orcid in _clean_orcids(block.orcids):
-            first = orcid_owner.get(orcid)
-            if first is None:
-                orcid_owner[orcid] = key
-            else:
-                uf.union(first, key)
-    grouped: dict[str, list[str]] = defaultdict(list)
-    for key in sorted(norm_keys):
-        grouped[uf.find(key)].append(key)
-    return [tuple(sorted(members)) for _, members in sorted(grouped.items())]
-
-
 def verify_role_assignments(
     blocks: Sequence[BlockSpec],
     block_to_role: Mapping[str, str],
     *,
     excluded_blocks: Collection[str] = PERMANENT_EXCLUDED_BLOCKS,
     dev_test_blocks: Collection[str] = LEGACY_DEV_TEST_BLOCKS,
-    closure_mode: Literal["strict", "block_only"] = "strict",
     enforce_source_splits: bool = False,
 ) -> dict[str, Any]:
-    """Verify strict block, ORCID, excluded-block, source-split, and legacy dev_test invariants."""
+    """Verify block, exclusion, source-split, and legacy dev_test invariants."""
     by_key = {normalize_block_key(block.block_key): block for block in blocks}
     norm_mapping = {normalize_block_key(k): r for k, r in block_to_role.items()}
     excluded_set = {normalize_block_key(k) for k in excluded_blocks} | set(PERMANENT_EXCLUDED_BLOCKS)
@@ -163,7 +120,7 @@ def verify_role_assignments(
             raise ValueError(f"Assigned block {key!r} missing from block metadata")
         if enforce_source_splits:
             split = by_key[key].source_split
-            if role in FINAL_TEST_ROLES and split != "holdout":
+            if role == FINAL_TEST_ROLE and split != "holdout":
                 raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter {role!r}")
             if role in TRAINING_AND_TUNING_ROLES and split != "development":
                 raise ValueError(f"Block {key!r} has source_split={split!r} and cannot enter {role!r}")
@@ -180,9 +137,6 @@ def verify_role_assignments(
 
     raw_counts = Counter(orcid for orcids in orcids_by_role.values() for orcid in orcids)
     raw_overlap = {orcid for orcid, count in raw_counts.items() if count > 1}
-    if closure_mode == "strict" and raw_overlap:
-        raise ValueError(f"ORCID overlap across roles: {sorted(raw_overlap)[:5]}")
-
     role_counts = {role: sum(1 for r in norm_mapping.values() if r == role) for role in VALID_ROLES}
     role_signatures = {
         role: sum(by_key[key].signature_count for key, r in norm_mapping.items() if r == role) for role in VALID_ROLES
@@ -196,7 +150,6 @@ def verify_role_assignments(
         "role_block_counts_by_stratum": {
             role: {stratum: counts[role, stratum] for stratum in strata} for role in VALID_ROLES
         },
-        "closure_mode": closure_mode,
         "cross_role_orcid_overlap": 0,
         "raw_cross_role_orcid_overlap": len(raw_overlap),
     }
@@ -214,18 +167,18 @@ def _validate_source_splits(blocks: Sequence[BlockSpec], enforce: bool) -> None:
 @dataclass
 class _GiantCaps:
     remaining: dict[str, int]
-    counts: dict[str, int]
+    giants: set[str]
 
-    def allows(self, role: str, component: tuple[str, ...]) -> bool:
-        return role not in self.remaining or self.counts[component[0]] <= self.remaining[role]
+    def allows(self, role: str, key: str) -> bool:
+        return role not in self.remaining or key not in self.giants or self.remaining[role] > 0
 
-    def take(self, role: str, component: tuple[str, ...]) -> None:
-        if role in self.remaining:
-            self.remaining[role] -= self.counts[component[0]]
+    def take(self, role: str, key: str) -> None:
+        if role in self.remaining and key in self.giants:
+            self.remaining[role] -= 1
 
 
 def _allocate_strata(
-    components: Sequence[tuple[str, ...]],
+    blocks: Sequence[str],
     by_key: Mapping[str, BlockSpec],
     remaining: dict[str, int],
     block_to_role: dict[str, str],
@@ -234,18 +187,16 @@ def _allocate_strata(
     enforce_source_splits: bool,
     giant_caps: _GiantCaps | None = None,
 ) -> None:
-    groups: dict[tuple[str, str], deque[tuple[str, ...]]] = defaultdict(deque)
+    groups: dict[tuple[str, str], deque[str]] = defaultdict(deque)
     sizes: Counter[tuple[str, str]] = Counter()
-    for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
-        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
-        splits = {by_key[key].source_split for key in component} if enforce_source_splits else set()
-        split = "holdout" if splits == {"holdout"} else "development" if splits == {"development"} else ""
-        group = (by_key[primary].stratum, split)
-        groups[group].append(component)
-        sizes[group] += len(component)
+    for key in sorted(blocks, key=lambda key: (_hash_rank(seed, key), key)):
+        spec = by_key[key]
+        group = (spec.stratum, (spec.source_split or "") if enforce_source_splits else "")
+        groups[group].append(key)
+        sizes[group] += 1
 
     for role, target in remaining.items():
-        allowed = "holdout" if role in FINAL_TEST_ROLES else "development"
+        allowed = "holdout" if role == FINAL_TEST_ROLE else "development"
         eligible = {
             group for group, size in sizes.items() if size and (not enforce_source_splits or group[1] == allowed)
         }
@@ -259,28 +210,27 @@ def _allocate_strata(
             group = max(eligible, key=lambda group: (deficits[group], tie_break[group]))
             queue = groups[group]
             if giant_caps is None or giant_caps.allows(role, queue[0]):
-                component = queue.popleft()
+                key = queue.popleft()
             else:
                 candidate = next((comp for comp in queue if giant_caps.allows(role, comp)), None)
                 if candidate is None:
                     eligible.remove(group)
                     continue
-                component = candidate
-                queue.remove(component)
+                key = candidate
+                queue.remove(key)
             if giant_caps is not None:
-                giant_caps.take(role, component)
-            for key in component:
-                block_to_role[key] = role
-            assigned += len(component)
-            sizes[group] -= len(component)
-            deficits[group] -= total * len(component)
+                giant_caps.take(role, key)
+            block_to_role[key] = role
+            assigned += 1
+            sizes[group] -= 1
+            deficits[group] -= total
             if not groups[group]:
                 eligible.remove(group)
         remaining[role] = max(0, remaining[role] - assigned)
 
 
 def _reserve_role_strata(
-    components: Sequence[tuple[str, ...]],
+    blocks: Sequence[str],
     by_key: Mapping[str, BlockSpec],
     remaining: dict[str, int],
     assignments: dict[str, str],
@@ -288,133 +238,32 @@ def _reserve_role_strata(
     seed: int,
     enforce_source_splits: bool,
     giant_caps: _GiantCaps | None = None,
-) -> list[tuple[str, ...]]:
-    groups: dict[tuple[str, str], deque[tuple[str, ...]]] = defaultdict(deque)
-    for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
-        splits = {by_key[key].source_split for key in component}
-        split = next(iter(splits)) if enforce_source_splits and len(splits) == 1 else None
-        if enforce_source_splits and split is None:
-            continue
-        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
-        groups[by_key[primary].stratum, split or ""].append(component)
+) -> list[str]:
+    groups: dict[tuple[str, str], deque[str]] = defaultdict(deque)
+    for key in sorted(blocks, key=lambda key: (_hash_rank(seed, key), key)):
+        spec = by_key[key]
+        split = (spec.source_split or "") if enforce_source_splits else ""
+        groups[spec.stratum, split].append(key)
 
     covered = {(role, by_key[key].stratum) for key, role in assignments.items()}
     reserved = set()
-    paired = all(role in remaining for role in FINAL_TEST_ROLES)
     for (stratum, split), queue in sorted(groups.items(), key=lambda item: (len(item[1]), item[0])):
         for role in remaining:
-            if paired and role in FINAL_TEST_ROLES:
-                continue
-            expected_split = "holdout" if role in FINAL_TEST_ROLES else "development"
+            expected_split = "holdout" if role == FINAL_TEST_ROLE else "development"
             if split and split != expected_split:
                 continue
             if (role, stratum) not in covered and remaining[role]:
-                component = next(
-                    (
-                        comp
-                        for comp in queue
-                        if len(comp) <= remaining[role] and (giant_caps is None or giant_caps.allows(role, comp))
-                    ),
-                    None,
-                )
-                if component is None:
+                key = next((key for key in queue if giant_caps is None or giant_caps.allows(role, key)), None)
+                if key is None:
                     continue
-                queue.remove(component)
+                queue.remove(key)
                 if giant_caps is not None:
-                    giant_caps.take(role, component)
-                reserved.add(component[0])
-                remaining[role] -= len(component)
-                for key in component:
-                    assignments[key] = role
-                    covered.add((role, by_key[key].stratum))
-    return [component for component in components if component[0] not in reserved]
-
-
-def _allocate_sealed_pairs(
-    components: Sequence[tuple[str, ...]],
-    by_key: Mapping[str, BlockSpec],
-    remaining: dict[str, int],
-    assignments: dict[str, str],
-    *,
-    seed: int,
-    enforce_source_splits: bool,
-    giant_caps: _GiantCaps | None = None,
-) -> list[tuple[str, ...]]:
-    left, right = FINAL_TEST_ROLES
-    if left not in remaining or right not in remaining:
-        return list(components)
-    strata: dict[str, deque[tuple[str, ...]]] = defaultdict(deque)
-    for component in sorted(components, key=lambda comp: (_hash_rank(seed, comp[0]), comp[0])):
-        if enforce_source_splits and any(by_key[key].source_split != "holdout" for key in component):
-            continue
-        primary = max(component, key=lambda key: (by_key[key].signature_count, key))
-        strata[by_key[primary].stratum].append(component)
-    counts = Counter((role, by_key[key].stratum) for key, role in assignments.items())
-    sizes = {stratum: sum(map(len, queue)) for stratum, queue in strata.items()}
-    total = sum(sizes.values())
-    pair_target = min(remaining[left], remaining[right])
-    assigned: set[str] = set()
-
-    def take(role: str, queue: deque[tuple[str, ...]], component: tuple[str, ...] | None = None) -> None:
-        if component is None:
-            component = queue.popleft()
-        else:
-            queue.remove(component)
-        if giant_caps is not None:
-            giant_caps.take(role, component)
-        assigned.add(component[0])
-        remaining[role] -= len(component)
-        for key in component:
-            assignments[key] = role
-            counts[role, by_key[key].stratum] += 1
-
-    def fits(role: str, component: tuple[str, ...]) -> bool:
-        return len(component) <= remaining[role] and (giant_caps is None or giant_caps.allows(role, component))
-
-    # Cover feasible rare strata before spending proportional quotas.
-    for stratum in sorted(
-        strata,
-        key=lambda value: (
-            len(strata[value]) == 1 and all(not counts[role, value] for role in FINAL_TEST_ROLES),
-            sizes[value],
-            value,
-        ),
-    ):
-        queue = strata[stratum]
-        missing = [role for role in FINAL_TEST_ROLES if not counts[role, stratum]]
-        if len(queue) == 1 and len(missing) == 2:
-            role = max(missing, key=lambda role: (fits(role, queue[0]), remaining[role]))
-            if fits(role, queue[0]):
-                take(role, queue)
-        elif len(queue) >= len(missing) and all(
-            fits(role, component) for role, component in zip(missing, queue, strict=False)
-        ):
-            for role in missing:
-                take(role, queue)
-        elif giant_caps is not None:
-            for role in missing:
-                if component := next((comp for comp in queue if fits(role, comp)), None):
-                    take(role, queue, component)
-
-    # Fill both halves together so rounding cannot send the rare stratum to one half.
-    deficits = {
-        stratum: pair_target * size - total * max(counts[left, stratum], counts[right, stratum])
-        for stratum, size in sizes.items()
-    }
-    while remaining[left] and remaining[right]:
-        eligible = [
-            stratum
-            for stratum, queue in strata.items()
-            if len(queue) >= 2 and fits(left, queue[0]) and fits(right, queue[1])
-        ]
-        if not eligible:
-            break
-        stratum = max(eligible, key=lambda value: (deficits[value], value))
-        queue = strata[stratum]
-        deficits[stratum] -= total * max(len(queue[0]), len(queue[1]))
-        take(left, queue)
-        take(right, queue)
-    return [component for component in components if component[0] not in assigned]
+                    giant_caps.take(role, key)
+                reserved.add(key)
+                remaining[role] -= 1
+                assignments[key] = role
+                covered.add((role, stratum))
+    return [key for key in blocks if key not in reserved]
 
 
 def _pairwise_validation_fold(
@@ -445,7 +294,7 @@ def _select_fit_pool_blocks(
     """Fill the requested subset proportionally across the eligible strata."""
     selected: dict[str, str] = {}
     _allocate_strata(
-        [(key,) for key in eligible],
+        sorted(eligible),
         blocks,
         {subset: max(0, target - len(prior))},
         selected,
@@ -467,7 +316,6 @@ def assign_block_roles(
     giant_caps: Mapping[str, int] | None = None,
     pairwise_validation_fraction: float = DEFAULT_PAIRWISE_VALIDATION_FRACTION,
     gate_training_block_count: int = DEFAULT_GATE_TRAINING_BLOCK_COUNT,
-    closure_mode: Literal["strict", "block_only"] = "strict",
     enforce_source_splits: bool = False,
     require_pinned_present: bool = False,
 ) -> dict[str, Any]:
@@ -485,18 +333,12 @@ def assign_block_roles(
         giant_caps: Maximum number of blocks above 15,000 signatures per specified role, including pins.
         pairwise_validation_fraction: Fraction of fit_pool blocks held out from pairwise fitting.
         gate_training_block_count: Target number of fit_pool blocks marked for gate training.
-        closure_mode: Use block-only allocation or require identity-disjoint blocks.
-        enforce_source_splits: When True, both final test halves accept only ``holdout`` blocks and
+        enforce_source_splits: When True, final_test accepts only ``holdout`` blocks and
             training/tuning roles accept only ``development`` blocks.
         require_pinned_present: When True, raise if any explicitly pinned/dev_test/excluded block
             is absent from ``blocks``.
     """
     role_targets = dict(role_targets)
-    if "final_test" in role_targets:
-        if any(role in role_targets for role in FINAL_TEST_ROLES):
-            raise ValueError("Specify an aggregate final_test target or individual half targets")
-        total = role_targets.pop("final_test")
-        role_targets.update(final_test_a=(total + 1) // 2, final_test_b=total // 2)
     invalid_targets = sorted(set(role_targets) - set(ASSIGNABLE_ROLES))
     if invalid_targets:
         raise ValueError(f"Unsupported target roles: {invalid_targets}")
@@ -576,46 +418,18 @@ def assign_block_roles(
     recorded_exclusions = sorted((seen_keys & excluded_set) | {normalize_block_key(k) for k in excluded_blocks})
     by_key = {block.block_key: block for block in active_blocks}
 
-    if closure_mode == "strict":
-        components = build_orcid_components(active_blocks)
-    elif closure_mode == "block_only":
-        components = [(block.block_key,) for block in sorted(active_blocks, key=lambda b: b.block_key)]
-    else:
-        raise ValueError(f"Unsupported closure_mode: {closure_mode!r}")
-
     giant_budget = (
-        _GiantCaps(
-            caps.copy(),
-            {comp[0]: sum(by_key[key].signature_count > GIANT_SIGNATURE_COUNT for key in comp) for comp in components},
-        )
+        _GiantCaps(caps.copy(), {key for key, block in by_key.items() if block.signature_count > GIANT_SIGNATURE_COUNT})
         if caps
         else None
     )
-    block_to_role: dict[str, str] = {}
-    free_components: list[tuple[str, ...]] = []
-    for component in components:
-        component_pins = {pins[key] for key in component if key in pins}
-        if len(component_pins) > 1:
-            raise ValueError(
-                f"ORCID-linked component {component} has conflicting pinned roles: {sorted(component_pins)}"
-            )
-        if component_pins:
-            role = next(iter(component_pins))
-            if giant_budget is not None:
-                if not giant_budget.allows(role, component):
-                    raise ValueError(f"Pinned blocks exceed the giant cap for {role!r}: {component}")
-                giant_budget.take(role, component)
-            for key in component:
-                if (
-                    enforce_source_splits
-                    and role == "dev_test"
-                    and by_key[key].source_split == "holdout"
-                    and key not in pins
-                ):
-                    raise ValueError(f"Unpinned holdout block {key!r} cannot follow an ORCID component into dev_test")
-                block_to_role[key] = role
-        else:
-            free_components.append(component)
+    block_to_role = {key: pins[key] for key in sorted(by_key.keys() & pins.keys())}
+    if giant_budget is not None:
+        for key, role in block_to_role.items():
+            if not giant_budget.allows(role, key):
+                raise ValueError(f"Pinned blocks exceed the giant cap for {role!r}: {key!r}")
+            giant_budget.take(role, key)
+    free_blocks = sorted(by_key.keys() - block_to_role.keys())
 
     target_order = [role for role in ASSIGNABLE_ROLES if role in role_targets]
     if not target_order:
@@ -632,42 +446,18 @@ def assign_block_roles(
             for block in active_blocks
             if block_to_role.get(block.block_key) == role
             or (
-                (role not in FINAL_TEST_ROLES or block.block_key not in block_to_role)
+                (role != FINAL_TEST_ROLE or block.block_key not in block_to_role)
                 and (
                     not enforce_source_splits
-                    or block.source_split == ("holdout" if role in FINAL_TEST_ROLES else "development")
+                    or block.source_split == ("holdout" if role == FINAL_TEST_ROLE else "development")
                 )
             )
         }
         for role in target_order
     }
-    if closure_mode != "block_only" and all(role in role_targets for role in FINAL_TEST_ROLES):
-        sealed_counts = Counter(
-            block.stratum
-            for block in active_blocks
-            if block_to_role.get(block.block_key) in FINAL_TEST_ROLES
-            or (block.block_key not in block_to_role and (not enforce_source_splits or block.source_split == "holdout"))
-        )
-        for role in FINAL_TEST_ROLES:
-            if role in caps:
-                continue
-            pinned_strata = {by_key[key].stratum for key, assigned in block_to_role.items() if assigned == role}
-            required = pinned_strata | {stratum for stratum in strata_by_role[role] if sealed_counts[stratum] > 1}
-            if role_targets[role] < len(required):
-                raise ValueError("Sealed targets must allow at least one block per stratum in each half")
-
-    free_components = _allocate_sealed_pairs(
-        free_components,
-        by_key,
-        remaining,
-        block_to_role,
-        seed=seed,
-        enforce_source_splits=enforce_source_splits,
-        giant_caps=giant_budget,
-    )
     # Reserve coverage before proportional sampling can discard a rare stratum.
-    free_components = _reserve_role_strata(
-        free_components,
+    free_blocks = _reserve_role_strata(
+        free_blocks,
         by_key,
         remaining,
         block_to_role,
@@ -677,7 +467,7 @@ def assign_block_roles(
     )
     if giant_budget is not None:
         _allocate_strata(
-            free_components,
+            free_blocks,
             by_key,
             remaining,
             block_to_role,
@@ -687,9 +477,9 @@ def assign_block_roles(
         )
     else:
         cohorts = (
-            {FINAL_TEST_ROLES[0]: FINAL_TEST_ROLES, "fit_pool": TRAINING_AND_TUNING_ROLES, "dev_test": ("dev_test",)}
+            {FINAL_TEST_ROLE: (FINAL_TEST_ROLE,), "fit_pool": TRAINING_AND_TUNING_ROLES, "dev_test": ("dev_test",)}
             if enforce_source_splits
-            else {FINAL_TEST_ROLES[0]: ASSIGNABLE_ROLES}
+            else {FINAL_TEST_ROLE: ASSIGNABLE_ROLES}
         )
         targets_by_cohort = {
             cohort: {role: count for role, count in remaining.items() if role in members}
@@ -698,20 +488,19 @@ def assign_block_roles(
         # Reserve the total sample before role rounding so rare strata reach small roles.
         selected: dict[str, str] = {}
         _allocate_strata(
-            free_components,
+            free_blocks,
             by_key,
             {cohort: sum(targets.values()) for cohort, targets in targets_by_cohort.items()},
             selected,
             seed=seed,
             enforce_source_splits=enforce_source_splits,
         )
-        selected_components: dict[str, list[tuple[str, ...]]] = defaultdict(list)
-        for component in free_components:
-            if component[0] in selected:
-                selected_components[selected[component[0]]].append(component)
+        selected_blocks: dict[str, list[str]] = defaultdict(list)
+        for key, cohort in selected.items():
+            selected_blocks[cohort].append(key)
         for cohort, targets in targets_by_cohort.items():
             _allocate_strata(
-                selected_components[cohort],
+                selected_blocks[cohort],
                 by_key,
                 targets,
                 block_to_role,
@@ -725,14 +514,11 @@ def assign_block_roles(
         block_to_role,
         excluded_blocks=excluded_set,
         dev_test_blocks=dev_test_set,
-        closure_mode=closure_mode,
         enforce_source_splits=enforce_source_splits,
     )
     roles: dict[str, list[str]] = {role: [] for role in VALID_ROLES}
     for key, role in sorted(block_to_role.items()):
         roles[role].append(key)
-    multi_block_components = [list(component) for component in components if len(component) > 1]
-    component_sizes = sorted((len(c) for c in components), reverse=True)
     shortfalls = {role: remaining[role] for role in target_order if remaining[role] > 0}
 
     stratum_shortfalls = {}
@@ -745,7 +531,6 @@ def assign_block_roles(
 
     return {
         "seed": int(seed),
-        "closure_mode": closure_mode,
         "enforce_source_splits": bool(enforce_source_splits),
         "excluded_blocks": recorded_exclusions,
         "role_targets": {role: int(role_targets[role]) for role in target_order},
@@ -765,13 +550,6 @@ def assign_block_roles(
         "unassigned": sorted(by_key.keys() - block_to_role.keys()),
         "shortfalls": shortfalls,
         "stratum_shortfalls": stratum_shortfalls,
-        "cross_block_components": multi_block_components,
-        "component_size_summary": {
-            "total_components": len(components),
-            "multi_block_components": len(multi_block_components),
-            "largest_component_size": component_sizes[0] if component_sizes else 0,
-            "top_5_component_sizes": component_sizes[:5],
-        },
         "verification": verification,
     }
 
@@ -959,25 +737,48 @@ def freeze_identity_roles(
         if prior is not None
         else DEFAULT_GATE_TRAINING_BLOCK_COUNT
     )
+    block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
+    excluded_reasons: dict[str, str] = dict(prior.get("excluded_block_reasons", {})) if prior is not None else {}
     if fresh:
         assert prior is not None
         roles = prior
     else:
-        roles = assign_block_roles(
-            blocks,
-            targets,
-            seed=seed,
-            extra_dev_test_blocks=dev_test_blocks,
-            fit_pool_blocks=fit_pool_blocks,
-            pinned_roles=pins,
-            excluded_blocks=(*prior_exclusions, *excluded_blocks),
-            giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
-            pairwise_validation_fraction=fraction,
-            gate_training_block_count=gate_count,
-            closure_mode="block_only",
-            enforce_source_splits=True,
-            require_pinned_present=True,
-        )
+        while True:
+            roles = assign_block_roles(
+                blocks,
+                targets,
+                seed=seed,
+                extra_dev_test_blocks=dev_test_blocks,
+                fit_pool_blocks=fit_pool_blocks,
+                pinned_roles=pins,
+                excluded_blocks=(*prior_exclusions, *excluded_blocks, *excluded_reasons),
+                giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
+                pairwise_validation_fraction=fraction,
+                gate_training_block_count=gate_count,
+                enforce_source_splits=True,
+                require_pinned_present=True,
+            )
+            mapping = roles["block_to_role"]
+            ledger = IdentityLedger(
+                evidence,
+                BlockRoles(
+                    mapping,
+                    "",
+                    {block: frozenset(orcids) for block, orcids in block_orcids.items()},
+                    identity_roles=assigned_identity_roles(block_orcids, mapping),
+                    source_splits={block.block_key: cast(str, block.source_split) for block in blocks},
+                ),
+            )
+            sparse = {
+                block
+                for block in roles["roles"]["eps_cal"]
+                if max(Counter(ledger.for_block(block).scored().values()).values(), default=0) < 2
+            }
+            if not sparse:
+                break
+            # Keep surviving assignments while filling any resulting EPS shortfall.
+            excluded_reasons.update(dict.fromkeys(sorted(sparse), "no_repeated_scored_orcid"))
+            pins = {block: role for block, role in mapping.items() if block not in sparse}
         if prior_fit:
             by_key = {block.block_key: block for block in blocks}
             roles["pairwise_validation_blocks"] = _pairwise_validation_fold(
@@ -998,7 +799,6 @@ def freeze_identity_roles(
                     prior_gate_training,
                 )
     mapping = roles["block_to_role"]
-    block_orcids = {block.block_key: sorted(block.orcids) for block in blocks}
     identity_roles = assigned_identity_roles(block_orcids, mapping)
     cross_role = {orcid for orcid, assigned in identity_roles.items() if len(assigned) > 1}
     identities_by_role: dict[str, set[str]] = defaultdict(set)
@@ -1032,9 +832,6 @@ def freeze_identity_roles(
             )
     if fresh:
         return roles
-    for key in ("closure_mode", "cross_block_components", "component_size_summary"):
-        roles.pop(key)
-    roles["verification"].pop("closure_mode")
     roles["verification"]["raw_cross_role_orcid_overlap"] = len(cross_role)
     roles["verification"]["cross_role_identities_by_role"] = {
         role: len(identities_by_role[role]) for role in VALID_ROLES
@@ -1042,6 +839,7 @@ def freeze_identity_roles(
     roles["verification"]["cross_role_mentions_by_role"] = {role: mentions_by_role[role] for role in VALID_ROLES}
     return {
         **roles,
+        **({"excluded_block_reasons": excluded_reasons} if excluded_reasons else {}),
         "format_version": 2,
         "excluded_orcid_groups_sha256": excluded_orcid_groups_digest(),
         EVIDENCE_SHA256_FIELD: evidence.sha256,

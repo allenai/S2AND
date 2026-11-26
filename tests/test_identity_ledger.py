@@ -104,7 +104,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
     frozen = tmp_path / "roles.json"
-    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {role: 1, "final_test_a": 1})
+    roles = freeze_identity_roles(blocks, evidence / "manifest.json", {role: 1, "final_test": 1})
     frozen.write_text(json.dumps(roles), encoding="utf-8")
     ledger = ledger_for_roles(evidence / "manifest.json", load_block_roles(frozen))
     assert ledger is not None
@@ -118,7 +118,7 @@ def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path],
     if role == "gate_thresh":
         assert DEPOSITED not in ledger.roles.identity_roles
         refrozen = replace(
-            ledger.roles, identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"final_test_a"})}
+            ledger.roles, identity_roles={**ledger.roles.identity_roles, DEPOSITED: frozenset({"final_test"})}
         )
         assert ledger.roles.bindings_for({"a lovelace"}) != refrozen.bindings_for({"a lovelace"})
 
@@ -258,7 +258,7 @@ def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold
     assert view.component_label(fitting_seeds) == GOLD
 
 
-def test_freeze_masks_shared_identities_and_reserves_both_halves(
+def test_freeze_masks_shared_identities_and_reserves_sealed_strata(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:
     from scripts.common.block_roles import load_block_roles
@@ -275,7 +275,7 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     )
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
-    targets = {"fit_pool": 1, "final_test_a": 1}
+    targets = {"fit_pool": 1, "final_test": 1}
     frozen = freeze_identity_roles(blocks, evidence / "manifest.json", targets)
     manifest = tmp_path / "assignments.json"
     manifest.write_text(json.dumps(frozen))
@@ -300,9 +300,34 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
             BlockSpec("c block", 1, stratum="paired"),
         ],
         {"final_test": 2},
-        closure_mode="block_only",
     )
-    assert allocation["unassigned"] == ["a block"]
+    assert "a block" in allocation["roles"]["final_test"]
+    assert not allocation["stratum_shortfalls"]
+
+
+def test_freeze_excludes_eps_block_without_repeated_scored_orcid(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from scripts.intake.assign_block_roles import freeze_identity_roles
+    from scripts.intake.build_freeze_input import build_freeze_input
+    from scripts.intake.build_identity_evidence import build_identity_evidence
+
+    snapshot, gold = evidence_inputs
+    evidence = tmp_path / "evidence" / "manifest.json"
+    build_identity_evidence(snapshot, gold, evidence.parent, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
+    source = tmp_path / "source.parquet"
+    pq.write_table(
+        pa.table({"cluster_block_key": ["a lovelace", "g hopper"], "split": ["development", "holdout"]}), source
+    )
+    blocks = tmp_path / "freeze.parquet"
+    build_freeze_input(evidence, source, blocks)
+    frozen = freeze_identity_roles(
+        blocks, evidence, {"eps_cal": 1, "final_test": 1}, extra_pins={"a lovelace": "eps_cal"}
+    )
+    assert frozen["roles"]["eps_cal"] == []
+    assert frozen["roles"]["final_test"] == ["g hopper"]
+    assert frozen["shortfalls"] == {"eps_cal": 1}
+    assert frozen["excluded_block_reasons"] == {"a lovelace": "no_repeated_scored_orcid"}
 
 
 def test_eligibility_blocks_conflicting_and_cross_role_mentions(
@@ -325,7 +350,7 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     blocks = tmp_path / "freeze.parquet"
     build_freeze_input(evidence, source, blocks)
     frozen = tmp_path / "roles.json"
-    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
+    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(frozen))
     assert ledger is not None
     block = ledger.for_block("a lovelace")
@@ -364,13 +389,13 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence, source, blocks)
     role_path = tmp_path / "roles.json"
-    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
+    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
     assignment_root = tmp_path / "assignments"
     assignment_root.mkdir()
-    assignments = assignment_root / "assignments.parquet"
-    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
+    assignments = assignment_root / "seeds.parquet"
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "component_key": ["a", "b"]}), assignments)
     queries = assignments.with_name("queries.json")
     queries.write_text("[]", encoding="utf-8")
     manifest = assignment_root / "manifest.json"
@@ -384,7 +409,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
         "files": {assignments.name: sha256_file(assignments), queries.name: sha256_file(queries)},
     }
     manifest.write_text(json.dumps(record))
-    specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
+    specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", assignments)}
     output = tmp_path / "pairs.csv"
     assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 0
     summary = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))["blocks"]["a lovelace"]
@@ -402,10 +427,10 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"fit_pool": 2})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
-    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "component_key": ["a", "b"]}), assignments)
     other = tmp_path / "other" / assignments.name
     other.parent.mkdir()
-    pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)
+    pq.write_table(pa.table({"signature_id": ["5-0"], "component_key": ["a"]}), other)
     for block, model_sha, path in (("a lovelace", "a" * 64, assignments), ("g hopper", "c" * 64, other)):
         queries = path.with_name("queries.json")
         queries.write_text("[]", encoding="utf-8")
@@ -422,12 +447,12 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
                 }
             )
         )
-    specs["g hopper"] = BlockInput(snapshot / "datasets" / "g_hopper", None, other)
+    specs["g hopper"] = BlockInput(snapshot / "datasets" / "g_hopper", other)
     with pytest.raises(ValueError, match="model_sha256"):
         mine_pairs(role_path, specs, tmp_path / "mixed-model.csv", per_block=1, identity_evidence=evidence)
 
 
-def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
+def test_evidence_excludes_over_limit_blocks_and_rejects_stale_exclusions(
     evidence_inputs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from scripts.common import identity_ledger, orcid_references
@@ -438,13 +463,22 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
     output = tmp_path / "identity"
     missing = original.slice(0, 1).set_column(1, "corpus_paper_id", pa.array([999]))
     pq.write_table(pa.concat_tables([original, missing]), gold)
-    with pytest.raises(ValueError, match="a lovelace.*unmatched gold"):
-        build_identity_evidence(snapshot, gold, output)
-    assert not (output / "manifest.json").exists()
+    excluded = build_identity_evidence(snapshot, gold, output)
+    assert excluded["excluded_blocks"] == {"a lovelace": ["unmatched_gold", "absent_from_export"]}
+    assert excluded["exclusions_by_reason"] == {"unmatched_gold": 1, "absent_from_export": 1}
+    assert set(excluded["blocks"]) == {"g hopper"}
+    assert identity_ledger.load_identity_evidence(output / "manifest.json").read_block("g hopper").keys() == {"5-0"}
+    resumed = build_identity_evidence(
+        snapshot, gold, output, max_unmatched_gold=0.25, max_absent_from_export=0.25, append=True
+    )
+    assert not resumed["excluded_blocks"]
+    assert set(resumed["blocks"]) == {"a lovelace", "g hopper"}
+    assert resumed["blocks"]["g hopper"] == excluded["blocks"]["g hopper"]
     pq.write_table(missing, gold)
     with pytest.raises(ValueError, match="No gold rows matched"):
-        build_identity_evidence(snapshot, gold, output, max_unmatched_gold=1)
+        build_identity_evidence(snapshot, gold, tmp_path / "no-match", max_absent_from_export=1)
     pq.write_table(original, gold)
+    output = tmp_path / "within-limit"
     build_identity_evidence(snapshot, gold, output, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     monkeypatch.setattr(orcid_references, "EXCLUDED_ORCID_GROUPS", frozenset({GOLD}))
     with pytest.raises(ValueError, match="excluded ORCID groups"):
@@ -452,13 +486,10 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
 
 
 def test_unmatched_gold_limit_ignores_vetoed_same_paper_rows() -> None:
-    from scripts.intake.build_identity_evidence import unmatched_gold_over_limit
+    from scripts.intake.build_identity_evidence import _join_error_count
 
     # A Vietnamese block with many same-surname coauthors must not fail on its vetoed rows alone.
-    assert unmatched_gold_over_limit({"ambiguous_paper_block": 50}, 100, 0.02) is None
-    assert unmatched_gold_over_limit({"ambiguous_paper_block": 50, "position_shift": 3}, 100, 0.02) == 3
-    assert unmatched_gold_over_limit({"absent_from_export": 2}, 100, 0.02) is None
-    assert unmatched_gold_over_limit({}, 0, 0.02) is None
+    assert _join_error_count({"ambiguous_paper_block": 50, "absent_from_export": 2, "position_shift": 3}) == 3
 
 
 def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
@@ -487,8 +518,16 @@ def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
     assert audit["permission_filtered_gold_rows"] == 1
     assert not audit.get("dropped_unmatched_paper_position")
     pq.write_table(pa.concat_tables([original, denied, missing]), gold)
-    with pytest.raises(ValueError, match="'a lovelace' has 2/4 unmatched gold.*absent_from_export"):
-        build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.34)
+    result = build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.34)
+    assert result["excluded_blocks"] == {"a lovelace": ["absent_from_export"]}
+    audit = result["audit"]["a lovelace"]
+    assert audit["absent_from_export_rows"] == audit["join_error_rows"] == 1
+    assert audit["gold_rows_for_block"] - audit["permission_filtered_gold_rows"] == 4
+    allowed = build_identity_evidence(
+        snapshot, gold, tmp_path / "allow-absence", max_unmatched_gold=0.34, max_absent_from_export=0.25
+    )
+    assert "a lovelace" in allowed["blocks"]
+    assert not allowed["excluded_blocks"]
 
 
 def test_evidence_append_refuses_a_new_block_without_a_gold_match(
@@ -780,7 +819,7 @@ def test_refreeze_can_declare_a_previously_unassigned_dev_test_block(
     )
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence, source, blocks)
-    targets = {"final_test_a": 1}
+    targets = {"final_test": 1}
     prior = freeze_identity_roles(blocks, evidence, targets)
     assert "a lovelace" in prior["unassigned"]
     path = tmp_path / "prior.json"

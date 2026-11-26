@@ -32,8 +32,9 @@ from scripts.intake import (
     requests_to_datasets,
 )
 from scripts.judging import review_packets
-from scripts.linker import build_linker_inputs, build_linker_task_tables
-from scripts.linker.train_linker_and_finalize import _apply_blind_gate_labels, _validate_frozen_task_bindings
+from scripts.linker import blind_gate_metrics, build_linker_inputs, build_linker_task_tables
+from scripts.linker.blind_gate_metrics import _apply_blind_gate_labels
+from scripts.linker.train_linker_and_finalize import _validate_frozen_task_bindings
 from scripts.pairwise import mine_pairwise_pairs
 from tests.helpers import request_bundle
 from tests.test_giant_eps_release import _complete_model
@@ -534,7 +535,9 @@ def _v14_source(tmp_path: Path, index: Path, allowed_abstracts: Path) -> Path:
     return root
 
 
-def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Path) -> None:
+def test_stage_zero_commands_use_one_ledger_and_production_requests(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     eps_orcid = "0000-0001-5000-0007"
     other_orcid = "0000-0002-9079-593X"
     gate_a = "0000-0002-1825-0855"
@@ -582,10 +585,18 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         cluster_block_key=[*paper_ids, "f aba", "z last"],
         split=["development", "development", "holdout", "holdout", "development", "development", "holdout"],
     )
-    exports = {block: request_bundle(tmp_path / "full", block, ids) for block, ids in paper_ids.items()}
+    exports = {
+        block: request_bundle(
+            tmp_path / "full",
+            block,
+            ids,
+            first_names={"102": "Ada", "104": "Abigail"} if block == "a lovelace" else None,
+        )
+        for block, ids in paper_ids.items()
+    }
     index_text, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     index = Path(index_text)
-    model = _complete_model(tmp_path)
+    model = _complete_model(tmp_path, name_counts_index_root=index)
     permissions = _json(tmp_path / "allowed.json", [paper for ids in paper_ids.values() for paper, _ in ids])
     abstract_permissions = _json(tmp_path / "abstracts.json", [])
     reviewed = _json(tmp_path / "errors.json", {"a lovelace": ["105-0"]})
@@ -593,7 +604,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     targets = _json(tmp_path / "targets.json", {"fit_pool": 1, "eps_cal": 1, "final_test": 2})
     pins = _json(
         tmp_path / "pins.json",
-        {"a lovelace": "fit_pool", "b ross": "eps_cal", "d hopper": "final_test_a", "e turing": "final_test_b"},
+        {"a lovelace": "fit_pool", "b ross": "eps_cal", "d hopper": "final_test", "e turing": "final_test"},
     )
     gate = "g schneider"
     raw_gate = exports[gate].parent / "g_schneider"
@@ -718,28 +729,19 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     inventory = tmp_path / "inventory.parquet"
     _run(build_v14_training_inventory, "--gold-parquet", labels, "--linker-source-root", v14, "--output", inventory)
     assert any(row["signature_id"] == "802-0" and row["orcid"] is None for row in pq.read_table(inventory).to_pylist())
-    sealed = _json(tmp_path / "sealed.json", {key: arrow_dirs[key] for key in ("d hopper", "e turing")})
-    _run(check_v14_training_overlap, *binding, "--blocks-json", sealed, "--training-parquet", inventory)
-
-    linker_specs = _json(
-        tmp_path / "linker-specs.json",
-        {
-            gate: {"arrow_dir": arrow_dirs[gate], "incremental_request": str(inc_export)},
-            "a lovelace": {"arrow_dir": arrow_dirs["a lovelace"]},
-        },
-    )
+    _run(check_v14_training_overlap, *binding, "--training-parquet", inventory)
     inputs = tmp_path / "linker-inputs"
     _run(
         build_linker_inputs,
         *binding,
-        "--blocks-json",
-        linker_specs,
+        "--incremental-requests",
+        inc_export,
         "--output-dir",
         inputs,
         "--model-path",
-        model,
+        model.parent / "pairwise",
         "--batching-threshold",
-        "3",
+        "2",
         "--arrivals",
         arrivals,
         "--since",
@@ -747,12 +749,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--requests-per-block",
         "2",
         "--queries-per-block",
-        "1",
+        "300",
     )
     built = json.loads((inputs / "inputs.json").read_text())
     fit_inputs = built["a lovelace"]
     fit_assignments = {
-        row["signature_id"]: row["cluster_id"] for row in pq.read_table(fit_inputs["assignments"]).to_pylist()
+        row["signature_id"]: row["component_key"] for row in pq.read_table(fit_inputs["seeds"]).to_pylist()
     }
     fit_queries = set(json.loads(Path(fit_inputs["queries"]).read_text(encoding="utf-8")))
     assert fit_queries == {"106-0"}
@@ -770,8 +772,6 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         inputs / "inputs.json",
         "--output-dir",
         tasks,
-        "--blocks",
-        gate,
     )
     rows = pq.read_table(tasks / "gate_thresh.parquet").to_pylist()
     assert len(rows) == 50
@@ -885,6 +885,11 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     gate_blocks = task_manifest["tables"]["gate_thresh"]["blocks"]
     index_digest = ledger.evidence.name_counts_index_sha256
     _validate_frozen_task_bindings(task_manifest, roles, index_sha256=index_digest)
+    _validate_frozen_task_bindings(
+        task_manifest, roles, task_role="fit_pool", pairwise_model_path=model.parent / "pairwise"
+    )
+    with pytest.raises(ValueError, match="Frozen seeds use a different pairwise model"):
+        _validate_frozen_task_bindings(task_manifest, roles, task_role="fit_pool", pairwise_model_path=model)
     for field, error in (
         ("index_sha256", "Linker inputs use a different name-counts index"),
         ("model_sha256", "Input model, index, or role digest mismatch"),
@@ -901,6 +906,27 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert report["gate_thresh_audit_coverage"]["audit"]["planned_share"] == 0.5
     assert scored["query_gold_scored"].sum() == 0
     assert scored.loc[scored["label"].eq(1), "candidate_gold_mixed"].all()
+    capsys.readouterr()
+    _run(
+        blind_gate_metrics,
+        "--model-path",
+        model,
+        "--linker-task-manifest",
+        tasks / build_linker_task_tables.TASK_MANIFEST,
+        "--block-role-assignments",
+        role_path,
+        "--gate-thresh-judgments",
+        judged_path,
+        "--name-counts-index-root",
+        index,
+        "--n-jobs",
+        "1",
+    )
+    metrics = json.loads(capsys.readouterr().out)
+    coverage = metrics["judged_choice_coverage"]
+    assert coverage["requested_queries"] == coverage["queries_with_choices"] == 2
+    assert coverage["share_of_requests_with_judged_choice"] == coverage["judged_choices"] / 2
+    assert metrics["resolved_window_metrics"]["n_queries"] == 0
     vetoed = gate_table.loc[gate_table["candidate_component_key"].isin(vetoed_components)]
     assert set(vetoed["candidate_component_key"]) == vetoed_components
     assert gate_table["candidate_has_vetoed_identity"].equals(
@@ -916,12 +942,16 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         _apply_blind_gate_labels(gate_table, report, roles, gate_blocks)
 
     pairs = tmp_path / "pairs.csv"
-    assignments = inputs / "a_lovelace" / "assignments.parquet"
-    miner = _json(
-        tmp_path / "miner.json",
-        {"a lovelace": {"arrow_dir": arrow_dirs["a lovelace"], "assignments": str(assignments)}},
+    _run(
+        mine_pairwise_pairs,
+        *binding,
+        "--block-inputs",
+        inputs / "inputs.json",
+        "--pairs-per-block",
+        "10",
+        "--output",
+        pairs,
     )
-    _run(mine_pairwise_pairs, *binding, "--blocks-json", miner, "--pairs-per-block", "10", "--output", pairs)
     with pairs.open(encoding="utf-8", newline="") as handle:
         mined = list(csv.DictReader(handle))
     assert not mined
@@ -1080,7 +1110,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--eps",
         "0.38",
         "--precision-f1-tolerance",
-        "0.01",
+        "0.001",
         "--review-note",
         "Synthetic review",
         "--output-report",
@@ -1163,14 +1193,14 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     newer_roles = load_block_roles(appended_path)
     assert newer_roles.block_to_role == roles.block_to_role
     assert newer_roles.bindings_for({"d hopper", "e turing"}) == roles.bindings_for({"d hopper", "e turing"})
-    assert newer_roles.identity_roles[other_orcid] == {"final_test_b"}
+    assert newer_roles.identity_roles[other_orcid] == {"final_test"}
     with pytest.raises(ValueError, match="absent from the frozen role assignments"):
         newer_roles.bindings_for({"z last"})
     assert {path: sha256_file(path) for path in filenames} == old_files
     with pytest.raises(ValueError, match="master block role assignment"):
         _validate_frozen_task_bindings(task_manifest, newer_roles)
     foreign_roles = replace(
-        newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test_b"})}
+        newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test"})}
     )
     with pytest.raises(ValueError, match="block provenance"):
         _validate_frozen_task_bindings({**task_manifest, ROLE_SHA256_FIELD: foreign_roles.sha256}, foreign_roles)
@@ -1194,9 +1224,9 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert newer_judged.read_bytes() == judged_path.read_bytes()
     raised_targets = _json(
         tmp_path / "raised-targets.json",
-        {"fit_pool": 2, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
+        {"fit_pool": 2, "eps_cal": 1, "final_test": 3},
     )
-    new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test_b"})
+    new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test"})
     raised = tmp_path / "raised-freeze"
     _run(
         assign_block_roles,
@@ -1216,7 +1246,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert load_block_roles(raised / "assignments.json").block_to_role == {
         **roles.block_to_role,
         "f aba": "fit_pool",
-        "z last": "final_test_b",
+        "z last": "final_test",
     }
     assert load_block_roles(raised / "assignments.json").pairwise_validation_blocks == {"f aba"}
     for directory in (snapshot, evidence.parent):

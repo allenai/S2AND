@@ -8,13 +8,14 @@ import re
 import tempfile
 from collections.abc import Collection
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import ijson
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
+from s2and.arrow_schema import _contract_tables
 from s2and.incremental_linking.feature_block_arrow import write_arrow_batch_lookup_index
 from s2and.text import email_prefix_suffix
 
@@ -134,91 +135,99 @@ def _scrub_arrow_string_or_list(array: pa.Array, field: pa.Field) -> tuple[pa.Ar
             changed += sum(a != b for a, b in zip(row, cleaned, strict=True))
             after_list.append(cleaned)
         return pa.array(after_list, type=field.type), changed
-    return array, 0
+    raise ValueError(f"Cannot scrub Arrow string column {field.name!r} of type {field.type}")
 
 
-def _hash_arrow(path: Path, *, scrub_free_text: bool = False) -> int:
-    temporary = _atomic_temp_path(path)
-    changed = 0
-    try:
-        with pa.memory_map(str(path), "r") as source:
-            reader = pa.ipc.open_file(source)
-            email_column = reader.schema.get_field_index("author_email")
-            affiliation_columns = (
-                [
-                    idx
-                    for name in ("author_affiliations", "affiliations")
-                    if (idx := reader.schema.get_field_index(name)) >= 0
-                ]
-                if scrub_free_text
-                else []
+# Preserve identifiers and controlled values so a scrub cannot break joins.
+_ARROW_EMAIL_POLICY: dict[str, dict[str, Literal["hash", "scrub", "preserve"]]] = {
+    "altered_cluster_signatures": {"signature_id": "preserve"},
+    "cluster_seed_disallows": {"signature_id_1": "preserve", "signature_id_2": "preserve"},
+    "cluster_seeds": {"signature_id": "preserve", "cluster_id": "preserve"},
+    "incremental_query_signatures": {
+        "signature_id": "preserve",
+        "query_view": "preserve",
+        "query_author": "scrub",
+    },
+    "paper_authors": {"paper_id": "preserve", "author_name": "scrub"},
+    "papers": {
+        "paper_id": "preserve",
+        "title": "scrub",
+        "abstract": "scrub",
+        "venue": "scrub",
+        "journal_name": "scrub",
+        "predicted_language": "preserve",
+    },
+    "profile_exclusions": {"anchor_signature_id": "preserve", "excluded_signature_id": "preserve"},
+    "signatures": {
+        "signature_id": "preserve",
+        "paper_id": "preserve",
+        "author_first": "scrub",
+        "author_middle": "scrub",
+        "author_last": "scrub",
+        "author_suffix": "scrub",
+        "author_affiliations": "scrub",
+        "author_orcid": "preserve",
+        "author_block": "preserve",
+        "author_email": "hash",
+        "source_author_ids": "preserve",
+    },
+    "specter": {"paper_id": "preserve"},
+}
+_ARROW_COUNT_FIELDS = {
+    "signatures": "signature_arrow_values",
+    "papers": "paper_arrow_values",
+    "paper_authors": "paper_author_arrow_values",
+}
+
+
+def _validate_arrow_email_policy() -> None:
+    for table, columns in _contract_tables().items():
+        strings = {col["name"] for col in columns if col["datatype"] in {"string", "list<string>"}}
+        classified = _ARROW_EMAIL_POLICY.get(table, {}).keys()
+        if strings != classified:
+            raise ValueError(
+                f"Arrow email policy differs from the contract for {table}: {sorted(strings ^ classified)}"
             )
-            if email_column < 0 and not affiliation_columns:
-                temporary.unlink(missing_ok=True)
-                return 0
-            with pa.OSFile(str(temporary), "wb") as sink, pa.ipc.new_file(sink, reader.schema) as writer:
-                for index in range(reader.num_record_batches):
-                    batch = reader.get_batch(index)
-                    if email_column >= 0:
-                        before = batch.column(email_column).to_pylist()
-                        after = [hash_feature_email(value) for value in before]
-                        changed += sum(a != b for a, b in zip(before, after, strict=True))
-                        batch = batch.set_column(
-                            email_column,
-                            reader.schema.field(email_column),
-                            pa.array(after, type=reader.schema.field(email_column).type),
-                        )
-                    for col_idx in affiliation_columns:
-                        field = reader.schema.field(col_idx)
-                        cleaned_col, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
-                        changed += col_changed
-                        batch = batch.set_column(col_idx, field, cleaned_col)
-                    writer.write_batch(batch)
-        if changed:
-            temporary.replace(path)
-        else:
-            temporary.unlink(missing_ok=True)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
-    return changed
 
 
-def _scrub_papers_arrow(path: Path) -> int:
-    return _scrub_arrow_text_columns(path, ("title", "abstract"))
-
-
-def _scrub_paper_authors_arrow(path: Path) -> int:
-    # Production author lists occasionally carry an email as the author name.
-    return _scrub_arrow_text_columns(path, ("author_name",))
-
-
-def _scrub_arrow_text_columns(path: Path, column_names: tuple[str, ...]) -> int:
+def _redact_arrow(path: Path, *, scrub_free_text: bool) -> int:
     temporary = _atomic_temp_path(path)
     changed = 0
     try:
         with pa.memory_map(str(path), "r") as source:
             reader = pa.ipc.open_file(source)
-            text_columns = [idx for name in column_names if (idx := reader.schema.get_field_index(name)) >= 0]
-            if not text_columns:
-                temporary.unlink(missing_ok=True)
+            policies = _ARROW_EMAIL_POLICY[path.stem]
+            if path.stem == "signatures" and "affiliations" in reader.schema.names:
+                policies = {**policies, "affiliations": "scrub"}
+            columns = []
+            for index, field in enumerate(reader.schema):
+                if not _type_contains_string(field.type):
+                    continue
+                if field.name not in policies:
+                    raise ValueError(f"Unclassified Arrow string column {path.name}:{field.name}")
+                action = policies[field.name]
+                if action == "hash" or (action == "scrub" and scrub_free_text):
+                    columns.append((index, field, action))
+            if not columns:
                 return 0
             with pa.OSFile(str(temporary), "wb") as sink, pa.ipc.new_file(sink, reader.schema) as writer:
                 for index in range(reader.num_record_batches):
                     batch = reader.get_batch(index)
-                    for col_idx in text_columns:
-                        field = reader.schema.field(col_idx)
-                        cleaned_col, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
+                    for col_idx, field, action in columns:
+                        if action == "hash":
+                            before = batch.column(col_idx).to_pylist()
+                            after = [hash_feature_email(value) for value in before]
+                            col_changed = sum(a != b for a, b in zip(before, after, strict=True))
+                            column = pa.array(after, type=field.type)
+                        else:
+                            column, col_changed = _scrub_arrow_string_or_list(batch.column(col_idx), field)
                         changed += col_changed
-                        batch = batch.set_column(col_idx, field, cleaned_col)
+                        batch = batch.set_column(col_idx, field, column)
                     writer.write_batch(batch)
         if changed:
             temporary.replace(path)
-        else:
-            temporary.unlink(missing_ok=True)
-    except Exception:
+    finally:
         temporary.unlink(missing_ok=True)
-        raise
     return changed
 
 
@@ -384,9 +393,10 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
 
     Hashes structured ``email`` / ``emails`` / ``author_email`` fields while preserving
     normalized pairwise equality, and optionally scrubs plaintext email mentions from
-    ``affiliations``, ``title``, ``abstract`` and author names. Refreshes any sibling Arrow
+    JSON free text and classified Arrow text. Refreshes any sibling Arrow
     manifests and the batch lookup index of each rewritten table.
     """
+    _validate_arrow_email_policy()
     source_root = source_root.resolve()
     counts = {
         "signature_json_fields": 0,
@@ -404,21 +414,12 @@ def redact_source_tree(source_root: Path, *, scrub_free_text: bool = True) -> di
             counts["signature_json_fields"] += _hash_source_json(path, scrub_free_text=scrub_free_text)
         elif scrub_free_text and (name == "papers.json" or name.endswith("_papers.json")):
             counts["paper_json_fields"] += _scrub_papers_json(path)
-        elif name == "signatures.arrow":
-            changed = _hash_arrow(path, scrub_free_text=scrub_free_text)
-            counts["signature_arrow_values"] += changed
+        elif path.suffix == ".arrow" and path.stem in _ARROW_EMAIL_POLICY:
+            changed = _redact_arrow(path, scrub_free_text=scrub_free_text)
             if changed:
-                arrow_dirs.setdefault(path.parent, set()).add("signatures")
-        elif scrub_free_text and name == "papers.arrow":
-            changed = _scrub_papers_arrow(path)
-            counts["paper_arrow_values"] += changed
-            if changed:
-                arrow_dirs.setdefault(path.parent, set()).add("papers")
-        elif scrub_free_text and name == "paper_authors.arrow":
-            changed = _scrub_paper_authors_arrow(path)
-            counts["paper_author_arrow_values"] += changed
-            if changed:
-                arrow_dirs.setdefault(path.parent, set()).add("paper_authors")
+                key = _ARROW_COUNT_FIELDS.get(path.stem, f"{path.stem}_arrow_values")
+                counts[key] = counts.get(key, 0) + changed
+                arrow_dirs.setdefault(path.parent, set()).add(path.stem)
     for directory, tables in sorted(arrow_dirs.items()):
         _refresh_arrow_dataset_manifest(directory, sorted(tables))
     return counts
@@ -583,6 +584,7 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
     Returns:
         Changed Arrow values and source fields for each discovered dataset.
     """
+    _validate_arrow_email_policy()
     report: dict[str, dict[str, int]] = {}
     dataset = output_root / "dataset"
     source_root = output_root / "source"
@@ -594,14 +596,12 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
         directory = dataset / "datasets" / name
         if not directory.exists():
             continue
-        sig_changed = _hash_arrow(directory / "signatures.arrow", scrub_free_text=scrub_free_text)
-        papers_arrow = directory / "papers.arrow"
-        papers_changed = _scrub_papers_arrow(papers_arrow) if scrub_free_text and papers_arrow.is_file() else 0
-        authors_arrow = directory / "paper_authors.arrow"
-        authors_changed = (
-            _scrub_paper_authors_arrow(authors_arrow) if scrub_free_text and authors_arrow.is_file() else 0
-        )
-        changed = sig_changed + papers_changed + authors_changed
+        table_counts = {
+            table: _redact_arrow(path, scrub_free_text=scrub_free_text)
+            for table in _ARROW_COUNT_FIELDS
+            if (path := directory / f"{table}.arrow").is_file() or table == "signatures"
+        }
+        changed = sum(table_counts.values())
 
         source_dir = source_root / "corrected_replay" / "raw" / name
         source = source_dir / "signatures.json"
@@ -617,7 +617,6 @@ def hash_release_emails(output_root: Path, *, scrub_free_text: bool = False) -> 
         report[name] = {"arrow_values": changed, "source_fields": source_changed}
         if not changed:
             continue
-        table_counts = {"signatures": sig_changed, "papers": papers_changed, "paper_authors": authors_changed}
         changed_tables = [table for table, count in table_counts.items() if count]
         _refresh_arrow_dataset_manifest(directory, changed_tables)
         if replay_path.is_file():

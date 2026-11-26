@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -752,22 +752,17 @@ def _score_eval_candidate_rows(
 
 
 def _score_frozen_gate_rows(
-    task_rows: Mapping[str, pd.DataFrame],
+    fit_pool: pd.DataFrame,
     gate_training_blocks: Collection[str],
     predict: Callable[[Any], np.ndarray],
     feature_columns: tuple[str, ...],
 ) -> ClassicStratifiedEvalScores:
     """Score complete windows and keep only verified outcomes for gate fitting."""
-    fit_pool = task_rows["fit_pool"]
-    gate_rows = fit_pool.loc[fit_pool["dataset"].isin(gate_training_blocks)]
-    rows = pd.concat(
-        [gate_rows.assign(split="fit_pool"), task_rows["gate_thresh"].assign(split="gate_thresh")], ignore_index=True
-    )
+    rows = fit_pool.loc[fit_pool["dataset"].isin(gate_training_blocks)].assign(split="fit_pool")
     probabilities = predict(_classic_feature_matrix(rows, feature_columns))
     choices = _score_query_choices(rows, probabilities, query_id_column="query_group_id", include_margin=True)
-    splits = rows.drop_duplicates("query_group_id").set_index("query_group_id")["split"]
-    choices["split"] = choices["query_case_id"].map(splits)
-    keep_choices = choices["split"].eq("gate_thresh") | choices["chosen_candidate_gold_scored"]
+    choices["split"] = "fit_pool"
+    keep_choices = choices["chosen_candidate_gold_scored"]
     query_ids = set(choices.loc[keep_choices, "query_case_id"])
     keep_rows = rows["query_group_id"].isin(query_ids).to_numpy(dtype=bool)
     return ClassicStratifiedEvalScores(

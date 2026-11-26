@@ -58,7 +58,7 @@ from s2and.production_training_contract import (  # noqa: E402
     load_packaged_artifact_authority,
 )
 from scripts.common.block_roles import load_block_roles  # noqa: E402
-from scripts.common.identity_ledger import ledger_for_roles  # noqa: E402
+from scripts.common.identity_ledger import load_identity_ledger  # noqa: E402
 from scripts.common.plan_datasets import (  # noqa: E402
     development_split_members,
     load_development_dataset,
@@ -76,6 +76,7 @@ from scripts.pairwise.augmented_leakage import (  # noqa: E402
     require_validation_members,
     source_members,
 )
+from scripts.pairwise.mine_pairwise_pairs import SamplingPolicy, add_sampling_arguments  # noqa: E402
 from scripts.pairwise.training_pairs import (  # noqa: E402
     DEFAULT_MIN_MINED_VALIDATION_PAIRS,
     TrainingBlock,
@@ -533,12 +534,12 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
-    mined_csv = getattr(args, "mined_pairs", None)
+    block_inputs = getattr(args, "block_inputs", None)
     assignments = getattr(args, "block_role_assignments", None)
     evidence = getattr(args, "identity_evidence", None)
-    mined_args = (mined_csv, assignments, evidence)
+    mined_args = (block_inputs, assignments, evidence)
     if any(value is None for value in mined_args) and any(value is not None for value in mined_args):
-        raise ValueError("Use --mined-pairs, --identity-evidence and --block-role-assignments together")
+        raise ValueError("Use --block-inputs, --identity-evidence and --block-role-assignments together")
     unknown_inputs = {name: plan_unknown_signatures(plan.datasets[name]) for name in plan.dataset_names}
     unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
     augmented_members: dict[str, set[str]] = {}
@@ -581,14 +582,13 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     canonical_name_tuples = artifact_authority.name_tuples
     artifact_hashes = _canonical_training_artifact_hashes(artifact_authority)
     mined = None
-    if mined_csv is not None:
+    if block_inputs is not None:
         roles = load_block_roles(cast(Path, assignments))
-        ledger = ledger_for_roles(evidence, roles)
-        assert ledger is not None
+        ledger = load_identity_ledger(cast(Path, evidence), roles)
         mined = training_pairs(
-            roles,
             ledger,
-            mined_csv,
+            block_inputs,
+            policy=SamplingPolicy.from_args(args),
             name_counts_sha256=artifact_hashes["name_counts_manifest_sha256"],
             min_mined_validation_pairs=getattr(args, "min_mined_validation_pairs", DEFAULT_MIN_MINED_VALIDATION_PAIRS),
         )
@@ -620,7 +620,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
 
     cluster_test_splits: dict[str, dict[str, Any]] = {}
     mined_summary = {
-        block: {"split": spec.fold, "labeled_pairs": len(spec.fit), "unscored_pairs": len(spec.judge)}
+        block: {"split": spec.fold, "labeled_pairs": len(spec.fit), "unscored_pairs": spec.judge_count}
         for block, spec in mined_blocks.items()
     }
     started = time.perf_counter()
@@ -700,7 +700,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                     block,
                     spec.fold,
                     len(spec.fit),
-                    len(spec.judge),
+                    spec.judge_count,
                 )
                 if not spec.fit:
                     continue
@@ -825,7 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON of LightGBM parameters for both heads; fits them directly instead of searching.",
     )
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
-    parser.add_argument("--mined-pairs", type=Path, help="CSV and sidecar from mine_pairwise_pairs.")
+    parser.add_argument("--block-inputs", type=Path, help="Linker inputs.json for mining training pairs.")
+    add_sampling_arguments(parser)
     parser.add_argument(
         "--min-mined-validation-pairs",
         type=int,

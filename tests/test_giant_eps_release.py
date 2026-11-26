@@ -38,6 +38,39 @@ from tests.test_production_model import _write_synthetic_linker
 pytestmark = pytest.mark.tooling
 
 
+def test_reviewed_eps_cli_requires_override_for_wide_tolerance(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    received = []
+
+    def apply(*args: object, precision_f1_tolerance: float, **kwargs: object) -> dict:
+        received.append(precision_f1_tolerance)
+        return {}
+
+    monkeypatch.setattr(apply_reviewed_eps_module, "apply_reviewed_eps", apply)
+    options = [
+        "--source-model",
+        "source",
+        "--output-model",
+        "output",
+        "--eps",
+        "0.38",
+        "--review-note",
+        "reviewed",
+        "--output-report",
+        "review.json",
+        "--precision-f1-tolerance",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        apply_reviewed_eps_module.main([*options, "0.01"])
+    assert exc.value.code == 2
+    assert "--allow-wide-tolerance" in capsys.readouterr().err
+    assert not received
+    apply_reviewed_eps_module.main([*options, "0.005"])
+    apply_reviewed_eps_module.main([*options, "0.01", "--allow-wide-tolerance"])
+    assert received == [0.005, 0.01]
+
+
 def _source_snapshot(root: Path, *, source: str = "q1", with_clone: bool = False) -> Path:
     dataset = root / "datasets" / "unit"
     ids, papers = [source, "other"], ["source-paper", "other-paper"]
@@ -541,8 +574,14 @@ def test_eps_sweep_rejects_an_unmatched_expected_source_map(tmp_path: Path, with
     assert not (tmp_path / "output").exists()
 
 
-def _complete_model(tmp_path: Path) -> Path:
-    hashes = canonical_artifact_hashes()
+def _complete_model(tmp_path: Path, *, name_counts_index_root: Path | None = None) -> Path:
+    from s2and.production_training_contract import load_packaged_artifact_authority
+
+    hashes = (
+        canonical_artifact_hashes()
+        if name_counts_index_root is None
+        else load_packaged_artifact_authority(name_counts_index_root=name_counts_index_root).hashes
+    )
     pairwise = tmp_path / "pairwise"
     write_synthetic_pairwise_bundle(pairwise, artifact_hashes=hashes, release_version="9.9")
     linker = tmp_path / "linker"
@@ -702,8 +741,7 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
             BlockSpec("unit", 3, frozenset({shared, local}), source_split="development"),
             BlockSpec("sealed", 2, frozenset({shared}), source_split="holdout"),
         ],
-        {"eps_cal": 1, "final_test_a": 1},
-        closure_mode="block_only",
+        {"eps_cal": 1, "final_test": 1},
         enforce_source_splits=True,
     )
     write_json(role_path, result)
@@ -1012,8 +1050,7 @@ def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Pa
         read_sweep_curve(tmp_path, "unit")
 
 
-@pytest.mark.parametrize("mode", ["strict", "block_only"])
-def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mode: str) -> None:
+def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     from s2and._sha256 import sha256_file
@@ -1030,9 +1067,8 @@ def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mod
         json.dumps(
             assign_block_roles(
                 [BlockSpec(block, 2, frozenset({home})), BlockSpec("b ross", 2, frozenset({sealed}))],
-                {"eps_cal": 1, "final_test_a": 1},
-                pinned_roles={block: "eps_cal", "b ross": "final_test_a"},
-                closure_mode=mode,
+                {"eps_cal": 1, "final_test": 1},
+                pinned_roles={block: "eps_cal", "b ross": "final_test"},
             )
         ),
         encoding="utf-8",

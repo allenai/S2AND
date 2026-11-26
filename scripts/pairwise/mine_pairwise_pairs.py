@@ -12,21 +12,15 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from functools import partial
-from itertools import chain, groupby
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.ipc as ipc
-import pyarrow.parquet as pq
-
 from s2and._sha256 import sha256_file
-from s2and.arrow_inputs import ArrowDataset
-from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
-from scripts.common.identity_ledger import BlockEligibility, ledger_for_roles
-from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
+from scripts.common.identity_ledger import BlockEligibility, IdentityLedger, load_identity_ledger
+from scripts.common.linker_seeds import read_seed_components
 from scripts.common.stage0_invariants import (
     JUDGE_ONLY_STRATUM,
     PAIR_STRATA,
@@ -49,11 +43,11 @@ PAIR_COLUMNS = ("block_key", "signature_id_1", "signature_id_2", "stratum", "inc
 class SamplingPolicy:
     """Keep the sampling inputs needed to replay each block."""
 
-    seed: int
-    pairs_per_block: int
-    verified_pair_fraction: float
-    pairs_per_block_floor: int
-    pairs_per_identity_per_stratum: int
+    seed: int = 20261123
+    pairs_per_block: int = DEFAULT_PAIRS_PER_BLOCK
+    verified_pair_fraction: float = DEFAULT_VERIFIED_PAIR_FRACTION
+    pairs_per_block_floor: int = DEFAULT_PAIRS_PER_BLOCK_FLOOR
+    pairs_per_identity_per_stratum: int = 25
 
     def __post_init__(self) -> None:
         if (
@@ -69,91 +63,32 @@ class SamplingPolicy:
             raise ValueError("Invalid pair sampling policy")
 
     @classmethod
-    def from_manifest(cls, manifest: Mapping[str, Any]) -> SamplingPolicy:
-        """Require the mining policy fields before replaying a sample."""
-        if cls.__dataclass_fields__.keys() - manifest.keys():
-            raise ValueError("Missing pair sampling policy. Re-mine pairs.")
+    def from_args(cls, args: argparse.Namespace) -> SamplingPolicy:
+        """Read the common pair sampling options."""
         return cls(
-            manifest["seed"],
-            manifest["pairs_per_block"],
-            manifest["verified_pair_fraction"],
-            manifest["pairs_per_block_floor"],
-            manifest["pairs_per_identity_per_stratum"],
+            seed=getattr(args, "seed", cls.seed),
+            pairs_per_block=getattr(args, "pairs_per_block", cls.pairs_per_block),
+            verified_pair_fraction=getattr(args, "verified_pair_fraction", cls.verified_pair_fraction),
+            pairs_per_block_floor=getattr(args, "pairs_per_block_floor", cls.pairs_per_block_floor),
+            pairs_per_identity_per_stratum=getattr(
+                args, "pairs_per_identity_per_stratum", cls.pairs_per_identity_per_stratum
+            ),
         )
+
+
+def add_sampling_arguments(parser: argparse.ArgumentParser) -> None:
+    """Configure the same sampling policy for reports and training."""
+    parser.add_argument("--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK)
+    parser.add_argument("--verified-pair-fraction", type=float, default=DEFAULT_VERIFIED_PAIR_FRACTION)
+    parser.add_argument("--pairs-per-block-floor", type=int, default=DEFAULT_PAIRS_PER_BLOCK_FLOOR)
+    parser.add_argument("--pairs-per-identity", type=int, dest="pairs_per_identity_per_stratum", default=25)
+    parser.add_argument("--seed", type=int, default=20261123, help="Seed for choosing mined pairs.")
 
 
 @dataclass(frozen=True)
 class BlockInput:
     arrow_dir: Path
-    labels: Path | None
     assignments: Path
-
-
-def _mention_orcids(root: Path, block: str) -> dict[str, str | None]:
-    signatures: dict[str, str | None] = {}
-    with (
-        ArrowDataset.open(root) as dataset,
-        dataset.use() as lease,
-        lease.open_file("signatures") as infile,
-        pa.PythonFile(infile, mode="r") as source,
-    ):
-        reader = ipc.open_file(source)
-        columns = ["signature_id", "author_block"]
-        if "author_orcid" in reader.schema.names:
-            columns.append("author_orcid")
-        for batch_index in range(reader.num_record_batches):
-            for row in reader.get_batch(batch_index).select(columns).to_pylist():
-                signature = row["signature_id"]
-                if not signature or normalize_block_key(row["author_block"]) != block:
-                    raise ValueError(f"Expected real signatures from block {block!r} in {root}")
-                if signature.startswith("visibleq:"):
-                    continue
-                if signature in signatures:
-                    raise ValueError(f"Duplicate signature {signature!r} in {root}")
-                signatures[signature] = normalize_orcid(row.get("author_orcid") or "")
-    return signatures
-
-
-def _eligible_mentions(
-    spec: BlockInput, block: str, frozen_orcids: frozenset[str], identity_roles: Mapping[str, frozenset[str]]
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], int, int]:
-    deposited = _mention_orcids(spec.arrow_dir, block)
-    if spec.labels is None:
-        raise ValueError("Legacy pairwise inputs require labels")
-    identities, scored = read_external_reference_identity_evidence(spec.labels, require_scored=True)
-    if unknown := identities.keys() - deposited.keys():
-        raise ValueError(f"Joined labels contain signatures outside {block!r}: {sorted(unknown)[:5]}")
-    if frozen_orcids and frozen_orcids.isdisjoint(chain(identities.values(), deposited.values())):
-        raise ValueError(f"Neither label nor Arrow input names a frozen ORCID in {block!r}")
-    eligible: dict[str, str] = {}
-    for sid, orcid in deposited.items():
-        gold = identities.get(sid)
-        if any(identity_roles.get(oid, frozenset({"fit_pool"})) != {"fit_pool"} for oid in (gold, orcid) if oid):
-            continue
-        eligible[sid] = gold or orcid or f"signature:{sid}"
-    labels = {sid: oid for sid, oid in scored.items() if sid in eligible and oid not in EXCLUDED_ORCID_GROUPS}
-    table = pq.read_table(spec.assignments, columns=["signature_id", "cluster_id"])
-    components: dict[str, str] = {}
-    for sid, cid in zip(table["signature_id"].to_pylist(), table["cluster_id"].to_pylist(), strict=True):
-        if sid not in deposited or sid in components or type(cid) not in {str, int} or cid == "":
-            raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {spec.assignments}")
-        components[sid] = str(cid)
-    query_path = spec.assignments.with_name("queries.json")
-    # Legacy assignments built without linker requests cover every real signature.
-    queries = (
-        read_fit_pool_queries(query_path, block, read_json_object(query_path.with_name("manifest.json")))
-        if query_path.exists()
-        else set()
-    )
-    if unknown_queries := queries - deposited.keys():
-        raise ValueError(f"Unknown query signatures in {block!r}: {sorted(unknown_queries)[:5]}")
-    require_assignment_coverage(block, components.keys(), deposited.keys(), queries)
-    excluded = len(deposited) - len(eligible)
-    excluded_queries = len(queries & eligible.keys())
-    for sid in queries:
-        eligible.pop(sid, None)
-        labels.pop(sid, None)
-    return eligible, labels, components, excluded, excluded_queries
 
 
 def _read_assignment_partition(path: Path, receipt: Mapping[str, object]) -> tuple[dict[str, str], str]:
@@ -162,14 +97,7 @@ def _read_assignment_partition(path: Path, receipt: Mapping[str, object]) -> tup
     files = receipt.get("files")
     if not isinstance(files, dict) or files.get(path.name) != digest:
         raise ValueError(f"Assignment digest mismatch: {path}")
-    rows = pq.read_table(path, columns=["signature_id", "cluster_id"]).to_pylist()
-    components = {}
-    for row in rows:
-        sid, cid = row["signature_id"], row["cluster_id"]
-        if sid in components or type(cid) not in {str, int} or cid == "":
-            raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {path}")
-        components[sid] = str(cid)
-    return components, digest
+    return read_seed_components(path), digest
 
 
 @dataclass
@@ -369,7 +297,6 @@ class FrozenMiningBlock:
 
     sample: BlockSample
     gold: dict[str, str]
-    queries: set[str]
     assignments_digest: str
 
 
@@ -390,7 +317,18 @@ def sample_frozen_block(
     sample = select_block_pairs(
         block, identities, gold, clusters, len(view.rows) - len(eligible), policy, excluded_queries=len(queries)
     )
-    return FrozenMiningBlock(sample, gold, queries, digest)
+    return FrozenMiningBlock(sample, gold, digest)
+
+
+def fit_pool_receipts(ledger: IdentityLedger, blocks: Mapping[str, BlockInput]) -> tuple[dict[str, Any], str]:
+    """Read partition receipts and require one seed model and intake index."""
+    receipts = {block: read_json_object(spec.assignments.with_name("manifest.json")) for block, spec in blocks.items()}
+    model = require_assignment_receipts(
+        ledger.roles,
+        {block: receipt.get("binding") for block, receipt in receipts.items()},
+        intake_index_sha256=ledger.evidence.name_counts_index_sha256,
+    )
+    return receipts, model
 
 
 def mine_pairs(
@@ -401,14 +339,14 @@ def mine_pairs(
     per_block: int = DEFAULT_PAIRS_PER_BLOCK,
     verified_pair_fraction: float = DEFAULT_VERIFIED_PAIR_FRACTION,
     per_block_floor: int = DEFAULT_PAIRS_PER_BLOCK_FLOOR,
-    identity_evidence: Path | None = None,
+    identity_evidence: Path,
     per_identity: int = 25,
     seed: int = 20261123,
 ) -> int:
     """Write capped stratum samples and counts for every frozen fit_pool block."""
     policy = SamplingPolicy(seed, per_block, verified_pair_fraction, per_block_floor, per_identity)
     roles = load_block_roles(roles_path)
-    ledger = ledger_for_roles(identity_evidence, roles)
+    ledger = load_identity_ledger(identity_evidence, roles)
     normalized = {normalize_block_key(block): spec for block, spec in blocks.items()}
     if len(normalized) != len(blocks):
         raise ValueError("Duplicate normalized block keys in pairwise inputs")
@@ -417,50 +355,24 @@ def mine_pairs(
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)
 
-    assignment_manifests = {}
-    shared_binding: dict[str, str] = {}
-    if ledger is not None:
-        intake_index = ledger.evidence.name_counts_index_sha256
-        shared_binding["index_sha256"] = intake_index
-        assignment_manifests = {
-            block: read_json_object(spec.assignments.parent / "manifest.json") for block, spec in normalized.items()
-        }
-        shared_binding["model_sha256"] = require_assignment_receipts(
-            roles,
-            {block: receipt.get("binding") for block, receipt in assignment_manifests.items()},
-            intake_index_sha256=intake_index,
-        )
+    assignment_manifests, model_digest = fit_pool_receipts(ledger, normalized)
 
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []
     for block, spec in sorted(normalized.items()):
-        if ledger is None:
-            identities, gold, clusters, excluded, excluded_queries = _eligible_mentions(
-                spec, block, roles.block_orcids[block], roles.identity_roles
-            )
-            sample = select_block_pairs(
-                block, identities, gold, clusters, excluded, policy, excluded_queries=excluded_queries
-            )
-            assignments_digest = sha256_file(spec.assignments)
-            assignment_input = {}
-        else:
-            view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
-            receipt = assignment_manifests[block]
-            frozen = sample_frozen_block(view, spec.assignments, receipt, policy)
-            sample, assignments_digest = frozen.sample, frozen.assignments_digest
-            assignment_input = {
-                "assignments_path": str(spec.assignments.resolve()),
-                "assignment_binding": receipt["binding"],
-            }
+        view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
+        receipt = assignment_manifests[block]
+        frozen = sample_frozen_block(view, spec.assignments, receipt, policy)
+        sample = frozen.sample
         rows.extend(
             (block, left, right, stratum, inclusion) for (left, right), (stratum, inclusion) in sample.pairs.items()
         )
         counts[block] = {
             "fold": pairwise_fold(roles, block),
-            **assignment_input,
+            "assignments_path": str(spec.assignments.resolve()),
+            "assignment_binding": receipt["binding"],
             **sample.counts,
-            "labels_sha256": sha256_file(spec.labels) if spec.labels is not None else None,
-            "assignments_sha256": assignments_digest,
+            "assignments_sha256": frozen.assignments_digest,
         }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8", newline="") as handle:
@@ -471,8 +383,9 @@ def mine_pairs(
         json.dump(
             {
                 ROLE_SHA256_FIELD: roles.sha256,
-                **({BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys())} if ledger is not None else {}),
-                **shared_binding,
+                BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys()),
+                "index_sha256": ledger.evidence.name_counts_index_sha256,
+                "model_sha256": model_digest,
                 "role": "fit_pool",
                 **asdict(policy),
                 "probability_scope": "within_capped_stratum_frame",
@@ -488,32 +401,39 @@ def mine_pairs(
     return len(rows)
 
 
+def read_fit_pool_inputs(ledger: IdentityLedger, inputs_path: Path) -> dict[str, BlockInput]:
+    """Resolve the complete fit pool from the linker partitions and identity evidence."""
+    inputs = {}
+    for raw_block, entry in read_json_object(inputs_path).items():
+        block = normalize_block_key(raw_block)
+        if ledger.roles.role_for(block) == "gate_thresh":
+            continue
+        if (
+            block in inputs
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("seeds"), str)
+            or not entry["seeds"]
+        ):
+            raise ValueError(f"Expected one partition path for {block!r} in {inputs_path}")
+        inputs[block] = inputs_path.parent / entry["seeds"]
+    require_fit_pool_coverage(ledger.roles, inputs.keys())
+    return {
+        block: BlockInput(directory, inputs[block])
+        for block, directory in ledger.evidence.dataset_dirs(inputs.keys()).items()
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     """Sample pairs from frozen training blocks and their stored 1.4 assignments."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
-    parser.add_argument(
-        "--blocks-json", type=Path, required=True, help="Map block keys to arrow_dir, labels and assignments."
-    )
-    parser.add_argument(
-        "--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK, help="Cap per fitted and judge sample."
-    )
-    parser.add_argument("--verified-pair-fraction", type=float, default=DEFAULT_VERIFIED_PAIR_FRACTION)
-    parser.add_argument("--pairs-per-block-floor", type=int, default=DEFAULT_PAIRS_PER_BLOCK_FLOOR)
-    parser.add_argument("--pairs-per-identity", type=int, default=25, help="Maximum per stratum and identity.")
-    parser.add_argument("--seed", type=int, default=20261123)
+    parser.add_argument("--block-inputs", type=Path, required=True, help="Linker inputs.json with frozen seeds.")
+    add_sampling_arguments(parser)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    raw = read_json_object(args.blocks_json)
-    blocks = {
-        block: BlockInput(
-            arrow_dir=args.blocks_json.parent / spec["arrow_dir"],
-            labels=args.blocks_json.parent / spec["labels"] if "labels" in spec else None,
-            assignments=args.blocks_json.parent / spec["assignments"],
-        )
-        for block, spec in raw.items()
-    }
+    ledger = load_identity_ledger(args.identity_evidence, load_block_roles(args.block_role_assignments))
+    blocks = read_fit_pool_inputs(ledger, args.block_inputs)
     count = mine_pairs(
         args.block_role_assignments,
         blocks,
@@ -522,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         verified_pair_fraction=args.verified_pair_fraction,
         per_block_floor=args.pairs_per_block_floor,
         identity_evidence=args.identity_evidence,
-        per_identity=args.pairs_per_identity,
+        per_identity=args.pairs_per_identity_per_stratum,
         seed=args.seed,
     )
     print(json.dumps({"blocks": len(blocks), "pairs": count}))

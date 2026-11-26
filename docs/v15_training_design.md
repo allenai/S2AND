@@ -16,7 +16,7 @@ This design addresses the data-split, leakage, distribution, and release-enginee
 5. **Redact and gate once at intake.** Hash email fields, strip plaintext emails from free text (`affiliations`, `title`, `abstract`), filter non-S2AG papers, and redact unshareable abstracts to `"Has Abstract"` (preserving `has_abstract` and redacting correction history) *before* Arrow conversion or pair sampling. The `write_release_bundles.py` CLI scans final bundles automatically by default (deleting output on failure).
 6. **Freeze native top-25 windows before labeling.** Use ORCID-hidden reclustered seeds for fitting and the incremental export's production seeds for gate threshold evaluation.
 
-## Development pools and sealed test halves
+## Development pools and sealed test
 
 All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s lee`, `s park`, `s feldman`) and the 27 Batch 1–6 blocks are permanently assigned to `dev_test` (regression/iteration only). `f matsen` (1 scored identity) is excluded.
 
@@ -26,7 +26,7 @@ All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s
 | `eps_cal` | ~40 `orcid-blocks-v2/dev` blocks across the same strata | Production-route EPS, close-pair bonus, subblocking and post-linkage corrections | Disjoint from `fit_pool`. |
 | `gate_thresh` | 10–15 disjoint `orcid-blocks-v2/dev` blocks at **natural production request frequencies** + a non-ORCID natural sample for blind review | Operating-point report and blind review of added and removed links | Uses natural requests, including retrieval misses, without constructed author holdouts. Keep the configured weight until explicitly changed. Budget about 850 blind-judged items per arm: a 5-point wrong-rate gap needs about 600 consensus verdicts, and about 70% of items reach consensus. |
 | `dev_test` | ~40 disjoint `orcid-blocks-v2/dev` blocks + legacy giants + 27 Batch 1–6 blocks + fresh paired Sol disagreements | Model-vs-model iteration & go/no-go | Never fitted on. Include at least 30 giants (pins supply 21); giants carry 88–98% of the paired variance. |
-| `final_test_a` and `final_test_b` *(sealed)* | About 100 fresh `orcid-blocks-v2/holdout` blocks per half, including about 30 giants (±0.3 F1 paired intervals; ±0.15 would need 80–110 giants per half) + a sealed blind panel + canonical classic outer test (regression report) | Evaluate the frozen candidate on A and keep B sealed for a subsequent candidate | Score verified `holdout` gold labels through the identity ledger. |
+| `final_test` *(sealed)* | About 200 fresh `orcid-blocks-v2/holdout` blocks, including about 60 giants, plus a sealed blind panel and the canonical classic outer test regression report | Evaluate the frozen candidate and append fresh holdout blocks for the next candidate | Score verified `holdout` gold labels through the identity ledger. |
 
 **Tooling status.** Freeze one master `assignments.json` and pass it unchanged to every stage. The miner and ranker use `fit_pool`. The gate uses only marked `fit_pool` blocks, and `train_pairwise.py` uses the frozen block fold to split mined pairs. Reassign blocks before using a manifest with the retired gate role.
 
@@ -71,6 +71,8 @@ Supply a directory or explicit list of full bundles. The builder checks their na
 `author_block`, removes papers outside the S2AG allowlist, preserves abstract presence with
 `Has Abstract`, and hashes or scrubs emails before writing indexes. It scans retained and new
 datasets for plaintext emails. Scrubbing and scanning cover Unicode domains with combining marks.
+Arrow email redaction hashes structured email, scrubs names and publication text, and preserves
+join keys. Intake fails if the Arrow schema adds a string column without a redaction policy.
 Re-run with the same index and allowlists that contain the prior
 permissions to append new blocks. Each block retains the permission digests it had at intake.
 Papers absent from the supplied lists stay restricted. A failed append preserves prior permissions.
@@ -90,8 +92,10 @@ for fitting, mining, and scoring. Position shifts are detected from the same blo
 gold position is missing. A gold row ambiguous within its paper and block vetoes each mention there.
 Only verified gold supplies a score. Freeze identity lists and seed purity
 use matched gold and deposited identities. Inspect the per-block join audit.
-The builder defaults to at most 2% unmatched gold per block. The audit records missing export
-papers, shifted positions, other failed joins, and papers removed by that block's intake permissions.
+The builder caps join errors at 2% per block with `--max-unmatched-gold` and missing export rows at 10%
+with `--max-absent-from-export`. It excludes blocks that exceed either cap and reports exclusion counts
+by reason. The audit records missing export papers, shifted positions, other failed joins, and papers
+removed by that block's intake permissions.
 Gold rows on a paper with two mentions in the block stay vetoed but do not count toward the limit,
 so blocks with many same-surname coauthors (common in Vietnamese and South Asian names) are kept.
 Only papers actually removed at intake are excluded from the denominator. An incomplete permission
@@ -145,37 +149,52 @@ uv run --offline --no-sync python -m scripts.intake.build_v14_training_inventory
   --output inventory/v14_training.parquet
 uv run --offline --no-sync python -m scripts.intake.check_v14_training_overlap \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json sealed-blocks.json --training-parquet inventory/v14_training.parquet
+  --training-parquet inventory/v14_training.parquet
 ~~~
 
 Use the source bundle for the deployed 1.4 linker. The inventory includes corpus-keyed training
 and gate calibration queries, their full candidate component memberships, and giant gold ORCIDs.
-Add further identified training mentions with `--private-labels`. Map both sealed halves' blocks to their Arrow directories.
+Add further identified training mentions with `--private-labels`. The audit resolves the sealed Arrow datasets
+from the identity evidence and role assignments.
 The audit checks frozen signature counts and compares corpus paper and author positions and ORCIDs.
 It fails when zero corpus keys can be compared. Benchmark overlap is unobservable because benchmark
 IDs are dataset-local and the benchmarks lack ORCIDs.
 
 ### 8. Build linker inputs and gate requests
 
+Run the 1.5 training passes in this order.
+
+1. Cluster `fit_pool` without its queries using the 1.4 pairwise model.
+2. Mine pairs from that partition and fit the 1.5 pairwise heads.
+3. Recluster the same `fit_pool` seed population with the calibrated 1.5 pairwise bundle. Cluster oversized blocks within native subblocks before a linker exists. Write to a fresh directory.
+4. Build tasks from that second pass and fit the ranker and gate. The trainer requires the seeds' model digest to match its pairwise bundle.
+5. Sweep EPS on `eps_cal` using the finalized 1.5 bundle.
+
 ~~~sh
 uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json linker-blocks.json --model-path inference/production_model_v1.4 \
+  --fit-pool-only --model-path inference/production_model_v1.4 \
+  --output-dir mining-inputs --n-jobs N
+uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
+  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
+  --model-path calibrated-pairwise-1.5 --incremental-requests requests/incremental \
   --arrivals arrivals.parquet --since 2026-10-20 --requests-per-block 300 \
   --output-dir linker-inputs --n-jobs N
 ~~~
 
-Map each block to its `arrow_dir`, with an additional `incremental_request` path for gate threshold
-blocks. Take the latest eligible mentions by `inserted` in each gate threshold block. Review any
+The builder resolves Arrow datasets from the identity evidence and role assignments. Supply gate threshold
+request bundles with `--incremental-requests`. The builder takes the latest eligible mentions by
+`inserted` in each gate threshold block. Review any
 shortfall against K, missing timestamps, and the actual timestamp range. Arrival paper keys must be
 nonnegative integers or canonical decimal strings. Invalid arrival keys and empty request sets fail.
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `fit_pool`, sample eligible scored mentions using `--queries-per-block`. The
-ORCID-hidden `fit_pool` population is clustered without the queries, and the same partition supplies
-assignments for mining and seeds for retrieval. Mining skips query endpoints and counts excluded
-query signatures per block. A `fit_pool` block with no eligible signatures writes empty assignments,
-seeds, and queries with reason `no_eligible_signatures`. The gate reuses the linker inputs from
+ORCID-hidden `fit_pool` population is clustered without the queries. Retrieval and mining read the
+same seed partition. Mining skips query endpoints and counts excluded
+query signatures per block. A `fit_pool` block with no eligible signatures writes empty seeds and queries
+with reason `no_eligible_signatures`. The gate reuses the linker inputs from
 the marked blocks. Re-run with the same inputs to verify and reuse completed blocks.
+Use ledger-backed role assignments for linker input building, task building, and pair mining.
 
 ### 9. Freeze linker and gate tasks
 
@@ -185,16 +204,22 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
   --block-inputs linker-inputs/inputs.json --output-dir linker-tasks --n-jobs N
 ~~~
 
-The builder preserves real names and freezes native top-25 windows. The `fit_pool` tasks hold out whole
+The builder preserves real names and native first tokens for gate features and freezes native top-25 windows. The `fit_pool` tasks hold out whole
 authors before retrieval. Ledger-backed fitting tasks require scored queries and seed assignments
 for every eligible non-query signature. Gold-labeled roles check every seed member for identity purity.
+The input builder retains at least half of each block's scored mentions as seeds.
 The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.
-Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
-report to the trainer with `--gate-thresh-judgments`. The trainer checks candidate keys against the frozen
-windows and leaves unresolved outcomes unscored. Use `--blocks` and a fresh output directory to
-inspect a subset. Training requires every frozen block for each task role. Keep the linker input
+Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Score the fitted bundle
+with `python -m scripts.linker.blind_gate_metrics`. Pass its `--model-path`, `--linker-task-manifest`,
+`--block-role-assignments`, `--gate-thresh-judgments`, `--name-counts-index-root`, and `--n-jobs`.
+The report checks the judgment bindings and gives judged-choice coverage across the requested queries.
+Run `scripts.linker.train_linker_and_finalize` with the frozen task manifest, role assignments, linker target,
+name-counts index, and pairwise bundle. The frozen fit writes `linker_training_report.json`.
+Use `--false-abstain-weight` or `--initial-only-offset` to pass a reviewed gate setting explicitly.
+Use `--blocks` and a fresh output directory to inspect a subset. Training requires every frozen
+`fit_pool` block. Keep the linker input
 receipts available so the trainer can check the input model, name-counts index, and seed digests.
-Rebuild older ledger-backed task tables to include the receipt paths.
+Rebuild older task tables to include the receipt paths and native query first tokens.
 The gate selects logistic `C` and feature count `k` by four-fold cross-validation grouped by block, minimizing binary safe-link log loss across at least four marked blocks with scored queries.
 The gate keeps `query_view_initial_only` and adds `classic.promoted_stratified_gate.initial_only_offset` (default `0.0`) to its safe-class weight after folding the scaler into the weights.
 The offset sets the initial-only operating point in subblocked giants, where 99.6% of runtime gate calls are initial-only.
@@ -208,17 +233,18 @@ Confirm it with the sized `gate_thresh` blind review before release.
 ~~~sh
 uv run --offline --no-sync python -m scripts.pairwise.mine_pairwise_pairs \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json miner-blocks.json --pairs-per-block 2000 --verified-pair-fraction 0.05 \
+  --block-inputs mining-inputs/inputs.json --pairs-per-block 2000 --verified-pair-fraction 0.05 \
   --pairs-per-block-floor 100 --output mined/pairs.csv
 uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --model-plan model-plan.json --name-counts-index-root name-counts-index \
-  --mined-pairs mined/pairs.csv --identity-evidence evidence/manifest.json \
+  --block-inputs mining-inputs/inputs.json --identity-evidence evidence/manifest.json \
   --block-role-assignments freeze/assignments.json --matrix-work-dir matrix-work \
+  --pairs-per-block 2000 --verified-pair-fraction 0.05 --pairs-per-block-floor 100 \
   --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
-Map every block in the nonempty frozen `fit_pool` to its `arrow_dir` and `assignments` entry from step 8. The mining
-manifest records each block's frozen fold, assignment path, and binding, including blocks with zero
+The miner selects the entire frozen `fit_pool` and reads its partitions from `inputs.json`. The mining
+manifest records each block's frozen fold, partition path, and binding, including blocks with zero
 sampled pairs. Keep the frozen assignment files and receipts available for training. Assignment
 receipts and the trainer's name-counts index must match the intake index. All assignment receipts
 must name one prediction model. The trainer verifies the ledger against the master assignment.
@@ -227,32 +253,32 @@ The fitted strata are `false_merge`, `missed_link`, and `random`. The trainer re
 scores for each fitted pair and uses them to compute the label. `merged_unlabeled` pairs require
 at least one unscored endpoint and go to judging only. Each block uses its own random sequence
 derived from the run seed and block key. Judge-only pairs have a separate `--pairs-per-block` budget.
-The trainer replays selection from the ledger, frozen assignments, and recorded policy. It checks
-pair IDs, strata, inclusion probabilities, and the report counts against the replay. Training
-requires at least one fitted mined pair in the frozen validation fold. Set
-`--min-mined-validation-pairs` to require more. The report
-counts drops by reason from the eligible population through the frame and sample. Re-mine older
-samples before training.
+The trainer samples directly from the ledger, seed partitions, and sampling options. Run the miner
+with the same options to produce a CSV report for review. The report counts drops by reason from the
+eligible population through the frame and sample. Training requires at least one fitted mined pair in
+the frozen validation fold. Set `--min-mined-validation-pairs` to require more.
 
 ### 11. Sweep and apply production EPS
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.eps.sweep_eps_on_linking_gold \
-  --dataset a_ross --arrow-root snapshot --model-path inference/production_model_v1.4 \
+  --dataset a_ross --arrow-root snapshot --model-path finalized-1.5 \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
   --allow-all-reference-identities --route production --batching-threshold 15000 \
   --eps-start 0.34 --eps-stop 0.42 --eps-step 0.02 --compute-missing-dists --allow-full-run \
   --output-dir eps/a_ross --n-jobs N
 uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
-  --source-model inference/production_model_v1.4 --output-model reviewed-model \
+  --source-model finalized-1.5 --output-model reviewed-model \
   --sweep-root eps --datasets a_ross --expected-batching-threshold 15000 \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --eps 0.38 --precision-f1-tolerance 0.01 --review-note "Record the review decision." \
+  --eps 0.38 --precision-f1-tolerance 0.001 --review-note "Record the review decision." \
   --output-report eps-review.json
 ~~~
 
 Sweep all `eps_cal` blocks, with one folder per snapshot dataset. Pass each dataset once to the EPS
-review. Production clustering hides ORCID
+review. Tolerances above `0.005` require `--allow-wide-tolerance`.
+The role freeze excludes blocks without a repeated scored ORCID and records the reason.
+Production clustering hides ORCID
 and keeps the full population. B3 scores verified, eligible mentions only. Apply verifies both
 digests and the reference coverage. Reload the revised model and verify the chosen EPS.
 ## First 1.5 experiment order

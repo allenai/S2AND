@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +13,7 @@ import pyarrow.parquet as pq
 from s2and._sha256 import sha256_file
 from s2and.arrow_tables import write_name_counts_index
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, BlockRoles, load_block_roles
-from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
+from scripts.common.identity_ledger import IdentityLedger, load_identity_ledger
 from scripts.intake.assign_block_roles import freeze_identity_roles
 from scripts.intake.build_freeze_input import build_freeze_input
 from scripts.intake.build_identity_evidence import build_identity_evidence
@@ -31,6 +30,7 @@ class Stage0World:
     evidence_path: Path
     name_counts: Path
     inputs: dict[str, BlockInput]
+    inputs_path: Path
     mined: Path
     manifest: Path
     roles: BlockRoles
@@ -46,8 +46,6 @@ def build_stage0_world(
     *,
     missing_fit_pool_block: bool = False,
     foreign_index: bool = False,
-    judge_as_fitted: bool = False,
-    fitted_as_judge: bool = False,
     lost_ledger_score: bool = False,
     empty_block: bool = False,
     all_ineligible_block: bool = False,
@@ -64,9 +62,9 @@ def build_stage0_world(
     if empty_block or all_ineligible_block:
         papers["e vale"] = [40]
         clusters["e vale"] = ["x"]
-    if sampling_hazard in {"stale_frame", "judge_zero_cap", "zeroed_judge_frame"}:
+    if sampling_hazard == "judge_zero_cap":
         papers["e vale"] = [40, 41]
-        clusters["e vale"] = ["x", "y" if sampling_hazard == "stale_frame" else "x"]
+        clusters["e vale"] = ["x", "x"]
     convert_requests(
         [request_bundle(root / "raw", block, [(str(paper), None) for paper in ids]) for block, ids in papers.items()],
         snapshot,
@@ -116,19 +114,17 @@ def build_stage0_world(
     model = root / "model"
     model.write_bytes(b"fixture model")
     model_digest = sha256_file(model) if all_ineligible_block else "a" * 64
-    query = "13-0" if with_query or sampling_hazard in {"query_in_assignments", "query_in_mined_pair"} else None
+    query = "13-0" if with_query or sampling_hazard == "query_in_assignments" else None
     inputs = {}
     for block, cluster_ids in clusters.items():
         name = block.replace(" ", "_")
         if all_ineligible_block and block == "e vale":
             arrow_dir = snapshot / "datasets" / name
-            linker_input = root / "linker-input.json"
-            _write_json(linker_input, {block: {"arrow_dir": str(arrow_dir)}})
             output = root / "linker-inputs"
-            build_linker_inputs(roles_path, linker_input, output, model, identity_evidence=evidence)
-            inputs[block] = BlockInput(arrow_dir, None, output / name / "assignments.parquet")
+            build_linker_inputs(load_identity_ledger(evidence, roles), [block], output, model)
+            inputs[block] = BlockInput(arrow_dir, output / name / "seeds.parquet")
             continue
-        assignments = root / name / "assignments.parquet"
+        assignments = root / name / "seeds.parquet"
         assignments.parent.mkdir()
         queries = [query] if query is not None and block == "a ross" else []
         assignments.with_name("queries.json").write_text(json.dumps(queries), encoding="utf-8")
@@ -138,12 +134,12 @@ def build_stage0_world(
             if (sid := f"{paper}-0") not in queries
         ]
         pq.write_table(
-            pa.table({"signature_id": [sid for sid, _ in rows], "cluster_id": [cid for _, cid in rows]}),
+            pa.table({"signature_id": [sid for sid, _ in rows], "component_key": [cid for _, cid in rows]}),
             assignments,
         )
-        inputs[block] = BlockInput(snapshot / "datasets" / name, None, assignments)
+        inputs[block] = BlockInput(snapshot / "datasets" / name, assignments)
 
-    def write_receipts() -> dict[str, Any]:
+    def write_receipts() -> None:
         bindings = {}
         for block, spec in inputs.items():
             if all_ineligible_block and block == "e vale":
@@ -164,89 +160,34 @@ def build_stage0_world(
                     },
                 },
             )
-        return bindings
 
     write_receipts()
     mined = root / "mined.csv"
     mine_pairs(roles_path, inputs, mined, identity_evidence=evidence)
     manifest_path = mined.with_suffix(".csv.manifest.json")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    with mined.open(encoding="utf-8", newline="") as handle:
-        columns, *rows = csv.reader(handle)
     if sampling_hazard == "query_in_assignments":
         assignments = inputs["a ross"].assignments
         table = pq.read_table(assignments)
-        pq.write_table(pa.concat_tables([table, pa.table({"signature_id": [query], "cluster_id": ["z"]})]), assignments)
+        pq.write_table(
+            pa.concat_tables([table, pa.table({"signature_id": [query], "component_key": ["z"]})]), assignments
+        )
         write_receipts()
-        manifest["blocks"]["a ross"]["assignments_sha256"] = sha256_file(assignments)
-    if sampling_hazard == "query_in_mined_pair":
-        rows.append(["a ross", "12-0", "13-0", "missed_link", "1.0"])
-
     if lost_ledger_score:
         next(row for row in gold_rows if row["corpus_paper_id"] == 21)["scored"] = False
-    if sampling_hazard == "stale_frame":
-        gold_rows.extend(
-            gold_rows[0] | {"cluster_block_key": "e vale", "corpus_paper_id": paper, "orcid": "0000-0003-3151-6105"}
-            for paper in papers["e vale"]
-        )
-    ledger_changed = lost_ledger_score or sampling_hazard == "stale_frame"
-    if ledger_changed:
         evidence, roles = freeze(root / "updated_evidence")
+        write_receipts()
     if foreign_index:
         foreign, _ = write_name_counts_index(root / "foreign", ({"foreign": 1}, {}, {}, {}))
         index = sha256_file(Path(foreign) / "manifest.json")
-    if ledger_changed or foreign_index:
-        manifest[ROLE_SHA256_FIELD] = roles.sha256
-        manifest[BLOCK_BINDINGS_FIELD] = roles.bindings_for(inputs.keys())
-        manifest["index_sha256"] = index
-        for block, binding in write_receipts().items():
-            manifest["blocks"][block]["assignment_binding"] = binding
+        write_receipts()
     if missing_fit_pool_block:
         inputs.pop("b crane")
-        manifest["blocks"].pop("b crane")
-        manifest[BLOCK_BINDINGS_FIELD] = roles.bindings_for(inputs.keys())
-        rows = [row for row in rows if row[0] != "b crane"]
-    if judge_as_fitted or fitted_as_judge:
-        left, right, target = ("10-0", "14-0", "random") if judge_as_fitted else ("10-0", "13-0", "merged_unlabeled")
-        next(row for row in rows if row[1:3] == [left, right])[3] = target
-        for stratum in ("random", "merged_unlabeled"):
-            ids = sorted((a, b) for block, a, b, tag, _ in rows if block == "a ross" and tag == stratum)
-            counts = manifest["blocks"]["a ross"]["strata"][stratum]
-            counts.update(frame_pairs=len(ids), sampled_pairs=len(ids), reporting_population_pairs=len(ids))
-    if sampling_hazard in {"lost_validation", "empty_frame", "zeroed_judge_frame"}:
-        block, stratum = (
-            ("e vale", "merged_unlabeled") if sampling_hazard == "zeroed_judge_frame" else ("b crane", "random")
-        )
-        rows = [row for row in rows if (row[0], row[3]) != (block, stratum)]
-        counts = manifest["blocks"][block]["strata"][stratum]
-        counts.update(sampled_pairs=0, dropped_pairs=1, inclusion_probability=0)
-        if sampling_hazard == "lost_validation":
-            counts["drops"] = {"sampling_budget": 1}
-        else:
-            counts.update(frame_pairs=0, reporting_population_pairs=0, drops={"zero_cap": 1})
-    if sampling_hazard == "swapped_strata":
-        for endpoints, stratum in ((["10-0", "11-0"], "false_merge"), (["10-0", "12-0"], "missed_link")):
-            next(row for row in rows if row[1:3] == endpoints)[3] = stratum
-    changed_rows = (
-        missing_fit_pool_block
-        or judge_as_fitted
-        or fitted_as_judge
-        or sampling_hazard
-        in {"lost_validation", "empty_frame", "swapped_strata", "zeroed_judge_frame", "query_in_mined_pair"}
-    )
-    if changed_rows:
-        with mined.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(columns)
-            writer.writerows(rows)
-        manifest["output_sha256"] = sha256_file(mined)
-    if changed_rows or foreign_index or ledger_changed or sampling_hazard == "query_in_assignments":
-        _write_json(manifest_path, manifest)
+    inputs_path = root / "inputs.json"
+    _write_json(inputs_path, {block: {"seeds": str(spec.assignments)} for block, spec in inputs.items()})
 
-    ledger = ledger_for_roles(evidence, roles)
-    assert ledger is not None
+    ledger = load_identity_ledger(evidence, roles)
     if gate_block_outside_fit_pool:
         payload = json.loads(roles_path.read_text(encoding="utf-8"))
         payload["gate_training_blocks"].append("c lane")
         _write_json(roles_path, payload)
-    return Stage0World(roles_path, evidence, name_counts, inputs, mined, manifest_path, roles, ledger)
+    return Stage0World(roles_path, evidence, name_counts, inputs, inputs_path, mined, manifest_path, roles, ledger)

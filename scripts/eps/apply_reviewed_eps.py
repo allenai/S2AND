@@ -477,6 +477,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "this below the best swept F1."
         ),
     )
+    parser.add_argument("--allow-wide-tolerance", action="store_true", help="Allow a tolerance above 0.005.")
     parser.add_argument(
         "--block-role-assignments",
         type=Path,
@@ -486,6 +487,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--review-note", required=True)
     parser.add_argument("--output-report", type=Path, required=True)
     args = parser.parse_args(argv)
+    if (
+        args.precision_f1_tolerance is not None
+        and args.precision_f1_tolerance > 0.005
+        and not args.allow_wide_tolerance
+    ):
+        parser.error("--precision-f1-tolerance above 0.005 requires --allow-wide-tolerance")
     report = apply_reviewed_eps(
         args.source_model,
         args.output_model,

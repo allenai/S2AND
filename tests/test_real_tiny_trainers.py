@@ -142,12 +142,14 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
     from tests.stage0_world import build_stage0_world
 
     world = build_stage0_world(tmp_path)
+    world.mined.unlink()
+    world.manifest.unlink()
     name_counts = world.name_counts
     args = pairwise_training_args(
         tmp_path,
         train_pairs_size=24,
         validation_pairs_size=6,
-        mined_pairs=world.mined,
+        block_inputs=world.inputs_path,
         identity_evidence=world.evidence_path,
         block_role_assignments=world.roles_path,
         name_counts_index_root=name_counts,

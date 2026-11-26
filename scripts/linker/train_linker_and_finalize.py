@@ -1,4 +1,4 @@
-"""Train the linker once, publish a complete bundle, reload, and evaluate."""
+"""Fit and reload a complete linker bundle, with official evaluation for legacy training."""
 
 from __future__ import annotations
 
@@ -95,8 +95,7 @@ from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 from scripts.common.arrow_roots import read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
-    GATE_BINDINGS_FIELD,
-    GATE_CANDIDATE_ORCIDS,
+    BLOCK_BINDINGS_FIELD,
     BlockRoles,
     load_block_roles,
 )
@@ -108,14 +107,12 @@ from scripts.common.initial_query_sources import (  # noqa: E402
     load_initial_query_sources,
 )
 from scripts.common.linker_seeds import (  # noqa: E402
-    GATE_SEED_DIGESTS,
     PRODUCTION_MAX_EXEMPLARS,
     members_by_component,
     read_frozen_seeds,
 )
 from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
-from scripts.linker.blind_gate_metrics import update_blind_gate_metrics  # noqa: E402
-from scripts.linker.build_linker_task_tables import TASK_ROLES  # noqa: E402
+from scripts.eps.sweep_eps_on_linking_gold import _hash_directory  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
 evaluate_classic = evaluate_linker
@@ -1912,16 +1909,17 @@ def _assert_output_paths_outside_inputs(
     *,
     output_dir: Path,
     complete_model_dir: Path,
-    source_bundle_root: Path,
+    source_bundle_root: Path | None,
     pairwise_model_path: Path,
     fixed_ranker_bundle: Path | None = None,
 ) -> None:
     """Reject any write target nested beneath an immutable input bundle."""
 
     input_roots = {
-        "--source-bundle-root": source_bundle_root.resolve(),
         "--pairwise-model-path": pairwise_model_path.resolve(),
     }
+    if source_bundle_root is not None:
+        input_roots["--source-bundle-root"] = source_bundle_root.resolve()
     if fixed_ranker_bundle is not None:
         input_roots["--fixed-ranker-bundle"] = fixed_ranker_bundle.resolve()
     collisions = [
@@ -2004,60 +2002,24 @@ def _release_table_plan(
     return training_keys, calibration_query_ids, evaluation_keys
 
 
-def _apply_blind_gate_labels(
-    rows: pd.DataFrame, report: Mapping[str, Any], roles: BlockRoles, blocks: Mapping[str, Any]
-) -> pd.DataFrame:
-    """Attach agreed blind outcomes to the matching frozen production window."""
-    if not rows["label"].isna().all() or rows["query_gold_scored"].any() or rows["candidate_gold_scored"].any():
-        raise ValueError("Frozen production requests must have no pre-existing labels")
-    vetoes = rows.get("candidate_has_vetoed_identity")
-    if vetoes is None or not pd.api.types.is_bool_dtype(vetoes) or vetoes.isna().any():
-        raise ValueError("Frozen gate tasks must record candidate identity vetoes. Rebuild the tasks.")
-    keys = ["dataset", "query_signature_id", "candidate_component_key"]
-    judged = pd.DataFrame.from_records(report.get("gate_thresh_labels", []), columns=[*keys, "verdict"])
-    if judged.empty or judged.duplicated(keys).any() or not judged["verdict"].isin({"same", "different"}).all():
-        raise ValueError("Expected unique, agreed gate threshold verdicts")
-    indexed = pd.MultiIndex.from_frame(rows[keys])
-    decisions = judged.set_index(keys)["verdict"]
-    if not indexed.is_unique or len(decisions.index.difference(indexed)):
-        raise ValueError("Gate threshold judgments contain candidates outside the frozen windows")
-    candidates = report.get(GATE_CANDIDATE_ORCIDS)
-    if (
-        not isinstance(candidates, dict)
-        or set(judged["dataset"]) - candidates.keys()
-        or report.get(GATE_BINDINGS_FIELD) != roles.gate_judgment_bindings(candidates)
-    ):
-        raise ValueError("Gate threshold judgments block provenance does not match the identity ledger")
-    seed_digests = report.get(GATE_SEED_DIGESTS)
-    if (
-        not isinstance(seed_digests, dict)
-        or candidates.keys() != seed_digests.keys()
-        or any(block not in blocks or digest != blocks[block]["seeds_sha256"] for block, digest in seed_digests.items())
-    ):
-        raise ValueError("Gate threshold judgments do not match the frozen seed assignments")
-    for block, block_rows in rows.groupby("dataset", sort=False):
-        members = members_by_component(read_frozen_seeds(blocks[str(block)]))
-        if missing := set(block_rows["candidate_component_key"]) - members.keys():
-            raise ValueError(f"Gate candidates have no frozen seed members in {block!r}: {sorted(missing)}")
-    labeled = rows.copy()
-    verdicts = decisions.reindex(indexed).reset_index(drop=True)
-    known = verdicts.notna() & ~vetoes.reset_index(drop=True)
-    labeled["label"] = (verdicts.eq("same") & known).astype("int8").to_numpy()
-    labeled["candidate_gold_scored"] = known.to_numpy()
-    grouped = labeled.groupby("query_group_id", sort=False)
-    labeled["query_gold_scored"] = grouped["candidate_gold_scored"].transform("all")
-    labeled["gold_safe_target"] = grouped["label"].transform("any")
-    return labeled
-
-
 def _validate_frozen_task_bindings(
-    manifest: Mapping[str, Any], roles: BlockRoles, *, index_sha256: str | None = None
+    manifest: Mapping[str, Any],
+    roles: BlockRoles,
+    *,
+    task_role: str | None = None,
+    index_sha256: str | None = None,
+    pairwise_model_path: Path | None = None,
 ) -> None:
     """Check the roles and block provenance of every frozen task table."""
     roles.require_current_exclusions()
     roles.require_assignment(manifest, context="Frozen linker tasks")
     bound_blocks = set()
-    for role, table in manifest["tables"].items():
+    tables = manifest["tables"]
+    if task_role is not None:
+        if task_role not in tables:
+            raise ValueError(f"Missing frozen linker table for {task_role!r}")
+        tables = {task_role: tables[task_role]}
+    for role, table in tables.items():
         blocks = set(table["blocks"])
         assigned = {block for block, assignment in roles.block_to_role.items() if assignment == role}
         if not blocks or blocks != assigned:
@@ -2066,17 +2028,23 @@ def _validate_frozen_task_bindings(
                 f"Missing {sorted(assigned - blocks)}. Unexpected {sorted(blocks - assigned)}."
             )
         bound_blocks.update(blocks)
-    if roles.evidence_sha256 is not None:
-        roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")
-        common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
-        for table in manifest["tables"].values():
-            for block, spec in table["blocks"].items():
-                path = spec.get("input_manifest")
-                if not isinstance(path, str) or not path:
-                    raise ValueError(f"Missing frozen linker input receipt for {block!r}. Rebuild frozen linker tasks.")
-                require_linker_input_receipt(
-                    roles, block, read_json_object(Path(path)), common, {Path(spec["seeds"]): spec["seeds_sha256"]}
-                )
+    if roles.evidence_sha256 is None:
+        raise ValueError("Frozen linker tasks require ledger-backed roles")
+    bindings = manifest.get(BLOCK_BINDINGS_FIELD)
+    if task_role is not None and isinstance(bindings, dict):
+        bindings = {block: bindings.get(block) for block in bound_blocks}
+    roles.require_bindings({BLOCK_BINDINGS_FIELD: bindings}, bound_blocks, context="Frozen linker tasks")
+    common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
+    if pairwise_model_path is not None and common["model_sha256"] != _hash_directory(pairwise_model_path)[2]:
+        raise ValueError("Frozen seeds use a different pairwise model. Rebuild linker inputs and tasks.")
+    for table in tables.values():
+        for block, spec in table["blocks"].items():
+            path = spec.get("input_manifest")
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"Missing frozen linker input receipt for {block!r}. Rebuild frozen linker tasks.")
+            require_linker_input_receipt(
+                roles, block, read_json_object(Path(path)), common, {Path(spec["seeds"]): spec["seeds_sha256"]}
+            )
 
 
 def _materialize_frozen_linker_tasks(
@@ -2089,7 +2057,8 @@ def _materialize_frozen_linker_tasks(
     n_jobs: int,
     total_ram_bytes: int,
     max_query_groups: int | None,
-    gate_judgments: Path | None = None,
+    role: str = "fit_pool",
+    pairwise_model_path: Path | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
     """Verify frozen inputs and attach model features without changing candidate windows."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -2098,88 +2067,73 @@ def _materialize_frozen_linker_tasks(
         or manifest.get("s2and_version") != __version__
     ):
         raise ValueError("Frozen linker tasks use a different distance policy or package version. Rebuild the tasks.")
-    if roles.evidence_sha256 is not None and (
-        gate_judgments is None or manifest.get("gate_label_source") != "blind_judging"
-    ):
-        raise ValueError("Ledger-backed linker tasks require --gate-thresh-judgments")
-    if gate_judgments is not None and roles.evidence_sha256 is None:
-        raise ValueError("Gate threshold judgments require ledger-backed linker tasks")
-    if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
-        raise ValueError("The linker manifest must contain exactly fit_pool and gate_thresh at top-25")
-    index_sha256 = (
-        clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] if roles.evidence_sha256 is not None else None
+    if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K:
+        raise ValueError("Frozen linker tasks require top-25 windows")
+    index_sha256 = clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD]
+    _validate_frozen_task_bindings(
+        manifest, roles, task_role=role, index_sha256=index_sha256, pairwise_model_path=pairwise_model_path
     )
-    _validate_frozen_task_bindings(manifest, roles, index_sha256=index_sha256)
-    tasks: dict[str, pd.DataFrame] = {}
     summaries = []
-    for role in TASK_ROLES:
-        table = manifest["tables"][role]
-        table_path = manifest_path.parent / table["path"]
-        if sha256_file(table_path) != table["sha256"]:
-            raise ValueError(f"Frozen linker table changed: {table_path}")
-        rows = pd.read_parquet(table_path)
-        if role == "gate_thresh" and gate_judgments is not None:
-            rows = _apply_blind_gate_labels(
-                rows, json.loads(gate_judgments.read_text(encoding="utf-8")), roles, table["blocks"]
+    table = manifest["tables"][role]
+    table_path = manifest_path.parent / table["path"]
+    if sha256_file(table_path) != table["sha256"]:
+        raise ValueError(f"Frozen linker table changed: {table_path}")
+    rows = pd.read_parquet(table_path)
+    expected_counts = {
+        block: spec["counts"]["rows"] for block, spec in table["blocks"].items() if spec["counts"]["rows"]
+    }
+    if rows["dataset"].value_counts().to_dict() != expected_counts:
+        raise ValueError(f"Frozen linker rows do not match block counts: {table_path}")
+    if max_query_groups is not None:
+        rows = _sample_query_groups_for_smoke(
+            rows,
+            max_query_groups,
+            gate_training_blocks=roles.gate_training_blocks if role == "fit_pool" else frozenset(),
+        )
+    materialized = []
+    for block, block_rows in rows.groupby("dataset", sort=False):
+        spec = table["blocks"][block]
+        seeds = read_frozen_seeds(spec)
+        members = members_by_component(seeds)
+        with ArrowDataset.open(spec["arrow_dir"], require_specter=True, require_name_counts_index=True) as arrow:
+            if arrow.generation_id != spec["arrow_generation_id"]:
+                raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
+            require_arrow_name_counts_index_for_clusterer(clusterer, arrow, context=f"frozen linker task {block!r}")
+            context = ArrowRustDatasetContext(
+                dataset_name=str(block),
+                row_component_scope="block-local",
+                pairwise_component_scope="block-local",
+                runtime_context=build_runtime_context("joint_safe_link_arrow_rust_featureization", backend="rust"),
+                arrow_dataset=arrow,
+                component_members=members,
+                cluster_seeds_require=seeds,
+                cluster_seeds_disallow=frozenset(),
+                max_block_component_size=max(map(len, members.values())),
+                shard_query_signature_ids=frozenset(block_rows["query_signature_id"]),
             )
-        expected_counts = {
-            block: spec["counts"]["rows"] for block, spec in table["blocks"].items() if spec["counts"]["rows"]
-        }
-        if rows["dataset"].value_counts().to_dict() != expected_counts:
-            raise ValueError(f"Frozen linker rows do not match block counts: {table_path}")
-        if max_query_groups is not None:
-            rows = _sample_query_groups_for_smoke(
-                rows,
-                max_query_groups,
-                gate_training_blocks=roles.gate_training_blocks if role == "fit_pool" else frozenset(),
-            )
-        materialized = []
-        for block, block_rows in rows.groupby("dataset", sort=False):
-            spec = table["blocks"][block]
-            seeds = read_frozen_seeds(spec)
-            members = members_by_component(seeds)
-            with ArrowDataset.open(spec["arrow_dir"], require_specter=True, require_name_counts_index=True) as arrow:
-                if arrow.generation_id != spec["arrow_generation_id"]:
-                    raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
-                require_arrow_name_counts_index_for_clusterer(clusterer, arrow, context=f"frozen linker task {block!r}")
-                context = ArrowRustDatasetContext(
-                    dataset_name=str(block),
-                    row_component_scope="block-local",
-                    pairwise_component_scope="block-local",
-                    runtime_context=build_runtime_context("joint_safe_link_arrow_rust_featureization", backend="rust"),
-                    arrow_dataset=arrow,
-                    component_members=members,
-                    cluster_seeds_require=seeds,
-                    cluster_seeds_disallow=frozenset(),
-                    max_block_component_size=max(map(len, members.values())),
-                    shard_query_signature_ids=frozenset(block_rows["query_signature_id"]),
-                )
-                try:
-                    group_codes = pd.factorize(block_rows["query_group_id"], sort=False)[0]
-                    for _, shard in block_rows.groupby(group_codes // 128, sort=False):
-                        features, summary, _ = _materialize_arrow_rust_dataset_rows(
-                            context=context,
-                            rows=shard,
-                            target_features=target_features,
-                            name_tuples=name_tuples,
-                            clusterer=clusterer,
-                            n_jobs=n_jobs,
-                            total_ram_bytes=total_ram_bytes,
-                            max_exemplars=PRODUCTION_MAX_EXEMPLARS,
-                            pairwise_model_nan_value=float("nan"),
-                            pairwise_aggregate_nan_value=0.0,
-                            frozen_retrieval=True,
-                        )
-                        feature_rows = _rows_with_materialized_target_features(shard, features, target_features)
-                        _validate_materialized_target_features(
-                            feature_rows, target_features, context=f"{role}: {block}"
-                        )
-                        materialized.append(feature_rows)
-                        summaries.append({"table_key": role, **summary})
-                finally:
-                    _release_arrow_rust_dataset_context(context)
-        tasks[role] = pd.concat(materialized, ignore_index=True)
-    return tasks, summaries
+            try:
+                group_codes = pd.factorize(block_rows["query_group_id"], sort=False)[0]
+                for _, shard in block_rows.groupby(group_codes // 128, sort=False):
+                    features, summary, _ = _materialize_arrow_rust_dataset_rows(
+                        context=context,
+                        rows=shard,
+                        target_features=target_features,
+                        name_tuples=name_tuples,
+                        clusterer=clusterer,
+                        n_jobs=n_jobs,
+                        total_ram_bytes=total_ram_bytes,
+                        max_exemplars=PRODUCTION_MAX_EXEMPLARS,
+                        pairwise_model_nan_value=float("nan"),
+                        pairwise_aggregate_nan_value=0.0,
+                        frozen_retrieval=True,
+                    )
+                    feature_rows = _rows_with_materialized_target_features(shard, features, target_features)
+                    _validate_materialized_target_features(feature_rows, target_features, context=f"{role}: {block}")
+                    materialized.append(feature_rows)
+                    summaries.append({"table_key": role, **summary})
+            finally:
+                _release_arrow_rust_dataset_context(context)
+    return {role: pd.concat(materialized, ignore_index=True)}, summaries
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -2193,12 +2147,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     pairwise_model_nan_value = float("nan")
     pairwise_aggregate_nan_value = 0.0
     feature_nan_policy = _feature_nan_policy_summary()
-    source_bundle = load_bundle(args.source_bundle_root)
     frozen_manifest = getattr(args, "linker_task_manifest", None)
     roles_path = getattr(args, "block_role_assignments", None)
-    gate_judgments = getattr(args, "gate_thresh_judgments", None)
-    if gate_judgments is not None and frozen_manifest is None:
-        raise ValueError("--gate-thresh-judgments requires frozen linker tasks")
     if (frozen_manifest is None) != (roles_path is None):
         raise ValueError("--linker-task-manifest and --block-role-assignments must be used together")
     block_roles = load_block_roles(roles_path) if roles_path is not None else None
@@ -2222,69 +2172,78 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     linker_legacy_paper_years = linker_feature_contract == LEGACY_INCREMENTAL_LINKER_FEATURE_CONTRACT_VERSION
     if linker_legacy_paper_years and frozen_manifest is not None:
         raise ValueError("Contract-1 fixed ranker requires legacy calibration; frozen task windows use contract 2")
+    source_root = getattr(args, "source_bundle_root", None)
+    gate_options = {
+        key: value
+        for key in ("false_abstain_weight", "initial_only_offset")
+        if (value := getattr(args, key, None)) is not None
+    }
+    source_bundle = None
     if frozen_manifest is None:
+        if source_root is None:
+            raise ValueError("--source-bundle-root is required for legacy linker training")
+        if gate_options:
+            raise ValueError("Gate options on the command line require frozen linker tasks")
+        source_bundle = load_bundle(source_root)
+        validate_source_bundle_support_files(source_bundle)
         training_table_keys, calibration_query_ids, evaluation_table_keys = _release_table_plan(source_bundle)
         if fixed_ranker is not None:
             training_table_keys = tuple(key for key in training_table_keys if key != "train_path")
-    else:
-        training_table_keys, calibration_query_ids = (), {}
-        evaluation_table_keys = tuple(
-            key
-            for key in source_featureless_table_keys(source_bundle)
-            if key not in {"train_path", "classic_gate_source_path"}
-        )
     _assert_output_paths_outside_inputs(
         output_dir=output_dir,
         complete_model_dir=complete_model_dir,
-        source_bundle_root=source_bundle.root,
+        source_bundle_root=source_root,
         pairwise_model_path=Path(args.pairwise_model_path),
         fixed_ranker_bundle=fixed_ranker_bundle,
     )
-    validate_source_bundle_support_files(source_bundle)
-    holdout_identities = read_classic_holdout_identities(source_bundle)
-    name_counts_index_root = Path(args.name_counts_index_root)
-    with ExitStack() as arrow_stack:
-        _, arrow_datasets = preflight_source_rows(
-            source_bundle,
-            name_counts_index_root=name_counts_index_root,
-            arrow_stack=arrow_stack,
-        )
-        query_sources = load_initial_query_sources(
-            source_bundle.root,
-            arrow_datasets=arrow_datasets,
-            expected_sha256=getattr(args, "expected_initial_query_map_sha256", None),
-        )
-        if unknown_origins := set(query_sources.datasets) - set(arrow_datasets):
-            raise ValueError(f"Initial-query source map names absent datasets: {sorted(unknown_origins)}")
-        clusterer = load_clusterer(
-            args.pairwise_model_path,
-            n_jobs=int(args.n_jobs),
-            expected_artifact_hashes=artifact_hashes,
-        )
-        for dataset_name, arrow_dataset in arrow_datasets.items():
-            require_arrow_name_counts_index_for_clusterer(
-                clusterer,
-                arrow_dataset,
-                context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}",
+    clusterer = load_clusterer(
+        args.pairwise_model_path,
+        n_jobs=int(args.n_jobs),
+        expected_artifact_hashes=artifact_hashes,
+    )
+    with ExitStack() as stack:
+        fit_kwargs: dict[str, Any] = {}
+        if source_bundle is not None:
+            holdout_identities = read_classic_holdout_identities(source_bundle)
+            fit_kwargs["holdout_identities"] = holdout_identities
+            _, arrow_datasets = preflight_source_rows(
+                source_bundle,
+                name_counts_index_root=Path(args.name_counts_index_root),
+                arrow_stack=stack,
             )
+            query_sources = load_initial_query_sources(
+                source_bundle.root,
+                arrow_datasets=arrow_datasets,
+                expected_sha256=getattr(args, "expected_initial_query_map_sha256", None),
+            )
+            if unknown_origins := set(query_sources.datasets) - set(arrow_datasets):
+                raise ValueError(f"Initial-query source map names absent datasets: {sorted(unknown_origins)}")
+            for dataset_name, arrow_dataset in arrow_datasets.items():
+                require_arrow_name_counts_index_for_clusterer(
+                    clusterer, arrow_dataset, context=f"linker train/calibrate/eval preflight dataset {dataset_name!r}"
+                )
         output_dir.mkdir(parents=True)
-        work = tempfile.TemporaryDirectory(prefix=".linker-release-", dir=output_dir)
-        work_dir = Path(work.name)
+        work_dir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".linker-release-", dir=output_dir)))
         artifact_dir = work_dir / LINKER_STAGING_DIRNAME
         feature_bundle_root = work_dir / "training_features"
         max_query_groups = getattr(args, "max_query_groups_per_table", None)
         if max_query_groups is not None:
             # Never publish a normal production_model_vX bundle from a smoke run.
             complete_model_dir = output_dir / "smoke_model_DO_NOT_SHIP"
-        fit_kwargs: dict[str, Any] = {}
-        blind_gate_rows: pd.DataFrame | None = None
         if frozen_manifest is not None and block_roles is not None:
-            feature_bundle = _bundle_with_promoted_target(source_bundle, target)
-            if (
-                int(feature_bundle.models["classic"].get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
-                != DEFAULT_RETRIEVAL_TOP_K
-            ):
-                raise ValueError("Frozen linker tasks require top-25 in the source bundle")
+            feature_bundle = OfficialBundle(
+                root=frozen_manifest.parent,
+                bundle_name="frozen_fit_pool",
+                assets={},
+                expected_metrics={},
+                models={
+                    "classic": {
+                        "feature_columns": list(target["features"]),
+                        "best_params": dict(target["params"]),
+                        "promoted_stratified_gate": gate_options,
+                    }
+                },
+            )
             task_rows, featureization_summaries = _materialize_frozen_linker_tasks(
                 frozen_manifest,
                 block_roles,
@@ -2294,13 +2253,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 n_jobs=int(args.n_jobs),
                 total_ram_bytes=int(args.total_ram_bytes),
                 max_query_groups=max_query_groups,
-                **({"gate_judgments": gate_judgments} if gate_judgments is not None else {}),
+                pairwise_model_path=Path(args.pairwise_model_path),
             )
             fit_kwargs["frozen_task_rows"] = task_rows
             fit_kwargs["gate_training_blocks"] = block_roles.gate_training_blocks
-            if gate_judgments is not None:
-                blind_gate_rows = task_rows["gate_thresh"]
         else:
+            assert source_bundle is not None
             feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
                 source_bundle=source_bundle,
                 output_bundle_root=feature_bundle_root,
@@ -2336,17 +2294,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         calibrated = fit_linker(
             feature_bundle,
             n_jobs=int(args.n_jobs),
-            holdout_identities=holdout_identities,
             **({"fixed_ranker": fixed_ranker} if fixed_ranker is not None else {}),
             **fit_kwargs,
         )
-        if blind_gate_rows is not None:
-            update_blind_gate_metrics(
-                calibrated,
-                blind_gate_rows,
-                tuple(feature_bundle.models["classic"]["feature_columns"]),
-                int(args.n_jobs),
-            )
         artifact_metadata = save_incremental_linking_artifact(
             calibrated.model,
             artifact_dir,
@@ -2380,40 +2330,51 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("Reloaded complete model does not contain an incremental linker artifact")
         shutil.rmtree(artifact_dir)
 
-        evaluation_feature_bundle_root = work_dir / "evaluation_features"
-        evaluation_feature_bundle, evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
-            source_bundle=source_bundle,
-            output_bundle_root=evaluation_feature_bundle_root,
-            target=target,
-            name_tuples=name_tuples,
-            clusterer=complete_model,
-            n_jobs=int(args.n_jobs),
-            total_ram_bytes=int(args.total_ram_bytes),
-            table_keys=evaluation_table_keys,
-            max_exemplars=PRODUCTION_MAX_EXEMPLARS,
-            pairwise_model_nan_value=pairwise_model_nan_value,
-            pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
-            arrow_datasets=arrow_datasets,
-            query_sources=query_sources,
-            max_query_groups_per_table=max_query_groups,
-            linker_legacy_paper_years=linker_legacy_paper_years,
-        )
-    evaluation = evaluate_linker(
-        evaluation_feature_bundle,
-        calibrated=calibrated,
-        artifact=complete_model.incremental_linker_artifact,
-        n_jobs=int(args.n_jobs),
-    )
-    summary = evaluation.summary
-    observed = _observed_official_metrics(summary)
-    _validate_observed_official_metrics(observed, ranker_refit=fixed_ranker is None)
-    artifact_summary = dict(artifact_metadata)
+        evaluation_featureization_summaries = []
+        if source_bundle is not None:
+            evaluation_feature_bundle_root = work_dir / "evaluation_features"
+            evaluation_feature_bundle, evaluation_featureization_summaries = _materialize_arrow_rust_feature_bundle(
+                source_bundle=source_bundle,
+                output_bundle_root=evaluation_feature_bundle_root,
+                target=target,
+                name_tuples=name_tuples,
+                clusterer=complete_model,
+                n_jobs=int(args.n_jobs),
+                total_ram_bytes=int(args.total_ram_bytes),
+                table_keys=evaluation_table_keys,
+                max_exemplars=PRODUCTION_MAX_EXEMPLARS,
+                pairwise_model_nan_value=pairwise_model_nan_value,
+                pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
+                arrow_datasets=arrow_datasets,
+                query_sources=query_sources,
+                max_query_groups_per_table=max_query_groups,
+                linker_legacy_paper_years=linker_legacy_paper_years,
+            )
+            evaluation = evaluate_linker(
+                evaluation_feature_bundle,
+                calibrated=calibrated,
+                artifact=complete_model.incremental_linker_artifact,
+                n_jobs=int(args.n_jobs),
+            )
+            summary = evaluation.summary
+            observed = _observed_official_metrics(summary)
+            _validate_observed_official_metrics(observed, ranker_refit=fixed_ranker is None)
+            training_report = {
+                "source_bundle_root": str(source_bundle.root),
+                MAP_SHA256_FIELD: query_sources.sha256,
+                "observed_metrics": observed,
+                "evaluation_summary": summary,
+                "query_predictions": evaluation.query_predictions,
+            }
+        else:
+            training_report = {
+                "training_summary": calibrated.training_summary,
+                "abstain_rule": calibrated.abstain_rule_summary,
+            }
     result = {
         "mode": "arrow-rust",
         "complete_model_path": str(complete_model_dir),
         "model_manifest_path": str(finalized.manifest_path),
-        "source_bundle_root": str(source_bundle.root),
-        MAP_SHA256_FIELD: query_sources.sha256,
         "target_json": str(Path(args.target_json).resolve()),
         "feature_count": int(target["feature_count"]),
         "n_estimators": int(active_params["n_estimators"]),
@@ -2421,15 +2382,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "elapsed_seconds": round(float(time.perf_counter() - started), 3),
         "pairwise_bundle_binding": pairwise_binding,
         "input_artifact_hashes": artifact_hashes,
-        "observed_metrics": observed,
-        "evaluation_summary": summary,
         "feature_materialization_summaries": {
             "training": featureization_summaries,
             "evaluation": evaluation_featureization_summaries,
         },
-        "query_predictions": evaluation.query_predictions,
         "feature_nan_policy": feature_nan_policy,
-        "artifact_summary": artifact_summary,
+        "artifact_summary": dict(artifact_metadata),
+        **training_report,
         "component_scope": "block-local",
         "smoke_mode": max_query_groups is not None,
         "max_query_groups_per_table": max_query_groups,
@@ -2440,8 +2399,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if block_roles is not None and frozen_manifest is not None:
         result["block_role_assignments_sha256"] = block_roles.sha256
         result["linker_task_manifest_sha256"] = sha256_file(frozen_manifest)
-    _write_json(output_dir / "linker_evaluation_report.json", result)
-    work.cleanup()
+    report_name = "linker_evaluation_report.json" if source_bundle is not None else "linker_training_report.json"
+    _write_json(output_dir / report_name, result)
     return result
 
 
@@ -2453,16 +2412,15 @@ def _positive_int(value: str) -> int:
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--source-bundle-root", type=Path, required=True)
+    parser.add_argument("--source-bundle-root", type=Path, help="Required for legacy linker training.")
+    parser.add_argument("--false-abstain-weight", type=float, help="Override the frozen-task gate default weight.")
+    parser.add_argument("--initial-only-offset", type=float, help="Set the frozen-task gate initial-only offset.")
     parser.add_argument("--fixed-ranker-bundle", type=Path, help="Reuse the ranker from this production bundle.")
     parser.add_argument("--expected-ranker-sha256", help="Required SHA-256 for the fixed source ranker.")
     parser.add_argument(
         "--use-legacy-gate-calibration", action="store_true", help="Fit with the source M1 calibration rows."
     )
-    parser.add_argument(
-        "--gate-thresh-judgments", type=Path, help="Bound blind judging consensus for production requests."
-    )
-    parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen fit_pool and gate_thresh tasks.")
+    parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen fit_pool tasks.")
     parser.add_argument("--block-role-assignments", type=Path, help="Role manifest used to build the linker tables.")
     parser.add_argument(
         "--expected-initial-query-map-sha256",
@@ -2480,7 +2438,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--name-counts-index-root",
         type=Path,
         required=True,
-        help="Use the same resolved index path as the source bundle's Arrow manifests.",
+        help="Use the index bound to the training Arrow manifests.",
     )
     # Require an explicit allocation; a fixed default can exceed the shared CPU budget.
     parser.add_argument("--n-jobs", type=_positive_int, required=True)

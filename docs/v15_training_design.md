@@ -71,6 +71,8 @@ Supply a directory or explicit list of full bundles. The builder checks their na
 `author_block`, removes papers outside the S2AG allowlist, preserves abstract presence with
 `Has Abstract`, and hashes or scrubs emails before writing indexes. It scans retained and new
 datasets for plaintext emails. Scrubbing and scanning cover Unicode domains with combining marks.
+Arrow email redaction hashes structured email, scrubs names and publication text, and preserves
+join keys. Intake fails if the Arrow schema adds a string column without a redaction policy.
 Re-run with the same index and allowlists that contain the prior
 permissions to append new blocks. Each block retains the permission digests it had at intake.
 Papers absent from the supplied lists stay restricted. A failed append preserves prior permissions.

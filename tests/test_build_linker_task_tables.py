@@ -16,6 +16,11 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
+from s2and.incremental_linking.logistic_gate import (
+    build_logistic_gate_matrix,
+    default_logistic_gate_feature_names,
+    feature_values_from_candidate_frame,
+)
 from scripts.common.block_roles import load_block_roles
 from scripts.common.distance_policy import DISTANCE_POLICY_VERSION
 from scripts.common.orcid_references import read_external_reference_identity_evidence
@@ -285,6 +290,20 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
         np.testing.assert_array_equal(rows["retrieval_rank"], frozen_rows["retrieval_rank"])
         np.testing.assert_allclose(rows["retrieval_score"], frozen_rows["retrieval_score"])
         assert set(promoted_linker_feature_columns()) <= set(rows)
+    fit_rows = feature_rows["fit_pool"]
+    gate_columns = default_logistic_gate_feature_names()
+    matrix, choices = build_logistic_gate_matrix(
+        gate_columns,
+        query_indices=fit_rows["query_group_id"].to_numpy(),
+        probabilities=np.full(len(fit_rows), 0.8),
+        feature_values=feature_values_from_candidate_frame(fit_rows),
+        retrieval_ranks=fit_rows["retrieval_rank"].to_numpy(),
+        component_keys=fit_rows["candidate_component_key"].to_numpy(),
+    )
+    bucket_column = gate_columns.index("first_name_bucket_single_letter_first")
+    np.testing.assert_array_equal(
+        matrix[:, bucket_column], fit_rows.iloc[choices.best_rows]["query_view"].eq("initial_only")
+    )
     manifest_path = output / TASK_MANIFEST
     original_manifest = manifest_path.read_bytes()
     manifest_path.write_text(

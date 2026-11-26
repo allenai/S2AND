@@ -185,7 +185,7 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
   --block-inputs linker-inputs/inputs.json --output-dir linker-tasks --n-jobs N
 ~~~
 
-The builder preserves real names and freezes native top-25 windows. The `fit_pool` tasks hold out whole
+The builder preserves real names and native first tokens for gate features and freezes native top-25 windows. The `fit_pool` tasks hold out whole
 authors before retrieval. Ledger-backed fitting tasks require scored queries and seed assignments
 for every eligible non-query signature. Gold-labeled roles check every seed member for identity purity.
 The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.

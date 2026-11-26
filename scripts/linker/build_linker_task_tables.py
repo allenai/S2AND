@@ -53,6 +53,7 @@ _TASK_COLUMNS = (
     "query_signature_id",
     "query_view",
     "query_author",
+    "query_first_token",
     "query_author_middle",
     "candidate_component_key",
     "retrieval_rank",
@@ -202,22 +203,23 @@ def _freeze_block_rows(
                     )
                     if plan["query_signature_ids"] != batch:
                         raise ValueError(f"Native planner changed query order in {block!r}")
-                    windows: dict[int, list[tuple[int, str, float]]] = defaultdict(list)
-                    for index, rank, component, score in zip(
+                    windows: dict[int, list[tuple[int, str, float, str]]] = defaultdict(list)
+                    for index, rank, component, score, first_token in zip(
                         plan["row_query_signature_indices"],
                         plan["retrieval_ranks"],
                         plan["row_component_keys"],
                         plan["retrieval_scores"],
+                        plan["row_query_first_tokens"],
                         strict=True,
                     ):
-                        windows[index].append((int(rank), component, float(score)))
+                        windows[index].append((int(rank), component, float(score), first_token))
                     for index, query in enumerate(batch):
                         expected = min(DEFAULT_RETRIEVAL_TOP_K, len(representatives) - len(removed[index]))
                         window = sorted(windows[index])
                         size = len(window)
-                        candidate_keys = {component for _, component, _ in window}
+                        candidate_keys = {component for _, component, _, _ in window}
                         if (
-                            [rank for rank, _, _ in window] != list(range(1, size + 1))
+                            [rank for rank, _, _, _ in window] != list(range(1, size + 1))
                             or size > expected
                             or len(candidate_keys) != size
                             or candidate_keys - representatives.keys()
@@ -234,7 +236,7 @@ def _freeze_block_rows(
                         counts["full_windows"] += size == DEFAULT_RETRIEVAL_TOP_K
                         counts["whole_author_holdout"] += is_heldout
                         counts["unscored_queries"] += query_orcid is None
-                        for rank, component, score in window:
+                        for rank, component, score, first_token in window:
                             rows.append(
                                 (
                                     block,
@@ -242,6 +244,7 @@ def _freeze_block_rows(
                                     query,
                                     view,
                                     plan["query_authors"][index],
+                                    first_token,
                                     signatures[query][0],
                                     component,
                                     rank,

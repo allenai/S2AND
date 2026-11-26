@@ -184,9 +184,9 @@ nonnegative integers or canonical decimal strings. Invalid arrival keys and empt
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `fit_pool`, sample eligible scored mentions using `--queries-per-block`. The
 ORCID-hidden `fit_pool` population is clustered without the queries, and the same partition supplies
-assignments for mining and seeds for retrieval. Mining skips query endpoints and counts excluded
-query signatures per block. A `fit_pool` block with no eligible signatures writes empty assignments,
-seeds, and queries with reason `no_eligible_signatures`. The gate reuses the linker inputs from
+one seed partition per block for retrieval and mining. Mining skips query endpoints and counts excluded
+query signatures per block. A `fit_pool` block with no eligible signatures writes empty seeds and queries
+with reason `no_eligible_signatures`. The gate reuses the linker inputs from
 the marked blocks. Re-run with the same inputs to verify and reuse completed blocks.
 
 ### 9. Freeze linker and gate tasks
@@ -235,7 +235,7 @@ uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
-Map every block in the nonempty frozen `fit_pool` to its `arrow_dir` and `assignments` entry from step 8. The mining
+Map every block in the nonempty frozen `fit_pool` to its `arrow_dir` and pass its `seeds` path as `assignments`. The mining
 manifest records each block's frozen fold, assignment path, and binding, including blocks with zero
 sampled pairs. Keep the frozen assignment files and receipts available for training. Assignment
 receipts and the trainer's name-counts index must match the intake index. All assignment receipts

@@ -28,8 +28,9 @@ from s2and.production_model import load_production_model
 from scripts.common.arrow_roots import _replace_json, read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
+from scripts.common.linker_seeds import read_seed_components
 from scripts.common.orcid_references import read_external_reference_identity_evidence
-from scripts.common.stage0_invariants import read_fit_pool_queries, require_assignment_coverage
+from scripts.common.stage0_invariants import read_fit_pool_queries
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
 from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
 from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
@@ -189,12 +190,9 @@ def build_linker_inputs(
             raise ValueError("gate_thresh requires --arrivals, --requests-per-block, --since and an incremental bundle")
 
         target = output_dir / name
-        assignments_path = target / "assignments.parquet"
         seed_path = target / "seeds.parquet"
         query_path = target / "queries.json"
         expected_files = [seed_path, query_path]
-        if role == "fit_pool":
-            expected_files.append(assignments_path)
         with (
             exclusive_file_lock(output_dir / f".{name}.lock"),
             ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow,
@@ -238,9 +236,11 @@ def build_linker_inputs(
                     raise ValueError(f"Existing linker inputs have changed: {target}")
                 if role == "fit_pool":
                     frozen_queries = read_fit_pool_queries(query_path, block, record)
-                    assigned_ids = set(pq.read_table(assignments_path, columns=["signature_id"])[0].to_pylist())
-                    seed_ids = set(pq.read_table(seed_path, columns=["signature_id"])[0].to_pylist())
-                    require_assignment_coverage(block, assigned_ids, seed_ids, frozen_queries)
+                    if overlap := frozen_queries & read_seed_components(seed_path).keys():
+                        raise ValueError(
+                            f"Query signatures in assignments for {block!r}: {sorted(overlap)[:5]}. "
+                            "Rebuild linker inputs."
+                        )
             else:
                 signatures = _read_signatures(arrow, block, include_orcid=ledger is None)
                 if ledger is None:
@@ -326,16 +326,6 @@ def build_linker_inputs(
                     ),
                     staging / seed_path.name,
                 )
-                if role == "fit_pool":
-                    pq.write_table(
-                        pa.table(
-                            {
-                                "signature_id": pa.array([sid for sid, _ in rows], type=pa.string()),
-                                "cluster_id": pa.array([cid for _, cid in rows], type=pa.string()),
-                            }
-                        ),
-                        staging / assignments_path.name,
-                    )
                 _replace_json(staging / query_path.name, queries)
                 record = {
                     "binding": binding,
@@ -355,7 +345,6 @@ def build_linker_inputs(
             entries[block] = {
                 "arrow_dir": str(arrow_dir),
                 **({"labels": str(label_path)} if label_path is not None else {}),
-                **({"assignments": str(assignments_path)} if role == "fit_pool" else {}),
                 "input_manifest": str(target / "manifest.json"),
                 "seeds": str(seed_path),
                 "queries": str(query_path),

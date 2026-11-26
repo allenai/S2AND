@@ -94,9 +94,9 @@ def test_fit_pool_predicts_only_non_queries_and_rejects_stale_assignments(
     assert len(queries) == 1
     signatures = {"q_full", "q_initial", "q_outside_home", *(f"s{i:02}" for i in range(29))}
     assert calls == [sorted(signatures - queries)]
-    assignments = Path(entry["assignments"])
+    assignments = Path(entry["seeds"])
     rows = pd.read_parquet(assignments)
-    pd.testing.assert_frame_equal(rows.rename(columns={"cluster_id": "component_key"}), pd.read_parquet(entry["seeds"]))
+    assert list(assignments.parent.glob("*.parquet")) == [assignments]
     assert build_linker_inputs.build_linker_inputs(roles, paths, output, model, queries_per_block=1) == counts
     assert len(calls) == 1
 
@@ -106,7 +106,9 @@ def test_fit_pool_predicts_only_non_queries_and_rejects_stale_assignments(
     assert not pairs.empty
     assert queries.isdisjoint(set(pairs["signature_id_1"]) | set(pairs["signature_id_2"]))
 
-    pd.concat([rows, pd.DataFrame({"signature_id": sorted(queries), "cluster_id": "fixture"})]).to_parquet(assignments)
+    pd.concat([rows, pd.DataFrame({"signature_id": sorted(queries), "component_key": "fixture"})]).to_parquet(
+        assignments
+    )
     receipt_path = assignments.with_name("manifest.json")
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     receipt["files"][assignments.name] = sha256_file(assignments)

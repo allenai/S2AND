@@ -64,10 +64,10 @@ def _mining_input(tmp_path: Path, block: str, *, deposited_orcids: bool = True):
     from scripts.pairwise.mine_pairwise_pairs import BlockInput
 
     spec = _block_inputs(tmp_path / "block", block, _ORCIDS[0], deposited_orcids=deposited_orcids)
-    assignments = tmp_path / "assignments.parquet"
+    assignments = tmp_path / "seeds.parquet"
     signatures = ["q_initial", "q_full", "q_outside_home", *(f"s{i:02}" for i in range(29))]
     clusters = ["mixed", "split", "mixed", "mixed", "mixed", "mixed", "mixed", "mixed", *signatures[8:]]
-    pd.DataFrame({"signature_id": signatures, "cluster_id": clusters}).to_parquet(assignments)
+    pd.DataFrame({"signature_id": signatures, "component_key": clusters}).to_parquet(assignments)
     labels = Path(spec["labels"])
     frame = pd.read_parquet(labels)
     frame.loc[frame["signature_id"].isin(["q_outside_home", "s03"]), "scored"] = False

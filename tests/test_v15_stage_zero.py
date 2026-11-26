@@ -753,7 +753,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     built = json.loads((inputs / "inputs.json").read_text())
     fit_inputs = built["a lovelace"]
     fit_assignments = {
-        row["signature_id"]: row["cluster_id"] for row in pq.read_table(fit_inputs["assignments"]).to_pylist()
+        row["signature_id"]: row["component_key"] for row in pq.read_table(fit_inputs["seeds"]).to_pylist()
     }
     fit_queries = set(json.loads(Path(fit_inputs["queries"]).read_text(encoding="utf-8")))
     assert fit_queries == {"106-0"}
@@ -926,7 +926,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         _apply_blind_gate_labels(gate_table, report, roles, gate_blocks)
 
     pairs = tmp_path / "pairs.csv"
-    assignments = inputs / "a_lovelace" / "assignments.parquet"
+    assignments = inputs / "a_lovelace" / "seeds.parquet"
     miner = _json(
         tmp_path / "miner.json",
         {"a lovelace": {"arrow_dir": arrow_dirs["a lovelace"], "assignments": str(assignments)}},

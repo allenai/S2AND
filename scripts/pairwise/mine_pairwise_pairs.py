@@ -18,7 +18,6 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
-import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
@@ -26,6 +25,7 @@ from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import BlockEligibility, ledger_for_roles
+from scripts.common.linker_seeds import read_seed_components
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 from scripts.common.stage0_invariants import (
     JUDGE_ONLY_STRATUM,
@@ -132,12 +132,7 @@ def _eligible_mentions(
             continue
         eligible[sid] = gold or orcid or f"signature:{sid}"
     labels = {sid: oid for sid, oid in scored.items() if sid in eligible and oid not in EXCLUDED_ORCID_GROUPS}
-    table = pq.read_table(spec.assignments, columns=["signature_id", "cluster_id"])
-    components: dict[str, str] = {}
-    for sid, cid in zip(table["signature_id"].to_pylist(), table["cluster_id"].to_pylist(), strict=True):
-        if sid not in deposited or sid in components or type(cid) not in {str, int} or cid == "":
-            raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {spec.assignments}")
-        components[sid] = str(cid)
+    components = read_seed_components(spec.assignments)
     query_path = spec.assignments.with_name("queries.json")
     # Legacy assignments built without linker requests cover every real signature.
     queries = (
@@ -162,14 +157,7 @@ def _read_assignment_partition(path: Path, receipt: Mapping[str, object]) -> tup
     files = receipt.get("files")
     if not isinstance(files, dict) or files.get(path.name) != digest:
         raise ValueError(f"Assignment digest mismatch: {path}")
-    rows = pq.read_table(path, columns=["signature_id", "cluster_id"]).to_pylist()
-    components = {}
-    for row in rows:
-        sid, cid = row["signature_id"], row["cluster_id"]
-        if sid in components or type(cid) not in {str, int} or cid == "":
-            raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {path}")
-        components[sid] = str(cid)
-    return components, digest
+    return read_seed_components(path), digest
 
 
 @dataclass

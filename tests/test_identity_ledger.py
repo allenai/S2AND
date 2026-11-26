@@ -395,8 +395,8 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     assert ledger is not None
     assignment_root = tmp_path / "assignments"
     assignment_root.mkdir()
-    assignments = assignment_root / "assignments.parquet"
-    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
+    assignments = assignment_root / "seeds.parquet"
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "component_key": ["a", "b"]}), assignments)
     queries = assignments.with_name("queries.json")
     queries.write_text("[]", encoding="utf-8")
     manifest = assignment_root / "manifest.json"
@@ -428,10 +428,10 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"fit_pool": 2})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
-    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
+    pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "component_key": ["a", "b"]}), assignments)
     other = tmp_path / "other" / assignments.name
     other.parent.mkdir()
-    pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)
+    pq.write_table(pa.table({"signature_id": ["5-0"], "component_key": ["a"]}), other)
     for block, model_sha, path in (("a lovelace", "a" * 64, assignments), ("g hopper", "c" * 64, other)):
         queries = path.with_name("queries.json")
         queries.write_text("[]", encoding="utf-8")

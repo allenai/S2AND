@@ -126,9 +126,9 @@ def build_stage0_world(
             _write_json(linker_input, {block: {"arrow_dir": str(arrow_dir)}})
             output = root / "linker-inputs"
             build_linker_inputs(roles_path, linker_input, output, model, identity_evidence=evidence)
-            inputs[block] = BlockInput(arrow_dir, None, output / name / "assignments.parquet")
+            inputs[block] = BlockInput(arrow_dir, None, output / name / "seeds.parquet")
             continue
-        assignments = root / name / "assignments.parquet"
+        assignments = root / name / "seeds.parquet"
         assignments.parent.mkdir()
         queries = [query] if query is not None and block == "a ross" else []
         assignments.with_name("queries.json").write_text(json.dumps(queries), encoding="utf-8")
@@ -138,7 +138,7 @@ def build_stage0_world(
             if (sid := f"{paper}-0") not in queries
         ]
         pq.write_table(
-            pa.table({"signature_id": [sid for sid, _ in rows], "cluster_id": [cid for _, cid in rows]}),
+            pa.table({"signature_id": [sid for sid, _ in rows], "component_key": [cid for _, cid in rows]}),
             assignments,
         )
         inputs[block] = BlockInput(snapshot / "datasets" / name, None, assignments)
@@ -176,7 +176,9 @@ def build_stage0_world(
     if sampling_hazard == "query_in_assignments":
         assignments = inputs["a ross"].assignments
         table = pq.read_table(assignments)
-        pq.write_table(pa.concat_tables([table, pa.table({"signature_id": [query], "cluster_id": ["z"]})]), assignments)
+        pq.write_table(
+            pa.concat_tables([table, pa.table({"signature_id": [query], "component_key": ["z"]})]), assignments
+        )
         write_receipts()
         manifest["blocks"]["a ross"]["assignments_sha256"] = sha256_file(assignments)
     if sampling_hazard == "query_in_mined_pair":

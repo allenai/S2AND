@@ -188,11 +188,7 @@ def test_fitting_linker_inputs_reconcile_queries_and_seeds(tmp_path: Path, hazar
         queries.write_text(json.dumps(query_ids), encoding="utf-8")
         pq.write_table(
             pa.Table.from_pylist(
-                [
-                    {"signature_id": row["signature_id"], "component_key": row["cluster_id"]}
-                    for row in pq.read_table(spec.assignments).to_pylist()
-                    if row["signature_id"] not in omitted
-                ]
+                [row for row in pq.read_table(spec.assignments).to_pylist() if row["signature_id"] not in omitted]
             ),
             seeds,
         )

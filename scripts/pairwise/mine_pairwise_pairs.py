@@ -12,21 +12,15 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from functools import partial
-from itertools import chain, groupby
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.ipc as ipc
-
 from s2and._sha256 import sha256_file
-from s2and.arrow_inputs import ArrowDataset
-from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
-from scripts.common.identity_ledger import BlockEligibility, IdentityLedger, ledger_for_roles, load_identity_ledger
+from scripts.common.identity_ledger import BlockEligibility, IdentityLedger, load_identity_ledger
 from scripts.common.linker_seeds import read_seed_components
-from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 from scripts.common.stage0_invariants import (
     JUDGE_ONLY_STRATUM,
     PAIR_STRATA,
@@ -94,70 +88,7 @@ def add_sampling_arguments(parser: argparse.ArgumentParser) -> None:
 @dataclass(frozen=True)
 class BlockInput:
     arrow_dir: Path
-    labels: Path | None
     assignments: Path
-
-
-def _mention_orcids(root: Path, block: str) -> dict[str, str | None]:
-    signatures: dict[str, str | None] = {}
-    with (
-        ArrowDataset.open(root) as dataset,
-        dataset.use() as lease,
-        lease.open_file("signatures") as infile,
-        pa.PythonFile(infile, mode="r") as source,
-    ):
-        reader = ipc.open_file(source)
-        columns = ["signature_id", "author_block"]
-        if "author_orcid" in reader.schema.names:
-            columns.append("author_orcid")
-        for batch_index in range(reader.num_record_batches):
-            for row in reader.get_batch(batch_index).select(columns).to_pylist():
-                signature = row["signature_id"]
-                if not signature or normalize_block_key(row["author_block"]) != block:
-                    raise ValueError(f"Expected real signatures from block {block!r} in {root}")
-                if signature.startswith("visibleq:"):
-                    continue
-                if signature in signatures:
-                    raise ValueError(f"Duplicate signature {signature!r} in {root}")
-                signatures[signature] = normalize_orcid(row.get("author_orcid") or "")
-    return signatures
-
-
-def _eligible_mentions(
-    spec: BlockInput, block: str, frozen_orcids: frozenset[str], identity_roles: Mapping[str, frozenset[str]]
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], int, int]:
-    deposited = _mention_orcids(spec.arrow_dir, block)
-    if spec.labels is None:
-        raise ValueError("Legacy pairwise inputs require labels")
-    identities, scored = read_external_reference_identity_evidence(spec.labels, require_scored=True)
-    if unknown := identities.keys() - deposited.keys():
-        raise ValueError(f"Joined labels contain signatures outside {block!r}: {sorted(unknown)[:5]}")
-    if frozen_orcids and frozen_orcids.isdisjoint(chain(identities.values(), deposited.values())):
-        raise ValueError(f"Neither label nor Arrow input names a frozen ORCID in {block!r}")
-    eligible: dict[str, str] = {}
-    for sid, orcid in deposited.items():
-        gold = identities.get(sid)
-        if any(identity_roles.get(oid, frozenset({"fit_pool"})) != {"fit_pool"} for oid in (gold, orcid) if oid):
-            continue
-        eligible[sid] = gold or orcid or f"signature:{sid}"
-    labels = {sid: oid for sid, oid in scored.items() if sid in eligible and oid not in EXCLUDED_ORCID_GROUPS}
-    components = read_seed_components(spec.assignments)
-    query_path = spec.assignments.with_name("queries.json")
-    # Legacy assignments built without linker requests cover every real signature.
-    queries = (
-        read_fit_pool_queries(query_path, block, read_json_object(query_path.with_name("manifest.json")))
-        if query_path.exists()
-        else set()
-    )
-    if unknown_queries := queries - deposited.keys():
-        raise ValueError(f"Unknown query signatures in {block!r}: {sorted(unknown_queries)[:5]}")
-    require_assignment_coverage(block, components.keys(), deposited.keys(), queries)
-    excluded = len(deposited) - len(eligible)
-    excluded_queries = len(queries & eligible.keys())
-    for sid in queries:
-        eligible.pop(sid, None)
-        labels.pop(sid, None)
-    return eligible, labels, components, excluded, excluded_queries
 
 
 def _read_assignment_partition(path: Path, receipt: Mapping[str, object]) -> tuple[dict[str, str], str]:
@@ -408,14 +339,14 @@ def mine_pairs(
     per_block: int = DEFAULT_PAIRS_PER_BLOCK,
     verified_pair_fraction: float = DEFAULT_VERIFIED_PAIR_FRACTION,
     per_block_floor: int = DEFAULT_PAIRS_PER_BLOCK_FLOOR,
-    identity_evidence: Path | None = None,
+    identity_evidence: Path,
     per_identity: int = 25,
     seed: int = 20261123,
 ) -> int:
     """Write capped stratum samples and counts for every frozen fit_pool block."""
     policy = SamplingPolicy(seed, per_block, verified_pair_fraction, per_block_floor, per_identity)
     roles = load_block_roles(roles_path)
-    ledger = ledger_for_roles(identity_evidence, roles)
+    ledger = load_identity_ledger(identity_evidence, roles)
     normalized = {normalize_block_key(block): spec for block, spec in blocks.items()}
     if len(normalized) != len(blocks):
         raise ValueError("Duplicate normalized block keys in pairwise inputs")
@@ -424,43 +355,24 @@ def mine_pairs(
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)
 
-    assignment_manifests = {}
-    shared_binding: dict[str, str] = {}
-    if ledger is not None:
-        intake_index = ledger.evidence.name_counts_index_sha256
-        shared_binding["index_sha256"] = intake_index
-        assignment_manifests, shared_binding["model_sha256"] = fit_pool_receipts(ledger, normalized)
+    assignment_manifests, model_digest = fit_pool_receipts(ledger, normalized)
 
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []
     for block, spec in sorted(normalized.items()):
-        if ledger is None:
-            identities, gold, clusters, excluded, excluded_queries = _eligible_mentions(
-                spec, block, roles.block_orcids[block], roles.identity_roles
-            )
-            sample = select_block_pairs(
-                block, identities, gold, clusters, excluded, policy, excluded_queries=excluded_queries
-            )
-            assignments_digest = sha256_file(spec.assignments)
-            assignment_input = {}
-        else:
-            view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
-            receipt = assignment_manifests[block]
-            frozen = sample_frozen_block(view, spec.assignments, receipt, policy)
-            sample, assignments_digest = frozen.sample, frozen.assignments_digest
-            assignment_input = {
-                "assignments_path": str(spec.assignments.resolve()),
-                "assignment_binding": receipt["binding"],
-            }
+        view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
+        receipt = assignment_manifests[block]
+        frozen = sample_frozen_block(view, spec.assignments, receipt, policy)
+        sample = frozen.sample
         rows.extend(
             (block, left, right, stratum, inclusion) for (left, right), (stratum, inclusion) in sample.pairs.items()
         )
         counts[block] = {
             "fold": pairwise_fold(roles, block),
-            **assignment_input,
+            "assignments_path": str(spec.assignments.resolve()),
+            "assignment_binding": receipt["binding"],
             **sample.counts,
-            "labels_sha256": sha256_file(spec.labels) if spec.labels is not None else None,
-            "assignments_sha256": assignments_digest,
+            "assignments_sha256": frozen.assignments_digest,
         }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8", newline="") as handle:
@@ -471,8 +383,9 @@ def mine_pairs(
         json.dump(
             {
                 ROLE_SHA256_FIELD: roles.sha256,
-                **({BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys())} if ledger is not None else {}),
-                **shared_binding,
+                BLOCK_BINDINGS_FIELD: roles.bindings_for(normalized.keys()),
+                "index_sha256": ledger.evidence.name_counts_index_sha256,
+                "model_sha256": model_digest,
                 "role": "fit_pool",
                 **asdict(policy),
                 "probability_scope": "within_capped_stratum_frame",
@@ -505,7 +418,7 @@ def read_fit_pool_inputs(ledger: IdentityLedger, inputs_path: Path) -> dict[str,
         inputs[block] = inputs_path.parent / entry["seeds"]
     require_fit_pool_coverage(ledger.roles, inputs.keys())
     return {
-        block: BlockInput(directory, None, inputs[block])
+        block: BlockInput(directory, inputs[block])
         for block, directory in ledger.evidence.dataset_dirs(inputs.keys()).items()
     }
 

@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -331,7 +332,9 @@ def build_dummy_dataset(
     )
 
 
-def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
+def request_bundle(
+    root: Path, block: str, rows: list[tuple[str, str | None]], *, first_names: Mapping[str, str] | None = None
+) -> Path:
     """Write a tiny intake request from paper IDs and deposited ORCIDs."""
     import tarfile
 
@@ -341,7 +344,7 @@ def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -
     name = block.replace(" ", "_")
     first, last = block.split()
     papers = [paper for paper, _ in rows]
-    author = f"{first} {last}"
+    firsts = [(first_names or {}).get(paper, first) for paper in papers]
     directory = root / name
     write_arrow_tables_bundle(
         directory,
@@ -351,7 +354,7 @@ def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -
                     "signature_id": [f"{paper}-0" for paper in papers],
                     "paper_id": papers,
                     "author_position": [0] * len(papers),
-                    "author_first": [first] * len(papers),
+                    "author_first": firsts,
                     "author_middle": [""] * len(papers),
                     "author_last": [last] * len(papers),
                     "author_suffix": [""] * len(papers),
@@ -369,7 +372,7 @@ def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -
                 }
             ),
             "paper_authors": pa.table(
-                {"paper_id": papers, "position": [0] * len(papers), "author_name": [author] * len(papers)}
+                {"paper_id": papers, "position": [0] * len(papers), "author_name": [f"{f} {last}" for f in firsts]}
             ),
             "specter": pa.table(
                 {"paper_id": papers, "embedding": pa.array([[1.0, 0.0]] * len(papers), type=pa.list_(pa.float32(), 2))}

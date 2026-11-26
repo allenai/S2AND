@@ -32,7 +32,7 @@ from scripts.intake import (
     requests_to_datasets,
 )
 from scripts.judging import review_packets
-from scripts.linker import build_linker_inputs, build_linker_task_tables
+from scripts.linker import blind_gate_metrics, build_linker_inputs, build_linker_task_tables
 from scripts.linker.blind_gate_metrics import _apply_blind_gate_labels
 from scripts.linker.train_linker_and_finalize import _validate_frozen_task_bindings
 from scripts.pairwise import mine_pairwise_pairs
@@ -535,7 +535,9 @@ def _v14_source(tmp_path: Path, index: Path, allowed_abstracts: Path) -> Path:
     return root
 
 
-def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Path) -> None:
+def test_stage_zero_commands_use_one_ledger_and_production_requests(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     eps_orcid = "0000-0001-5000-0007"
     other_orcid = "0000-0002-9079-593X"
     gate_a = "0000-0002-1825-0855"
@@ -583,10 +585,18 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         cluster_block_key=[*paper_ids, "f aba", "z last"],
         split=["development", "development", "holdout", "holdout", "development", "development", "holdout"],
     )
-    exports = {block: request_bundle(tmp_path / "full", block, ids) for block, ids in paper_ids.items()}
+    exports = {
+        block: request_bundle(
+            tmp_path / "full",
+            block,
+            ids,
+            first_names={"102": "Ada", "104": "Abigail"} if block == "a lovelace" else None,
+        )
+        for block, ids in paper_ids.items()
+    }
     index_text, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
     index = Path(index_text)
-    model = _complete_model(tmp_path)
+    model = _complete_model(tmp_path, name_counts_index_root=index)
     permissions = _json(tmp_path / "allowed.json", [paper for ids in paper_ids.values() for paper, _ in ids])
     abstract_permissions = _json(tmp_path / "abstracts.json", [])
     reviewed = _json(tmp_path / "errors.json", {"a lovelace": ["105-0"]})
@@ -729,9 +739,9 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--output-dir",
         inputs,
         "--model-path",
-        model,
+        model.parent / "pairwise",
         "--batching-threshold",
-        "3",
+        "2",
         "--arrivals",
         arrivals,
         "--since",
@@ -762,8 +772,6 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         inputs / "inputs.json",
         "--output-dir",
         tasks,
-        "--blocks",
-        gate,
     )
     rows = pq.read_table(tasks / "gate_thresh.parquet").to_pylist()
     assert len(rows) == 50
@@ -877,15 +885,11 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     gate_blocks = task_manifest["tables"]["gate_thresh"]["blocks"]
     index_digest = ledger.evidence.name_counts_index_sha256
     _validate_frozen_task_bindings(task_manifest, roles, index_sha256=index_digest)
-    fitting_manifest = build_linker_task_tables.build_linker_task_tables(
-        role_path, inputs / "inputs.json", tmp_path / "fit-tasks", blocks=["a lovelace"], identity_evidence=evidence
+    _validate_frozen_task_bindings(
+        task_manifest, roles, task_role="fit_pool", pairwise_model_path=model.parent / "pairwise"
     )
-    _validate_frozen_task_bindings(fitting_manifest, roles, task_role="fit_pool", pairwise_model_path=model)
-    wrong_model = tmp_path / "wrong-pairwise-model"
-    wrong_model.mkdir()
-    (wrong_model / "manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="Frozen seeds use a different pairwise model"):
-        _validate_frozen_task_bindings(fitting_manifest, roles, task_role="fit_pool", pairwise_model_path=wrong_model)
+        _validate_frozen_task_bindings(task_manifest, roles, task_role="fit_pool", pairwise_model_path=model)
     for field, error in (
         ("index_sha256", "Linker inputs use a different name-counts index"),
         ("model_sha256", "Input model, index, or role digest mismatch"),
@@ -902,6 +906,27 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert report["gate_thresh_audit_coverage"]["audit"]["planned_share"] == 0.5
     assert scored["query_gold_scored"].sum() == 0
     assert scored.loc[scored["label"].eq(1), "candidate_gold_mixed"].all()
+    capsys.readouterr()
+    _run(
+        blind_gate_metrics,
+        "--model-path",
+        model,
+        "--linker-task-manifest",
+        tasks / build_linker_task_tables.TASK_MANIFEST,
+        "--block-role-assignments",
+        role_path,
+        "--gate-thresh-judgments",
+        judged_path,
+        "--name-counts-index-root",
+        index,
+        "--n-jobs",
+        "1",
+    )
+    metrics = json.loads(capsys.readouterr().out)
+    coverage = metrics["judged_choice_coverage"]
+    assert coverage["requested_queries"] == coverage["queries_with_choices"] == 2
+    assert coverage["share_of_requests_with_judged_choice"] == coverage["judged_choices"] / 2
+    assert metrics["resolved_window_metrics"]["n_queries"] == 0
     vetoed = gate_table.loc[gate_table["candidate_component_key"].isin(vetoed_components)]
     assert set(vetoed["candidate_component_key"]) == vetoed_components
     assert gate_table["candidate_has_vetoed_identity"].equals(

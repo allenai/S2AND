@@ -574,8 +574,14 @@ def test_eps_sweep_rejects_an_unmatched_expected_source_map(tmp_path: Path, with
     assert not (tmp_path / "output").exists()
 
 
-def _complete_model(tmp_path: Path) -> Path:
-    hashes = canonical_artifact_hashes()
+def _complete_model(tmp_path: Path, *, name_counts_index_root: Path | None = None) -> Path:
+    from s2and.production_training_contract import load_packaged_artifact_authority
+
+    hashes = (
+        canonical_artifact_hashes()
+        if name_counts_index_root is None
+        else load_packaged_artifact_authority(name_counts_index_root=name_counts_index_root).hashes
+    )
     pairwise = tmp_path / "pairwise"
     write_synthetic_pairwise_bundle(pairwise, artifact_hashes=hashes, release_version="9.9")
     linker = tmp_path / "linker"
@@ -736,7 +742,6 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
             BlockSpec("sealed", 2, frozenset({shared}), source_split="holdout"),
         ],
         {"eps_cal": 1, "final_test": 1},
-        closure_mode="block_only",
         enforce_source_splits=True,
     )
     write_json(role_path, result)
@@ -1045,8 +1050,7 @@ def test_manual_curve_reader_rejects_hash_valid_old_distance_policy(tmp_path: Pa
         read_sweep_curve(tmp_path, "unit")
 
 
-@pytest.mark.parametrize("mode", ["strict", "block_only"])
-def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mode: str) -> None:
+def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     from s2and._sha256 import sha256_file
@@ -1065,7 +1069,6 @@ def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path, mod
                 [BlockSpec(block, 2, frozenset({home})), BlockSpec("b ross", 2, frozenset({sealed}))],
                 {"eps_cal": 1, "final_test": 1},
                 pinned_roles={block: "eps_cal", "b ross": "final_test"},
-                closure_mode=mode,
             )
         ),
         encoding="utf-8",

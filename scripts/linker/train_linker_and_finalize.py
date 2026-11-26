@@ -1,4 +1,4 @@
-"""Train the linker once, publish a complete bundle, reload, and evaluate."""
+"""Fit and reload a complete linker bundle, with official evaluation for legacy training."""
 
 from __future__ import annotations
 
@@ -95,6 +95,7 @@ from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 from scripts.common.arrow_roots import read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
+    BLOCK_BINDINGS_FIELD,
     BlockRoles,
     load_block_roles,
 )
@@ -2027,19 +2028,23 @@ def _validate_frozen_task_bindings(
                 f"Missing {sorted(assigned - blocks)}. Unexpected {sorted(blocks - assigned)}."
             )
         bound_blocks.update(blocks)
-    if roles.evidence_sha256 is not None:
-        roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")
-        common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
-        if pairwise_model_path is not None and common["model_sha256"] != _hash_directory(pairwise_model_path)[2]:
-            raise ValueError("Frozen seeds use a different pairwise model. Rebuild linker inputs and tasks.")
-        for table in tables.values():
-            for block, spec in table["blocks"].items():
-                path = spec.get("input_manifest")
-                if not isinstance(path, str) or not path:
-                    raise ValueError(f"Missing frozen linker input receipt for {block!r}. Rebuild frozen linker tasks.")
-                require_linker_input_receipt(
-                    roles, block, read_json_object(Path(path)), common, {Path(spec["seeds"]): spec["seeds_sha256"]}
-                )
+    if roles.evidence_sha256 is None:
+        raise ValueError("Frozen linker tasks require ledger-backed roles")
+    bindings = manifest.get(BLOCK_BINDINGS_FIELD)
+    if task_role is not None and isinstance(bindings, dict):
+        bindings = {block: bindings.get(block) for block in bound_blocks}
+    roles.require_bindings({BLOCK_BINDINGS_FIELD: bindings}, bound_blocks, context="Frozen linker tasks")
+    common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
+    if pairwise_model_path is not None and common["model_sha256"] != _hash_directory(pairwise_model_path)[2]:
+        raise ValueError("Frozen seeds use a different pairwise model. Rebuild linker inputs and tasks.")
+    for table in tables.values():
+        for block, spec in table["blocks"].items():
+            path = spec.get("input_manifest")
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"Missing frozen linker input receipt for {block!r}. Rebuild frozen linker tasks.")
+            require_linker_input_receipt(
+                roles, block, read_json_object(Path(path)), common, {Path(spec["seeds"]): spec["seeds_sha256"]}
+            )
 
 
 def _materialize_frozen_linker_tasks(
@@ -2064,9 +2069,7 @@ def _materialize_frozen_linker_tasks(
         raise ValueError("Frozen linker tasks use a different distance policy or package version. Rebuild the tasks.")
     if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K:
         raise ValueError("Frozen linker tasks require top-25 windows")
-    index_sha256 = (
-        clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] if roles.evidence_sha256 is not None else None
-    )
+    index_sha256 = clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD]
     _validate_frozen_task_bindings(
         manifest, roles, task_role=role, index_sha256=index_sha256, pairwise_model_path=pairwise_model_path
     )

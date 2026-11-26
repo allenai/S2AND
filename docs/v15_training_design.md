@@ -166,7 +166,7 @@ Run the 1.5 training passes in this order.
 
 1. Cluster `fit_pool` without its queries using the 1.4 pairwise model.
 2. Mine pairs from that partition and fit the 1.5 pairwise heads.
-3. Recluster the same `fit_pool` seed population with the calibrated 1.5 pairwise bundle. Write to a fresh directory.
+3. Recluster the same `fit_pool` seed population with the calibrated 1.5 pairwise bundle. Cluster oversized blocks within native subblocks before a linker exists. Write to a fresh directory.
 4. Build tasks from that second pass and fit the ranker and gate. The trainer requires the seeds' model digest to match its pairwise bundle.
 5. Sweep EPS on `eps_cal` using the finalized 1.5 bundle.
 
@@ -194,6 +194,7 @@ same seed partition. Mining skips query endpoints and counts excluded
 query signatures per block. A `fit_pool` block with no eligible signatures writes empty seeds and queries
 with reason `no_eligible_signatures`. The gate reuses the linker inputs from
 the marked blocks. Re-run with the same inputs to verify and reuse completed blocks.
+Use ledger-backed role assignments for linker input building, task building, and pair mining.
 
 ### 9. Freeze linker and gate tasks
 
@@ -218,7 +219,7 @@ Use `--false-abstain-weight` or `--initial-only-offset` to pass a reviewed gate 
 Use `--blocks` and a fresh output directory to inspect a subset. Training requires every frozen
 `fit_pool` block. Keep the linker input
 receipts available so the trainer can check the input model, name-counts index, and seed digests.
-Rebuild older ledger-backed task tables to include the receipt paths.
+Rebuild older task tables to include the receipt paths and native query first tokens.
 The gate selects logistic `C` and feature count `k` by four-fold cross-validation grouped by block, minimizing binary safe-link log loss across at least four marked blocks with scored queries.
 The gate keeps `query_view_initial_only` and adds `classic.promoted_stratified_gate.initial_only_offset` (default `0.0`) to its safe-class weight after folding the scaler into the weights.
 The offset sets the initial-only operating point in subblocked giants, where 99.6% of runtime gate calls are initial-only.
@@ -275,7 +276,8 @@ uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
 ~~~
 
 Sweep all `eps_cal` blocks, with one folder per snapshot dataset. Pass each dataset once to the EPS
-review. The role freeze excludes blocks without a repeated scored ORCID and records the reason.
+review. Tolerances above `0.005` require `--allow-wide-tolerance`.
+The role freeze excludes blocks without a repeated scored ORCID and records the reason.
 Production clustering hides ORCID
 and keeps the full population. B3 scores verified, eligible mentions only. Apply verifies both
 digests and the reference coverage. Reload the revised model and verify the chosen EPS.

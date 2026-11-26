@@ -300,7 +300,6 @@ def test_freeze_masks_shared_identities_and_reserves_sealed_strata(
             BlockSpec("c block", 1, stratum="paired"),
         ],
         {"final_test": 2},
-        closure_mode="block_only",
     )
     assert "a block" in allocation["roles"]["final_test"]
     assert not allocation["stratum_shortfalls"]
@@ -410,7 +409,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
         "files": {assignments.name: sha256_file(assignments), queries.name: sha256_file(queries)},
     }
     manifest.write_text(json.dumps(record))
-    specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
+    specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", assignments)}
     output = tmp_path / "pairs.csv"
     assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 0
     summary = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))["blocks"]["a lovelace"]
@@ -448,7 +447,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
                 }
             )
         )
-    specs["g hopper"] = BlockInput(snapshot / "datasets" / "g_hopper", None, other)
+    specs["g hopper"] = BlockInput(snapshot / "datasets" / "g_hopper", other)
     with pytest.raises(ValueError, match="model_sha256"):
         mine_pairs(role_path, specs, tmp_path / "mixed-model.csv", per_block=1, identity_evidence=evidence)
 

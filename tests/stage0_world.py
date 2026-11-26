@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from s2and._sha256 import sha256_file
 from s2and.arrow_tables import write_name_counts_index
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, BlockRoles, load_block_roles
-from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
+from scripts.common.identity_ledger import IdentityLedger, load_identity_ledger
 from scripts.intake.assign_block_roles import freeze_identity_roles
 from scripts.intake.build_freeze_input import build_freeze_input
 from scripts.intake.build_identity_evidence import build_identity_evidence
@@ -121,10 +121,8 @@ def build_stage0_world(
         if all_ineligible_block and block == "e vale":
             arrow_dir = snapshot / "datasets" / name
             output = root / "linker-inputs"
-            build_linker_inputs(
-                roles_path, {block: {"arrow_dir": arrow_dir}}, output, model, identity_evidence=evidence
-            )
-            inputs[block] = BlockInput(arrow_dir, None, output / name / "seeds.parquet")
+            build_linker_inputs(load_identity_ledger(evidence, roles), [block], output, model)
+            inputs[block] = BlockInput(arrow_dir, output / name / "seeds.parquet")
             continue
         assignments = root / name / "seeds.parquet"
         assignments.parent.mkdir()
@@ -139,7 +137,7 @@ def build_stage0_world(
             pa.table({"signature_id": [sid for sid, _ in rows], "component_key": [cid for _, cid in rows]}),
             assignments,
         )
-        inputs[block] = BlockInput(snapshot / "datasets" / name, None, assignments)
+        inputs[block] = BlockInput(snapshot / "datasets" / name, assignments)
 
     def write_receipts() -> None:
         bindings = {}
@@ -187,8 +185,7 @@ def build_stage0_world(
     inputs_path = root / "inputs.json"
     _write_json(inputs_path, {block: {"seeds": str(spec.assignments)} for block, spec in inputs.items()})
 
-    ledger = ledger_for_roles(evidence, roles)
-    assert ledger is not None
+    ledger = load_identity_ledger(evidence, roles)
     if gate_block_outside_fit_pool:
         payload = json.loads(roles_path.read_text(encoding="utf-8"))
         payload["gate_training_blocks"].append("c lane")

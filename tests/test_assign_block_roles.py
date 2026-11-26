@@ -29,9 +29,9 @@ def _sample_blocks() -> list[BlockSpec]:
         BlockSpec("f matsen", 1200, frozenset({valid_a}), "small", "holdout"),
         BlockSpec("a khan", 25000, frozenset({valid_a, excluded_shared}), "large", "development"),
         BlockSpec("s feldman", 8000, frozenset(), "medium", "development"),
-        # Shares valid_a with a khan (via HTTPS URL form) -> must follow a khan into dev_test!
+        # Shares valid_a with a khan via HTTPS URL form.
         BlockSpec("b linked", 5000, frozenset({f"https://orcid.org/{valid_a}"}), "medium", "development"),
-        # Pair of non-dev blocks sharing valid_b -> must land in the same pool!
+        # Pair of development blocks sharing valid_b.
         BlockSpec("c pair 1", 4000, frozenset({valid_b, excluded_shared}), "medium", "development"),
         BlockSpec("c pair 2", 3500, frozenset({valid_b}), "medium", "development"),
     ]
@@ -71,14 +71,11 @@ def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overfl
         assert excluded not in mapping
     assert res1["excluded_blocks"] == ["f matsen"]
 
-    # Legacy giants (space-separated) including s feldman and ORCID-linked b linked all go to dev_test.
+    # Legacy giants and explicit pins go to dev_test.
     assert mapping["a khan"] == "dev_test"
     assert mapping["s feldman"] == "dev_test"
-    assert mapping["b linked"] == "dev_test"
+    assert mapping.get("b linked") != "dev_test"
     assert mapping["blk 08"] == "dev_test"
-    # Cross-block ORCID pair must receive the exact same role (and NOT be dragged to dev_test by excluded_shared!).
-    assert mapping["c pair 1"] == mapping["c pair 2"]
-    assert mapping["c pair 1"] != "dev_test"
     # final_test receives ONLY holdout blocks and does NOT absorb overflow.
     assert len(res1["roles"]["final_test"]) == 6
     assert len(res1["unassigned"]) > 0
@@ -192,7 +189,7 @@ def test_block_roles_do_not_follow_shared_orcids() -> None:
         BlockSpec("blk 1", 10000, frozenset({shared_orcid}), "large"),
         BlockSpec("blk 2", 10000, frozenset({shared_orcid}), "large"),
     ]
-    res = assign_block_roles(blocks, {"eps_cal": 2}, seed=1, closure_mode="block_only")
+    res = assign_block_roles(blocks, {"eps_cal": 2}, seed=1)
     assert res["block_to_role"]["a khan"] == "dev_test"
     assert res["block_to_role"]["blk 1"] == "eps_cal"
     assert res["block_to_role"]["blk 2"] == "eps_cal"
@@ -200,23 +197,14 @@ def test_block_roles_do_not_follow_shared_orcids() -> None:
     assert res["verification"]["cross_role_orcid_overlap"] == 0
 
 
-def test_assign_block_roles_rejects_conflicting_pins_and_verify_catches_leaks() -> None:
+def test_verify_rejects_misassigned_legacy_blocks() -> None:
     shared = "0000-0002-1694-233X"
-    blocks = [
-        BlockSpec("a khan", 10000, frozenset({shared})),
-        BlockSpec("new block", 5000, frozenset({shared})),
-    ]
-    with pytest.raises(ValueError, match="conflicting pinned roles"):
-        assign_block_roles(blocks, {"final_test": 1}, pinned_roles={"new_block": "final_test"})
-
     legacy = sorted(LEGACY_DEV_TEST_BLOCKS)[0]
     verify_blocks = [
         BlockSpec("x1", 100, frozenset({shared})),
         BlockSpec("x2", 100, frozenset({shared})),
         BlockSpec(legacy, 100, frozenset()),
     ]
-    with pytest.raises(ValueError, match="ORCID overlap"):
-        verify_role_assignments(verify_blocks, {"x1": "fit_pool", "x2": "final_test", legacy: "dev_test"})
     with pytest.raises(ValueError, match="must be assigned to 'dev_test'"):
         verify_role_assignments(verify_blocks, {"x1": "fit_pool", "x2": "fit_pool", legacy: "final_test"})
 
@@ -264,7 +252,6 @@ def test_free_development_role_cannot_consume_holdout() -> None:
         [BlockSpec(key, 20, source_split="holdout") for key in ("red", "blue", "green")],
         {"final_test": 2, "dev_test": 1},
         enforce_source_splits=True,
-        closure_mode="block_only",
     )
     assert result["roles"]["dev_test"] == []
     assert result["shortfalls"] == {"dev_test": 1}
@@ -351,7 +338,6 @@ def test_load_blocks_normalizes_mention_counts(tmp_path: Path, count_key: str) -
         load_blocks(path),
         {"fit_pool": 1, "eps_cal": 1},
         pinned_roles={"train": "fit_pool", "tune": "eps_cal"},
-        closure_mode="block_only",
     )
     assert result["verification"]["raw_cross_role_orcid_overlap"] == 1
 

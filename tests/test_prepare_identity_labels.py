@@ -34,7 +34,6 @@ def test_identity_label_join_masks_cross_role_orcid_in_both_roles(tmp_path: Path
         [BlockSpec("a ross", 1, frozenset({shared})), BlockSpec("b ross", 1, frozenset({shared}))],
         {"eps_cal": 1, "final_test": 1},
         pinned_roles={"a ross": "eps_cal", "b ross": "final_test"},
-        closure_mode="block_only",
     )
     path = tmp_path / "assignments.json"
     path.write_text(json.dumps(assignments), encoding="utf-8")

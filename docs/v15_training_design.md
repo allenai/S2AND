@@ -24,9 +24,9 @@ All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s
 | --- | --- | --- | --- |
 | `fit_pool` | ~110 `orcid-blocks-v2/dev` blocks across size × surname-origin strata, plus the 80% benchmark train split (reclaiming 1.4's ~9% `unused_internal_test`) and fresh augmentation | Main and nameless pairwise heads (benchmarks + mined pairs), the 53-feature ranker, and the gate on the marked subset | Cap mining across strata at the smaller of 2,000 and 5% of verified within-block pairs, with a floor of up to 100 verified pairs. Pairwise validation uses benchmark val and the frozen `pairwise_validation_blocks`. The stratified `gate_training_blocks` subset can overlap that fold. Ranker replays real `full_name` and `initial_only` queries with real `author_middle`, with `no_safe` via whole-author holdout before retrieval. |
 | `eps_cal` | ~40 `orcid-blocks-v2/dev` blocks across the same strata | Production-route EPS, close-pair bonus, subblocking and post-linkage corrections | Disjoint from `fit_pool`. |
-| `gate_thresh` | 10–15 disjoint `orcid-blocks-v2/dev` blocks at **natural production request frequencies** + a non-ORCID natural sample for blind review | Operating-point report and blind review of added and removed links | Uses natural requests, including retrieval misses, without constructed author holdouts. Keep the configured weight until explicitly changed. |
-| `dev_test` | ~40 disjoint `orcid-blocks-v2/dev` blocks + legacy giants + 27 Batch 1–6 blocks + fresh paired Sol disagreements | Model-vs-model iteration & go/no-go | Never fitted on. |
-| `final_test_a` and `final_test_b` *(sealed)* | 130–300 fresh `orcid-blocks-v2/holdout` blocks in total (incl. 40–60 fresh giants) + a sealed blind panel + canonical classic outer test (regression report) | Evaluate the frozen candidate on A and keep B sealed for a subsequent candidate | Score verified `holdout` gold labels through the identity ledger. |
+| `gate_thresh` | 10–15 disjoint `orcid-blocks-v2/dev` blocks at **natural production request frequencies** + a non-ORCID natural sample for blind review | Operating-point report and blind review of added and removed links | Uses natural requests, including retrieval misses, without constructed author holdouts. Keep the configured weight until explicitly changed. Budget about 850 blind-judged items per arm: a 5-point wrong-rate gap needs about 600 consensus verdicts, and about 70% of items reach consensus. |
+| `dev_test` | ~40 disjoint `orcid-blocks-v2/dev` blocks + legacy giants + 27 Batch 1–6 blocks + fresh paired Sol disagreements | Model-vs-model iteration & go/no-go | Never fitted on. Include at least 30 giants (pins supply 21); giants carry 88–98% of the paired variance. |
+| `final_test_a` and `final_test_b` *(sealed)* | About 100 fresh `orcid-blocks-v2/holdout` blocks per half, including about 30 giants (±0.3 F1 paired intervals; ±0.15 would need 80–110 giants per half) + a sealed blind panel + canonical classic outer test (regression report) | Evaluate the frozen candidate on A and keep B sealed for a subsequent candidate | Score verified `holdout` gold labels through the identity ledger. |
 
 **Tooling status.** Freeze one master `assignments.json` and pass it unchanged to every stage. The miner and ranker use `fit_pool`. The gate uses only marked `fit_pool` blocks, and `train_pairwise.py` uses the frozen block fold to split mined pairs. Reassign blocks before using a manifest with the retired gate role.
 
@@ -197,6 +197,11 @@ receipts available so the trainer can check the input model, name-counts index, 
 Rebuild older ledger-backed task tables to include the receipt paths.
 The gate selects logistic `C` and feature count `k` by four-fold cross-validation grouped by block, minimizing binary safe-link log loss across at least four marked blocks with scored queries.
 The gate keeps `query_view_initial_only` and adds `classic.promoted_stratified_gate.initial_only_offset` (default `0.0`) to its safe-class weight after folding the scaler into the weights.
+The offset sets the initial-only operating point in subblocked giants, where 99.6% of runtime gate calls are initial-only.
+Blind judging passed +2.5 on the 51-block CV gate, a 52% runtime initial-only link rate per call.
+The logit value does not transfer across refits: a 16-block gate already links 42% without an offset.
+For each refit, pick the offset on `eps_cal` giants that reaches at most that judged link rate.
+Confirm it with the sized `gate_thresh` blind review before release.
 
 ### 10. Mine pairs and train the pairwise heads
 

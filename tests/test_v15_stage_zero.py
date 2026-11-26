@@ -719,22 +719,13 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     inventory = tmp_path / "inventory.parquet"
     _run(build_v14_training_inventory, "--gold-parquet", labels, "--linker-source-root", v14, "--output", inventory)
     assert any(row["signature_id"] == "802-0" and row["orcid"] is None for row in pq.read_table(inventory).to_pylist())
-    sealed = _json(tmp_path / "sealed.json", {key: arrow_dirs[key] for key in ("d hopper", "e turing")})
-    _run(check_v14_training_overlap, *binding, "--blocks-json", sealed, "--training-parquet", inventory)
-
-    linker_specs = _json(
-        tmp_path / "linker-specs.json",
-        {
-            gate: {"arrow_dir": arrow_dirs[gate], "incremental_request": str(inc_export)},
-            "a lovelace": {"arrow_dir": arrow_dirs["a lovelace"]},
-        },
-    )
+    _run(check_v14_training_overlap, *binding, "--training-parquet", inventory)
     inputs = tmp_path / "linker-inputs"
     _run(
         build_linker_inputs,
         *binding,
-        "--blocks-json",
-        linker_specs,
+        "--incremental-requests",
+        inc_export,
         "--output-dir",
         inputs,
         "--model-path",
@@ -926,12 +917,16 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         _apply_blind_gate_labels(gate_table, report, roles, gate_blocks)
 
     pairs = tmp_path / "pairs.csv"
-    assignments = inputs / "a_lovelace" / "seeds.parquet"
-    miner = _json(
-        tmp_path / "miner.json",
-        {"a lovelace": {"arrow_dir": arrow_dirs["a lovelace"], "assignments": str(assignments)}},
+    _run(
+        mine_pairwise_pairs,
+        *binding,
+        "--block-inputs",
+        inputs / "inputs.json",
+        "--pairs-per-block",
+        "10",
+        "--output",
+        pairs,
     )
-    _run(mine_pairwise_pairs, *binding, "--blocks-json", miner, "--pairs-per-block", "10", "--output", pairs)
     with pairs.open(encoding="utf-8", newline="") as handle:
         mined = list(csv.DictReader(handle))
     assert not mined

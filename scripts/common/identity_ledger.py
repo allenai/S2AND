@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.contracts import canonical_json_digest
-from scripts.common.arrow_roots import read_json_object, resolved_manifest_artifact_path
+from scripts.common.arrow_roots import generic_dataset_manifests, read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import ROLE_SHA256_FIELD, BlockRoles, normalize_block_key
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, excluded_orcid_groups_digest
 
@@ -85,6 +85,13 @@ class IdentityEvidence:
     def block_digests(self) -> dict[str, str]:
         """Return the binding for each evidence partition and its intake inputs."""
         return {block: canonical_json_digest(entry) for block, entry in self.blocks.items()}
+
+    def dataset_dirs(self, blocks: Collection[str]) -> dict[str, Path]:
+        """Resolve frozen block datasets through the bound intake snapshot."""
+        if sha256_file(self.snapshot_root / "manifest.json") != self.snapshot_sha256:
+            raise ValueError("Snapshot does not match the identity evidence")
+        manifests = generic_dataset_manifests(self.snapshot_root)
+        return {block: manifests[self.blocks[block]["dataset"]].parent for block in blocks}
 
     def assignment_receipts(self) -> set[str]:
         """Read every saved master assignment hash for this intake."""
@@ -274,6 +281,11 @@ def ledger_for_roles(path: Path | None, roles: BlockRoles | None) -> IdentityLed
         return None
     if path is None or roles is None:
         raise ValueError("Ledger-backed roles require --identity-evidence and --block-role-assignments")
+    return load_identity_ledger(path, roles)
+
+
+def load_identity_ledger(path: Path, roles: BlockRoles) -> IdentityLedger:
+    """Load the required evidence for frozen roles."""
     evidence = load_identity_evidence(path)
     require_evidence_for_roles(evidence, roles)
     return IdentityLedger(evidence, roles)

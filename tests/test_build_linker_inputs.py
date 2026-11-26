@@ -39,8 +39,7 @@ def test_real_gate_queries_are_excluded_from_orcid_hidden_seed_prediction_and_re
     with tarfile.open(bundle, "w:gz") as archive:
         archive.add(arrow_dir / "signatures.arrow", arcname="signatures.arrow")
         archive.add(request_seed_path, arcname="cluster_seeds.arrow")
-    paths = tmp_path / "blocks.json"
-    paths.write_text(json.dumps({block: {**spec, "incremental_request": bundle.name}}), encoding="utf-8")
+    paths = {block: {**spec, "incremental_request": bundle}}
     model_path, output = tmp_path / "model", tmp_path / "output"
     model_path.write_text("model", encoding="utf-8")
 
@@ -76,8 +75,7 @@ def test_fit_pool_predicts_only_non_queries_and_rejects_stale_assignments(
         json.dumps(assign_block_roles([BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME}))], {"fit_pool": 1})),
         encoding="utf-8",
     )
-    paths = tmp_path / "blocks.json"
-    paths.write_text(json.dumps({block: spec}), encoding="utf-8")
+    paths = {block: spec}
     model, output = tmp_path / "model", tmp_path / "output"
     model.write_text("model", encoding="utf-8")
     calls = []

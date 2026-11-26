@@ -122,10 +122,10 @@ def build_stage0_world(
         name = block.replace(" ", "_")
         if all_ineligible_block and block == "e vale":
             arrow_dir = snapshot / "datasets" / name
-            linker_input = root / "linker-input.json"
-            _write_json(linker_input, {block: {"arrow_dir": str(arrow_dir)}})
             output = root / "linker-inputs"
-            build_linker_inputs(roles_path, linker_input, output, model, identity_evidence=evidence)
+            build_linker_inputs(
+                roles_path, {block: {"arrow_dir": arrow_dir}}, output, model, identity_evidence=evidence
+            )
             inputs[block] = BlockInput(arrow_dir, None, output / name / "seeds.parquet")
             continue
         assignments = root / name / "seeds.parquet"

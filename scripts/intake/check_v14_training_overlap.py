@@ -5,21 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
-from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from s2and.text.normalize import ORCID_PATTERN
 from scripts.common.arrow_roots import read_json_object
-from scripts.common.block_roles import FINAL_TEST_ROLE, load_block_roles, normalize_block_key
-from scripts.common.identity_ledger import evidence_identities, ledger_for_roles
+from scripts.common.block_roles import FINAL_TEST_ROLE, load_block_roles
+from scripts.common.identity_ledger import evidence_identities, load_identity_ledger
 
 
 def canonical_id(value: object, field: str, path: Path) -> str:
@@ -61,56 +58,19 @@ def paper_position(paper: object, position: object, path: Path) -> tuple[str, in
     return canonical_id(paper, "paper_id", path), position
 
 
-def _read_sealed_block(root: Path, block: str) -> tuple[set[str], set[tuple[str, int]], set[str]]:
-    signatures: set[str] = set()
-    positions: set[tuple[str, int]] = set()
-    orcids: set[str] = set()
-    with (
-        ArrowDataset.open(root) as dataset,
-        dataset.use() as lease,
-        lease.open_file("signatures") as infile,
-        pa.PythonFile(infile, mode="r") as source,
-    ):
-        reader = ipc.open_file(source)
-        columns = ["signature_id", "author_block", "paper_id", "author_position"]
-        if "author_orcid" in reader.schema.names:
-            columns.append("author_orcid")
-        for index in range(reader.num_record_batches):
-            for row in reader.get_batch(index).select(columns).to_pylist():
-                raw = row["signature_id"]
-                if normalize_block_key(row["author_block"]) != block:
-                    raise ValueError(f"Unexpected block in {root}: expected {block!r}")
-                if isinstance(raw, str) and raw.startswith("visibleq:"):
-                    continue
-                signature = canonical_id(raw, "signature_id", root)
-                if signature in signatures:
-                    raise ValueError(f"Duplicate signature {signature!r} in {root}")
-                signatures.add(signature)
-                positions.add(paper_position(row["paper_id"], row["author_position"], root))
-                if orcid := checked_orcid(row.get("author_orcid"), root):
-                    orcids.add(orcid)
-    return signatures, positions, orcids
-
-
 def check_training_overlap(
     roles_path: Path,
-    sealed_blocks: Mapping[str, Path],
     training_paths: Sequence[Path],
     *,
     allow_no_training_orcids: bool = False,
-    identity_evidence: Path | None = None,
+    identity_evidence: Path,
 ) -> dict[str, Any]:
     """Count distinct signature, paper-position and ORCID overlaps for the sealed test role."""
     roles = load_block_roles(roles_path)
-    ledger = ledger_for_roles(identity_evidence, roles)
+    ledger = load_identity_ledger(identity_evidence, roles)
     counts = read_json_object(roles_path).get("block_signature_counts")
-    by_block = {normalize_block_key(block): root for block, root in sealed_blocks.items()}
     expected = {block for block, role in roles.block_to_role.items() if role == FINAL_TEST_ROLE}
-    if len(by_block) != len(sealed_blocks) or by_block.keys() != expected:
-        raise ValueError(
-            "The input must contain every sealed block exactly once. "
-            f"Missing {sorted(expected - by_block.keys())}. Unexpected {sorted(by_block.keys() - expected)}."
-        )
+    by_block = ledger.evidence.dataset_dirs(expected)
     if not isinstance(counts, dict) or any(
         type(counts.get(block)) is not int or counts[block] < 1 for block in expected
     ):
@@ -121,13 +81,10 @@ def check_training_overlap(
     positions: set[tuple[str, int]] = set()
     orcids: set[str] = set()
     for block, root in sorted(by_block.items()):
-        if ledger is None:
-            block_signatures, block_positions, block_orcids = _read_sealed_block(root, block)
-        else:
-            block_rows = ledger.for_block(block, dataset_dir=root).rows
-            block_signatures = set(block_rows)
-            block_positions = {(row["corpus_paper_id"], row["position"]) for row in block_rows.values()}
-            block_orcids = {orcid for row in block_rows.values() for orcid in evidence_identities(row)}
+        block_rows = ledger.for_block(block, dataset_dir=root).rows
+        block_signatures = set(block_rows)
+        block_positions = {(row["corpus_paper_id"], row["position"]) for row in block_rows.values()}
+        block_orcids = {orcid for row in block_rows.values() for orcid in evidence_identities(row)}
         if len(block_signatures) != counts[block]:
             raise ValueError(f"Sealed block {block!r} has {len(block_signatures)} signatures, expected {counts[block]}")
         if block_signatures & signatures:
@@ -188,7 +145,7 @@ def check_training_overlap(
     return {
         "compared_corpus_positions": compared_positions,
         "block_role_assignments_sha256": roles.sha256,
-        **(ledger.bindings if ledger is not None else {}),
+        **ledger.bindings,
         "benchmark_overlap": "unobservable",
         "training_shards": training,
         "distinct_training_orcids": len(training_orcids),
@@ -211,19 +168,13 @@ def check_training_overlap(
 def main(argv: list[str] | None = None) -> int:
     """Report sealed overlap and fail when training evidence is insufficient."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
-    parser.add_argument("--blocks-json", type=Path, required=True, help="Map the sealed blocks to Arrow directories.")
     parser.add_argument("--training-parquet", type=Path, action="append", required=True)
     parser.add_argument("--allow-no-training-orcids", action="store_true")
     args = parser.parse_args(argv)
-    raw = read_json_object(args.blocks_json)
-    if any(not isinstance(path, str) or not path for path in raw.values()):
-        raise ValueError("Expected a JSON object mapping sealed block keys to Arrow directories")
-    blocks = {block: args.blocks_json.parent / path for block, path in raw.items()}
     report = check_training_overlap(
         args.block_role_assignments,
-        blocks,
         args.training_parquet,
         allow_no_training_orcids=args.allow_no_training_orcids,
         identity_evidence=args.identity_evidence,

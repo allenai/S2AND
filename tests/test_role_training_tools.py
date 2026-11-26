@@ -78,23 +78,28 @@ def _mining_input(tmp_path: Path, block: str, *, deposited_orcids: bool = True):
 
 def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from scripts.pairwise.mine_pairwise_pairs import main
+    from tests.stage0_world import build_stage0_world
 
-    block = "a ross"
-    spec = _mining_input(tmp_path, block)
-    roles_path, blocks_path, output = (tmp_path / name for name in ("roles.json", "blocks.json", "nested/pairs.csv"))
-    roles = assign_block_roles([BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME}))], {"fit_pool": 1})
-    roles_path.write_text(json.dumps(roles), encoding="utf-8")
-    relative = {
-        field: getattr(spec, field).relative_to(tmp_path).as_posix() for field in ("arrow_dir", "labels", "assignments")
-    }
-    blocks_path.write_text(json.dumps({block: relative}), encoding="utf-8")
+    world = build_stage0_world(tmp_path)
+    inputs_path, output = tmp_path / "inputs.json", tmp_path / "nested" / "pairs.csv"
+    inputs_path.write_text(
+        json.dumps(
+            {
+                block: {"seeds": spec.assignments.relative_to(tmp_path).as_posix()}
+                for block, spec in world.inputs.items()
+            }
+        ),
+        encoding="utf-8",
+    )
     assert (
         main(
             [
                 "--block-role-assignments",
-                str(roles_path),
-                "--blocks-json",
-                str(blocks_path),
+                str(world.roles_path),
+                "--identity-evidence",
+                str(world.evidence_path),
+                "--block-inputs",
+                str(inputs_path),
                 "--pairs-per-block",
                 "6",
                 "--verified-pair-fraction",
@@ -108,10 +113,10 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
         == 0
     )
     rows = pd.read_csv(output)
-    assert json.loads(capsys.readouterr().out) == {"blocks": 1, "pairs": len(rows)}
-    assert list(rows["block_key"].unique()) == [block]
-    assert rows["stratum"].ne("merged_unlabeled").sum() == 6
-    assert rows["stratum"].eq("merged_unlabeled").sum() <= 6
+    assert json.loads(capsys.readouterr().out) == {"blocks": 2, "pairs": len(rows)}
+    assert set(rows["block_key"]) == set(world.inputs)
+    assert 0 < rows["stratum"].ne("merged_unlabeled").sum() <= 12
+    assert rows["stratum"].eq("merged_unlabeled").sum() <= 12
     assert rows["inclusion_probability"].between(0, 1, inclusive="right").all()
     manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
     assert manifest["pairs_per_block"] == 6

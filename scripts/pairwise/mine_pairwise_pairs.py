@@ -24,7 +24,7 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
-from scripts.common.identity_ledger import BlockEligibility, ledger_for_roles
+from scripts.common.identity_ledger import BlockEligibility, IdentityLedger, ledger_for_roles, load_identity_ledger
 from scripts.common.linker_seeds import read_seed_components
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
 from scripts.common.stage0_invariants import (
@@ -476,14 +476,34 @@ def mine_pairs(
     return len(rows)
 
 
+def read_fit_pool_inputs(ledger: IdentityLedger, inputs_path: Path) -> dict[str, BlockInput]:
+    """Resolve the complete fit pool from the linker partitions and identity evidence."""
+    inputs = {}
+    for raw_block, entry in read_json_object(inputs_path).items():
+        block = normalize_block_key(raw_block)
+        if ledger.roles.role_for(block) == "gate_thresh":
+            continue
+        if (
+            block in inputs
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("seeds"), str)
+            or not entry["seeds"]
+        ):
+            raise ValueError(f"Expected one partition path for {block!r} in {inputs_path}")
+        inputs[block] = inputs_path.parent / entry["seeds"]
+    require_fit_pool_coverage(ledger.roles, inputs.keys())
+    return {
+        block: BlockInput(directory, None, inputs[block])
+        for block, directory in ledger.evidence.dataset_dirs(inputs.keys()).items()
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     """Sample pairs from frozen training blocks and their stored 1.4 assignments."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
-    parser.add_argument(
-        "--blocks-json", type=Path, required=True, help="Map block keys to arrow_dir, labels and assignments."
-    )
+    parser.add_argument("--block-inputs", type=Path, required=True, help="Linker inputs.json with frozen seeds.")
     parser.add_argument(
         "--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK, help="Cap per fitted and judge sample."
     )
@@ -493,15 +513,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    raw = read_json_object(args.blocks_json)
-    blocks = {
-        block: BlockInput(
-            arrow_dir=args.blocks_json.parent / spec["arrow_dir"],
-            labels=args.blocks_json.parent / spec["labels"] if "labels" in spec else None,
-            assignments=args.blocks_json.parent / spec["assignments"],
-        )
-        for block, spec in raw.items()
-    }
+    ledger = load_identity_ledger(args.identity_evidence, load_block_roles(args.block_role_assignments))
+    blocks = read_fit_pool_inputs(ledger, args.block_inputs)
     count = mine_pairs(
         args.block_role_assignments,
         blocks,

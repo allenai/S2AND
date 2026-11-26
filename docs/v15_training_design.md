@@ -149,12 +149,13 @@ uv run --offline --no-sync python -m scripts.intake.build_v14_training_inventory
   --output inventory/v14_training.parquet
 uv run --offline --no-sync python -m scripts.intake.check_v14_training_overlap \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json sealed-blocks.json --training-parquet inventory/v14_training.parquet
+  --training-parquet inventory/v14_training.parquet
 ~~~
 
 Use the source bundle for the deployed 1.4 linker. The inventory includes corpus-keyed training
 and gate calibration queries, their full candidate component memberships, and giant gold ORCIDs.
-Add further identified training mentions with `--private-labels`. Map the sealed blocks to their Arrow directories.
+Add further identified training mentions with `--private-labels`. The audit resolves the sealed Arrow datasets
+from the identity evidence and role assignments.
 The audit checks frozen signature counts and compares corpus paper and author positions and ORCIDs.
 It fails when zero corpus keys can be compared. Benchmark overlap is unobservable because benchmark
 IDs are dataset-local and the benchmarks lack ORCIDs.
@@ -172,19 +173,24 @@ Run the 1.5 training passes in this order.
 ~~~sh
 uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json linker-blocks.json --model-path inference/production_model_v1.4 \
+  --fit-pool-only --model-path inference/production_model_v1.4 \
+  --output-dir mining-inputs --n-jobs N
+uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
+  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
+  --model-path calibrated-pairwise-1.5 --incremental-requests requests/incremental \
   --arrivals arrivals.parquet --since 2026-10-20 --requests-per-block 300 \
   --output-dir linker-inputs --n-jobs N
 ~~~
 
-Map each block to its `arrow_dir`, with an additional `incremental_request` path for gate threshold
-blocks. Take the latest eligible mentions by `inserted` in each gate threshold block. Review any
+The builder resolves Arrow datasets from the identity evidence and role assignments. Supply gate threshold
+request bundles with `--incremental-requests`. The builder takes the latest eligible mentions by
+`inserted` in each gate threshold block. Review any
 shortfall against K, missing timestamps, and the actual timestamp range. Arrival paper keys must be
 nonnegative integers or canonical decimal strings. Invalid arrival keys and empty request sets fail.
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `fit_pool`, sample eligible scored mentions using `--queries-per-block`. The
-ORCID-hidden `fit_pool` population is clustered without the queries, and the same partition supplies
-one seed partition per block for retrieval and mining. Mining skips query endpoints and counts excluded
+ORCID-hidden `fit_pool` population is clustered without the queries. Retrieval and mining read the
+same seed partition. Mining skips query endpoints and counts excluded
 query signatures per block. A `fit_pool` block with no eligible signatures writes empty seeds and queries
 with reason `no_eligible_signatures`. The gate reuses the linker inputs from
 the marked blocks. Re-run with the same inputs to verify and reuse completed blocks.
@@ -226,7 +232,7 @@ Confirm it with the sized `gate_thresh` blind review before release.
 ~~~sh
 uv run --offline --no-sync python -m scripts.pairwise.mine_pairwise_pairs \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --blocks-json miner-blocks.json --pairs-per-block 2000 --verified-pair-fraction 0.05 \
+  --block-inputs mining-inputs/inputs.json --pairs-per-block 2000 --verified-pair-fraction 0.05 \
   --pairs-per-block-floor 100 --output mined/pairs.csv
 uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --model-plan model-plan.json --name-counts-index-root name-counts-index \
@@ -235,8 +241,8 @@ uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
-Map every block in the nonempty frozen `fit_pool` to its `arrow_dir` and pass its `seeds` path as `assignments`. The mining
-manifest records each block's frozen fold, assignment path, and binding, including blocks with zero
+The miner selects the entire frozen `fit_pool` and reads its partitions from `inputs.json`. The mining
+manifest records each block's frozen fold, partition path, and binding, including blocks with zero
 sampled pairs. Keep the frozen assignment files and receipts available for training. Assignment
 receipts and the trainer's name-counts index must match the intake index. All assignment receipts
 must name one prediction model. The trainer verifies the ledger against the master assignment.

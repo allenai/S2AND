@@ -27,13 +27,13 @@ from s2and.production_bundle_contract import PAIRWISE_ONLY_BUNDLE_KIND, infer_bu
 from s2and.production_model import load_production_model
 from scripts.common.arrow_roots import _replace_json, read_json_object, resolved_manifest_artifact_path
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
-from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
+from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles, load_identity_ledger
 from scripts.common.linker_seeds import read_seed_components
 from scripts.common.orcid_references import read_external_reference_identity_evidence
 from scripts.common.stage0_invariants import read_fit_pool_queries
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
 from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
-from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
+from scripts.intake.requests_to_datasets import REQUEST_SUFFIX, extract_request_tables, request_dataset_name
 from scripts.linker.build_linker_task_tables import TASK_ROLES, _read_signatures
 
 BATCHING_THRESHOLD = 15_000
@@ -141,7 +141,7 @@ def _production_seeds(
 
 def build_linker_inputs(
     roles_path: Path,
-    blocks_path: Path,
+    block_inputs: Mapping[str, Mapping[str, Any]],
     output_dir: Path,
     model_path: Path,
     *,
@@ -159,9 +159,8 @@ def build_linker_inputs(
         raise ValueError("Expected positive query and thread counts")
     roles = load_block_roles(roles_path)
     ledger = ledger_for_roles(identity_evidence, roles)
-    raw = read_json_object(blocks_path)
-    blocks = {normalize_block_key(block): spec for block, spec in raw.items()}
-    if not blocks or len(blocks) != len(raw):
+    blocks = {normalize_block_key(block): spec for block, spec in block_inputs.items()}
+    if not blocks or len(blocks) != len(block_inputs):
         raise ValueError("Supply unique frozen blocks")
     model_digest = _hash_directory(model_path)[2] if model_path.is_dir() else sha256_file(model_path)
     output_dir = output_dir.resolve()
@@ -177,11 +176,9 @@ def build_linker_inputs(
         if role not in TASK_ROLES:
             raise ValueError(f"{block!r} cannot supply linker or mining inputs from role {role!r}")
         name = block.replace(" ", "_")
-        arrow_dir = (blocks_path.parent / spec["arrow_dir"]).resolve()
-        label_path = (blocks_path.parent / spec["labels"]).resolve() if ledger is None else None
-        request = (
-            (blocks_path.parent / spec["incremental_request"]).resolve() if "incremental_request" in spec else None
-        )
+        arrow_dir = Path(spec["arrow_dir"]).resolve()
+        label_path = Path(spec["labels"]).resolve() if ledger is None else None
+        request = Path(spec["incremental_request"]).resolve() if "incremental_request" in spec else None
         if request and (role != "gate_thresh" or request_dataset_name(request) != name):
             raise ValueError(f"Invalid incremental request for {block!r}: {request}")
 
@@ -356,13 +353,11 @@ def build_linker_inputs(
 def main(argv: list[str] | None = None) -> int:
     """Build task inputs and non-query 1.4 assignments for pairwise training blocks."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--block-role-assignments", required=True, type=Path)
+    parser.add_argument("--fit-pool-only", action="store_true", help="Build the fitting blocks for mining.")
     parser.add_argument(
-        "--blocks-json",
-        required=True,
-        type=Path,
-        help="Map blocks to arrow_dir, labels and optional incremental_request.",
+        "--incremental-requests", nargs="+", type=Path, default=[], help="Gate request bundles or directories."
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--model-path", required=True, type=Path)
@@ -374,9 +369,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--n-jobs", type=int, default=1)
     args = parser.parse_args(argv)
+    roles = load_block_roles(args.block_role_assignments)
+    ledger = load_identity_ledger(args.identity_evidence, roles)
+    required = {
+        block
+        for block, role in roles.block_to_role.items()
+        if role == "fit_pool" or (role == "gate_thresh" and not args.fit_pool_only)
+    }
+    requests = {}
+    for source in args.incremental_requests:
+        for path in sorted(source.glob(f"*{REQUEST_SUFFIX}")) if source.is_dir() else (source,):
+            block = normalize_block_key(request_dataset_name(path))
+            if roles.block_to_role.get(block) != "gate_thresh" or block not in required or block in requests:
+                raise ValueError(f"Unexpected or duplicate gate request bundle: {path}")
+            requests[block] = path
+    inputs = {
+        block: {
+            "arrow_dir": directory,
+            **({"incremental_request": requests[block]} if block in requests else {}),
+        }
+        for block, directory in ledger.evidence.dataset_dirs(required).items()
+    }
     counts = build_linker_inputs(
         args.block_role_assignments,
-        args.blocks_json,
+        inputs,
         args.output_dir,
         args.model_path,
         identity_evidence=args.identity_evidence,

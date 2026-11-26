@@ -229,12 +229,19 @@ def test_all_ineligible_fit_block_reaches_mining(tmp_path: Path) -> None:
     assert not empty.fit and not empty.judge
 
 
+def test_stage0_rejects_gate_training_block_outside_fit_pool(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path, gate_block_outside_fit_pool=True)
+    with pytest.raises(ValueError, match=r"Gate training blocks outside fit_pool: \['c lane'\]"):
+        load_block_roles(world.roles_path)
+
+
 def test_empty_fit_pool_fails_at_both_boundaries(tmp_path: Path) -> None:
     world = build_stage0_world(tmp_path)
     payload = json.loads(world.roles_path.read_text(encoding="utf-8"))
     payload["roles"]["fit_pool"] = []
-    payload["block_to_role"] = {"c lane": "gate_fit"}
+    payload["block_to_role"] = {"c lane": "gate_thresh"}
     payload["pairwise_validation_blocks"] = []
+    payload["gate_training_blocks"] = []
     world.roles_path.write_text(json.dumps(payload), encoding="utf-8")
     roles = load_block_roles(world.roles_path)
     ledger = ledger_for_roles(world.evidence_path, roles)

@@ -5,7 +5,7 @@ This module sits above `ranker` and `evaluate` so neither imports the other back
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from time import perf_counter
 from typing import Any
 
@@ -57,6 +57,7 @@ def fit_linker(
     holdout_identities: ClassicHoldoutIdentities | None = None,
     pre_materialization_holdout_summary: Mapping[str, Any] | None = None,
     frozen_task_rows: Mapping[str, pd.DataFrame] | None = None,
+    gate_training_blocks: Collection[str] = (),
     fixed_ranker: Booster | None = None,
 ) -> CalibratedClassicModel:
     """Fit the booster and gate without reading frozen test labels/features.
@@ -68,8 +69,8 @@ def fit_linker(
             may omit this when the bundle retains complete holdout tables.
         pre_materialization_holdout_summary: Earlier exclusion counts to report.
             When supplied, any remaining overlap is a materialization failure.
-        frozen_task_rows: Optional featureized fit_pool, gate_fit, and gate_thresh
-            windows from frozen development blocks.
+        frozen_task_rows: Optional featureized fit_pool and gate_thresh windows.
+        gate_training_blocks: Frozen fit_pool blocks marked for gate training.
         fixed_ranker: Verified source booster to reuse without fitting.
 
     Returns:
@@ -88,6 +89,8 @@ def fit_linker(
             f"{configured_calibration_limit} != {retrieval_top_k}"
         )
     calibration_limit = retrieval_top_k
+    if frozen_task_rows is not None and not gate_training_blocks:
+        raise ValueError("Frozen linker tasks require marked gate training blocks in fit_pool")
     model: LGBMClassifier | Booster
     if fixed_ranker is not None:
         model = fixed_ranker
@@ -195,10 +198,10 @@ def fit_linker(
             retrieval_top_k=retrieval_top_k,
         )
     else:
-        calibration_splits = ("gate_fit", "gate_thresh")
-        fit_splits = ("gate_fit",)
+        calibration_splits = ("fit_pool", "gate_thresh")
+        fit_splits = ("fit_pool",)
         validation_splits = ("gate_thresh",)
-        stratified_scores = _score_frozen_gate_rows(frozen_task_rows, predict, feature_columns)
+        stratified_scores = _score_frozen_gate_rows(frozen_task_rows, gate_training_blocks, predict, feature_columns)
     calibration_split_label = "+".join(calibration_splits)
     selected_gate_result = _fit_promoted_logistic_gate(
         stratified_scores.rows,

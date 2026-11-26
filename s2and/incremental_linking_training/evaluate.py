@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -753,13 +753,15 @@ def _score_eval_candidate_rows(
 
 def _score_frozen_gate_rows(
     task_rows: Mapping[str, pd.DataFrame],
+    gate_training_blocks: Collection[str],
     predict: Callable[[Any], np.ndarray],
     feature_columns: tuple[str, ...],
 ) -> ClassicStratifiedEvalScores:
     """Score complete windows and keep only verified outcomes for gate fitting."""
+    fit_pool = task_rows["fit_pool"]
+    gate_rows = fit_pool.loc[fit_pool["dataset"].isin(gate_training_blocks)]
     rows = pd.concat(
-        [task_rows[split].assign(split=split) for split in ("gate_fit", "gate_thresh")],
-        ignore_index=True,
+        [gate_rows.assign(split="fit_pool"), task_rows["gate_thresh"].assign(split="gate_thresh")], ignore_index=True
     )
     probabilities = predict(_classic_feature_matrix(rows, feature_columns))
     choices = _score_query_choices(rows, probabilities, query_id_column="query_group_id", include_margin=True)

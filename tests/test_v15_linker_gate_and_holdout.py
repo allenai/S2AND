@@ -187,9 +187,10 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     rows, _, probabilities = _synthetic_gate_data()
     rows = rows.assign(feature=probabilities, candidate_gold_scored=True)
     rows.loc[rows["query_group_id"].isin({"q_000", "q_049"}), "candidate_gold_scored"] = False
-    gate_fit = rows.loc[rows["split"].eq("calibration_fit")]
+    marked = rows.loc[rows["split"].eq("calibration_fit")]
     gate_thresh = rows.loc[rows["split"].eq("calibration_check")]
-    fit_pool = gate_fit.assign(query_group_id=lambda frame: "train_" + frame["query_group_id"])
+    extra = marked.assign(dataset="unmarked", query_group_id=lambda frame: "extra_" + frame["query_group_id"])
+    fit_pool = pd.concat([marked, extra], ignore_index=True)
     fitted_rows = []
 
     class Ranker:
@@ -223,13 +224,13 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
         n_jobs=1,
         holdout_identities=classic_training.ClassicHoldoutIdentities(frozenset(), frozenset(), ()),
         frozen_task_rows={
-            "gate_fit": gate_fit,
+            "fit_pool": fit_pool,
             "gate_thresh": gate_thresh,
-            **({} if fixed else {"fit_pool": fit_pool}),
         },
+        gate_training_blocks={"unit"},
         **ranker_args,
     )
-    assert fitted_rows == ([] if fixed else [78])
+    assert fitted_rows == ([] if fixed else [156])
     if fixed:
         assert result.model is fixed_ranker
         assert result.training_summary["ranker_refit"] is False
@@ -269,6 +270,7 @@ def test_smoke_mode_cap_per_source_and_block_disjoint_eps_review_guard(tmp_path:
             {
                 "roles": {"eps_cal": ["a_smith", "b_lee"], "final_test_a": ["c_park"]},
                 "pairwise_validation_blocks": [],
+                "gate_training_blocks": [],
                 "verification": {"cross_role_orcid_overlap": 0},
                 "block_orcids": {"a smith": [], "b lee": [], "c park": []},
             }

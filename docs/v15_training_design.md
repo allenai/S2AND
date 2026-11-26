@@ -7,10 +7,10 @@ This design addresses the data-split, leakage, distribution, and release-enginee
 1. **One block key = one lifecycle role.** Freeze a role for each canonical block key in the exported snapshot. Score or sample an identity only when every block holding its evidence has the same role. Keep cross-role mentions as context during evaluation clustering.
 2. **Separate blocks only where a leakage test showed it matters.** Gold ORCID v2 provides 1.77M development blocks (~2,800 giants >10k) and 888k holdout blocks (1,443 giants). The 2026-11-24/25 leakage tests (pool vs cross-fit, giants, mid and small blocks) found:
    - no measurable effect from fitting the pairwise heads and the ranker on the same blocks;
-   - a gate gain from fitting the gate on blocks its ranker never saw: +0.21 B3 F1 [+0.13, +0.36] at the shipped weight, +0.065 [+0.02, +0.13] at matched cluster count, on one ranker seed;
+   - a mean gate difference of −0.03 B3 F1 points [−0.21, +0.15] over five splits when fitting the gate on blocks outside the ranker's training pool;
    - a small, unproven upward drift in EPS chosen on mined blocks.
 
-   So the pairwise heads and the ranker share `fit_pool`, while `gate_fit` and `eps_cal` stay separate. Each block is clustered once per pairwise model; nothing is cross-fitted.
+   The pairwise heads, ranker, and gate share `fit_pool`. Keep `eps_cal` disjoint from `fit_pool` and cluster each fitting block once per pairwise model.
 3. **Separate linker-table construction from model release.** Freeze validated linker/gate task tables before starting a release fit. Do not mix data refresh, model fitting, and new giant-block task design into one release run.
 4. **Ship what was validated.** Do not pool `train + val` and refit after selection; refit seed noise (±0.4 F1 pts on small benchmarks) shifts downstream distances seen by the linker.
 5. **Redact and gate once at intake.** Hash email fields, strip plaintext emails from free text (`affiliations`, `title`, `abstract`), filter non-S2AG papers, and redact unshareable abstracts to `"Has Abstract"` (preserving `has_abstract` and redacting correction history) *before* Arrow conversion or pair sampling. The `write_release_bundles.py` CLI scans final bundles automatically by default (deleting output on failure).
@@ -22,14 +22,13 @@ All legacy `1.4` giants (`a khan`, `a silva`, `h wang`, `j smith`, `s gupta`, `s
 
 | Pool | Sources & allocation | Fits / tunes | Key guarantees |
 | --- | --- | --- | --- |
-| `fit_pool` | ~110 `orcid-blocks-v2/dev` blocks across size × surname-origin strata, plus the 80% benchmark train split (reclaiming 1.4's ~9% `unused_internal_test`) and fresh augmentation | Main and nameless pairwise heads (benchmarks + mined pairs) and the 53-feature ranker | Cap mining across strata at the smaller of 2,000 and 5% of verified within-block pairs, with a floor of up to 100 verified pairs. Pairwise validation uses benchmark val and the frozen `pairwise_validation_blocks`. Those blocks may supply ranker tasks. Ranker replays real `full_name` and `initial_only` queries with real `author_middle`, with `no_safe` via whole-author holdout before retrieval. |
-| `gate_fit` | 15–25 `orcid-blocks-v2/dev` blocks across the same strata | Gate medians, `StandardScaler`, feature selection (`k`), `C` and logistic weights | Neither the pairwise heads nor the ranker trained on these blocks. Choose `C` and `k` by grouped-block cross-validation: the same recipe with a fixed `C`, refit on 51 instead of 16 blocks, moved end-to-end F1 by 1.5 points. |
-| `eps_cal` | ~40 `orcid-blocks-v2/dev` blocks across the same strata | Production-route EPS, close-pair bonus, subblocking and post-linkage corrections | Disjoint from `fit_pool` and `gate_fit`. Sharing blocks with the gate is untested. |
+| `fit_pool` | ~110 `orcid-blocks-v2/dev` blocks across size × surname-origin strata, plus the 80% benchmark train split (reclaiming 1.4's ~9% `unused_internal_test`) and fresh augmentation | Main and nameless pairwise heads (benchmarks + mined pairs), the 53-feature ranker, and the gate on the marked subset | Cap mining across strata at the smaller of 2,000 and 5% of verified within-block pairs, with a floor of up to 100 verified pairs. Pairwise validation uses benchmark val and the frozen `pairwise_validation_blocks`. The stratified `gate_training_blocks` subset can overlap that fold. Ranker replays real `full_name` and `initial_only` queries with real `author_middle`, with `no_safe` via whole-author holdout before retrieval. |
+| `eps_cal` | ~40 `orcid-blocks-v2/dev` blocks across the same strata | Production-route EPS, close-pair bonus, subblocking and post-linkage corrections | Disjoint from `fit_pool`. |
 | `gate_thresh` | 10–15 disjoint `orcid-blocks-v2/dev` blocks at **natural production request frequencies** + a non-ORCID natural sample for blind review | Operating-point report and blind review of added and removed links | Uses natural requests, including retrieval misses, without constructed author holdouts. Keep the configured weight until explicitly changed. |
 | `dev_test` | ~40 disjoint `orcid-blocks-v2/dev` blocks + legacy giants + 27 Batch 1–6 blocks + fresh paired Sol disagreements | Model-vs-model iteration & go/no-go | Never fitted on. |
 | `final_test_a` and `final_test_b` *(sealed)* | 130–300 fresh `orcid-blocks-v2/holdout` blocks in total (incl. 40–60 fresh giants) + a sealed blind panel + canonical classic outer test (regression report) | Evaluate the frozen candidate on A and keep B sealed for a subsequent candidate | Score verified `holdout` gold labels through the identity ledger. |
 
-**Tooling status.** Freeze one master `assignments.json` and pass it unchanged to every stage. The miner and ranker use `fit_pool`, the gate fits on `gate_fit`, and `train_pairwise.py` uses the frozen block fold to split mined pairs.
+**Tooling status.** Freeze one master `assignments.json` and pass it unchanged to every stage. The miner and ranker use `fit_pool`. The gate uses only marked `fit_pool` blocks, and `train_pairwise.py` uses the frozen block fold to split mined pairs. Reassign blocks before using a manifest with the retired gate role.
 
 ### Feature contracts
 
@@ -120,7 +119,7 @@ surnames use `other`. The command reports matched and missing block and surname 
 uv run --offline --no-sync python -m scripts.intake.assign_block_roles \
   --blocks blocks.parquet --identity-evidence evidence/manifest.json --targets-json targets.json \
   --extra-pins-json reviewed-blocks.json --giant-caps-json giant-caps.json \
-  --pairwise-validation-fraction 0.15 --output-dir freeze
+  --pairwise-validation-fraction 0.15 --gate-training-block-count 20 --output-dir freeze
 ~~~
 
 Use an aggregate `final_test` target or distinct half targets. Giant caps map role names to counts
@@ -169,12 +168,12 @@ blocks. Take the latest eligible mentions by `inserted` in each gate threshold b
 shortfall against K, missing timestamps, and the actual timestamp range. Arrival paper keys must be
 nonnegative integers or canonical decimal strings. Invalid arrival keys and empty request sets fail.
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
-For `fit_pool` and `gate_fit`, sample eligible scored mentions using `--queries-per-block`. The
+For `fit_pool`, sample eligible scored mentions using `--queries-per-block`. The
 ORCID-hidden `fit_pool` population is clustered without the queries, and the same partition supplies
 assignments for mining and seeds for retrieval. Mining skips query endpoints and counts excluded
 query signatures per block. A `fit_pool` block with no eligible signatures writes empty assignments,
-seeds, and queries with reason `no_eligible_signatures`. Cluster the remaining `gate_fit` mentions with
-ORCID hidden. Re-run with the same inputs to verify and reuse completed blocks.
+seeds, and queries with reason `no_eligible_signatures`. The gate reuses the linker inputs from
+the marked blocks. Re-run with the same inputs to verify and reuse completed blocks.
 
 ### 9. Freeze linker and gate tasks
 
@@ -184,8 +183,8 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
   --block-inputs linker-inputs/inputs.json --output-dir linker-tasks --n-jobs N
 ~~~
 
-The builder preserves real names and freezes native top-25 windows. The fitting roles hold out whole
-authors before retrieval. Ledger-backed fitting roles require scored queries and seed assignments
+The builder preserves real names and freezes native top-25 windows. The `fit_pool` tasks hold out whole
+authors before retrieval. Ledger-backed fitting tasks require scored queries and seed assignments
 for every eligible non-query signature. Gold-labeled roles check every seed member for identity purity.
 The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.
 Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
@@ -249,7 +248,7 @@ and keeps the full population. B3 scores verified, eligible mentions only. Apply
 digests and the reference coverage. Reload the revised model and verify the chosen EPS.
 ## First 1.5 experiment order
 
-1. **Experiment 1:** Keep 1.4's pairwise heads and 53-feature candidate ranker fixed for the gate-only experiment. Replay M1 gate calibration with the 1.4 ranker. For a contract-2 ranker, refit the gate on `gate_fit` and inspect the `gate_thresh` report for link count, blind-judged precision and recall within the frozen windows. Blind-judge the links each weight adds and removes. The report includes the configured weight and keeps it in production unless `classic.promoted_stratified_gate.false_abstain_weight` explicitly sets a new one. Measure cross-subblock recovery on unseen >15k blocks and non-ORCID precision. Across 14 blocks above 15k in Batches 1–6, 1.4 changed pooled F1 by −0.145 points [−0.609, +0.311] versus 1.3.2. The across-sub-block component was −0.456 points.
+1. **Experiment 1:** Keep 1.4's pairwise heads and 53-feature candidate ranker fixed for the gate-only experiment. Replay M1 gate calibration with the 1.4 ranker. For a contract-2 ranker, refit the gate on the marked `fit_pool` blocks and inspect the `gate_thresh` report for link count, blind-judged precision and recall within the frozen windows. Blind-judge the links each weight adds and removes. The report includes the configured weight and keeps it in production unless `classic.promoted_stratified_gate.false_abstain_weight` explicitly sets a new one. Measure cross-subblock recovery on unseen >15k blocks and non-ORCID precision. Across 14 blocks above 15k in Batches 1–6, 1.4 changed pooled F1 by −0.145 points [−0.609, +0.311] versus 1.3.2. The across-sub-block component was −0.456 points.
 2. **Experiment 2:** Evaluate compact asymmetric middle & career-year gate features (`query_mid_x_cand_no_mid_x_size`, `query_mid_overlap_frac`, `query_mid_conflict_any`, `year_predates_log`) and retrieval re-tuning only after Experiment 1 establishes the clean baseline.
 3. **Experiment 3 (conditional):** Lift `YEAR_DIFF_CAP=50` only if backed by targeted `>45yr` historical labeled pairs (`≥5,000` pairs so splits exceed `min_child_samples`).
 

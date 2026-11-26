@@ -48,7 +48,6 @@ def test_assign_block_roles_normalizes_keys_excludes_f_matsen_and_handles_overfl
         "final_test": 6,
         "eps_cal": 4,
         "gate_thresh": 2,
-        "gate_fit": 2,
         "fit_pool": 8,
     }
     res1 = assign_block_roles(
@@ -93,15 +92,15 @@ def test_assign_block_roles_balances_strata_without_aliasing() -> None:
         *[BlockSpec(f"a_{i}", 1000, frozenset(), "A") for i in range(4)],
         *[BlockSpec(f"b_{i}", 1000, frozenset(), "B") for i in range(4)],
     ]
-    res = assign_block_roles(blocks, {"eps_cal": 4, "gate_fit": 4}, seed=7)
-    for role in ("eps_cal", "gate_fit"):
+    res = assign_block_roles(blocks, {"eps_cal": 4, "gate_thresh": 4}, seed=7)
+    for role in ("eps_cal", "gate_thresh"):
         assigned = res["roles"][role]
         assert len(assigned) == 4
         assert sum(k.startswith("a ") for k in assigned) == 2
         assert sum(k.startswith("b ") for k in assigned) == 2
 
 
-@pytest.mark.parametrize("old_role", ["pairwise_train", "pairwise_val", "linker_train"])
+@pytest.mark.parametrize("old_role", ["pairwise_train", "pairwise_val", "linker_train", "gate_fit"])
 def test_rejects_removed_roles(tmp_path: Path, old_role: str) -> None:
     blocks = [BlockSpec("a ross", 32)]
     with pytest.raises(ValueError, match=old_role):
@@ -112,7 +111,8 @@ def test_rejects_removed_roles(tmp_path: Path, old_role: str) -> None:
     manifest["roles"][old_role] = manifest["roles"].pop("fit_pool")
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match=rf"Unknown block role '{old_role}'"):
+    error = "gate_fit role. Reassign blocks" if old_role == "gate_fit" else rf"Unknown block role '{old_role}'"
+    with pytest.raises(ValueError, match=error):
         load_block_roles(path)
 
 
@@ -130,6 +130,25 @@ def test_pairwise_validation_blocks_are_stratified_and_order_independent(tmp_pat
     path.write_text(json.dumps({**result, "pairwise_validation_blocks": ["c missing"]}), encoding="utf-8")
     with pytest.raises(ValueError, match="pairwise_validation_blocks"):
         load_block_roles(path)
+
+
+def test_gate_training_blocks_are_stratified_frozen_and_can_overlap_validation(tmp_path: Path) -> None:
+    blocks = [BlockSpec(f"{origin} {i}", 500, stratum=f"<=1000|{origin}") for origin in "ab" for i in range(14)]
+    targets = {"fit_pool": 24, "gate_thresh": 4}
+    result = assign_block_roles(blocks, targets)
+    marked = result["gate_training_blocks"]
+    assert len(set(marked)) == len(marked) == 20
+    assert set(marked) <= set(result["roles"]["fit_pool"])
+    assert [sum(key.startswith(f"{origin} ") for key in marked) for origin in "ab"] == [10, 10]
+    assert marked == assign_block_roles(blocks[::-1], targets)["gate_training_blocks"]
+    all_fit = assign_block_roles(blocks, targets, gate_training_block_count=24)
+    assert set(all_fit["pairwise_validation_blocks"]) <= set(all_fit["gate_training_blocks"])
+    path = tmp_path / "assignments.json"
+    path.write_text(json.dumps(result), encoding="utf-8")
+    roles = load_block_roles(path)
+    assert roles.gate_training_blocks == set(marked)
+    path.write_text(json.dumps({**result, "gate_training_blocks": marked[:-1]}), encoding="utf-8")
+    assert load_block_roles(path).sha256 != roles.sha256
 
 
 def test_giant_caps_include_pins_and_fit_pool_pins_cannot_override_dev_test() -> None:
@@ -290,7 +309,7 @@ def test_small_development_roles_reserve_giants(giants: int) -> None:
         *[BlockSpec(f"small {i}", 100, stratum="small", source_split="development") for i in range(400)],
         *[BlockSpec(f"giant {i}", 20_000, stratum="giant", source_split="development") for i in range(giants)],
     ]
-    roles = ("eps_cal", "gate_fit", "gate_thresh", "dev_test")
+    roles = ("eps_cal", "fit_pool", "gate_thresh", "dev_test")
     result = assign_block_roles(blocks, dict.fromkeys(roles, 10), enforce_source_splits=True)
     counts = result["verification"]["role_block_counts_by_stratum"]
     assert all(len(result["roles"][role]) == 10 for role in roles)

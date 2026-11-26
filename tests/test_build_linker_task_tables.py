@@ -223,8 +223,8 @@ def test_fitting_linker_inputs_reconcile_queries_and_seeds(tmp_path: Path, hazar
 
 
 def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(tmp_path: Path) -> None:
-    blocks = dict(zip(TASK_ROLES, ("a ross", "b ross", "c ross"), strict=True))
-    orcids = dict(zip(TASK_ROLES, _ORCIDS, strict=True))
+    blocks = {"fit_pool": "a ross", "gate_thresh": "c ross"}
+    orcids = {"fit_pool": _ORCIDS[0], "gate_thresh": _ORCIDS[2]}
     inputs = {block: _block_inputs(tmp_path / role, block, orcids[role]) for role, block in blocks.items()}
     specs = [BlockSpec(block, 32, frozenset({orcids[role], _OUTSIDE_HOME})) for role, block in blocks.items()]
     specs.append(BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})))
@@ -237,25 +237,24 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
     roles_path, inputs_path, output = tmp_path / "roles.json", tmp_path / "inputs.json", tmp_path / "tasks"
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")
     inputs_path.write_text(json.dumps(inputs), encoding="utf-8")
-    subset = build_linker_task_tables(roles_path, inputs_path, tmp_path / "subset", blocks=["B_ROSS"])
-    assert set(subset["tables"]) == {"gate_fit"}
-    assert set(subset["tables"]["gate_fit"]["blocks"]) == {"b ross"}
+    subset = build_linker_task_tables(roles_path, inputs_path, tmp_path / "subset", blocks=["A_ROSS"])
+    assert set(subset["tables"]) == {"fit_pool"}
+    assert set(subset["tables"]["fit_pool"]["blocks"]) == {"a ross"}
     manifest = build_linker_task_tables(roles_path, inputs_path, output, holdout_fraction=1)
     assert manifest["distance_policy_version"] == DISTANCE_POLICY_VERSION
     assert manifest["s2and_version"] == __version__
     assert set(manifest["tables"]) == set(TASK_ROLES)
-    assert manifest["tables"]["gate_fit"]["blocks"]["b ross"]["counts"]["full_windows"] == 2
-    for role in ("fit_pool", "gate_fit"):
-        rows = pd.read_parquet(output / f"{role}.parquet")
-        assert rows.groupby("query_signature_id").size().to_dict() == {"q_full": 25, "q_initial": 25}
-        assert rows["whole_author_holdout"].all()
-        assert not rows["label"].any()
-        assert not set(rows["candidate_component_key"]) & {"c00", "c01", "c02"}
-        assert set(rows["query_author_middle"]) == {"Marie"}
-        assert rows.groupby("query_signature_id")["query_view"].first().to_dict() == {
-            "q_full": "full",
-            "q_initial": "initial_only",
-        }
+    assert manifest["tables"]["fit_pool"]["blocks"]["a ross"]["counts"]["full_windows"] == 2
+    rows = pd.read_parquet(output / "fit_pool.parquet")
+    assert rows.groupby("query_signature_id").size().to_dict() == {"q_full": 25, "q_initial": 25}
+    assert rows["whole_author_holdout"].all()
+    assert not rows["label"].any()
+    assert not set(rows["candidate_component_key"]) & {"c00", "c01", "c02"}
+    assert set(rows["query_author_middle"]) == {"Marie"}
+    assert rows.groupby("query_signature_id")["query_view"].first().to_dict() == {
+        "q_full": "full",
+        "q_initial": "initial_only",
+    }
     natural = pd.read_parquet(output / "gate_thresh.parquet")
     assert not natural["whole_author_holdout"].any()
     assert int(natural.loc[natural["query_signature_id"].eq("q_full"), "label"].sum()) == 2
@@ -279,7 +278,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
         max_query_groups=None,
     )
     assert set(feature_rows) == set(TASK_ROLES)
-    assert sum(s["rows"] for s in summaries) == 175
+    assert sum(s["rows"] for s in summaries) == 125
     for role, rows in feature_rows.items():
         frozen_rows = pd.read_parquet(output / f"{role}.parquet")
         assert rows["candidate_component_key"].tolist() == frozen_rows["candidate_component_key"].tolist()
@@ -317,11 +316,7 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(t
         )
 
 
-def test_pairwise_validation_blocks_feed_ranker_and_can_be_enabled_for_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from scripts.linker.build_linker_task_tables import TASK_BLOCK_ROLES
-
+def test_pairwise_validation_block_shares_one_linker_table_with_gate(tmp_path: Path) -> None:
     specs = [
         BlockSpec(key, 32, frozenset({identity, _OUTSIDE_HOME}))
         for key, identity in zip(("a ross", "b ross"), _ORCIDS[:2], strict=True)
@@ -331,15 +326,12 @@ def test_pairwise_validation_blocks_feed_ranker_and_can_be_enabled_for_gate(
     identity = next(iter(next(spec.orcids for spec in specs if spec.block_key == block) - {_OUTSIDE_HOME}))
     roles_path = tmp_path / "roles.json"
     roles_path.write_text(json.dumps(frozen), encoding="utf-8")
+    assert block in load_block_roles(roles_path).gate_training_blocks
     inputs_path = tmp_path / "inputs.json"
     inputs_path.write_text(json.dumps({block: _block_inputs(tmp_path / "block", block, identity)}), encoding="utf-8")
     ranker = build_linker_task_tables(roles_path, inputs_path, tmp_path / "ranker", blocks=[block])
     assert set(ranker["tables"]) == {"fit_pool"}
     assert set(ranker["tables"]["fit_pool"]["blocks"]) == {block}
-    monkeypatch.setitem(TASK_BLOCK_ROLES, "gate_fit", frozenset({"gate_fit", "fit_pool"}))
-    shared = build_linker_task_tables(roles_path, inputs_path, tmp_path / "shared", blocks=[block])
-    assert set(shared["tables"]) == {"fit_pool", "gate_fit"}
-    assert set(shared["tables"]["gate_fit"]["blocks"]) == {block}
 
 
 @pytest.mark.parametrize("recent_seeds", [1, 3])
@@ -381,8 +373,8 @@ def _freeze_fixture(
             BlockSpec(block, 32, frozenset({_ORCIDS[0], _OUTSIDE_HOME})),
             BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
         ],
-        {"gate_fit": 1},
-        pinned_roles={block: "gate_fit", "sealed": "final_test_a"},
+        {"fit_pool": 1},
+        pinned_roles={block: "fit_pool", "sealed": "final_test_a"},
         closure_mode="block_only",
     )
     path.write_text(json.dumps(roles), encoding="utf-8")
@@ -404,8 +396,8 @@ def _freeze_fixture(
 
 @pytest.mark.parametrize("check", ["mixed_seed", "heldout_fragment", "missing_scored"])
 def test_joined_identity_evidence_reaches_task_builder(tmp_path: Path, check: str) -> None:
-    blocks = dict(zip(TASK_ROLES, ("a ross", "b ross", "c ross"), strict=True))
-    orcids = dict(zip(TASK_ROLES, _ORCIDS, strict=True))
+    blocks = {"fit_pool": "a ross", "gate_thresh": "c ross"}
+    orcids = {"fit_pool": _ORCIDS[0], "gate_thresh": _ORCIDS[2]}
     inputs = {
         block: _block_inputs(tmp_path / role, block, orcids[role], deposited_orcids=False)
         for role, block in blocks.items()
@@ -451,6 +443,6 @@ def test_joined_identity_evidence_reaches_task_builder(tmp_path: Path, check: st
         assert not mixed["candidate_gold_scored"].any()
         assert not mixed["label"].any()
     else:
-        heldout = pd.read_parquet(output / "gate_fit.parquet")
+        heldout = pd.read_parquet(output / "fit_pool.parquet")
         assert heldout["whole_author_holdout"].all()
         assert not set(heldout["candidate_component_key"]) & {"c00", "c01", "c04"}

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from s2and._sha256 import sha256_file
@@ -141,113 +138,20 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from s2and.featurizer import resolve_selection_pairs
-    from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles
-    from scripts.intake.assign_block_roles import freeze_identity_roles
-    from scripts.intake.build_freeze_input import build_freeze_input
-    from scripts.intake.build_identity_evidence import build_identity_evidence
-    from scripts.intake.requests_to_datasets import convert_requests
-    from scripts.pairwise.mine_pairwise_pairs import BlockInput, mine_pairs
-    from tests.test_identity_ledger import DEPOSITED, GOLD, request_bundle
+    from scripts.common.block_roles import ROLE_SHA256_FIELD
+    from tests.stage0_world import build_stage0_world
 
-    _, name_counts, _ = write_pairwise_artifacts(tmp_path)
-    snapshot = tmp_path / "snapshot"
-    blocks = {"a ross": range(10, 15), "b crane": range(20, 25), "c lane": range(30, 32)}
-    requests = [
-        request_bundle(tmp_path / "raw", block, [(str(paper), None) for paper in ids]) for block, ids in blocks.items()
-    ]
-    convert_requests(
-        requests,
-        snapshot,
-        name_counts,
-        allowed_papers=frozenset(str(paper) for ids in blocks.values() for paper in ids),
-        abstract_allowed_papers=frozenset(),
-    )
-    rows = [
-        {
-            "cluster_block_key": block,
-            "corpus_paper_id": paper,
-            "position": 0,
-            "orcid": GOLD if offset < 2 else DEPOSITED,
-            "scored": True,
-            "split": "development",
-        }
-        for block in ("a ross", "b crane")
-        for offset, paper in enumerate(blocks[block][:4])
-    ]
-    rows.append({**rows[0], "cluster_block_key": "c lane", "corpus_paper_id": 30, "orcid": "0000-0002-9079-593X"})
-    gold, source, freeze_input = (tmp_path / name for name in ("gold.parquet", "source.parquet", "freeze.parquet"))
-    pq.write_table(pa.Table.from_pylist(rows), gold)
-    pq.write_table(pa.table({"cluster_block_key": list(blocks), "split": ["development"] * len(blocks)}), source)
-    evidence = tmp_path / "evidence" / "manifest.json"
-    build_identity_evidence(snapshot, gold, evidence.parent)
-    build_freeze_input(evidence, source, freeze_input)
-    role_path = tmp_path / "roles.json"
-    role_path.write_text(
-        json.dumps(
-            freeze_identity_roles(
-                freeze_input,
-                evidence,
-                {"fit_pool": 2, "gate_fit": 1},
-                extra_pins={"c lane": "gate_fit"},
-            )
-        ),
-        encoding="utf-8",
-    )
-    roles = load_block_roles(role_path)
-    inputs = {}
-    for block in ("a ross", "b crane"):
-        name = block.replace(" ", "_")
-        directory = tmp_path / name
-        directory.mkdir()
-        assignments = directory / "assignments.parquet"
-        pq.write_table(
-            pa.table({"signature_id": [f"{paper}-0" for paper in blocks[block]], "cluster_id": ["all"] * 5}),
-            assignments,
-        )
-        (directory / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "binding": {
-                        ROLE_SHA256_FIELD: roles.sha256,
-                        BLOCK_BINDINGS_FIELD: roles.bindings_for({block}),
-                        "model_sha256": "a" * 64,
-                        "index_sha256": sha256_file(name_counts / "manifest.json"),
-                    },
-                    "files": {assignments.name: sha256_file(assignments)},
-                }
-            ),
-            encoding="utf-8",
-        )
-        inputs[block] = BlockInput(snapshot / "datasets" / name, None, assignments)
-    mined = tmp_path / "mined.csv"
-    # Each block yields all 6 labeled pairs under the cap plus 4 judge-only pairs with its unlabeled mention.
-    assert mine_pairs(role_path, inputs, mined, identity_evidence=evidence) == 20
-
+    world = build_stage0_world(tmp_path)
+    name_counts = world.name_counts
     args = pairwise_training_args(
         tmp_path,
         train_pairs_size=24,
         validation_pairs_size=6,
-        mined_pairs=mined,
-        identity_evidence=evidence,
-        block_role_assignments=role_path,
+        mined_pairs=world.mined,
+        identity_evidence=world.evidence_path,
+        block_role_assignments=world.roles_path,
         name_counts_index_root=name_counts,
     )
-    manifest = mined.with_suffix(".csv.manifest.json")
-    original_mined, original_manifest = mined.read_bytes(), manifest.read_bytes()
-    with mined.open("a", encoding="utf-8", newline="") as stream:
-        csv.writer(stream).writerow(["c lane", "30-0", "31-0", "random", 1])
-    manifest.write_text(
-        json.dumps({**json.loads(original_manifest), "output_sha256": sha256_file(mined)}), encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="outside fit_pool.*c lane"):
-        train_pairwise._load_mined_pairs(args)
-    mined.write_bytes(original_mined)
-    manifest.write_bytes(original_manifest)
-    mined_blocks, _ = train_pairwise._load_mined_pairs(args)
-    assert {block for block, spec in mined_blocks.items() if spec.split == "val"} == roles.pairwise_validation_blocks
-    for spec in mined_blocks.values():
-        assert len(spec.pairs) == 6 and {label for _, _, label in spec.pairs} == {0, 1}
-        assert spec.unscored_pairs == 4
 
     benchmark, files = _arrow_plan_dataset(tmp_path / "data", "qian", tmp_path / "benchmarks", name_counts)
     args.model_plan = tmp_path / "plan.json"
@@ -267,14 +171,16 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
         encoding="utf-8",
     )
     expected = resolve_selection_pairs(_json_selection(files, "qian", args))
+    mined_labels = {"train": [1, 0, 0, 0, 0, 1], "val": [1]}
     fit = train_pairwise._fit_pairwise_model
     heads = []
 
     def confirm_union(*fit_args: Any, **kwargs: Any) -> Any:
         heads.append(kwargs["feature_prefix"])
         for split, benchmark_pairs in zip(("train", "val"), expected, strict=True):
-            labels = [label for spec in mined_blocks.values() if spec.split == split for _, _, label in spec.pairs]
-            np.testing.assert_array_equal(np.load(fit_args[1][f"y_{split}"])[len(benchmark_pairs) :], labels)
+            np.testing.assert_array_equal(
+                np.load(fit_args[1][f"y_{split}"])[len(benchmark_pairs) :], mined_labels[split]
+            )
         return fit(*fit_args, **kwargs)
 
     monkeypatch.setattr(train_pairwise, "_fit_pairwise_model", confirm_union)
@@ -283,11 +189,14 @@ def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_vali
     summary = result["training_summary"]
     for head in ("main", "nameless"):
         for split, benchmark_pairs in zip(("train", "val"), expected, strict=True):
-            assert summary[f"{head}_{split}_rows"] == len(benchmark_pairs) + 6
-    assert sum(spec["unscored_pairs"] for spec in summary["mined_pairs_by_block"].values()) == 8
+            assert summary[f"{head}_{split}_rows"] == len(benchmark_pairs) + len(mined_labels[split])
+    assert summary["mined_pairs_by_block"] == {
+        "a ross": {"split": "train", "labeled_pairs": 6, "unscored_pairs": 2},
+        "b crane": {"split": "val", "labeled_pairs": 1, "unscored_pairs": 0},
+    }
     config = json.loads((args.output_dir / "reproducibility" / "pairwise_training_config.json").read_text("utf-8"))
-    assert config["mined_pairs"][ROLE_SHA256_FIELD] == roles.sha256
-    assert config["mined_pairs"]["pairwise_validation_blocks"] == sorted(roles.pairwise_validation_blocks)
+    assert config["mined_pairs"][ROLE_SHA256_FIELD] == world.roles.sha256
+    assert config["mined_pairs"]["pairwise_validation_blocks"] == ["b crane"]
 
 
 @pytest.mark.parametrize(

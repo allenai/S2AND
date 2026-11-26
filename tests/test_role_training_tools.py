@@ -75,24 +75,6 @@ def _mining_input(tmp_path: Path, block: str, *, deposited_orcids: bool = True):
     return BlockInput(Path(spec["arrow_dir"]), labels, assignments)
 
 
-def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None:
-    from scripts.pairwise import mine_pairwise_pairs
-
-    block = "a ross"
-    spec = _mining_input(tmp_path, block)
-    roles_path = tmp_path / "roles.json"
-    frozen = assign_block_roles(
-        [BlockSpec(block, 32), BlockSpec("sealed", 5)],
-        {"fit_pool": 1, "final_test_a": 1},
-        pinned_roles={block: "fit_pool", "sealed": "final_test_a"},
-    )
-    roles_path.write_text(json.dumps(frozen), encoding="utf-8")
-    output = tmp_path / "pairs.csv"
-    with pytest.raises(ValueError, match="outside fit_pool"):
-        mine_pairwise_pairs.mine_pairs(roles_path, {block: spec, "sealed": spec}, output, per_block=6)
-    assert not output.exists()
-
-
 def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from scripts.pairwise.mine_pairwise_pairs import main
 
@@ -126,10 +108,7 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
     )
     rows = pd.read_csv(output)
     assert json.loads(capsys.readouterr().out) == {"blocks": 1, "pairs": len(rows)}
-    assert set(rows["stratum"]) == {"false_merge", "missed_link", "merged_unlabeled", "random"}
     assert list(rows["block_key"].unique()) == [block]
-    assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == len(rows)
-    assert (rows["signature_id_1"] < rows["signature_id_2"]).all()
     assert rows["stratum"].ne("merged_unlabeled").sum() == 6
     assert rows["stratum"].eq("merged_unlabeled").sum() <= 6
     assert rows["inclusion_probability"].between(0, 1, inclusive="right").all()

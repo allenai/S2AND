@@ -35,8 +35,9 @@ from scripts.judging import review_packets
 from scripts.linker import build_linker_inputs, build_linker_task_tables
 from scripts.linker.train_linker_and_finalize import _apply_blind_gate_labels, _validate_frozen_task_bindings
 from scripts.pairwise import mine_pairwise_pairs
+from tests.helpers import request_bundle
 from tests.test_giant_eps_release import _complete_model
-from tests.test_identity_ledger import DEPOSITED, GOLD, HOLDOUT, request_bundle
+from tests.test_identity_ledger import DEPOSITED, GOLD, HOLDOUT
 
 pytestmark = pytest.mark.tooling
 

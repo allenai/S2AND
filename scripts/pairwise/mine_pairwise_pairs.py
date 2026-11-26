@@ -27,12 +27,19 @@ from scripts.common.arrow_roots import read_json_object
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external_reference_identity_evidence
+from scripts.common.stage0_invariants import (
+    JUDGE_ONLY_STRATUM,
+    SAMPLING_DROP_REASON,
+    PairId,
+    pair_ids_sha256,
+    pairwise_fold,
+    require_assignment_receipt,
+    require_fit_pool_coverage,
+)
 
-Pair = tuple[str, str]
 DEFAULT_PAIRS_PER_BLOCK = 2_000
 DEFAULT_VERIFIED_PAIR_FRACTION = 0.05
 DEFAULT_PAIRS_PER_BLOCK_FLOOR = 100
-JUDGE_ONLY_STRATUM = "merged_unlabeled"
 
 
 @dataclass(frozen=True)
@@ -100,8 +107,6 @@ def _ledger_mentions(
     ledger: IdentityLedger, spec: BlockInput, block: str, manifest: Mapping[str, Any]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
     view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
-    ledger.roles.require_assignment(manifest["binding"], context=f"{block} pairwise assignments")
-    ledger.roles.require_bindings(manifest["binding"], {block}, context=f"{block} pairwise assignments")
     if manifest["files"].get(spec.assignments.name) != sha256_file(spec.assignments):
         raise ValueError(f"Assignment digest mismatch: {spec.assignments}")
     decisions = {sid: view.eligibility(sid) for sid in view.rows}
@@ -130,7 +135,7 @@ class PairFrame:
     def size(self) -> int:
         return self.ends[-1] if self.ends else 0
 
-    def pair(self, index: int) -> Pair:
+    def pair(self, index: int) -> PairId:
         span = bisect_right(self.ends, index)
         right, start = self.spans[span]
         base = self.ends[span - 1] if span else 0
@@ -165,23 +170,23 @@ def _grouped_frame(
     return frame
 
 
-def _random_pair(signatures: list[str], index: int) -> Pair:
+def _random_pair(signatures: list[str], index: int) -> PairId:
     right = (1 + math.isqrt(1 + 8 * index)) // 2
     return signatures[index - math.comb(right, 2)], signatures[right]
 
 
 def _capped_frame(
-    pair_at: Callable[[int], Pair],
+    pair_at: Callable[[int], PairId],
     population: int,
     identities: Mapping[str, str],
-    excluded_pairs: set[Pair],
+    excluded_pairs: set[PairId],
     *,
     per_block: int,
     per_identity: int,
     frame_seed: str,
-) -> list[Pair]:
+) -> list[PairId]:
     # Freeze a bounded candidate frame before sampling, so probabilities account for identity caps.
-    frame: list[Pair] = []
+    frame: list[PairId] = []
     counts: Counter[str] = Counter()
     frame_size = per_block * 4
     proposals = random.Random(frame_seed).sample(range(population), min(population, max(1024, frame_size * 16)))
@@ -224,7 +229,7 @@ def mine_pairs(
     per_identity: int = 25,
     seed: int = 20261123,
 ) -> int:
-    """Write deduplicated pairs sampled within each capped stratum frame."""
+    """Write capped stratum samples and counts for every frozen fit_pool block."""
     if min(per_block, per_identity) <= 0:
         raise ValueError("Pair caps must be positive")
     if not 0 <= verified_pair_fraction <= 1 or per_block_floor < 0:
@@ -232,11 +237,11 @@ def mine_pairs(
     roles = load_block_roles(roles_path)
     ledger = ledger_for_roles(identity_evidence, roles)
     normalized = {normalize_block_key(block): spec for block, spec in blocks.items()}
-    if not normalized or len(normalized) != len(blocks):
-        raise ValueError("Expected at least one block and no duplicate normalized keys")
-    for block in normalized:
-        if roles.role_for(block) != "fit_pool":
-            raise ValueError(f"Block {block!r} is outside fit_pool")
+    if len(normalized) != len(blocks):
+        raise ValueError("Duplicate normalized block keys in pairwise inputs")
+    require_fit_pool_coverage(roles, normalized.keys())
+    if not normalized:
+        raise ValueError("Expected at least one frozen fit_pool block")
     manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)
@@ -244,12 +249,18 @@ def mine_pairs(
     assignment_manifests = {}
     shared_binding: dict[str, str] = {}
     if ledger is not None:
+        intake_index = ledger.evidence.name_counts_index_sha256
+        shared_binding["index_sha256"] = intake_index
         for block, spec in sorted(normalized.items()):
             manifest = read_json_object(spec.assignments.parent / "manifest.json")
-            for field in ("model_sha256", "index_sha256"):
-                digest = manifest["binding"].get(field)
-                if not is_lowercase_sha256(digest) or shared_binding.setdefault(field, digest) != digest:
-                    raise ValueError(f"{block!r} pairwise assignments lack a shared {field}")
+            binding = manifest.get("binding")
+            require_assignment_receipt(roles, block, binding, intake_index_sha256=intake_index)
+            model_digest = manifest["binding"].get("model_sha256")
+            if (
+                not is_lowercase_sha256(model_digest)
+                or shared_binding.setdefault("model_sha256", model_digest) != model_digest
+            ):
+                raise ValueError(f"{block!r} pairwise assignments lack a shared model_sha256")
             assignment_manifests[block] = manifest
 
     rng = random.Random(seed)
@@ -269,8 +280,8 @@ def mine_pairs(
         missed_links = _grouped_frame(labeled, gold, clusters)
         merged_unlabeled = _grouped_frame(signatures, clusters, gold, include_unlabeled=True)
         stratum_counts = {}
-        seen_pairs: set[Pair] = set()
-        frames: list[tuple[str, int, list[Pair]]] = []
+        seen_pairs: set[PairId] = set()
+        frames: list[tuple[str, int, list[PairId]]] = []
         for stratum, population, pair_at in (
             ("false_merge", false_merges.size, false_merges.pair),
             ("missed_link", missed_links.size, missed_links.pair),
@@ -301,15 +312,21 @@ def mine_pairs(
             sample = rng.sample(frame, quota)
             frame_size = len(frame)
             inclusion = len(sample) / frame_size if frame_size else 0.0
+            dropped = frame_size - len(sample)
             stratum_counts[stratum] = {
                 "eligible_pairs": population,
                 "frame_pairs": frame_size,
                 "reporting_population_pairs": frame_size,
                 "sampled_pairs": len(sample),
+                "sampled_pair_ids_sha256": pair_ids_sha256(sample),
+                "dropped_pairs": dropped,
+                "drop_reason": SAMPLING_DROP_REASON if dropped else None,
                 "inclusion_probability": inclusion,
             }
             rows.extend((block, left, right, stratum, inclusion) for left, right in sorted(sample))
         counts[block] = {
+            "fold": pairwise_fold(roles, block),
+            **({"assignment_binding": assignment_manifests[block]["binding"]} if ledger is not None else {}),
             "eligible_signatures": len(signatures),
             "excluded_non_home_signatures": excluded,
             "ineligible_signatures": excluded,

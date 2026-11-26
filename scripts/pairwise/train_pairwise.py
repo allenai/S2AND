@@ -8,7 +8,6 @@ pairwise sibling consumed by ``train_linker_and_finalize.py``.
 from __future__ import annotations
 
 import argparse
-import csv
 import gc
 import json
 import logging
@@ -17,11 +16,10 @@ import shutil
 import sys
 import tempfile
 import time
-from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -59,8 +57,7 @@ from s2and.production_training_contract import (  # noqa: E402
     load_model_plan,
     load_packaged_artifact_authority,
 )
-from scripts.common.arrow_roots import generic_dataset_manifests, read_json_object  # noqa: E402
-from scripts.common.block_roles import load_block_roles, normalize_block_key  # noqa: E402
+from scripts.common.block_roles import load_block_roles  # noqa: E402
 from scripts.common.identity_ledger import ledger_for_roles  # noqa: E402
 from scripts.common.plan_datasets import (  # noqa: E402
     development_split_members,
@@ -79,6 +76,7 @@ from scripts.pairwise.augmented_leakage import (  # noqa: E402
     require_validation_members,
     source_members,
 )
+from scripts.pairwise.training_pairs import TrainingBlock, training_pairs  # noqa: E402
 
 logger = logging.getLogger("s2and")
 
@@ -104,92 +102,6 @@ class PairwisePreflightPlan:
     matrix_work_dir: Path
     matrix_work_free_bytes: int
     total_ram_bytes: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class MinedBlock:
-    """Verified, labeled pairs from one frozen block and one pairwise split."""
-
-    arrow_dir: Path
-    arrow_manifest_sha256: str
-    split: Literal["train", "val"]
-    pairs: list[tuple[str, str, int | float]]
-    unscored_pairs: int
-
-
-def _load_mined_pairs(args: argparse.Namespace) -> tuple[dict[str, MinedBlock], dict[str, Any]]:
-    mined = getattr(args, "mined_pairs", None)
-    assignments = getattr(args, "block_role_assignments", None)
-    evidence = getattr(args, "identity_evidence", None)
-    if mined is None and assignments is None and evidence is None:
-        return {}, {}
-    if mined is None or assignments is None or evidence is None:
-        raise ValueError("Use --mined-pairs, --identity-evidence and --block-role-assignments together")
-    roles = load_block_roles(assignments)
-    ledger = ledger_for_roles(evidence, roles)
-    assert ledger is not None
-    manifest_path = mined.with_suffix(mined.suffix + ".manifest.json")
-    manifest = read_json_object(manifest_path)
-    roles.require_assignment(manifest, context="Mined pairs")
-    if manifest.get("role") != "fit_pool" or not isinstance(manifest.get("blocks"), dict):
-        raise ValueError("Mined pair manifest must describe fit_pool blocks")
-    mined_digest = sha256_file(mined)
-    if manifest.get("output_sha256") != mined_digest:
-        raise ValueError(f"Mined pair CSV digest mismatch: {mined}")
-
-    for block in manifest["blocks"]:
-        if roles.role_for(block) != "fit_pool":
-            raise ValueError(f"Mined pairs come from outside fit_pool: {block!r}")
-    roles.require_bindings(manifest, manifest["blocks"], context="Mined pairs")
-    pairs_by_block: dict[str, set[tuple[str, str]]] = defaultdict(set)
-    with mined.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not {"block_key", "signature_id_1", "signature_id_2"}.issubset(reader.fieldnames or ()):
-            raise ValueError(f"Missing block or signature IDs in mined pairs: {mined}")
-        for row in reader:
-            block = normalize_block_key(row["block_key"])
-            if roles.role_for(block) != "fit_pool":
-                raise ValueError(f"Mined pair comes from outside fit_pool: {block!r}")
-            left, right = row["signature_id_1"], row["signature_id_2"]
-            if block not in manifest["blocks"] or not left or not right or left >= right:
-                raise ValueError(f"Invalid mined pair in {block!r}: {(left, right)}")
-            if (left, right) in pairs_by_block[block]:
-                raise ValueError(f"Duplicate mined pair in {block!r}: {(left, right)}")
-            pairs_by_block[block].add((left, right))
-
-    snapshot = ledger.evidence.snapshot_root
-    if sha256_file(snapshot / "manifest.json") != ledger.evidence.snapshot_sha256:
-        raise ValueError("Mined pair snapshot does not match the identity ledger")
-    dataset_manifests = generic_dataset_manifests(snapshot)
-    blocks: dict[str, MinedBlock] = {}
-    for block, spec in sorted(manifest["blocks"].items()):
-        block_pairs = pairs_by_block[block]
-        if len(block_pairs) != sum(stratum["sampled_pairs"] for stratum in spec["strata"].values()):
-            raise ValueError(f"Mined pair count differs from the manifest for {block!r}")
-        evidence_block = ledger.evidence.blocks[block]
-        arrow_dir = dataset_manifests[evidence_block["dataset"]].parent
-        view = ledger.for_block(block, dataset_dir=arrow_dir)
-        decisions = {sid: view.eligibility(sid) for pair in block_pairs for sid in pair}
-        pairs: list[tuple[str, str, int | float]] = []
-        for left, right in sorted(block_pairs):
-            a, b = decisions[left], decisions[right]
-            if not a.fit_ok or not b.fit_ok:
-                raise ValueError(f"Ineligible signature in mined pair for {block!r}: {(left, right)}")
-            if a.score_orcid is not None and b.score_orcid is not None:
-                pairs.append((left, right, int(a.score_orcid == b.score_orcid)))
-        blocks[block] = MinedBlock(
-            arrow_dir,
-            evidence_block["dataset_manifest_sha256"],
-            "val" if block in roles.pairwise_validation_blocks else "train",
-            pairs,
-            len(block_pairs) - len(pairs),
-        )
-    return blocks, {
-        **ledger.bindings,
-        "csv_sha256": mined_digest,
-        "manifest_sha256": sha256_file(manifest_path),
-        "pairwise_validation_blocks": sorted(roles.pairwise_validation_blocks),
-    }
 
 
 def _canonical_training_artifact_hashes(authority: ProductionArtifactAuthority) -> dict[str, str]:
@@ -368,7 +280,7 @@ def _stage_dataset_features(
 
 
 def _featurize_mined_block(
-    block: MinedBlock,
+    block: TrainingBlock,
     featurizer_info: FeaturizationInfo,
     nameless_featurizer_info: FeaturizationInfo,
     *,
@@ -384,14 +296,14 @@ def _featurize_mined_block(
             raise ValueError(f"Wrong name-counts index for mined pairs in {block.arrow_dir}")
         rust = build_rust_featurizer_from_arrow_dataset(
             arrow,
-            signature_ids=sorted({sid for left, right, _ in block.pairs for sid in (left, right)}),
+            signature_ids=sorted({sid for pair in block.fit for sid in (pair.left, pair.right)}),
             name_tuples=name_tuples,
             num_threads=n_jobs,
             use_orcid_id=False,
         )
         return featurize_pairs_with_rust(
             rust,
-            block.pairs,
+            [(pair.left, pair.right, pair.label) for pair in block.fit],
             featurizer_info,
             nameless_featurizer_info=nameless_featurizer_info,
             n_jobs=n_jobs,
@@ -617,7 +529,12 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
-    mined_blocks, mined_binding = _load_mined_pairs(args)
+    mined_csv = getattr(args, "mined_pairs", None)
+    assignments = getattr(args, "block_role_assignments", None)
+    evidence = getattr(args, "identity_evidence", None)
+    mined_args = (mined_csv, assignments, evidence)
+    if any(value is None for value in mined_args) and any(value is not None for value in mined_args):
+        raise ValueError("Use --mined-pairs, --identity-evidence and --block-role-assignments together")
     unknown_inputs = {name: plan_unknown_signatures(plan.datasets[name]) for name in plan.dataset_names}
     unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
     augmented_members: dict[str, set[str]] = {}
@@ -659,6 +576,15 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     )
     canonical_name_tuples = artifact_authority.name_tuples
     artifact_hashes = _canonical_training_artifact_hashes(artifact_authority)
+    mined = None
+    if mined_csv is not None:
+        roles = load_block_roles(assignments)
+        ledger = ledger_for_roles(evidence, roles)
+        assert ledger is not None
+        mined = training_pairs(
+            roles, ledger, mined_csv, name_counts_sha256=artifact_hashes["name_counts_manifest_sha256"]
+        )
+    mined_blocks = mined.blocks if mined is not None else {}
     training_config = _training_config(
         args,
         plan,
@@ -668,8 +594,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     training_config["unknown_signature_policy"] = "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only"
     training_config["incumbent_parameters"] = incumbents
     training_config["fixed_parameters"] = fixed_parameters
-    if mined_binding:
-        training_config["mined_pairs"] = mined_binding
+    if mined is not None:
+        training_config["mined_pairs"] = mined.binding
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
     logger.info(
         "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
@@ -686,7 +612,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
 
     cluster_test_splits: dict[str, dict[str, Any]] = {}
     mined_summary = {
-        block: {"split": spec.split, "labeled_pairs": len(spec.pairs), "unscored_pairs": spec.unscored_pairs}
+        block: {"split": spec.fold, "labeled_pairs": len(spec.fit), "unscored_pairs": len(spec.judge)}
         for block, spec in mined_blocks.items()
     }
     started = time.perf_counter()
@@ -764,11 +690,11 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                 logger.info(
                     "mined pairs block=%s split=%s labeled=%d unscored=%d",
                     block,
-                    spec.split,
-                    len(spec.pairs),
-                    spec.unscored_pairs,
+                    spec.fold,
+                    len(spec.fit),
+                    len(spec.judge),
                 )
-                if not spec.pairs:
+                if not spec.fit:
                     continue
                 features = _featurize_mined_block(
                     spec,
@@ -779,7 +705,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
                     n_jobs=int(args.n_jobs),
                     total_ram_bytes=plan.total_ram_bytes,
                 )
-                mined_arrays.append(_stage_dataset_features(mined_root, str(index), **{spec.split: features}))
+                mined_arrays.append(_stage_dataset_features(mined_root, str(index), **{spec.fold: features}))
                 del features
 
         validation_dataset_names = tuple(name for name in plan.dataset_names if name != "augmented")
@@ -846,7 +772,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             **{f"main_{key}": value for key, value in main_selection.items()},
             **{f"nameless_{key}": value for key, value in nameless_selection.items()},
         }
-        if mined_binding:
+        if mined is not None:
             training_summary["mined_pairs_by_block"] = mined_summary
         logger.info("pairwise training completed in %.3f seconds", time.perf_counter() - started)
     result = _publish_result(

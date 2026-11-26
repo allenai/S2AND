@@ -203,10 +203,16 @@ uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
-Map each `fit_pool` block to its `arrow_dir` and `assignments` entry from step 8. The miner counts
-all pairs of scored mentions, including same and different identities. Random controls use scored
-mentions. The trainer labels both endpoints through the ledger and skips pairs without two scores.
-Inspect each block's cap, sample counts and stratum-frame probabilities in the mining manifest.
+Map every frozen `fit_pool` block to its `arrow_dir` and `assignments` entry from step 8. The mining
+manifest records each block's frozen fold and assignment binding, including blocks with zero sampled
+pairs. Assignment receipts and the trainer's name-counts index must match the intake index.
+
+The fitted strata are `false_merge`, `missed_link`, and `random`. The trainer requires two ledger
+scores for each fitted pair and uses them to compute the label. `merged_unlabeled` pairs require
+at least one unscored endpoint and go to judging only. The trainer reconciles sampled IDs and counts
+in every block, stratum, and fold. For each capped stratum frame, the manifest records the sampled
+pairs and those dropped for the sampling budget. Re-run mining to produce a manifest with these
+fields before passing an older sample to the trainer.
 
 ### 11. Sweep and apply production EPS
 

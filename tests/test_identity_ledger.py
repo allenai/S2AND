@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from s2and.arrow_tables import write_name_counts_index
-from tests.helpers import write_arrow_tables_bundle
+from tests.helpers import request_bundle
 
 pytestmark = pytest.mark.tooling
 GOLD = "0000-0002-1694-233X"
@@ -15,53 +15,6 @@ DEPOSITED = "0000-0001-5109-3700"
 HOLDOUT = "0000-0003-3808-2083"
 # The synthetic block has one mismatched name among three gold rows.
 FIXTURE_UNMATCHED_LIMIT = 1 / 3
-
-
-def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    name = block.replace(" ", "_")
-    first, last = block.split()
-    papers = [paper for paper, _ in rows]
-    author = f"{first} {last}"
-    directory = root / name
-    write_arrow_tables_bundle(
-        directory,
-        {
-            "signatures": pa.table(
-                {
-                    "signature_id": [f"{paper}-0" for paper in papers],
-                    "paper_id": papers,
-                    "author_position": [0] * len(papers),
-                    "author_first": [first] * len(papers),
-                    "author_middle": [""] * len(papers),
-                    "author_last": [last] * len(papers),
-                    "author_suffix": [""] * len(papers),
-                    "author_affiliations": pa.array([[]] * len(papers), type=pa.list_(pa.string())),
-                    "author_block": [block] * len(papers),
-                    "author_orcid": pa.array([orcid for _, orcid in rows], type=pa.string()),
-                }
-            ),
-            "papers": pa.table(
-                {
-                    "paper_id": papers,
-                    "title": ["Study"] * len(papers),
-                    "venue": [""] * len(papers),
-                    "journal_name": [""] * len(papers),
-                }
-            ),
-            "paper_authors": pa.table(
-                {"paper_id": papers, "position": [0] * len(papers), "author_name": [author] * len(papers)}
-            ),
-            "specter": pa.table(
-                {"paper_id": papers, "embedding": pa.array([[1.0, 0.0]] * len(papers), type=pa.list_(pa.float32(), 2))}
-            ),
-        },
-    )
-    path = root / f"{name}.arrow.tar.gz"
-    with tarfile.open(path, "w:gz") as archive:
-        for arrow in directory.glob("*.arrow"):
-            archive.add(arrow, arcname=arrow.name)
-    return path
 
 
 @pytest.fixture
@@ -408,7 +361,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
             "block_bindings": ledger.roles.bindings_for({"a lovelace"}),
             "block_role_assignments_sha256": ledger.roles.sha256,
             "model_sha256": "a" * 64,
-            "index_sha256": "b" * 64,
+            "index_sha256": ledger.evidence.name_counts_index_sha256,
         },
         "files": {assignments.name: sha256_file(assignments)},
     }
@@ -443,7 +396,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
                         "block_bindings": ledger.roles.bindings_for({block}),
                         "block_role_assignments_sha256": ledger.roles.sha256,
                         "model_sha256": model_sha,
-                        "index_sha256": "b" * 64,
+                        "index_sha256": ledger.evidence.name_counts_index_sha256,
                     },
                     "files": {path.name: sha256_file(path)},
                 }

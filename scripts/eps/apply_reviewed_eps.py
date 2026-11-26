@@ -1,4 +1,4 @@
-"""Apply a manually reviewed EPS to a fresh complete model without another fit."""
+"""Apply a reviewed EPS, and optionally reviewed gate cutoffs, to a fresh complete model without another fit."""
 
 # ruff: noqa: E402
 
@@ -29,7 +29,9 @@ from s2and.incremental_linking_training.classic import (
     _validate_stratified_split_assignments,
     load_bundle,
 )
+from s2and.incremental_linking_training.gate import cutoff_gate_config
 from s2and.production_bundle import _staged_production_bundle
+from s2and.production_bundle_contract import COMPLETE_MANIFEST_FILES
 from s2and.production_model import load_production_model
 from scripts.common.block_roles import BlockRoles, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import ledger_for_roles
@@ -343,11 +345,14 @@ def apply_reviewed_eps(
     precision_f1_tolerance: float | None = None,
     block_role_assignments: Path | None = None,
     identity_evidence: Path | None = None,
+    gate_cutoffs: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Write a fresh complete model with the reviewed EPS and preserve all trained artifact bytes.
 
     ``close_pair`` is the reviewed (close_pair_bonus, close_pair_distance); None keeps the source's
     setting. ``release_version`` names a model that differs from its source only in linkage settings.
+    ``gate_cutoffs`` is the reviewed (t_full, t_init). It replaces only the linker gate config, because
+    judged cutoffs are set after the ranker is trained; the ranker booster bytes stay unchanged.
     ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
 
     With a sweep root, check the expected subblock limit and require the requested datasets
@@ -422,6 +427,14 @@ def apply_reviewed_eps(
             manifest["release_version"] = release_version
         write_json(staging / "clusterer.json", config)
         manifest["sha256"]["clusterer.json"] = sha256_file(staging / "clusterer.json")
+        if gate_cutoffs is not None:
+            gate_path = COMPLETE_MANIFEST_FILES["incremental_linker_metadata"]
+            if gate_path not in manifest["sha256"]:
+                raise ValueError("Gate cutoffs need a complete bundle with an incremental linker")
+            metadata = json.loads((staging / gate_path).read_text(encoding="utf-8"))
+            metadata["gate_config"] = cutoff_gate_config(*gate_cutoffs)
+            write_json(staging / gate_path, metadata)
+            manifest["sha256"][gate_path] = sha256_file(staging / gate_path)
         write_json(staging / "manifest.json", manifest)
         for relative, expected in manifest["sha256"].items():
             if sha256_file(staging / relative) != expected:
@@ -438,8 +451,13 @@ def apply_reviewed_eps(
         "review_note": review_note,
         "sweep_plans": plans,
         "giant_f1_tolerance": giant_f1_tolerance,
+        "gate_cutoffs": list(gate_cutoffs) if gate_cutoffs is not None else None,
         "model_output": str(output),
-        "unchanged_artifacts": sorted(set(manifest["sha256"]) - {"clusterer.json"}),
+        "unchanged_artifacts": sorted(
+            set(manifest["sha256"])
+            - {"clusterer.json"}
+            - ({COMPLETE_MANIFEST_FILES["incremental_linker_metadata"]} if gate_cutoffs is not None else set())
+        ),
     }
     write_json(report_path, report)
     return report
@@ -484,6 +502,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=None,
         help="Optional verified assign_block_roles.py assignments.json authorizing block-disjoint eps_cal sweeps.",
     )
+    parser.add_argument(
+        "--gate-cutoffs",
+        type=float,
+        nargs=2,
+        metavar=("T_FULL", "T_INIT"),
+        help="Reviewed ranker-probability gate cutoffs for full-name and initial-only queries.",
+    )
     parser.add_argument("--review-note", required=True)
     parser.add_argument("--output-report", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -507,6 +532,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         expected_batching_threshold=args.expected_batching_threshold,
         block_role_assignments=args.block_role_assignments,
         identity_evidence=args.identity_evidence,
+        gate_cutoffs=(args.gate_cutoffs[0], args.gate_cutoffs[1]) if args.gate_cutoffs else None,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

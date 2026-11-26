@@ -1100,3 +1100,31 @@ def test_eps_release_rejects_nonmember_without_shared_orcids(tmp_path: Path) -> 
             verified_eps_cal_blocks=frozenset({block}),
             block_roles=roles,
         )
+
+
+def test_internal_review_stamps_gate_cutoffs_and_keeps_the_ranker(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    output = tmp_path / "output"
+    apply_reviewed_eps_module.main(
+        [
+            "--source-model",
+            str(source),
+            "--output-model",
+            str(output),
+            "--eps",
+            "0.38",
+            "--gate-cutoffs",
+            "0.702",
+            "0.792",
+            "--review-note",
+            "Pinned EPS and judged cutoffs",
+            "--output-report",
+            str(tmp_path / "review.json"),
+        ]
+    )
+    assert _changed_files(source, output) == {"clusterer.json", "incremental_linker/metadata.json", "manifest.json"}
+    gate = json.loads((output / "incremental_linker/metadata.json").read_text(encoding="utf-8"))["gate_config"]
+    assert gate["training_summary"] == {"t_full": 0.702, "t_init": 0.792}
+    model = load_production_model(output)
+    assert model.cluster_model.eps == 0.38
+    assert json.loads((tmp_path / "review.json").read_text(encoding="utf-8"))["gate_cutoffs"] == [0.702, 0.792]

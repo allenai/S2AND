@@ -163,7 +163,9 @@ the giant curve is flat, and it misses wrong merges among unlabeled mentions. Th
 0.38 failed blind judging, with at least 30% wrong.
 
 Sweep all `eps_cal` blocks into one folder per dataset as a diagnostic. Hide ORCID and keep the full
-clustering population. Apply 0.38 with the review, which checks it against the F1 tolerance of the pooled peak.
+clustering population. Apply 0.38 with the review's no-sweep form, which records a review note instead of a gold
+F1 check: the sweep form's giant F1 tolerance can reject 0.38, because gold F1 favors looser cuts. The same call
+stamps judged gate cutoffs onto the trained bundle with `--gate-cutoffs T_FULL T_INIT` and keeps the ranker bytes.
 
 To move EPS, blind-judge the merges a candidate value adds or removes relative to 0.38. Pass only if at most
 15% are wrong and the 95% upper bound is at most 25%. Reload the reviewed model and verify its EPS before
@@ -178,9 +180,8 @@ uv run --offline --no-sync python -m scripts.eps.sweep_eps_on_linking_gold \
   --output-dir eps/a_ross --n-jobs N
 uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
   --source-model finalized-1.5 --output-model reviewed-model \
-  --sweep-root eps --datasets a_ross --expected-batching-threshold 15000 \
-  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --eps 0.38 --precision-f1-tolerance 0.001 --review-note "Record the review decision." \
+  --eps 0.38 --gate-cutoffs T_FULL T_INIT \
+  --review-note "Cite the judged merge check and the judged cutoff packages." \
   --output-report eps-review.json
 uv run --offline --no-sync python -m scripts.eps.orcid_b3 \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \

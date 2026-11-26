@@ -223,21 +223,13 @@ class BlockEligibility:
         """Return score-eligible gold labels for this block."""
         return {sid: orcid for sid in self.rows if (orcid := self.eligibility(sid).score_orcid) is not None}
 
-    @staticmethod
-    def _component_is_safe(decisions: list[Eligibility]) -> bool:
-        return (
-            all(decision.fit_ok for decision in decisions)
-            and len(set().union(*(decision.identities for decision in decisions))) <= 1
-        )
-
-    def component_is_safe(self, members: Collection[str]) -> bool:
-        """Check every member for fit eligibility and mixed evidence."""
-        return self._component_is_safe([self.eligibility(sid) for sid in members])
-
     def component_label(self, members: Collection[str]) -> str | None:
         """Label a component when all members pass and its evidence identifies one author."""
         decisions = [self.eligibility(sid) for sid in members]
-        if not self._component_is_safe(decisions):
+        if (
+            any(not decision.fit_ok for decision in decisions)
+            or len(set().union(*(decision.identities for decision in decisions))) > 1
+        ):
             return None
         return next((decision.score_orcid for decision in decisions if decision.score_orcid is not None), None)
 

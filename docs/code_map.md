@@ -23,7 +23,7 @@
 
 | Stage | Scripts | Output |
 | --- | --- | --- |
-| Intake | [`convert_to_arrow.py`](../scripts/intake/convert_to_arrow.py), [`prepare_identity_labels.py`](../scripts/intake/prepare_identity_labels.py), [`assign_block_roles.py`](../scripts/intake/assign_block_roles.py) | Arrow datasets, verified identity labels, and frozen block roles |
+| Intake | [`convert_to_arrow.py`](../scripts/intake/convert_to_arrow.py), [`build_identity_evidence.py`](../scripts/intake/build_identity_evidence.py), [`assign_block_roles.py`](../scripts/intake/assign_block_roles.py) | Arrow datasets, verified identity evidence, and frozen block roles |
 | Judging | [`review_packets.py`](../scripts/judging/review_packets.py) | Blind review packets, control keys, and judge scores |
 | Pairwise | [`prepare_pairwise_inputs.py`](../scripts/pairwise/prepare_pairwise_inputs.py), [`package_pairwise_inputs.py`](../scripts/pairwise/package_pairwise_inputs.py), [`train_pairwise.py`](../scripts/pairwise/train_pairwise.py), [`release_pairwise.py`](../scripts/pairwise/release_pairwise.py) | Portable pairwise inputs, both boosters and benchmark EPS. `release_pairwise.py evaluate-heldout` scores the held-out test after the linker stage writes a complete model |
 | Linker | [`build_linker_task_tables.py`](../scripts/linker/build_linker_task_tables.py), [`linker_source_bundle.py`](../scripts/linker/linker_source_bundle.py), [`train_linker_and_finalize.py`](../scripts/linker/train_linker_and_finalize.py) | Frozen task tables, a complete model, and linker evaluation |

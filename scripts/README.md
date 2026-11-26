@@ -17,11 +17,10 @@ Follow the [release process](../docs/release.md) for production runs.
 | `linker/train_linker_and_finalize.py` | One-fit complete-bundle linker finalization, reload, and evaluation |
 | `pairwise/release_pairwise.py` | Validation-only EPS calibration (`calibrate-eps`) and outer-test evaluation (`evaluate-heldout`) |
 | `release/rebind_name_counts_index.py` | Bind a copy of a complete model to a rebuilt `name_counts_index/` without refitting |
-| `intake/prepare_identity_labels.py` | Join and audit external Gold ORCID `(paper_id, position)` labels onto Arrow block signatures |
+| `intake/build_identity_evidence.py` | Join and audit Gold ORCID labels against a frozen Arrow snapshot |
 | `intake/assign_block_roles.py` | Deterministically partition production blocks into ORCID-disjoint 1.5 training, tuning, and test pools |
 | `intake/gate_public_snapshot.py` | Intake-once S2AG paper filtering, abstract redaction, email scrubbing, and `population_corrections.json` generation |
 | `judging/review_packets.py` | Leak-proof blind Sol 6.2 review packet builder, embedded ORCID control injector, and pre-launch validator |
-| `intake/hash_release_emails.py` | Hash structured emails, scrub free-text emails at intake, and scan staged release bundles for plaintext emails |
 | `linker/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](intake/README.md) |
 | `intake/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `intake/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](intake/counts/README.md) |
@@ -79,7 +78,7 @@ Code that several stages import. Stage folders import from here, not from each o
 | `common/arrow_roots.py` | Read, copy and rebind Arrow collection roots; check their name-count index binding |
 | `common/block_roles.py` | Read frozen block roles and apply their ORCID scoring policy |
 | `common/distance_policy.py` | `DISTANCE_POLICY_VERSION`, which EPS curves and linker task tables record |
-| `common/email_redaction.py` | Hash and scrub emails, and scan trees for plaintext emails; `intake/hash_release_emails.py` is its command line |
+| `common/email_redaction.py` | Hash and scrub emails, and scan trees for plaintext emails |
 | `common/initial_query_sources.py` | Verify derived query origins against the source signature tables |
 | `common/orcid_references.py` | `EXCLUDED_ORCID_GROUPS` and the external ORCID reference-label reader |
 | `common/release_root_checks.py` | `validate_release_root`, the local Arrow release-root check; `release/verification/validate_local_arrow_release.py` is its command line |
@@ -117,11 +116,9 @@ Look up a former path to find its current location.
 | `scripts/production/data/build_linker_task_tables.py` | [linker/build_linker_task_tables.py](linker/build_linker_task_tables.py) |
 | `scripts/production/data/check_v14_training_overlap.py` | [intake/check_v14_training_overlap.py](intake/check_v14_training_overlap.py) |
 | `scripts/production/data/gate_public_snapshot.py` | [intake/gate_public_snapshot.py](intake/gate_public_snapshot.py) |
-| `scripts/production/data/hash_release_emails.py` | [intake/hash_release_emails.py](intake/hash_release_emails.py) |
 | `scripts/production/data/mine_pairwise_pairs.py` | [pairwise/mine_pairwise_pairs.py](pairwise/mine_pairwise_pairs.py) |
 | `scripts/production/data/package_corrected_datasets.py` | [release/package_corrected_datasets.py](release/package_corrected_datasets.py) |
 | `scripts/production/data/package_pairwise_inputs.py` | [pairwise/package_pairwise_inputs.py](pairwise/package_pairwise_inputs.py) |
-| `scripts/production/data/prepare_identity_labels.py` | [intake/prepare_identity_labels.py](intake/prepare_identity_labels.py) |
 | `scripts/production/data/prepare_pairwise_inputs.py` | [pairwise/prepare_pairwise_inputs.py](pairwise/prepare_pairwise_inputs.py) |
 | `scripts/production/data/review_packets.py` | [judging/review_packets.py](judging/review_packets.py) |
 | `scripts/production/data/write_release_bundles.py` | [release/write_release_bundles.py](release/write_release_bundles.py) |

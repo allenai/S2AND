@@ -26,17 +26,6 @@ CLUSTERING_SOURCE = "Clusterer.predict_eps_grid_from_rust_featurizer"
 RELEASE_ROUTE = "production"
 
 
-def select_eps(pooled_curve: Mapping[float, float], tolerance: float) -> float:
-    """Return the smallest swept EPS within the pooled F1 tolerance of the peak.
-
-    Args:
-        pooled_curve: Swept EPS values mapped to their pooled F1 scores.
-        tolerance: Maximum loss in F1 on the [0, 1] scale.
-    """
-    minimum_f1 = max(pooled_curve.values()) - tolerance
-    return min(eps for eps, f1 in pooled_curve.items() if f1 >= minimum_f1)
-
-
 def write_json(path: Path, payload: Any) -> None:
     """Write pretty JSON with a trailing newline."""
 

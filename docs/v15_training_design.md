@@ -161,10 +161,16 @@ reviewed settings with `--false-abstain-weight` or `--initial-only-offset`.
 
 ### 4. Sweep production EPS and score the frozen candidate
 
-Sweep all `eps_cal` blocks into one folder per dataset. Hide ORCID and keep the full clustering population.
-Pool B-cubed (B3) over verified, eligible signatures. Apply the smallest swept EPS within the F1 tolerance
-of the pooled peak. Other swept values require `--override-eps-rule` and a review note. Tolerances above
-`0.005` require `--allow-wide-tolerance`. Reload the reviewed model and verify its EPS before final testing.
+EPS stays at 0.38, the value 1.4 shipped, until judged evidence moves it. Gold B-cubed (B3) cannot choose EPS:
+the giant curve is flat, and it misses wrong merges among unlabeled mentions. The merges that EPS 0.40 adds over
+0.38 failed blind judging, with at least 30% wrong.
+
+Sweep all `eps_cal` blocks into one folder per dataset as a diagnostic. Hide ORCID and keep the full
+clustering population. Apply 0.38 with the review, which checks it against the F1 tolerance of the pooled peak.
+
+To move EPS, blind-judge the merges a candidate value adds or removes relative to 0.38. Pass only if at most
+15% are wrong and the 95% upper bound is at most 25%. Reload the reviewed model and verify its EPS before
+final testing.
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.eps.sweep_eps_on_linking_gold \

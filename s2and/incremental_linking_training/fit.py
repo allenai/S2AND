@@ -210,6 +210,8 @@ def fit_linker(
         calibration_splits=calibration_splits,
         fit_splits=fit_splits,
         validation_splits=validation_splits,
+        grouped_cv=frozen_task_rows is not None,
+        initial_only_offset=promoted_gate_config.get("initial_only_offset", 0.0),
         error_weights={
             **LOGISTIC_GATE_ERROR_WEIGHTS,
             "false_abstain": promoted_gate_config["false_abstain_weight"],

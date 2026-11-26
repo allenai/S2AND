@@ -50,6 +50,23 @@ FULL_MATERIALIZATION_SUMMARIES = tuple(
 )
 
 
+def test_frozen_smoke_sample_covers_marked_gate_blocks() -> None:
+    marked = frozenset(f"block {i}" for i in range(1, 5))
+    rows = pd.DataFrame(
+        [
+            {"dataset": block, "query_group_id": f"{block}:{query}", "label": label}
+            for block in ["block 0", *sorted(marked)]
+            for query in range(8)
+            for label in (0, query % 2)
+        ]
+    )
+    sampled = promoted_train._sample_query_groups_for_smoke(rows, 8, gate_training_blocks=marked)
+    assert set(sampled["dataset"]) == marked
+    assert sampled.groupby("dataset")["query_group_id"].nunique().to_dict() == dict.fromkeys(marked, 2)
+    assert sampled.groupby(["dataset", "query_group_id"])["label"].max().groupby("dataset").sum().eq(1).all()
+    assert sampled.groupby("query_group_id").size().eq(2).all()
+
+
 def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         promoted_train,

@@ -126,8 +126,10 @@ Use an aggregate `final_test` target or distinct half targets. Giant caps map ro
 above 15,000 signatures and include pinned blocks. Pass quoted leakage-test block keys to
 `--fit-pool-blocks`. Keep legacy and reviewed `dev_test` keys out of that list. Inspect target and
 stratum shortfalls and cross-role identity and mention counts.
+The gate subset defaults to 20 blocks, capped by the available `fit_pool` blocks.
 For an append, build a new freeze input from the expanded evidence manifest and pass the previous
 `assignments.json` with `--pinned-roles-json`. Prior roles and pairwise fold membership are pinned.
+Existing gate marks are kept on append unless you pass a new `--gate-training-block-count`.
 Use `--fresh --pinned-roles-json freeze/assignments.json` without allocation options to reproduce
 the master on the same blocks. After an append, rebuild hash-bound artifacts with the new master.
 Judging keys retain their per-block evidence, eligibility, and seed checks.
@@ -193,6 +195,8 @@ windows and leaves unresolved outcomes unscored. Use `--blocks` and a fresh outp
 inspect a subset. Training requires every frozen block for each task role. Keep the linker input
 receipts available so the trainer can check the input model, name-counts index, and seed digests.
 Rebuild older ledger-backed task tables to include the receipt paths.
+The gate selects logistic `C` and feature count `k` by four-fold cross-validation grouped by block, minimizing binary safe-link log loss across at least four marked blocks with scored queries.
+The gate keeps `query_view_initial_only` and adds `classic.promoted_stratified_gate.initial_only_offset` (default `0.0`) to its safe-class weight after folding the scaler into the weights.
 
 ### 10. Mine pairs and train the pairwise heads
 

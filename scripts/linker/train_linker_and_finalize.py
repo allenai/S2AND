@@ -1332,7 +1332,9 @@ def _finalize_arrow_rust_bundle_metadata(
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target)
 
 
-def _sample_query_groups_for_smoke(labels: pd.DataFrame, max_query_groups: int) -> pd.DataFrame:
+def _sample_query_groups_for_smoke(
+    labels: pd.DataFrame, max_query_groups: int, *, gate_training_blocks: frozenset[str] = frozenset()
+) -> pd.DataFrame:
     """Deterministically cap a row table to at most ``max_query_groups`` query groups.
 
     Preserves both positive-bearing and all-negative query groups when both exist so
@@ -1348,8 +1350,18 @@ def _sample_query_groups_for_smoke(labels: pd.DataFrame, max_query_groups: int) 
         return labels
     if "label" in labels.columns and max_query_groups >= 2:
         has_pos = labels.groupby(query_ids)["label"].max() > 0
-        pos_qids = sorted(str(qid) for qid, flag in has_pos.items() if bool(flag))
-        neg_qids = sorted(str(qid) for qid, flag in has_pos.items() if not bool(flag))
+        if gate_training_blocks:
+            # Spread each label across marked blocks to give grouped CV usable folds.
+            blocks = labels["dataset"].groupby(query_ids).first()
+            order = pd.DataFrame(
+                {
+                    "unmarked": ~blocks.isin(gate_training_blocks),
+                    "position": has_pos.groupby([blocks, has_pos]).cumcount(),
+                }
+            ).sort_values(["unmarked", "position"])
+            has_pos = has_pos.reindex(order.index)
+        pos_qids = [str(qid) for qid, flag in has_pos.items() if bool(flag)]
+        neg_qids = [str(qid) for qid, flag in has_pos.items() if not bool(flag)]
         selected: list[str] = []
         pos_idx = 0
         neg_idx = 0
@@ -2116,7 +2128,11 @@ def _materialize_frozen_linker_tasks(
         if rows["dataset"].value_counts().to_dict() != expected_counts:
             raise ValueError(f"Frozen linker rows do not match block counts: {table_path}")
         if max_query_groups is not None:
-            rows = _sample_query_groups_for_smoke(rows, max_query_groups)
+            rows = _sample_query_groups_for_smoke(
+                rows,
+                max_query_groups,
+                gate_training_blocks=roles.gate_training_blocks if role == "fit_pool" else frozenset(),
+            )
         materialized = []
         for block, block_rows in rows.groupby("dataset", sort=False):
             spec = table["blocks"][block]

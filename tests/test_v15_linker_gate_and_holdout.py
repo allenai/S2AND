@@ -9,6 +9,7 @@ import pytest
 
 from s2and.incremental_linking_training import classic as classic_training
 from s2and.incremental_linking_training import fit as fit_module
+from s2and.incremental_linking_training import gate as gate_module
 from s2and.incremental_linking_training.classic import (
     _fit_promoted_logistic_gate,
     _promoted_stratified_gate_spec,
@@ -49,7 +50,7 @@ def _synthetic_gate_data() -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
             rows.append(
                 {
                     "query_group_id": qid,
-                    "dataset": "unit",
+                    "dataset": f"block {idx // 10}",
                     "query_view": "full" if idx % 2 == 0 else "initial_only",
                     "candidate_component_key": f"blk::c_{idx}_{rank}",
                     "retrieval_rank": rank,
@@ -116,7 +117,8 @@ def test_promoted_stratified_gate_spec_validates_fit_and_validation_splits() -> 
         )
 
 
-def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> None:
+@pytest.mark.parametrize("grouped_cv", [False, True])
+def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid(grouped_cv: bool) -> None:
     rows, choices, probs = _synthetic_gate_data()
     res1 = _fit_promoted_logistic_gate(
         rows,
@@ -126,6 +128,7 @@ def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> N
         fit_splits=("calibration_fit",),
         validation_splits=("calibration_check",),
         selection_feature_count=4,
+        grouped_cv=grouped_cv,
     )
     assert res1["validation_metrics"] is not None
     summary = res1["gate_config"]["training_summary"]
@@ -146,16 +149,19 @@ def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> N
         fit_splits=("calibration_fit",),
         validation_splits=("calibration_check",),
         selection_feature_count=4,
+        grouped_cv=grouped_cv,
     )
     assert res1["gate_config"]["weights"] == res2["gate_config"]["weights"]
     assert res1["gate_config"]["bias"] == res2["gate_config"]["bias"]
+    if grouped_cv:
+        assert summary["grouped_cv"] == res2["gate_config"]["training_summary"]["grouped_cv"]
 
     # Default grid includes the production 0.25 baseline and rejects empty choices.
     val_qids = set(choices.loc[val_mask, "query_case_id"].astype(str))
     row_val_mask = rows["query_group_id"].astype(str).isin(val_qids).to_numpy()
     config = {
         **res1["gate_config"],
-        "weights": [[0.0] * 3] * 4,
+        "weights": [[0.0] * 3] * len(res1["gate_config"]["feature_names"]),
         "bias": np.log([0.10, 0.025, 0.875]).tolist(),
     }
     report = report_logistic_gate_error_weights(
@@ -180,6 +186,37 @@ def test_fit_promoted_logistic_gate_separates_fit_and_reports_weight_grid() -> N
         report_logistic_gate_error_weights(res1["gate_config"], rows.iloc[:0], choices.iloc[:0], np.array([]))
 
 
+def test_initial_only_offset_changes_one_folded_weight(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows, choices, probabilities = _synthetic_gate_data()
+    fold = gate_module._fold_standard_scaler_into_logistic
+    folded_weights = []
+
+    def capture_fold(scaler, model):
+        weights, bias = fold(scaler, model)
+        folded_weights.append(weights.copy())
+        return weights, bias
+
+    monkeypatch.setattr(gate_module, "_fold_standard_scaler_into_logistic", capture_fold)
+    kwargs = {"calibration_splits": ("calibration_fit", "calibration_check"), "selection_feature_count": 4}
+    default = _fit_promoted_logistic_gate(rows, choices, probabilities, **kwargs)["gate_config"]
+    zero = _fit_promoted_logistic_gate(rows, choices, probabilities, initial_only_offset=0.0, **kwargs)["gate_config"]
+    shifted = _fit_promoted_logistic_gate(rows, choices, probabilities, initial_only_offset=1.5, **kwargs)[
+        "gate_config"
+    ]
+
+    assert zero["training_summary"]["initial_only_offset"] == default["training_summary"]["initial_only_offset"] == 0
+    assert shifted["training_summary"]["initial_only_offset"] == 1.5
+    assert shifted["feature_names"] == zero["feature_names"]
+    assert shifted["bias"] == zero["bias"]
+    assert shifted["missing_values"] == zero["missing_values"]
+    weights = np.asarray(zero["weights"])
+    assert weights.tobytes() == np.asarray(default["weights"]).tobytes() == folded_weights[1].tobytes()
+    shifted_weights = np.asarray(shifted["weights"])
+    cell = (zero["feature_names"].index("query_view_initial_only"), zero["classes"].index(2))
+    assert np.argwhere(weights != shifted_weights).tolist() == [list(cell)]
+    assert shifted_weights[cell] == weights[cell] + 1.5
+
+
 @pytest.mark.parametrize("configured_weight, fixed", [(None, False), (0.34, False), (None, True)])
 def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured_weight: float | None, fixed: bool
@@ -202,7 +239,12 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
             return np.column_stack((1 - positive, positive))
 
     monkeypatch.setattr(fit_module, "_build_classic_classifier", lambda *_args, **_kwargs: Ranker())
-    gate = {"false_abstain_weight": configured_weight} if configured_weight is not None else {}
+    offset = 1.5 if configured_weight is not None else 0.0
+    gate = (
+        {"false_abstain_weight": configured_weight, "initial_only_offset": offset}
+        if configured_weight is not None
+        else {}
+    )
     bundle = classic_training.OfficialBundle(
         root=tmp_path,
         bundle_name="fixture",
@@ -227,15 +269,31 @@ def test_fit_classic_uses_frozen_roles_and_keeps_the_configured_gate_weight(
             "fit_pool": fit_pool,
             "gate_thresh": gate_thresh,
         },
-        gate_training_blocks={"unit"},
+        gate_training_blocks={f"block {i}" for i in range(4)},
         **ranker_args,
     )
     assert fitted_rows == ([] if fixed else [156])
     if fixed:
         assert result.model is fixed_ranker
         assert result.training_summary["ranker_refit"] is False
-    assert result.gate_config["training_summary"]["fit_queries"] == 39
-    assert result.gate_config["training_summary"]["validation_queries"] == 20
+    summary = result.gate_config["training_summary"]
+    assert summary["fit_queries"] == 39
+    assert summary["validation_queries"] == 20
+    assert summary["initial_only_offset"] == offset
+    assert "query_view_initial_only" in result.gate_config["feature_names"]
+    cv = summary["grouped_cv"]
+    assert sorted(block for fold in cv["folds"] for block in fold["blocks"]) == [f"block {i}" for i in range(4)]
+    assert sorted(fold["queries"] for fold in cv["folds"]) == [9, 10, 10, 10]
+    assert cv["k_grid"] == [60, 120, 240, "all"]
+    assert cv["c_grid"] == [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0]
+    losses = np.array([fold["log_loss"] for fold in cv["folds"]])
+    assert losses.shape == (4, 4, 7)
+    assert np.isfinite(losses).all()
+    means = np.average(losses, weights=[fold["queries"] for fold in cv["folds"]], axis=0)
+    np.testing.assert_array_equal(cv["mean_log_loss"], means)
+    ki, ci = np.unravel_index(means.argmin(), means.shape)
+    assert cv["selected_k"] == cv["k_grid"][ki]
+    assert cv["selected_c"] == cv["c_grid"][ci] == summary["final_c"]
     assert result.gate_config["error_weights"]["false_abstain"] == (configured_weight or 0.25)
     report = result.abstain_rule_summary["promoted_logistic_gate"]["false_abstain_weight_report"]
     assert report["n_queries"] == 20

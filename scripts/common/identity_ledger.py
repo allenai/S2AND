@@ -139,7 +139,11 @@ def load_identity_evidence(path: Path) -> IdentityEvidence:
     """Load one evidence manifest and verify the exclusion policy."""
     path = path.resolve()
     payload = read_json_object(path)
-    if payload.get("format_version") != 1 or not isinstance(payload.get("blocks"), dict) or not payload["blocks"]:
+    if (
+        payload.get("format_version") != 1
+        or not isinstance(payload.get("blocks"), dict)
+        or not (payload["blocks"] or payload.get("excluded_blocks"))
+    ):
         raise ValueError(f"Invalid identity evidence manifest: {path}")
     if payload.get("excluded_orcid_groups_sha256") != excluded_orcid_groups_digest():
         raise ValueError(f"Identity evidence uses different excluded ORCID groups: {path}")

@@ -427,7 +427,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
         mine_pairs(role_path, specs, tmp_path / "mixed-model.csv", per_block=1, identity_evidence=evidence)
 
 
-def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
+def test_evidence_excludes_over_limit_blocks_and_rejects_stale_exclusions(
     evidence_inputs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from scripts.common import identity_ledger, orcid_references
@@ -438,13 +438,22 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
     output = tmp_path / "identity"
     missing = original.slice(0, 1).set_column(1, "corpus_paper_id", pa.array([999]))
     pq.write_table(pa.concat_tables([original, missing]), gold)
-    with pytest.raises(ValueError, match="a lovelace.*unmatched gold"):
-        build_identity_evidence(snapshot, gold, output)
-    assert not (output / "manifest.json").exists()
+    excluded = build_identity_evidence(snapshot, gold, output)
+    assert excluded["excluded_blocks"] == {"a lovelace": ["unmatched_gold", "absent_from_export"]}
+    assert excluded["exclusions_by_reason"] == {"unmatched_gold": 1, "absent_from_export": 1}
+    assert set(excluded["blocks"]) == {"g hopper"}
+    assert identity_ledger.load_identity_evidence(output / "manifest.json").read_block("g hopper").keys() == {"5-0"}
+    resumed = build_identity_evidence(
+        snapshot, gold, output, max_unmatched_gold=0.25, max_absent_from_export=0.25, append=True
+    )
+    assert not resumed["excluded_blocks"]
+    assert set(resumed["blocks"]) == {"a lovelace", "g hopper"}
+    assert resumed["blocks"]["g hopper"] == excluded["blocks"]["g hopper"]
     pq.write_table(missing, gold)
     with pytest.raises(ValueError, match="No gold rows matched"):
-        build_identity_evidence(snapshot, gold, output, max_unmatched_gold=1)
+        build_identity_evidence(snapshot, gold, tmp_path / "no-match", max_absent_from_export=1)
     pq.write_table(original, gold)
+    output = tmp_path / "within-limit"
     build_identity_evidence(snapshot, gold, output, max_unmatched_gold=FIXTURE_UNMATCHED_LIMIT)
     monkeypatch.setattr(orcid_references, "EXCLUDED_ORCID_GROUPS", frozenset({GOLD}))
     with pytest.raises(ValueError, match="excluded ORCID groups"):
@@ -452,13 +461,10 @@ def test_evidence_rejects_unmatched_gold_and_stale_exclusions(
 
 
 def test_unmatched_gold_limit_ignores_vetoed_same_paper_rows() -> None:
-    from scripts.intake.build_identity_evidence import unmatched_gold_over_limit
+    from scripts.intake.build_identity_evidence import _join_error_count
 
     # A Vietnamese block with many same-surname coauthors must not fail on its vetoed rows alone.
-    assert unmatched_gold_over_limit({"ambiguous_paper_block": 50}, 100, 0.02) is None
-    assert unmatched_gold_over_limit({"ambiguous_paper_block": 50, "position_shift": 3}, 100, 0.02) == 3
-    assert unmatched_gold_over_limit({"absent_from_export": 2}, 100, 0.02) is None
-    assert unmatched_gold_over_limit({}, 0, 0.02) is None
+    assert _join_error_count({"ambiguous_paper_block": 50, "absent_from_export": 2, "position_shift": 3}) == 3
 
 
 def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
@@ -487,8 +493,16 @@ def test_unmatched_gold_limit_excludes_permission_filtered_rows_per_block(
     assert audit["permission_filtered_gold_rows"] == 1
     assert not audit.get("dropped_unmatched_paper_position")
     pq.write_table(pa.concat_tables([original, denied, missing]), gold)
-    with pytest.raises(ValueError, match="'a lovelace' has 2/4 unmatched gold.*absent_from_export"):
-        build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.34)
+    result = build_identity_evidence(snapshot, gold, tmp_path / "over-limit", max_unmatched_gold=0.34)
+    assert result["excluded_blocks"] == {"a lovelace": ["absent_from_export"]}
+    audit = result["audit"]["a lovelace"]
+    assert audit["absent_from_export_rows"] == audit["join_error_rows"] == 1
+    assert audit["gold_rows_for_block"] - audit["permission_filtered_gold_rows"] == 4
+    allowed = build_identity_evidence(
+        snapshot, gold, tmp_path / "allow-absence", max_unmatched_gold=0.34, max_absent_from_export=0.25
+    )
+    assert "a lovelace" in allowed["blocks"]
+    assert not allowed["excluded_blocks"]
 
 
 def test_evidence_append_refuses_a_new_block_without_a_gold_match(

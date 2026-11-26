@@ -48,24 +48,17 @@ from scripts.intake.requests_to_datasets import INTAKE_LOCK, SNAPSHOT_BINDING, S
 _GOLD_FIELDS = [("orcid", pa.string()), ("scored", pa.bool_()), ("split", pa.string())]
 
 DEFAULT_MAX_UNMATCHED_GOLD = 0.02
+DEFAULT_MAX_ABSENT_FROM_EXPORT = 0.10
 _UNMATCHED_REASON_PREFIX = "unmatched_gold_"
 # Gold rows on a paper with two mentions in the block are vetoed by design, not failed joins.
 # Same-surname coauthors are common in Vietnamese and South Asian blocks, so capping these
 # rows would drop exactly those blocks from the freeze.
-_UNCAPPED_UNMATCHED_REASONS = frozenset({"ambiguous_paper_block"})
+_NON_JOIN_ERROR_REASONS = frozenset({"ambiguous_paper_block", "absent_from_export"})
 
 
-def unmatched_gold_over_limit(reasons: Mapping[str, int], total: int, limit: float) -> int | None:
-    """Return the capped unmatched count when it exceeds ``limit``, else None.
-
-    Args:
-        reasons: Unmatched gold row counts by reason for one block.
-        total: Gold rows for the block, excluding rows removed by intake permissions.
-        limit: Largest allowed share of capped unmatched rows.
-    """
-
-    capped = sum(count for reason, count in reasons.items() if reason not in _UNCAPPED_UNMATCHED_REASONS)
-    return capped if total and capped / total > limit else None
+def _join_error_count(reasons: Mapping[str, int]) -> int:
+    """Count unmatched rows due to join errors."""
+    return sum(count for reason, count in reasons.items() if reason not in _NON_JOIN_ERROR_REASONS)
 
 
 EVIDENCE_SCHEMA = pa.schema(
@@ -258,12 +251,15 @@ def build_identity_evidence(
     reviewed_errors: dict[str, list[str]] | None = None,
     *,
     max_unmatched_gold: float = DEFAULT_MAX_UNMATCHED_GOLD,
+    max_absent_from_export: float = DEFAULT_MAX_ABSENT_FROM_EXPORT,
     append: bool = False,
 ) -> dict[str, Any]:
     """Write verified evidence partitions for new blocks and preserve existing ones."""
     snapshot, output = snapshot.resolve(), output.resolve()
     with exclusive_file_lock(snapshot / INTAKE_LOCK):
-        return _write_evidence(snapshot, gold, output, reviewed_errors, max_unmatched_gold, append=append)
+        return _write_evidence(
+            snapshot, gold, output, reviewed_errors, max_unmatched_gold, max_absent_from_export, append=append
+        )
 
 
 def _write_evidence(
@@ -272,11 +268,14 @@ def _write_evidence(
     output: Path,
     reviewed_errors: dict[str, list[str]] | None,
     max_unmatched_gold: float,
+    max_absent_from_export: float,
     *,
     append: bool,
 ) -> dict[str, Any]:
     if not 0 <= max_unmatched_gold <= 1:
         raise ValueError("Maximum unmatched gold share must be in [0, 1]")
+    if not 0 <= max_absent_from_export <= 1:
+        raise ValueError("Maximum absent-from-export share must be in [0, 1]")
     datasets = generic_dataset_manifests(snapshot)
     blocks = {normalize_block_key(name): (name, path) for name, path in datasets.items()}
     if len(blocks) != len(datasets):
@@ -306,10 +305,12 @@ def _write_evidence(
                 raise ValueError(f"Reviewed errors changed for retained block {block!r}")
             prior.read_block(block, dataset_dir=blocks[block][1].parent)
         metadata.update(prior.blocks)
-        audits.update(payload["audit"])
+        audits.update({block: payload["audit"][block] for block in prior.blocks})
     elif output.exists():
         raise FileExistsError(f"Evidence already exists: {output}. Pass --append to add blocks.")
     new_blocks = {block: spec for block, spec in sorted(blocks.items()) if block not in metadata}
+    excluded: dict[str, list[str]] = {}
+    accepted: list[str] = []
     joins = {}
     for block, (_, path) in new_blocks.items():
         manifest = read_json_object(path)
@@ -321,7 +322,7 @@ def _write_evidence(
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=f".{output.name}.") as tmp:
         staging = Path(tmp) / "evidence"
         staging.mkdir()
-        for index, (block, (dataset, path)) in enumerate(new_blocks.items(), start=len(metadata)):
+        for block, (dataset, path) in new_blocks.items():
             source = path.parent / SOURCE_RECORD
             record = read_json_object(source)
             filtered = record.get("permission_filtered_papers")
@@ -346,22 +347,28 @@ def _write_evidence(
                 filtered_papers,
                 retained_papers=retained,
             )
-            if append and not audit["matched_gold_rows"]:
-                raise ValueError(f"No gold rows matched the appended block {block!r}")
             reasons = {
                 key.removeprefix(_UNMATCHED_REASON_PREFIX): count
                 for key, count in sorted(audit.items())
                 if key.startswith(_UNMATCHED_REASON_PREFIX) and count
             }
             audit["unmatched_gold_rows"] = sum(reasons.values())
+            audit["absent_from_export_rows"] = reasons.get("absent_from_export", 0)
+            audit["join_error_rows"] = _join_error_count(reasons)
+            audits[block] = dict(audit)
             total = audit["gold_rows_for_block"] - audit["permission_filtered_gold_rows"]
-            capped = unmatched_gold_over_limit(reasons, total, max_unmatched_gold)
-            if capped is not None:
-                raise ValueError(
-                    f"{block!r} has {capped}/{total} unmatched gold rows ({capped / total:.2%}); "
-                    f"--max-unmatched-gold is {max_unmatched_gold:.2%}. Reasons: {reasons}"
-                )
-            destination = staging / f"block-{index:06d}.parquet"
+            limits = {
+                "unmatched_gold": (audit["join_error_rows"], max_unmatched_gold),
+                "absent_from_export": (audit["absent_from_export_rows"], max_absent_from_export),
+            }
+            if reasons_over_limit := [
+                reason for reason, (count, limit) in limits.items() if total and count / total > limit
+            ]:
+                excluded[block] = reasons_over_limit
+                continue
+            if append and not audit["matched_gold_rows"]:
+                raise ValueError(f"No gold rows matched the appended block {block!r}")
+            destination = staging / f"block-{len(metadata):06d}.parquet"
             pq.write_table(pa.Table.from_pylist(rows, schema=EVIDENCE_SCHEMA), destination)
             metadata[block] = {
                 "path": destination.name,
@@ -373,8 +380,8 @@ def _write_evidence(
                 "request_source_sha256": sha256_file(source),
                 "reviewed_errors_sha256": canonical_json_digest(sorted(errors.get(block, ()))),
             }
-            audits[block] = dict(audit)
-        if not sum(audit.get("matched_gold_rows", 0) for audit in audits.values()):
+            accepted.append(block)
+        if not excluded and not any(audit.get("matched_gold_rows", 0) for audit in audits.values()):
             raise ValueError("No gold rows matched the intake snapshot")
         result = {
             "format_version": 1,
@@ -386,9 +393,11 @@ def _write_evidence(
             "gold_sha256": gold_digest,
             "blocks": metadata,
             "audit": audits,
+            "excluded_blocks": excluded,
+            "exclusions_by_reason": dict(Counter(reason for reasons in excluded.values() for reason in reasons)),
         }
         if append:
-            for entry in new_blocks:
+            for entry in accepted:
                 filename = metadata[entry]["path"]
                 (staging / filename).replace(output / filename)
             _replace_json(manifest_path, result)
@@ -407,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reviewed-errors-json", type=Path)
     parser.add_argument("--append", action="store_true", help="Verify retained blocks and add new evidence partitions.")
     parser.add_argument("--max-unmatched-gold", type=float, default=DEFAULT_MAX_UNMATCHED_GOLD)
+    parser.add_argument("--max-absent-from-export", type=float, default=DEFAULT_MAX_ABSENT_FROM_EXPORT)
     args = parser.parse_args(argv)
     reviewed = read_json_object(args.reviewed_errors_json) if args.reviewed_errors_json else None
     result = build_identity_evidence(
@@ -415,9 +425,12 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir,
         reviewed,
         max_unmatched_gold=args.max_unmatched_gold,
+        max_absent_from_export=args.max_absent_from_export,
         append=args.append,
     )
-    print(json.dumps(result["audit"], sort_keys=True))
+    print(
+        json.dumps({key: result[key] for key in ("audit", "excluded_blocks", "exclusions_by_reason")}, sort_keys=True)
+    )
     return 0
 
 

@@ -90,8 +90,10 @@ for fitting, mining, and scoring. Position shifts are detected from the same blo
 gold position is missing. A gold row ambiguous within its paper and block vetoes each mention there.
 Only verified gold supplies a score. Freeze identity lists and seed purity
 use matched gold and deposited identities. Inspect the per-block join audit.
-The builder defaults to at most 2% unmatched gold per block. The audit records missing export
-papers, shifted positions, other failed joins, and papers removed by that block's intake permissions.
+The builder caps join errors at 2% per block with `--max-unmatched-gold` and missing export rows at 10%
+with `--max-absent-from-export`. It excludes blocks that exceed either cap and reports exclusion counts
+by reason. The audit records missing export papers, shifted positions, other failed joins, and papers
+removed by that block's intake permissions.
 Gold rows on a paper with two mentions in the block stay vetoed but do not count toward the limit,
 so blocks with many same-surname coauthors (common in Vietnamese and South Asian names) are kept.
 Only papers actually removed at intake are excluded from the denominator. An incomplete permission

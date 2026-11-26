@@ -27,6 +27,7 @@ from scripts.eps.sweep_curves import (
     RELEASE_ROUTE,
     arrow_dataset_dir,
     read_sweep_curve,
+    select_eps,
     write_json,
 )
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
@@ -36,6 +37,13 @@ from tests.raw_arrow_helpers import base_arrow_paths, write_ipc
 from tests.test_production_model import _write_synthetic_linker
 
 pytestmark = pytest.mark.tooling
+
+
+def test_select_eps_uses_smallest_point_within_tolerance() -> None:
+    curve = {0.44: 0.95, 0.38: 0.9489, 0.42: 0.95, 0.40: 0.949}
+    assert select_eps(curve, 0.001) == 0.40
+    assert select_eps(curve, 0.0) == 0.42
+    assert select_eps(curve | {0.39: 0.9495, 0.41: 0.9499}, 0.001) == 0.39
 
 
 def test_reviewed_eps_cli_requires_override_for_wide_tolerance(
@@ -908,13 +916,52 @@ def test_sweep_review_of_a_bonus_bundle_requires_the_f1_tolerance(tmp_path: Path
     with pytest.raises(ValueError, match="needs --precision-f1-tolerance"):
         review(None)
     assert not (tmp_path / "output").exists()
-    with pytest.raises(ValueError, match="below the best swept F1"):
+    with pytest.raises(ValueError, match="differs from the EPS rule's pick 0.65"):
         review(0.01, eps=0.55)
     assert not (tmp_path / "output").exists()
 
     record = review(0.01)["giant_f1_tolerance"]
-    assert (record["best_eps"], record["tolerance"]) == (0.65, 0.01)
+    assert (record["best_eps"], record["rule_eps"], record["tolerance"]) == (0.65, 0.65, 0.01)
+    assert record["rule_overridden"] is False
     assert record["selected_f1"] == pytest.approx(8 / 9)
+
+
+def test_reviewed_eps_cli_requires_a_noted_override_for_a_tied_higher_eps(tmp_path: Path) -> None:
+    source = _complete_model(tmp_path)
+    curves, output, report = tmp_path / "curves", tmp_path / "output", tmp_path / "review.json"
+    _curve(curves, sha256_file(source / "manifest.json"))
+    options = [
+        "--source-model",
+        str(source),
+        "--output-model",
+        str(output),
+        "--sweep-root",
+        str(curves),
+        "--datasets",
+        "unit",
+        "--expected-batching-threshold",
+        "15000",
+        "--eps",
+        "0.65",
+        "--precision-f1-tolerance",
+        "0.001",
+        "--output-report",
+        str(report),
+    ]
+    note = "Prefer the higher EPS for recall."
+    with pytest.raises(ValueError, match="differs from the EPS rule's pick 0.55"):
+        apply_reviewed_eps_module.main([*options, "--review-note", note])
+    with pytest.raises(ValueError, match="review note is required"):
+        apply_reviewed_eps_module.main([*options, "--override-eps-rule", "--review-note", " "])
+    assert not output.exists()
+    assert not report.exists()
+
+    apply_reviewed_eps_module.main([*options, "--override-eps-rule", "--review-note", note])
+    result = json.loads(report.read_bytes())
+    assert result["review_note"] == note
+    assert result["giant_f1_tolerance"]["rule_eps"] == 0.55
+    assert result["giant_f1_tolerance"]["rule_overridden"] is True
+    assert load_production_model(output).cluster_model.eps == 0.65
 
 
 def _second_block(tmp_path: Path, *, eps: list[float], recall: list[float], references: int) -> None:

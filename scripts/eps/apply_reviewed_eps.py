@@ -50,6 +50,7 @@ from scripts.eps.sweep_curves import (
     SINGLETON_INCLUSIVE_CURVE,
     read_singleton_inclusive_curve,
     read_sweep_curve,
+    select_eps,
     write_json,
 )
 
@@ -300,31 +301,33 @@ def _pooled_curve(sweep_root: Path, datasets: Sequence[str]) -> pd.DataFrame:
     return pooled
 
 
-def _giant_f1_tolerance(sweep_root: Path, datasets: Sequence[str], eps: float, tolerance: float) -> dict[str, Any]:
-    """Require pooled giant-block F1 at the reviewed EPS to be within ``tolerance`` of the swept best.
-
-    This is the giant-block half of the plan's ``precision_f1_tolerance``: calibration takes the
-    most precise setting within the tolerance on validation, and this check keeps that choice
-    from costing more than the same tolerance on giant blocks.
+def _giant_f1_tolerance(
+    sweep_root: Path, datasets: Sequence[str], eps: float, tolerance: float, *, override_eps_rule: bool
+) -> dict[str, float | bool]:
+    """Record the EPS rule's pick and check the reviewed EPS against it.
 
     Raises:
-        ValueError: F1 at ``eps`` is more than ``tolerance`` below the best swept F1.
+        ValueError: The reviewed EPS differs from the rule's pick without an override.
     """
-
-    pooled = _pooled_curve(sweep_root, datasets)
-    best_eps = float(pooled["f1"].idxmax())
-    record = {
+    f1_by_eps = {float(value): float(f1) for value, f1 in _pooled_curve(sweep_root, datasets)["f1"].items()}
+    rule_eps = select_eps(f1_by_eps, tolerance)
+    best_eps = max(f1_by_eps, key=f1_by_eps.__getitem__)
+    reviewed_eps = round(eps, 10)
+    differs = reviewed_eps != rule_eps
+    if differs and not override_eps_rule:
+        raise ValueError(
+            f"Reviewed EPS {eps:g} differs from the EPS rule's pick {rule_eps:g} "
+            f"(smallest swept EPS within {tolerance:g} of the best pooled F1). "
+            "Use --override-eps-rule with a review note to override."
+        )
+    return {
         "tolerance": tolerance,
         "best_eps": best_eps,
-        "best_f1": float(pooled["f1"].max()),
-        "selected_f1": float(pooled.at[round(eps, 10), "f1"]),
+        "best_f1": f1_by_eps[best_eps],
+        "selected_f1": f1_by_eps[reviewed_eps],
+        "rule_eps": rule_eps,
+        "rule_overridden": differs,
     }
-    if record["selected_f1"] < record["best_f1"] - tolerance:
-        raise ValueError(
-            f"Giant-block F1 {record['selected_f1']:.6f} at EPS {eps} is more than {tolerance:g} below "
-            f"the best swept F1 {record['best_f1']:.6f} at EPS {best_eps}"
-        )
-    return record
 
 
 def apply_reviewed_eps(
@@ -341,6 +344,7 @@ def apply_reviewed_eps(
     close_pair: tuple[float, float] | None = None,
     release_version: str | None = None,
     precision_f1_tolerance: float | None = None,
+    override_eps_rule: bool = False,
     block_role_assignments: Path | None = None,
     identity_evidence: Path | None = None,
 ) -> dict[str, Any]:
@@ -348,7 +352,8 @@ def apply_reviewed_eps(
 
     ``close_pair`` is the reviewed (close_pair_bonus, close_pair_distance); None keeps the source's
     setting. ``release_version`` names a model that differs from its source only in linkage settings.
-    ``precision_f1_tolerance`` is the model plan's value; see ``_giant_f1_tolerance``.
+    ``precision_f1_tolerance`` is the model plan's value. When set, require the EPS picked by
+    the rule unless ``override_eps_rule`` is set and the review note explains the decision.
 
     With a sweep root, check the expected subblock limit and require the requested datasets
     to match the snapshot's calibration assignments outside ``s2and_eval``.
@@ -379,6 +384,8 @@ def apply_reviewed_eps(
             raise ValueError("The giant-block F1 tolerance needs a snapshot sweep")
         if not math.isfinite(precision_f1_tolerance) or not 0 <= precision_f1_tolerance <= 1:
             raise ValueError("The F1 tolerance must be within [0, 1]")
+    elif override_eps_rule:
+        raise ValueError("--override-eps-rule requires --precision-f1-tolerance and a snapshot sweep")
     if output.exists() or report_path.exists():
         raise FileExistsError("Use new model and review-report paths")
     if source in output.parents or output in source.parents:
@@ -403,7 +410,9 @@ def apply_reviewed_eps(
     giant_f1_tolerance = (
         None
         if precision_f1_tolerance is None or sweep_root is None
-        else _giant_f1_tolerance(sweep_root.resolve(), datasets, eps, precision_f1_tolerance)
+        else _giant_f1_tolerance(
+            sweep_root.resolve(), datasets, eps, precision_f1_tolerance, override_eps_rule=override_eps_rule
+        )
     )
     load_production_model(source)
     manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
@@ -472,10 +481,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--precision-f1-tolerance",
         type=float,
-        help=(
-            "The model plan's precision_f1_tolerance. Reject an EPS whose pooled giant-block F1 is more than "
-            "this below the best swept F1."
-        ),
+        help="The model plan's tolerance for selecting the smallest swept EPS near the best pooled giant-block F1.",
+    )
+    parser.add_argument(
+        "--override-eps-rule",
+        action="store_true",
+        help="Apply a different swept EPS and explain the choice in --review-note.",
     )
     parser.add_argument("--allow-wide-tolerance", action="store_true", help="Allow a tolerance above 0.005.")
     parser.add_argument(
@@ -504,6 +515,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         close_pair=(args.close_pair[0], args.close_pair[1]) if args.close_pair else None,
         release_version=args.release_version,
         precision_f1_tolerance=args.precision_f1_tolerance,
+        override_eps_rule=args.override_eps_rule,
         expected_batching_threshold=args.expected_batching_threshold,
         block_role_assignments=args.block_role_assignments,
         identity_evidence=args.identity_evidence,

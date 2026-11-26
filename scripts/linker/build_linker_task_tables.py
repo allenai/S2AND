@@ -112,9 +112,11 @@ def _freeze_block_rows(
     signatures = _read_signatures(arrow, block, include_orcid=eligibility is None)
     if missing := (set(seeds) | set(query_ids) | set(identities)) - signatures.keys():
         raise ValueError(f"{block!r} inputs reference missing signatures: {sorted(missing)[:5]}")
-    if len(set(query_ids)) != len(query_ids) or set(query_ids) & seeds.keys():
+    query_set = set(query_ids)
+    if len(query_set) != len(query_ids) or query_set & seeds.keys():
         raise ValueError(f"Queries in {block!r} must be unique and absent from the pre-attachment seeds")
     scored = {}
+    decisions = {}
     if eligibility is None:
         scored = {
             sid: orcid
@@ -123,12 +125,23 @@ def _freeze_block_rows(
         }
     else:
         eligibility.require_signatures(signatures.keys())
-        if role != "gate_thresh":
-            scored = eligibility.scored()
-        if any(not eligibility.eligibility(sid).fit_ok for sid in query_ids):
+        decisions = {sid: eligibility.eligibility(sid) for sid in signatures}
+        eligible = {sid for sid, decision in decisions.items() if decision.fit_ok}
+        if query_set - eligible:
             raise ValueError(f"Ineligible query in {block!r}")
-        if role != "gate_thresh" and any(not eligibility.eligibility(sid).fit_ok for sid in seeds):
-            raise ValueError(f"Ineligible fitting seed in {block!r}")
+        if role != "gate_thresh":
+            scored = {
+                sid: decision.score_orcid for sid, decision in decisions.items() if decision.score_orcid is not None
+            }
+            if unscored := query_set - scored.keys():
+                raise ValueError(f"Unscored fitting queries in {block!r}: {sorted(unscored)[:5]}")
+            expected_seeds = eligible - query_set
+            if seeds.keys() != expected_seeds:
+                raise ValueError(
+                    f"Fitting seed coverage differs in {block!r}: "
+                    f"missing={sorted(expected_seeds - seeds.keys())[:5]}, "
+                    f"ineligible={sorted(seeds.keys() - expected_seeds)[:5]}"
+                )
     queries = [query for query in query_ids if query in scored or role == "gate_thresh"]
     members: dict[str, list[str]] = defaultdict(list)
     components_by_orcid: dict[str, set[str]] = defaultdict(set)
@@ -139,7 +152,7 @@ def _freeze_block_rows(
         if eligibility is None:
             evidence_ids = {identities.get(sid), signatures[sid][1]}
         else:
-            decision = eligibility.eligibility(sid)
+            decision = decisions[sid]
             evidence_ids = decision.identities
             if decision.identity_veto:
                 vetoed_components.add(component)

@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from s2and import __version__
+from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_name_counts_index
@@ -28,6 +30,7 @@ from scripts.linker.build_linker_task_tables import (
 )
 from scripts.linker.train_linker_and_finalize import _materialize_frozen_linker_tasks
 from tests.helpers import write_arrow_tables_bundle, write_test_arrow_artifact_manifest
+from tests.stage0_world import build_stage0_world
 
 pytestmark = pytest.mark.tooling
 
@@ -141,6 +144,82 @@ def _block_inputs(
         "labels": str(labels_path),
         "queries": str(query_path),
     }
+
+
+@pytest.mark.parametrize(
+    ("hazard", "error"),
+    [
+        ("missing_seed", r"Fitting seed coverage differs in 'a ross': missing=\['11-0'\]"),
+        ("unscored_query", r"Unscored fitting queries in 'a ross': \['14-0'\]"),
+    ],
+)
+def test_fitting_linker_inputs_reconcile_queries_and_seeds(tmp_path: Path, hazard: str, error: str) -> None:
+    world = build_stage0_world(tmp_path)
+    block = "a ross"
+    spec = world.inputs[block]
+    directory = spec.assignments.parent
+    receipt_path = directory / "manifest.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    common = {key: value for key, value in receipt["binding"].items() if key != "block_bindings"}
+    binding_path = directory / "inputs_binding.json"
+    binding_path.write_text(json.dumps(common), encoding="utf-8")
+    seeds, queries = directory / "seeds.parquet", directory / "queries.json"
+    inputs_path = directory / "inputs.json"
+    inputs_path.write_text(
+        json.dumps(
+            {
+                block: {
+                    "arrow_dir": str(spec.arrow_dir),
+                    "input_manifest": receipt_path.name,
+                    "seeds": seeds.name,
+                    "queries": queries.name,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def write_inputs(query_ids: list[str], omitted: set[str]) -> None:
+        queries.write_text(json.dumps(query_ids), encoding="utf-8")
+        pq.write_table(
+            pa.Table.from_pylist(
+                [
+                    {"signature_id": row["signature_id"], "component_key": row["cluster_id"]}
+                    for row in pq.read_table(spec.assignments).to_pylist()
+                    if row["signature_id"] not in omitted
+                ]
+            ),
+            seeds,
+        )
+        receipt["files"].update({path.name: sha256_file(path) for path in (seeds, queries)})
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    write_inputs(["10-0"], {"10-0"})
+    complete = tmp_path / "complete"
+    build_linker_task_tables(
+        world.roles_path,
+        inputs_path,
+        complete,
+        blocks=[block],
+        identity_evidence=world.evidence_path,
+        holdout_fraction=0,
+    )
+    assert pq.read_table(complete / "fit_pool.parquet")["label"].to_pylist().count(1) == 1
+    if hazard == "missing_seed":
+        write_inputs(["10-0"], {"10-0", "11-0"})
+    else:
+        write_inputs(["10-0", "14-0"], {"10-0", "14-0"})
+    rejected = tmp_path / "rejected"
+    with pytest.raises(ValueError, match=error):
+        build_linker_task_tables(
+            world.roles_path,
+            inputs_path,
+            rejected,
+            blocks=[block],
+            identity_evidence=world.evidence_path,
+            holdout_fraction=0,
+        )
+    assert not (rejected / TASK_MANIFEST).exists()
 
 
 def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(tmp_path: Path) -> None:

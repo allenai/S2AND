@@ -1077,6 +1077,23 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     assert load_production_model(reviewed_model).cluster_model.eps == 0.38
     assert json.loads(report.read_text())["identity_evidence_sha256"] == sha256_file(evidence)
+    for duplicate in ("b_ross", "B Ross"):
+        with pytest.raises(ValueError, match="EPS review datasets must be unique"):
+            apply_reviewed_eps.apply_reviewed_eps(
+                model,
+                tmp_path / "duplicate-model",
+                eps_root,
+                ["b_ross", duplicate],
+                0.38,
+                "Synthetic review",
+                tmp_path / "duplicate-report.json",
+                expected_batching_threshold=3,
+                precision_f1_tolerance=0.01,
+                block_role_assignments=role_path,
+                identity_evidence=evidence,
+            )
+    assert not (tmp_path / "duplicate-model").exists()
+    assert not (tmp_path / "duplicate-report.json").exists()
 
     old_evidence = load_identity_evidence(evidence)
     filenames = [

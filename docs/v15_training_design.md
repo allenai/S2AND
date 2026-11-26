@@ -184,7 +184,8 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
 ~~~
 
 The builder preserves real names and freezes native top-25 windows. The fitting roles hold out whole
-authors before retrieval. Gold-labeled roles check every seed member for identity purity.
+authors before retrieval. Ledger-backed fitting roles require scored queries and seed assignments
+for every eligible non-query signature. Gold-labeled roles check every seed member for identity purity.
 The gate threshold windows record mixed production candidates in `candidate_gold_mixed`.
 Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
 report to the trainer with `--gate-thresh-judgments`. The trainer checks candidate keys against the frozen
@@ -241,7 +242,8 @@ uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
   --output-report eps-review.json
 ~~~
 
-Sweep all `eps_cal` blocks, with one folder per snapshot dataset. Production clustering hides ORCID
+Sweep all `eps_cal` blocks, with one folder per snapshot dataset. Pass each dataset once to the EPS
+review. Production clustering hides ORCID
 and keeps the full population. B3 scores verified, eligible mentions only. Apply verifies both
 digests and the reference coverage. Reload the revised model and verify the chosen EPS.
 ## First 1.5 experiment order

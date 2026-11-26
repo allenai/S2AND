@@ -38,6 +38,39 @@ from tests.test_production_model import _write_synthetic_linker
 pytestmark = pytest.mark.tooling
 
 
+def test_reviewed_eps_cli_requires_override_for_wide_tolerance(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    received = []
+
+    def apply(*args: object, precision_f1_tolerance: float, **kwargs: object) -> dict:
+        received.append(precision_f1_tolerance)
+        return {}
+
+    monkeypatch.setattr(apply_reviewed_eps_module, "apply_reviewed_eps", apply)
+    options = [
+        "--source-model",
+        "source",
+        "--output-model",
+        "output",
+        "--eps",
+        "0.38",
+        "--review-note",
+        "reviewed",
+        "--output-report",
+        "review.json",
+        "--precision-f1-tolerance",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        apply_reviewed_eps_module.main([*options, "0.01"])
+    assert exc.value.code == 2
+    assert "--allow-wide-tolerance" in capsys.readouterr().err
+    assert not received
+    apply_reviewed_eps_module.main([*options, "0.005"])
+    apply_reviewed_eps_module.main([*options, "0.01", "--allow-wide-tolerance"])
+    assert received == [0.005, 0.01]
+
+
 def _source_snapshot(root: Path, *, source: str = "q1", with_clone: bool = False) -> Path:
     dataset = root / "datasets" / "unit"
     ids, papers = [source, "other"], ["source-paper", "other-paper"]

@@ -247,7 +247,7 @@ uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
   --source-model inference/production_model_v1.4 --output-model reviewed-model \
   --sweep-root eps --datasets a_ross --expected-batching-threshold 15000 \
   --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --eps 0.38 --precision-f1-tolerance 0.01 --review-note "Record the review decision." \
+  --eps 0.38 --precision-f1-tolerance 0.001 --review-note "Record the review decision." \
   --output-report eps-review.json
 ~~~
 

@@ -1080,7 +1080,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--eps",
         "0.38",
         "--precision-f1-tolerance",
-        "0.01",
+        "0.001",
         "--review-note",
         "Synthetic review",
         "--output-report",

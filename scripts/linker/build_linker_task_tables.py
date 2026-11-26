@@ -42,6 +42,7 @@ from scripts.common.orcid_references import (  # noqa: E402
     EXCLUDED_ORCID_GROUPS,
     read_external_reference_identity_evidence,
 )
+from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
 
 TASK_BLOCK_ROLES = {
     "fit_pool": frozenset({"fit_pool"}),
@@ -298,10 +299,11 @@ def build_linker_task_tables(
         )
     common_binding = None
     if ledger is not None:
-        common_binding = read_json_object(inputs_path.parent / "inputs_binding.json")
-        roles.require_assignment(common_binding, context="Linker inputs")
-        if common_binding.get("index_sha256") != ledger.evidence.name_counts_index_sha256:
-            raise ValueError("Linker inputs use a different name-counts index")
+        common_binding = require_linker_input_binding(
+            roles,
+            read_json_object(inputs_path.parent / "inputs_binding.json"),
+            index_sha256=ledger.evidence.name_counts_index_sha256,
+        )
     tables: dict[str, Any] = {}
     output_dir.mkdir(parents=True, exist_ok=False)
     for role in TASK_ROLES:
@@ -323,22 +325,23 @@ def build_linker_task_tables(
                 ):
                     raise ValueError(f"Expected real request signature IDs in {query_path}")
                 eligibility = None
+                receipt_path = None
                 identities, labels = {}, {}
+                seed_digest = sha256_file(seed_path)
                 if ledger is None:
                     label_path = (inputs_path.parent / str(spec["labels"])).resolve()
                     identities, labels = read_external_reference_identity_evidence(label_path, require_scored=True)
                 else:
                     eligibility = ledger.for_block(block, dataset_dir=arrow_dir)
-                    input_manifest = read_json_object(inputs_path.parent / spec["input_manifest"])
-                    observed = input_manifest["binding"]
-                    roles.require_bindings(observed, {block}, context="Linker inputs")
-                    if common_binding is None or any(
-                        observed.get(key) != value for key, value in common_binding.items()
-                    ):
-                        raise ValueError(f"Input model, index, or ledger digest mismatch for {block!r}")
-                    for path in (seed_path, query_path):
-                        if input_manifest["files"].get(path.name) != sha256_file(path):
-                            raise ValueError(f"Linker input digest mismatch: {path}")
+                    receipt_path = (inputs_path.parent / spec["input_manifest"]).resolve()
+                    assert common_binding is not None
+                    require_linker_input_receipt(
+                        roles,
+                        block,
+                        read_json_object(receipt_path),
+                        common_binding,
+                        {seed_path: seed_digest, query_path: sha256_file(query_path)},
+                    )
                 with ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow:
                     frame, counts = _freeze_block_rows(
                         arrow,
@@ -357,7 +360,8 @@ def build_linker_task_tables(
                         "arrow_dir": str(arrow_dir),
                         "arrow_generation_id": arrow.generation_id,
                         "seeds": str(seed_path),
-                        "seeds_sha256": sha256_file(seed_path),
+                        "seeds_sha256": seed_digest,
+                        **({"input_manifest": str(receipt_path)} if receipt_path is not None else {}),
                         "counts": counts,
                     }
                 if not frame.empty:

@@ -11,7 +11,7 @@ from typing import TypedDict, cast
 from s2and._sha256 import sha256_file
 from scripts.common.arrow_roots import generic_dataset_manifests, read_json_object
 from scripts.common.block_roles import BlockRoles, normalize_block_key
-from scripts.common.identity_ledger import IdentityLedger
+from scripts.common.identity_ledger import IdentityLedger, require_evidence_for_roles
 from scripts.common.stage0_invariants import (
     JUDGE_ONLY_STRATUM,
     PAIR_STRATA,
@@ -19,7 +19,7 @@ from scripts.common.stage0_invariants import (
     Fold,
     PairId,
     PairStratum,
-    require_assignment_receipt,
+    require_assignment_receipts,
     require_fit_pool_coverage,
     require_intake_index,
     require_pairwise_fold,
@@ -118,6 +118,7 @@ def training_pairs(
     if min_mined_validation_pairs < 1:
         raise ValueError("Minimum mined validation pairs must be positive")
     roles.require_assignment(ledger.bindings, context="Identity ledger")
+    require_evidence_for_roles(ledger.evidence, roles)
     manifest_path = mined_csv.with_suffix(mined_csv.suffix + ".manifest.json")
     manifest = read_json_object(manifest_path)
     roles.require_assignment(manifest, context="Mined pairs")
@@ -129,10 +130,14 @@ def training_pairs(
     roles.require_bindings(manifest, blocks.keys(), context="Mined pairs")
     intake_index = ledger.evidence.name_counts_index_sha256
     require_intake_index(intake_index, name_counts_sha256, context="Pairwise trainer")
-    for block, spec in sorted(blocks.items()):
+    bindings = {}
+    for block, spec in blocks.items():
         if not isinstance(spec, dict):
             raise ValueError(f"Invalid mined block record for {block!r}")
-        require_assignment_receipt(roles, block, spec.get("assignment_binding"), intake_index_sha256=intake_index)
+        bindings[block] = spec.get("assignment_binding")
+    model = require_assignment_receipts(roles, bindings, intake_index_sha256=intake_index)
+    if manifest.get("model_sha256") != model:
+        raise ValueError("Mined model_sha256 differs from the shared assignment model")
     require_intake_index(intake_index, manifest.get("index_sha256"), context="Mined pairs")
     policy = SamplingPolicy.from_manifest(manifest)
 

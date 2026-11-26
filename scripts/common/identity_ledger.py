@@ -252,13 +252,8 @@ class IdentityLedger:
         return BlockEligibility(block, role, split, rows, self.roles)
 
 
-def ledger_for_roles(path: Path | None, roles: BlockRoles | None) -> IdentityLedger | None:
-    """Require the identity ledger whenever frozen ledger-backed roles apply."""
-    if path is None and (roles is None or roles.evidence_sha256 is None):
-        return None
-    if path is None or roles is None:
-        raise ValueError("Ledger-backed roles require --identity-evidence and --block-role-assignments")
-    evidence = load_identity_evidence(path)
+def require_evidence_for_roles(evidence: IdentityEvidence, roles: BlockRoles) -> None:
+    """Bind evidence and intake to the master role assignment."""
     if (
         evidence.sha256 != roles.evidence_sha256
         or evidence.snapshot_sha256 != roles.snapshot_sha256
@@ -267,4 +262,14 @@ def ledger_for_roles(path: Path | None, roles: BlockRoles | None) -> IdentityLed
         raise ValueError("Frozen roles do not match the identity evidence and intake snapshot")
     if (receipts := evidence.assignment_receipts()) and receipts != {roles.sha256}:
         raise ValueError("Frozen roles do not match the recorded master block role assignment")
+
+
+def ledger_for_roles(path: Path | None, roles: BlockRoles | None) -> IdentityLedger | None:
+    """Require the identity ledger whenever frozen ledger-backed roles apply."""
+    if path is None and (roles is None or roles.evidence_sha256 is None):
+        return None
+    if path is None or roles is None:
+        raise ValueError("Ledger-backed roles require --identity-evidence and --block-role-assignments")
+    evidence = load_identity_evidence(path)
+    require_evidence_for_roles(evidence, roles)
     return IdentityLedger(evidence, roles)

@@ -10,7 +10,7 @@ import pytest
 
 from s2and._sha256 import sha256_file
 from scripts.common.block_roles import load_block_roles
-from scripts.common.identity_ledger import ledger_for_roles
+from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.stage0_invariants import require_fit_pool_coverage, require_intake_index
 from scripts.pairwise.mine_pairwise_pairs import mine_pairs
 from scripts.pairwise.training_pairs import FitPair, JudgePair, TrainValPairs, training_pairs
@@ -81,6 +81,39 @@ def test_trainer_checks_its_own_index(tmp_path: Path) -> None:
     world = build_stage0_world(tmp_path)
     with pytest.raises(ValueError, match="Pairwise trainer name-counts index does not match intake"):
         _load(world, name_counts_sha256="b" * 64)
+
+
+@pytest.mark.parametrize("digest", [None, "b" * 64])
+def test_miner_and_trainer_require_one_assignment_model(tmp_path: Path, digest: str | None) -> None:
+    world = build_stage0_world(tmp_path)
+    assignments = world.inputs["b crane"].assignments
+    receipt_path = assignments.with_name("manifest.json")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if digest is None:
+        receipt["binding"].pop("model_sha256")
+    else:
+        receipt["binding"]["model_sha256"] = digest
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
+    manifest["blocks"]["b crane"]["assignment_binding"] = receipt["binding"]
+    world.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    assert receipt["files"][assignments.name] == sha256_file(assignments)
+    assert manifest["output_sha256"] == sha256_file(world.mined)
+    with pytest.raises(ValueError, match="'b crane' pairwise assignments lack a shared model_sha256"):
+        _load(world)
+    with pytest.raises(ValueError, match="'b crane' pairwise assignments lack a shared model_sha256"):
+        mine_pairs(world.roles_path, world.inputs, tmp_path / "rejected.csv", identity_evidence=world.evidence_path)
+
+
+def test_trainer_rejects_a_direct_ledger_with_foreign_evidence(tmp_path: Path) -> None:
+    first, second = (tmp_path / name for name in ("first", "second"))
+    first.mkdir()
+    second.mkdir()
+    world, foreign = build_stage0_world(first), build_stage0_world(second)
+    ledger = IdentityLedger(foreign.ledger.evidence, world.roles)
+    assert ledger.evidence.sha256 != world.roles.evidence_sha256
+    with pytest.raises(ValueError, match="Frozen roles do not match the identity evidence and intake snapshot"):
+        _load(replace(world, ledger=ledger))
 
 
 @pytest.mark.parametrize(

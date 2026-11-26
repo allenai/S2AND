@@ -516,6 +516,7 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
 ) -> None:
     from scripts.common import orcid_references
     from scripts.common.block_roles import load_block_roles
+    from scripts.common.identity_ledger import load_identity_evidence
     from scripts.intake.assign_block_roles import freeze_identity_roles
     from scripts.intake.build_freeze_input import build_freeze_input
     from scripts.intake.build_identity_evidence import build_identity_evidence
@@ -531,10 +532,33 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
     path = tmp_path / "assignments.json"
     path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 2})), encoding="utf-8")
     roles = load_block_roles(path)
+    common_binding = {
+        "index_sha256": load_identity_evidence(evidence).name_counts_index_sha256,
+        "model_sha256": "a" * 64,
+        "block_role_assignments_sha256": roles.sha256,
+    }
+    task_blocks = {}
+    for block in roles.block_to_role:
+        receipt = tmp_path / f"{block}.json"
+        receipt.write_text(
+            json.dumps(
+                {
+                    "binding": {**common_binding, "block_bindings": roles.bindings_for({block})},
+                    "files": {"seeds.parquet": "b" * 64},
+                }
+            ),
+            encoding="utf-8",
+        )
+        task_blocks[block] = {
+            "input_manifest": str(receipt),
+            "seeds": "seeds.parquet",
+            "seeds_sha256": "b" * 64,
+        }
     manifest = {
-        "tables": {"fit_pool": {"blocks": dict.fromkeys(roles.block_to_role)}},
+        "tables": {"fit_pool": {"blocks": task_blocks}},
         "block_bindings": roles.bindings_for(roles.block_to_role),
         "block_role_assignments_sha256": roles.sha256,
+        "linker_input_binding": common_binding,
     }
     _validate_frozen_task_bindings(manifest, roles)
     if check in {"load", "train"}:

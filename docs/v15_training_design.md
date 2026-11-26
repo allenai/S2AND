@@ -189,7 +189,9 @@ The gate threshold windows record mixed production candidates in `candidate_gold
 Agreed blind verdicts supply the gate threshold labels, including for mixed candidates. Pass the bound score
 report to the trainer with `--gate-thresh-judgments`. The trainer checks candidate keys against the frozen
 windows and leaves unresolved outcomes unscored. Use `--blocks` and a fresh output directory to
-inspect a subset. Training requires every frozen block for each task role.
+inspect a subset. Training requires every frozen block for each task role. Keep the linker input
+receipts available so the trainer can check the input model, name-counts index, and seed digests.
+Rebuild older ledger-backed task tables to include the receipt paths.
 
 ### 10. Mine pairs and train the pairwise heads
 
@@ -208,7 +210,8 @@ uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
 Map every block in the nonempty frozen `fit_pool` to its `arrow_dir` and `assignments` entry from step 8. The mining
 manifest records each block's frozen fold, assignment path, and binding, including blocks with zero
 sampled pairs. Keep the frozen assignment files and receipts available for training. Assignment
-receipts and the trainer's name-counts index must match the intake index.
+receipts and the trainer's name-counts index must match the intake index. All assignment receipts
+must name one prediction model. The trainer verifies the ledger against the master assignment.
 
 The fitted strata are `false_merge`, `missed_link`, and `random`. The trainer requires two ledger
 scores for each fitted pair and uses them to compute the label. `merged_unlabeled` pairs require

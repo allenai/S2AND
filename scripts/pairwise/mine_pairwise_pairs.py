@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
-from s2and._sha256 import is_lowercase_sha256, sha256_file
+from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.text import normalize_orcid
 from scripts.common.arrow_roots import read_json_object
@@ -33,7 +33,7 @@ from scripts.common.stage0_invariants import (
     PairId,
     PairStratum,
     pairwise_fold,
-    require_assignment_receipt,
+    require_assignment_receipts,
     require_fit_pool_coverage,
 )
 
@@ -390,17 +390,14 @@ def mine_pairs(
     if ledger is not None:
         intake_index = ledger.evidence.name_counts_index_sha256
         shared_binding["index_sha256"] = intake_index
-        for block, spec in sorted(normalized.items()):
-            manifest = read_json_object(spec.assignments.parent / "manifest.json")
-            binding = manifest.get("binding")
-            require_assignment_receipt(roles, block, binding, intake_index_sha256=intake_index)
-            model_digest = manifest["binding"].get("model_sha256")
-            if (
-                not is_lowercase_sha256(model_digest)
-                or shared_binding.setdefault("model_sha256", model_digest) != model_digest
-            ):
-                raise ValueError(f"{block!r} pairwise assignments lack a shared model_sha256")
-            assignment_manifests[block] = manifest
+        assignment_manifests = {
+            block: read_json_object(spec.assignments.parent / "manifest.json") for block, spec in normalized.items()
+        }
+        shared_binding["model_sha256"] = require_assignment_receipts(
+            roles,
+            {block: receipt.get("binding") for block, receipt in assignment_manifests.items()},
+            intake_index_sha256=intake_index,
+        )
 
     counts: dict[str, Any] = {}
     rows: list[tuple[str, str, str, str, float]] = []

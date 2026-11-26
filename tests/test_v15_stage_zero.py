@@ -224,6 +224,22 @@ def test_gate_controls_show_verified_identity(
     )
 
 
+def test_gate_control_exemplars_check_the_frozen_dataset(
+    gate_packet_inputs: tuple[str, IdentityLedger, Path],
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    manifest = json.loads(task.read_text(encoding="utf-8"))
+    spec = manifest["tables"]["gate_thresh"]["blocks"][block]
+    datasets = ledger.evidence.snapshot_root / "datasets"
+    foreign_dir = next(path for path in datasets.iterdir() if path != Path(spec["arrow_dir"]))
+    with ArrowDataset.open(foreign_dir) as foreign:
+        spec.update(arrow_dir=str(foreign_dir), arrow_generation_id=foreign.generation_id)
+    _json(task, manifest)
+    items = [{"block_key": block, "candidates": [{"candidate_key": "other"}]}]
+    with pytest.raises(ValueError, match="Identity evidence was built for a different dataset generation"):
+        review_packets.resolve_gate_exemplars(items, ledger.roles, task, control_ledger=ledger)
+
+
 def test_gate_query_metadata_follows_frozen_signature(
     tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
 ) -> None:
@@ -859,6 +875,15 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     gate_table = pq.read_table(tasks / "gate_thresh.parquet").to_pandas()
     task_manifest = json.loads((tasks / build_linker_task_tables.TASK_MANIFEST).read_text())
     gate_blocks = task_manifest["tables"]["gate_thresh"]["blocks"]
+    index_digest = ledger.evidence.name_counts_index_sha256
+    _validate_frozen_task_bindings(task_manifest, roles, index_sha256=index_digest)
+    for field, error in (
+        ("index_sha256", "Linker inputs use a different name-counts index"),
+        ("model_sha256", "Input model, index, or role digest mismatch"),
+    ):
+        rebound = {**task_manifest, "linker_input_binding": {**task_manifest["linker_input_binding"], field: "0" * 64}}
+        with pytest.raises(ValueError, match=error):
+            _validate_frozen_task_bindings(rebound, roles, index_sha256=index_digest)
     stale_seed_report = {**report, "gate_seed_sha256": {gate: "0" * 64}}
     with pytest.raises(ValueError, match="frozen seed assignments"):
         _apply_blind_gate_labels(gate_table, stale_seed_report, roles, gate_blocks)

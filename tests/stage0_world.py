@@ -13,7 +13,6 @@ import pyarrow.parquet as pq
 
 from s2and._sha256 import sha256_file
 from s2and.arrow_tables import write_name_counts_index
-from s2and.incremental_linking.contracts import canonical_json_digest
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, BlockRoles, load_block_roles
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.intake.assign_block_roles import freeze_identity_roles
@@ -50,6 +49,7 @@ def build_stage0_world(
     fitted_as_judge: bool = False,
     lost_ledger_score: bool = False,
     empty_block: bool = False,
+    sampling_hazard: str | None = None,
 ) -> Stage0World:
     """Build a real intake, freeze, and mined sample, with optional rebound hazards."""
     _, name_counts, _ = write_pairwise_artifacts(root)
@@ -59,6 +59,9 @@ def build_stage0_world(
     if empty_block:
         papers["e vale"] = [40]
         clusters["e vale"] = ["x"]
+    if sampling_hazard in {"stale_frame", "judge_zero_cap", "zeroed_judge_frame"}:
+        papers["e vale"] = [40, 41]
+        clusters["e vale"] = ["x", "y" if sampling_hazard == "stale_frame" else "x"]
     convert_requests(
         [request_bundle(root / "raw", block, [(str(paper), None) for paper in ids]) for block, ids in papers.items()],
         snapshot,
@@ -143,11 +146,18 @@ def build_stage0_world(
 
     if lost_ledger_score:
         next(row for row in gold_rows if row["corpus_paper_id"] == 21)["scored"] = False
+    if sampling_hazard == "stale_frame":
+        gold_rows.extend(
+            gold_rows[0] | {"cluster_block_key": "e vale", "corpus_paper_id": paper, "orcid": "0000-0003-3151-6105"}
+            for paper in papers["e vale"]
+        )
+    ledger_changed = lost_ledger_score or sampling_hazard == "stale_frame"
+    if ledger_changed:
         evidence, roles = freeze(root / "updated_evidence")
     if foreign_index:
         foreign, _ = write_name_counts_index(root / "foreign", ({"foreign": 1}, {}, {}, {}))
         index = sha256_file(Path(foreign) / "manifest.json")
-    if lost_ledger_score or foreign_index:
+    if ledger_changed or foreign_index:
         manifest[ROLE_SHA256_FIELD] = roles.sha256
         manifest[BLOCK_BINDINGS_FIELD] = roles.bindings_for(inputs.keys())
         manifest["index_sha256"] = index
@@ -164,19 +174,34 @@ def build_stage0_world(
         for stratum in ("random", "merged_unlabeled"):
             ids = sorted((a, b) for block, a, b, tag, _ in rows if block == "a ross" and tag == stratum)
             counts = manifest["blocks"]["a ross"]["strata"][stratum]
-            counts.update(
-                frame_pairs=len(ids),
-                sampled_pairs=len(ids),
-                reporting_population_pairs=len(ids),
-                sampled_pair_ids_sha256=canonical_json_digest(ids),
-            )
-    if missing_fit_pool_block or judge_as_fitted or fitted_as_judge:
+            counts.update(frame_pairs=len(ids), sampled_pairs=len(ids), reporting_population_pairs=len(ids))
+    if sampling_hazard in {"lost_validation", "empty_frame", "zeroed_judge_frame"}:
+        block, stratum = (
+            ("e vale", "merged_unlabeled") if sampling_hazard == "zeroed_judge_frame" else ("b crane", "random")
+        )
+        rows = [row for row in rows if (row[0], row[3]) != (block, stratum)]
+        counts = manifest["blocks"][block]["strata"][stratum]
+        counts.update(sampled_pairs=0, dropped_pairs=1, inclusion_probability=0)
+        if sampling_hazard == "lost_validation":
+            counts["drops"] = {"sampling_budget": 1}
+        else:
+            counts.update(frame_pairs=0, reporting_population_pairs=0, drops={"zero_cap": 1})
+    if sampling_hazard == "swapped_strata":
+        for endpoints, stratum in ((["10-0", "11-0"], "false_merge"), (["10-0", "12-0"], "missed_link")):
+            next(row for row in rows if row[1:3] == endpoints)[3] = stratum
+    changed_rows = (
+        missing_fit_pool_block
+        or judge_as_fitted
+        or fitted_as_judge
+        or sampling_hazard in {"lost_validation", "empty_frame", "swapped_strata", "zeroed_judge_frame"}
+    )
+    if changed_rows:
         with mined.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(columns)
             writer.writerows(rows)
         manifest["output_sha256"] = sha256_file(mined)
-    if missing_fit_pool_block or foreign_index or lost_ledger_score or judge_as_fitted or fitted_as_judge:
+    if changed_rows or foreign_index or ledger_changed:
         _write_json(manifest_path, manifest)
 
     ledger = ledger_for_roles(evidence, roles)

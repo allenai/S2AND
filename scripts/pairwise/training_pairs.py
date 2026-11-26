@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,13 +18,19 @@ from scripts.common.stage0_invariants import (
     FitStratum,
     Fold,
     PairId,
+    PairStratum,
     require_assignment_receipt,
     require_fit_pool_coverage,
     require_intake_index,
-    require_pair_conservation,
-    require_pair_purpose,
     require_pairwise_fold,
     require_unique_pair,
+)
+from scripts.pairwise.mine_pairwise_pairs import (
+    PAIR_COLUMNS,
+    SamplingPolicy,
+    ledger_population,
+    read_assignment_partition,
+    select_block_pairs,
 )
 
 
@@ -77,14 +82,16 @@ class TrainValPairs:
     binding: TrainingPairsBinding
 
 
-def _read_pair_ids(mined_csv: Path, blocks: Collection[str]) -> dict[str, dict[PairId, str]]:
-    pairs_by_block: dict[str, dict[PairId, str]] = {block: {} for block in blocks}
-    columns = {"block_key", "signature_id_1", "signature_id_2", "stratum"}
+def _read_pairs(mined_csv: Path, blocks: Collection[str]) -> dict[str, dict[PairId, tuple[PairStratum, float]]]:
+    pairs_by_block: dict[str, dict[PairId, tuple[PairStratum, float]]] = {block: {} for block in blocks}
     with mined_csv.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        if not columns.issubset(reader.fieldnames or ()):
-            raise ValueError(f"Missing block, stratum or signature IDs in mined pairs: {mined_csv}")
+        fieldnames = reader.fieldnames or []
+        if set(fieldnames) != set(PAIR_COLUMNS) or len(fieldnames) != len(PAIR_COLUMNS):
+            raise ValueError(f"Invalid mined pair CSV columns: {mined_csv}")
         for row in reader:
+            if None in row or None in row.values():
+                raise ValueError(f"Invalid mined pair CSV row {reader.line_num}: {mined_csv}")
             block = normalize_block_key(row["block_key"])
             stratum = row["stratum"]
             if block not in pairs_by_block:
@@ -93,7 +100,7 @@ def _read_pair_ids(mined_csv: Path, blocks: Collection[str]) -> dict[str, dict[P
                 raise ValueError(f"Invalid mined stratum {stratum!r} in {block!r}")
             pair = (row["signature_id_1"], row["signature_id_2"])
             require_unique_pair(block, stratum, pair, pairs_by_block[block].keys())
-            pairs_by_block[block][pair] = stratum
+            pairs_by_block[block][pair] = (cast(PairStratum, stratum), float(row["inclusion_probability"]))
     return pairs_by_block
 
 
@@ -118,11 +125,12 @@ def training_pairs(
             raise ValueError(f"Invalid mined block record for {block!r}")
         require_assignment_receipt(roles, block, spec.get("assignment_binding"), intake_index_sha256=intake_index)
     require_intake_index(intake_index, manifest.get("index_sha256"), context="Mined pairs")
+    policy = SamplingPolicy.from_manifest(manifest)
 
     mined_digest = sha256_file(mined_csv)
     if manifest.get("output_sha256") != mined_digest:
         raise ValueError(f"Mined pair CSV digest mismatch: {mined_csv}")
-    pairs_by_block = _read_pair_ids(mined_csv, blocks)
+    pairs_by_block = _read_pairs(mined_csv, blocks)
     snapshot = ledger.evidence.snapshot_root
     if sha256_file(snapshot / "manifest.json") != ledger.evidence.snapshot_sha256:
         raise ValueError("Mined pair snapshot does not match the identity ledger")
@@ -134,26 +142,40 @@ def training_pairs(
         evidence = ledger.evidence.blocks[block]
         arrow_dir = dataset_manifests[evidence["dataset"]].parent
         view = ledger.for_block(block, dataset_dir=arrow_dir)
+        identities, gold, excluded = ledger_population(view)
+        raw_path = spec.get("assignments_path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError(f"Missing frozen assignments path for {block!r}. Re-mine pairs.")
+        path = manifest_path.parent / raw_path
+        receipt = read_json_object(path.parent / "manifest.json")
+        if receipt.get("binding") != spec.get("assignment_binding"):
+            raise ValueError(f"Mined assignment binding differs from the frozen receipt for {block!r}")
+        clusters, assignments_digest = read_assignment_partition(path, block, identities, receipt)
+        if spec.get("assignments_sha256") != assignments_digest:
+            raise ValueError(f"Mined assignment digest differs from the frozen partition for {block!r}")
+        sample = select_block_pairs(block, identities, gold, clusters, excluded, policy)
+        observed = pairs_by_block.pop(block)
+        if observed != sample.pairs:
+            pair = next(
+                pair
+                for pair in sorted(observed.keys() | sample.pairs.keys())
+                if observed.get(pair) != sample.pairs.get(pair)
+            )
+            raise ValueError(
+                f"Mined pair selection differs from frozen inputs in {block!r} fold {fold!r} for {pair!r}: "
+                f"observed {observed.get(pair)!r}, expected {sample.pairs.get(pair)!r}"
+            )
+        for field, expected in sample.counts.items():
+            if spec.get(field) != expected:
+                raise ValueError(f"Mined {field} report differs from frozen inputs in {block!r} fold {fold!r}")
+
         fit: list[FitPair] = []
         judge: list[JudgePair] = []
-        block_pairs = pairs_by_block.pop(block)
-        decisions = {
-            sid: view.eligibility(sid) for sid in {sid for pair in block_pairs for sid in pair} & view.rows.keys()
-        }
-        for (left, right), stratum in sorted(block_pairs.items()):
-            if left not in decisions or right not in decisions:
-                raise ValueError(f"Unknown endpoint in {block!r} stratum {stratum!r} pair {(left, right)!r}")
-            label = require_pair_purpose(block, stratum, (left, right), decisions[left], decisions[right])
-            if label is None:
+        for (left, right), (stratum, _) in sorted(sample.pairs.items()):
+            if stratum == JUDGE_ONLY_STRATUM:
                 judge.append(JudgePair(block, left, right))
             else:
-                fit.append(FitPair(block, left, right, cast(FitStratum, stratum), label, fold))
-
-        observed: dict[tuple[Fold, str], list[PairId]] = defaultdict(list)
-        for pair in fit:
-            observed[pair.fold, pair.stratum].append((pair.left, pair.right))
-        observed[fold, JUDGE_ONLY_STRATUM] = [(pair.left, pair.right) for pair in judge]
-        require_pair_conservation(block, fold, spec.get("strata"), observed)
+                fit.append(FitPair(block, left, right, stratum, int(gold[left] == gold[right]), fold))
         result[block] = TrainingBlock(arrow_dir, evidence["dataset_manifest_sha256"], fold, fit, judge)
 
     return TrainValPairs(

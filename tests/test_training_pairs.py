@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from s2and._sha256 import sha256_file
-from scripts.common.stage0_invariants import require_fit_pool_coverage, require_intake_index, require_pair_conservation
+from scripts.common.stage0_invariants import require_fit_pool_coverage, require_intake_index
 from scripts.pairwise.mine_pairwise_pairs import mine_pairs
 from scripts.pairwise.training_pairs import FitPair, JudgePair, TrainValPairs, training_pairs
 from tests.stage0_world import Stage0World, build_stage0_world
@@ -42,17 +42,6 @@ def test_handoff_preserves_exact_train_validation_and_judge_pairs(tmp_path: Path
     require_fit_pool_coverage(world.roles, result.blocks.keys())
     manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
     require_intake_index(world.ledger.evidence.name_counts_index_sha256, manifest["index_sha256"], context="Miner")
-    require_pair_conservation(
-        "a ross",
-        "train",
-        manifest["blocks"]["a ross"]["strata"],
-        {
-            ("train", "false_merge"): [("10-0", "12-0")],
-            ("train", "missed_link"): [("10-0", "11-0"), ("12-0", "13-0")],
-            ("train", "random"): [("10-0", "13-0"), ("11-0", "12-0"), ("11-0", "13-0")],
-            ("train", "merged_unlabeled"): [("10-0", "14-0"), ("12-0", "14-0")],
-        },
-    )
 
 
 @pytest.mark.parametrize(
@@ -60,9 +49,9 @@ def test_handoff_preserves_exact_train_validation_and_judge_pairs(tmp_path: Path
     [
         ("missing_fit_pool_block", r"missing=\['b crane'\]"),
         ("foreign_index", "pairwise assignments name-counts index does not match intake"),
-        ("judge_as_fitted", r"Fitted pair requires two ledger scores in 'a ross' stratum 'random'.*'14-0'"),
-        ("fitted_as_judge", r"Judge-only pair has two ledger scores in 'a ross' stratum 'merged_unlabeled'"),
-        ("lost_ledger_score", r"Fitted pair requires two ledger scores in 'b crane' stratum 'random'.*'21-0'"),
+        ("judge_as_fitted", r"Mined pair selection differs .*'a ross'.*'14-0'.*'random'.*'merged_unlabeled'"),
+        ("fitted_as_judge", r"Mined pair selection differs .*'a ross'.*'13-0'.*'merged_unlabeled'.*'random'"),
+        ("lost_ledger_score", r"Mined pair selection differs .*'b crane'.*'21-0'.*'random'.*'merged_unlabeled'"),
     ],
 )
 def test_handoff_rejects_rebound_hazards(tmp_path: Path, hazard: str, error: str) -> None:
@@ -82,10 +71,48 @@ def test_handoff_rejects_rebound_hazards(tmp_path: Path, hazard: str, error: str
 
 
 def test_trainer_checks_its_own_index(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path, foreign_index=True)
-    manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
+    world = build_stage0_world(tmp_path)
     with pytest.raises(ValueError, match="Pairwise trainer name-counts index does not match intake"):
-        _load(world, name_counts_sha256=manifest["index_sha256"])
+        _load(world, name_counts_sha256="b" * 64)
+
+
+@pytest.mark.parametrize(
+    ("hazard", "detail"),
+    [
+        ("lost_validation", r"'b crane' fold 'val'.*observed None, expected \('random', 1\.0\)"),
+        ("empty_frame", r"'b crane' fold 'val'.*observed None, expected \('random', 1\.0\)"),
+        ("swapped_strata", r"'a ross' fold 'train'.*observed \('false_merge'.*expected \('missed_link'"),
+        ("stale_frame", r"'e vale' fold 'train'.*observed None, expected \('missed_link', 1\.0\)"),
+        ("zeroed_judge_frame", r"'e vale' fold 'train'.*observed None, expected \('merged_unlabeled', 1\.0\)"),
+    ],
+)
+def test_handoff_replays_the_frozen_sample(tmp_path: Path, hazard: str, detail: str) -> None:
+    world = build_stage0_world(tmp_path, sampling_hazard=hazard)
+    manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
+    assert manifest["output_sha256"] == sha256_file(world.mined)
+    assert manifest["block_bindings"] == world.roles.bindings_for(world.inputs.keys())
+    for block, entry in world.inputs.items():
+        assert manifest["blocks"][block]["assignments_sha256"] == sha256_file(entry.assignments)
+    with pytest.raises(ValueError, match="Mined pair selection differs from frozen inputs in " + detail):
+        _load(world)
+
+
+def test_judge_budget_is_independent_of_zero_fitted_cap(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path, sampling_hazard="judge_zero_cap")
+    empty = _load(world).blocks["e vale"]
+    assert not empty.fit
+    assert empty.judge == [JudgePair("e vale", "40-0", "41-0")]
+    mined = tmp_path / "zero_fit_cap.csv"
+    mine_pairs(
+        world.roles_path,
+        world.inputs,
+        mined,
+        identity_evidence=world.evidence_path,
+        per_block_floor=0,
+        verified_pair_fraction=0,
+    )
+    report = json.loads(mined.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+    assert report["blocks"]["b crane"]["strata"]["random"]["drops"] == {"zero_cap": 1}
 
 
 def test_handoff_accepts_an_explicit_empty_block(tmp_path: Path) -> None:
@@ -121,15 +148,14 @@ def test_sample_budget_is_conserved_in_the_manifest(tmp_path: Path) -> None:
         "strata"
     ]
     for stratum, expected in {
-        "false_merge": (1, 1, 0, None),
-        "missed_link": (2, 1, 1, "sampling_budget"),
-        "random": (3, 0, 3, "sampling_budget"),
-        "merged_unlabeled": (2, 2, 0, None),
+        "false_merge": (1, 1, {}),
+        "missed_link": (2, 1, {"sampling_budget": 1}),
+        "random": (3, 0, {"cross_stratum_duplicate": 3, "sampling_budget": 3}),
+        "merged_unlabeled": (2, 2, {}),
     }.items():
-        assert (
-            tuple(strata[stratum][key] for key in ("frame_pairs", "sampled_pairs", "dropped_pairs", "drop_reason"))
-            == expected
-        )
+        assert tuple(strata[stratum][key] for key in ("frame_pairs", "sampled_pairs", "drops")) == expected
+        counts = strata[stratum]
+        assert counts["eligible_pairs"] == counts["sampled_pairs"] + sum(counts["drops"].values())
     training_pairs(
         world.roles,
         world.ledger,
@@ -138,16 +164,28 @@ def test_sample_budget_is_conserved_in_the_manifest(tmp_path: Path) -> None:
     )
 
 
+def test_identity_cap_drops_are_counted(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path)
+    mined = tmp_path / "identity_cap.csv"
+    mine_pairs(world.roles_path, world.inputs, mined, identity_evidence=world.evidence_path, per_identity=1)
+    report = json.loads(mined.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+    random = report["blocks"]["a ross"]["strata"]["random"]
+    assert random["frame_pairs"] == 1
+    assert random["drops"] == {"cross_stratum_duplicate": 3, "identity_cap": 2}
+
+
 @pytest.mark.parametrize(
     ("change", "error"),
     [
-        ("missing_row", r"pair count differs .*'b crane' stratum 'random' fold 'val'"),
-        ("changed_ids", r"pair IDs differ .*'a ross' stratum 'merged_unlabeled' fold 'train'"),
-        ("moved_stratum", r"pair count differs .*'a ross' stratum 'false_merge' fold 'train'"),
+        ("changed_ids", r"pair selection differs .*'a ross' fold 'train'.*'merged_unlabeled'"),
+        ("moved_stratum", r"pair selection differs .*'a ross' fold 'train'.*'false_merge'"),
         ("duplicate", r"Duplicate mined pair .*'a ross' stratum 'random'"),
         ("foreign_block", r"outside fit_pool: 'c lane'"),
         ("wrong_fold", r"Mined fold for 'b crane' is 'train', expected 'val'"),
-        ("unbalanced_frame", r"frame counts do not reconcile .*'a ross' stratum 'random' fold 'train'"),
+        ("unbalanced_frame", r"strata report differs .*'a ross' fold 'train'"),
+        ("missing_columns", r"Invalid mined pair CSV columns"),
+        ("extra_column_value", r"Invalid mined pair CSV row 2"),
+        ("probability", r"pair selection differs .*'a ross' fold 'train'.*999\.0"),
     ],
 )
 def test_handoff_reconciles_pairs_and_manifest(tmp_path: Path, change: str, error: str) -> None:
@@ -155,9 +193,7 @@ def test_handoff_reconciles_pairs_and_manifest(tmp_path: Path, change: str, erro
     manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
     with world.mined.open(encoding="utf-8", newline="") as handle:
         columns, *rows = csv.reader(handle)
-    if change == "missing_row":
-        rows = [row for row in rows if row[0] != "b crane"]
-    elif change == "changed_ids":
+    if change == "changed_ids":
         next(row for row in rows if row[1:3] == ["10-0", "14-0"])[1] = "11-0"
     elif change == "moved_stratum":
         next(row for row in rows if row[1:3] == ["10-0", "12-0"])[3] = "random"
@@ -176,6 +212,12 @@ def test_handoff_reconciles_pairs_and_manifest(tmp_path: Path, change: str, erro
         manifest["blocks"]["b crane"]["fold"] = "train"
     elif change == "unbalanced_frame":
         manifest["blocks"]["a ross"]["strata"]["random"]["frame_pairs"] += 1
+    elif change == "missing_columns":
+        columns = columns[:4]
+    elif change == "extra_column_value":
+        rows[0].append("unheaded")
+    elif change == "probability":
+        rows[0][-1] = "999"
     with world.mined.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(columns)

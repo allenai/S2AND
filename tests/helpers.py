@@ -329,3 +329,55 @@ def build_dummy_dataset(
         preprocess=True,
         n_jobs=n_jobs,
     )
+
+
+def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
+    """Write a tiny intake request from paper IDs and deposited ORCIDs."""
+    import tarfile
+
+    import pyarrow as pa
+
+    root.mkdir(parents=True, exist_ok=True)
+    name = block.replace(" ", "_")
+    first, last = block.split()
+    papers = [paper for paper, _ in rows]
+    author = f"{first} {last}"
+    directory = root / name
+    write_arrow_tables_bundle(
+        directory,
+        {
+            "signatures": pa.table(
+                {
+                    "signature_id": [f"{paper}-0" for paper in papers],
+                    "paper_id": papers,
+                    "author_position": [0] * len(papers),
+                    "author_first": [first] * len(papers),
+                    "author_middle": [""] * len(papers),
+                    "author_last": [last] * len(papers),
+                    "author_suffix": [""] * len(papers),
+                    "author_affiliations": pa.array([[]] * len(papers), type=pa.list_(pa.string())),
+                    "author_block": [block] * len(papers),
+                    "author_orcid": pa.array([orcid for _, orcid in rows], type=pa.string()),
+                }
+            ),
+            "papers": pa.table(
+                {
+                    "paper_id": papers,
+                    "title": ["Study"] * len(papers),
+                    "venue": [""] * len(papers),
+                    "journal_name": [""] * len(papers),
+                }
+            ),
+            "paper_authors": pa.table(
+                {"paper_id": papers, "position": [0] * len(papers), "author_name": [author] * len(papers)}
+            ),
+            "specter": pa.table(
+                {"paper_id": papers, "embedding": pa.array([[1.0, 0.0]] * len(papers), type=pa.list_(pa.float32(), 2))}
+            ),
+        },
+    )
+    path = root / f"{name}.arrow.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        for arrow in directory.glob("*.arrow"):
+            archive.add(arrow, arcname=arrow.name)
+    return path

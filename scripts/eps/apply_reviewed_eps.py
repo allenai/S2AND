@@ -39,7 +39,6 @@ from scripts.common.initial_query_sources import (
     load_initial_query_sources,
 )
 from scripts.eps.orcid_b3 import (
-    BLOCK_ROLE_SHA256_FIELD,
     REFERENCE_POLICY,
     REFERENCE_POLICY_ALL_IDENTITIES,
     final_test_query_identities,
@@ -100,8 +99,7 @@ def _require_test_separated_reference(
     if sha256_file(reference_path) != stats.get("sha256"):
         raise ValueError(f"The EPS reference changes after its sweep: {dataset}")
     if block_roles is not None:
-        if block_roles.evidence_sha256 is None and stats.get(BLOCK_ROLE_SHA256_FIELD) != block_roles.sha256:
-            raise ValueError(f"The EPS sweep must use the same frozen block roles: {dataset}")
+        block_roles.require_assignment(stats, context=f"{dataset} EPS sweep reference")
         orcids = pd.read_parquet(reference_path, columns=["orcid"])["orcid"].unique()
         if any(not block_roles.scores(dataset, orcid) for orcid in orcids):
             raise ValueError(f"The EPS reference contains an ORCID outside its home role: {dataset}")
@@ -276,7 +274,7 @@ def _pooled_curve(sweep_root: Path, datasets: Sequence[str]) -> pd.DataFrame:
 
     weights: dict[str, int] = {}
     curves: dict[str, pd.DataFrame] = {}
-    for dataset in datasets:
+    for dataset in dict.fromkeys(datasets):
         _, curve = read_sweep_curve(sweep_root, dataset)
         curves[dataset] = curve.assign(eps=curve["eps"].round(10)).set_index("eps")
         # The identity curve scores the repeated references; the file also lists one-record groups.
@@ -290,7 +288,10 @@ def _pooled_curve(sweep_root: Path, datasets: Sequence[str]) -> pd.DataFrame:
     total = sum(weights.values())
     pooled = pd.DataFrame(
         {
-            metric: [sum(weights[d] * float(curves[d].at[eps, metric]) for d in datasets) / total for eps in shared]
+            metric: [
+                sum(weight * float(curves[dataset].at[eps, metric]) for dataset, weight in weights.items()) / total
+                for eps in shared
+            ]
             for metric in ("precision", "recall")
         },
         index=pd.Index(shared, name="eps"),
@@ -360,6 +361,8 @@ def apply_reviewed_eps(
         raise ValueError("A manual review note is required")
     if (sweep_root is None) != (not datasets):
         raise ValueError("Pass the sweep root and the dataset list together, or neither")
+    if len({normalize_block_key(dataset) for dataset in datasets}) != len(datasets):
+        raise ValueError("EPS review datasets must be unique")
     if sweep_root is None and (identity_evidence is not None or block_role_assignments is not None):
         raise ValueError("Frozen block roles require a bound EPS sweep")
     if sweep_root is None and expected_batching_threshold is not None:

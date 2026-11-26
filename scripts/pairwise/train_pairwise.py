@@ -19,7 +19,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -31,9 +31,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from s2and._sha256 import sha256_file  # noqa: E402
 from s2and.arrow_inputs import ArrowDataset  # noqa: E402
 from s2and.data import ANDData, _map_fixed_pair_labels  # noqa: E402
-from s2and.feature_port import build_verified_rust_featurizer, featurize_pairs_with_rust  # noqa: E402
+from s2and.feature_port import (  # noqa: E402
+    build_rust_featurizer_from_arrow_dataset,
+    build_verified_rust_featurizer,
+    featurize_pairs_with_rust,
+)
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -52,6 +57,8 @@ from s2and.production_training_contract import (  # noqa: E402
     load_model_plan,
     load_packaged_artifact_authority,
 )
+from scripts.common.block_roles import load_block_roles  # noqa: E402
+from scripts.common.identity_ledger import ledger_for_roles  # noqa: E402
 from scripts.common.plan_datasets import (  # noqa: E402
     development_split_members,
     load_development_dataset,
@@ -68,6 +75,11 @@ from scripts.pairwise.augmented_leakage import (  # noqa: E402
     require_training_members,
     require_validation_members,
     source_members,
+)
+from scripts.pairwise.training_pairs import (  # noqa: E402
+    DEFAULT_MIN_MINED_VALIDATION_PAIRS,
+    TrainingBlock,
+    training_pairs,
 )
 
 logger = logging.getLogger("s2and")
@@ -250,13 +262,15 @@ def _stage_dataset_features(
     root: Path,
     dataset_name: str,
     *,
-    train: TupleOfArrays,
-    val: TupleOfArrays,
+    train: TupleOfArrays | None = None,
+    val: TupleOfArrays | None = None,
 ) -> dict[str, Path]:
     dataset_root = root / dataset_name
     dataset_root.mkdir()
     arrays: dict[str, Path] = {}
     for split_name, split in (("train", train), ("val", val)):
+        if split is None:
+            continue
         features, labels, nameless_features = split
         if nameless_features is None:
             raise RuntimeError(f"Expected nameless {split_name} features for dataset {dataset_name!r}")
@@ -267,6 +281,39 @@ def _stage_dataset_features(
         ):
             arrays[role] = _stage_array(dataset_root / f"{role}.npy", values)
     return arrays
+
+
+def _featurize_mined_block(
+    block: TrainingBlock,
+    featurizer_info: FeaturizationInfo,
+    nameless_featurizer_info: FeaturizationInfo,
+    *,
+    name_tuples: frozenset[tuple[str, str]],
+    name_counts_sha256: str,
+    n_jobs: int,
+    total_ram_bytes: int | None,
+) -> TupleOfArrays:
+    if sha256_file(block.arrow_dir / "manifest.json") != block.arrow_manifest_sha256:
+        raise ValueError(f"Mined pair Arrow dataset changed after verification: {block.arrow_dir}")
+    with ArrowDataset.open(block.arrow_dir, require_specter=True, require_name_counts_index=True) as arrow:
+        if arrow.name_counts_index is None or arrow.name_counts_index.manifest_sha256 != name_counts_sha256:
+            raise ValueError(f"Wrong name-counts index for mined pairs in {block.arrow_dir}")
+        rust = build_rust_featurizer_from_arrow_dataset(
+            arrow,
+            signature_ids=sorted({sid for pair in block.fit for sid in (pair.left, pair.right)}),
+            name_tuples=name_tuples,
+            num_threads=n_jobs,
+            use_orcid_id=False,
+        )
+        return featurize_pairs_with_rust(
+            rust,
+            [(pair.left, pair.right, pair.label) for pair in block.fit],
+            featurizer_info,
+            nameless_featurizer_info=nameless_featurizer_info,
+            n_jobs=n_jobs,
+            nan_value=np.nan,
+            total_ram_bytes=total_ram_bytes,
+        )
 
 
 def _featurize_selection(
@@ -486,6 +533,12 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     """Train pairwise models and write the pairwise production bundle stage."""
 
     plan = _preflight_pairwise(args)
+    mined_csv = getattr(args, "mined_pairs", None)
+    assignments = getattr(args, "block_role_assignments", None)
+    evidence = getattr(args, "identity_evidence", None)
+    mined_args = (mined_csv, assignments, evidence)
+    if any(value is None for value in mined_args) and any(value is not None for value in mined_args):
+        raise ValueError("Use --mined-pairs, --identity-evidence and --block-role-assignments together")
     unknown_inputs = {name: plan_unknown_signatures(plan.datasets[name]) for name in plan.dataset_names}
     unknown_ids = {name: source.ids for name, source in unknown_inputs.items()}
     augmented_members: dict[str, set[str]] = {}
@@ -527,6 +580,19 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     )
     canonical_name_tuples = artifact_authority.name_tuples
     artifact_hashes = _canonical_training_artifact_hashes(artifact_authority)
+    mined = None
+    if mined_csv is not None:
+        roles = load_block_roles(cast(Path, assignments))
+        ledger = ledger_for_roles(evidence, roles)
+        assert ledger is not None
+        mined = training_pairs(
+            roles,
+            ledger,
+            mined_csv,
+            name_counts_sha256=artifact_hashes["name_counts_manifest_sha256"],
+            min_mined_validation_pairs=getattr(args, "min_mined_validation_pairs", DEFAULT_MIN_MINED_VALIDATION_PAIRS),
+        )
+    mined_blocks = mined.blocks if mined is not None else {}
     training_config = _training_config(
         args,
         plan,
@@ -536,6 +602,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     training_config["unknown_signature_policy"] = "exclude_pair_endpoints; retain_eps_inputs; score_known_members_only"
     training_config["incumbent_parameters"] = incumbents
     training_config["fixed_parameters"] = fixed_parameters
+    if mined is not None:
+        training_config["mined_pairs"] = mined.binding
     os.environ["OMP_NUM_THREADS"] = str(int(args.n_jobs))
     logger.info(
         "pairwise resources n_jobs=%d matrix_work_dir=%s free_bytes=%d total_ram_bytes=%s",
@@ -551,6 +619,10 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     nameless_monotone_constraints = nameless_featurizer_info.lightgbm_monotone_constraints
 
     cluster_test_splits: dict[str, dict[str, Any]] = {}
+    mined_summary = {
+        block: {"split": spec.fold, "labeled_pairs": len(spec.fit), "unscored_pairs": len(spec.judge)}
+        for block, spec in mined_blocks.items()
+    }
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(
         prefix=f".pairwise_v{plan.release_version}_",
@@ -619,6 +691,31 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             del anddata
             gc.collect()
 
+        mined_arrays: list[dict[str, Path]] = []
+        if mined_blocks:
+            mined_root = Path(tempfile.mkdtemp(dir=matrix_work_dir, prefix=".mined_pairs_"))
+            for index, (block, spec) in enumerate(mined_blocks.items()):
+                logger.info(
+                    "mined pairs block=%s split=%s labeled=%d unscored=%d",
+                    block,
+                    spec.fold,
+                    len(spec.fit),
+                    len(spec.judge),
+                )
+                if not spec.fit:
+                    continue
+                features = _featurize_mined_block(
+                    spec,
+                    featurizer_info,
+                    nameless_featurizer_info,
+                    name_tuples=canonical_name_tuples.pairs,
+                    name_counts_sha256=artifact_hashes["name_counts_manifest_sha256"],
+                    n_jobs=int(args.n_jobs),
+                    total_ram_bytes=plan.total_ram_bytes,
+                )
+                mined_arrays.append(_stage_dataset_features(mined_root, str(index), **{spec.fold: features}))
+                del features
+
         validation_dataset_names = tuple(name for name in plan.dataset_names if name != "augmented")
         union_members = {
             "X_train": plan.dataset_names,
@@ -631,7 +728,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         union_arrays = {
             role: _concatenate_staged_arrays(
                 matrix_work_dir / f"union_{role}.npy",
-                [staged_datasets[name][role] for name in names],
+                [staged_datasets[name][role] for name in names]
+                + [paths[role] for paths in mined_arrays if role in paths],
             )
             for role, names in union_members.items()
         }
@@ -682,6 +780,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             **{f"main_{key}": value for key, value in main_selection.items()},
             **{f"nameless_{key}": value for key, value in nameless_selection.items()},
         }
+        if mined is not None:
+            training_summary["mined_pairs_by_block"] = mined_summary
         logger.info("pairwise training completed in %.3f seconds", time.perf_counter() - started)
     result = _publish_result(
         plan,
@@ -725,6 +825,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON of LightGBM parameters for both heads; fits them directly instead of searching.",
     )
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
+    parser.add_argument("--mined-pairs", type=Path, help="CSV and sidecar from mine_pairwise_pairs.")
+    parser.add_argument(
+        "--min-mined-validation-pairs",
+        type=int,
+        default=DEFAULT_MIN_MINED_VALIDATION_PAIRS,
+        help="Require at least this many fitted mined pairs in the frozen validation fold.",
+    )
+    parser.add_argument("--identity-evidence", type=Path, help="Identity ledger used to label mined pairs.")
+    parser.add_argument("--block-role-assignments", type=Path, help="Master assignment that defines the mined fold.")
     parser.add_argument(
         "--model-plan",
         type=Path,

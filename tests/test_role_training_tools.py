@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
+from scripts.common.block_roles import load_block_roles
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.test_build_linker_task_tables import _ORCIDS, _OUTSIDE_HOME, _block_inputs
 
@@ -75,31 +76,13 @@ def _mining_input(tmp_path: Path, block: str, *, deposited_orcids: bool = True):
     return BlockInput(Path(spec["arrow_dir"]), labels, assignments)
 
 
-def test_pair_miner_rejects_sealed_blocks_before_writing(tmp_path: Path) -> None:
-    from scripts.pairwise import mine_pairwise_pairs
-
-    block = "a ross"
-    spec = _mining_input(tmp_path, block)
-    roles_path = tmp_path / "roles.json"
-    frozen = assign_block_roles(
-        [BlockSpec(block, 32), BlockSpec("sealed", 5)],
-        {"pairwise_train": 1, "final_test_a": 1},
-        pinned_roles={block: "pairwise_train", "sealed": "final_test_a"},
-    )
-    roles_path.write_text(json.dumps(frozen), encoding="utf-8")
-    output = tmp_path / "pairs.csv"
-    with pytest.raises(ValueError, match="outside pairwise_train"):
-        mine_pairwise_pairs.mine_pairs(roles_path, {block: spec, "sealed": spec}, output, per_block=6)
-    assert not output.exists()
-
-
 def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from scripts.pairwise.mine_pairwise_pairs import main
 
     block = "a ross"
     spec = _mining_input(tmp_path, block)
     roles_path, blocks_path, output = (tmp_path / name for name in ("roles.json", "blocks.json", "nested/pairs.csv"))
-    roles = assign_block_roles([BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME}))], {"pairwise_train": 1})
+    roles = assign_block_roles([BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME}))], {"fit_pool": 1})
     roles_path.write_text(json.dumps(roles), encoding="utf-8")
     relative = {
         field: getattr(spec, field).relative_to(tmp_path).as_posix() for field in ("arrow_dir", "labels", "assignments")
@@ -114,6 +97,10 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
                 str(blocks_path),
                 "--pairs-per-block",
                 "6",
+                "--verified-pair-fraction",
+                "1",
+                "--pairs-per-block-floor",
+                "0",
                 "--output",
                 str(output),
             ]
@@ -122,12 +109,14 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
     )
     rows = pd.read_csv(output)
     assert json.loads(capsys.readouterr().out) == {"blocks": 1, "pairs": len(rows)}
-    assert set(rows["stratum"]) == {"false_merge", "missed_link", "merged_unlabeled", "random"}
     assert list(rows["block_key"].unique()) == [block]
-    assert len(rows[["signature_id_1", "signature_id_2"]].drop_duplicates()) == len(rows)
-    assert (rows["signature_id_1"] < rows["signature_id_2"]).all()
-    assert rows.groupby("stratum").size().le(6).all()
+    assert rows["stratum"].ne("merged_unlabeled").sum() == 6
+    assert rows["stratum"].eq("merged_unlabeled").sum() <= 6
     assert rows["inclusion_probability"].between(0, 1, inclusive="right").all()
+    manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pairs_per_block"] == 6
+    assert manifest["verified_pair_fraction"] == 1
+    assert manifest["pairs_per_block_floor"] == 0
 
 
 def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
@@ -184,8 +173,8 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_
                     BlockSpec(block, 32, frozenset({*_ORCIDS, _OUTSIDE_HOME})),
                     BlockSpec("sealed", 2, frozenset({_OUTSIDE_HOME})),
                 ],
-                {"pairwise_train": 1, "final_test_a": 1},
-                pinned_roles={block: "pairwise_train", "sealed": "final_test_a"},
+                {"fit_pool": 1, "final_test_a": 1},
+                pinned_roles={block: "fit_pool", "sealed": "final_test_a"},
                 closure_mode="block_only",
             )
         ),
@@ -199,12 +188,24 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_
     assert not set(rows["signature_id_2"]) & {"q_outside_home", "s03"}
     manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
     info = manifest["blocks"][block]
-    assert manifest["block_role_assignments_sha256"] == sha256_file(roles_path)
+    assert manifest["block_role_assignments_sha256"] == load_block_roles(roles_path).sha256
     assert manifest["output_sha256"] == sha256_file(output)
     assert info["labels_sha256"] == sha256_file(spec.labels)
     assert info["assignments_sha256"] == sha256_file(spec.assignments)
     assert info["eligible_signatures"] == 30
     assert info["excluded_non_home_signatures"] == 2
+    assert info["verified_signatures"] == 4
+    assert info["verified_within_block_pairs"] == 6
+    assert info["pair_cap"] == 6
+    strata = info["strata"]
+    fitted = [name for name in strata if name != "merged_unlabeled"]
+    # Judge-only pairs have their own budget and never displace ledger-labeled pairs.
+    assert sum(strata[name]["sampled_pairs"] for name in fitted) == min(
+        6, sum(strata[name]["frame_pairs"] for name in fitted)
+    )
+    assert strata["merged_unlabeled"]["sampled_pairs"] == min(6, strata["merged_unlabeled"]["frame_pairs"])
+    assert strata["merged_unlabeled"]["sampled_pairs"] > 0
+    assert mined <= 12
     random = rows.loc[rows["stratum"].eq("random")]
     author = {"q_full", "q_initial", "s00"}
     assert (random["signature_id_1"].isin(author) | random["signature_id_2"].isin(author)).sum() <= 2

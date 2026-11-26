@@ -10,14 +10,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from s2and._sha256 import is_lowercase_sha256, sha256_file
+from s2and._sha256 import is_lowercase_sha256
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.text import normalize_orcid
 
 BLOCK_BINDINGS_FIELD = "block_bindings"
+ROLE_SHA256_FIELD = "block_role_assignments_sha256"
+
+
+def assignment_digest(path: Path) -> str:
+    """Hash a role assignment by its JSON content, so whitespace or key order never changes its identity."""
+    return canonical_json_digest(json.loads(path.read_text(encoding="utf-8")))
+
+
 GATE_BINDINGS_FIELD = "gate_thresh_block_bindings"
 GATE_CANDIDATE_ORCIDS = "gate_thresh_candidate_orcids"
 FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
+VALID_ROLES = ("fit_pool", "gate_fit", "eps_cal", "gate_thresh", "dev_test", *FINAL_TEST_ROLES)
 _WHITESPACE_OR_UNDERSCORE = re.compile(r"[\s_]+")
 
 
@@ -51,6 +60,12 @@ class BlockRoles:
     evidence_blocks: dict[str, str] = field(default_factory=dict)
     excluded_orcid_groups_sha256: str | None = None
     gate_block_orcids: dict[str, frozenset[str]] = field(default_factory=dict)
+    pairwise_validation_blocks: frozenset[str] = frozenset()
+
+    def require_assignment(self, payload: Mapping[str, object], *, context: str) -> None:
+        """Check that an artifact was built with this exact role assignment."""
+        if payload.get(ROLE_SHA256_FIELD) != self.sha256:
+            raise ValueError(f"{context} does not match the master block role assignment")
 
     def require_current_exclusions(self) -> None:
         """Reject roles built with a different policy or containing excluded ORCIDs."""
@@ -115,7 +130,8 @@ class BlockRoles:
 
 def load_block_roles(path: Path) -> BlockRoles:
     """Load the scored assignments and reject inconsistent manifests."""
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    content = path.read_bytes()
+    payload = json.loads(content.decode("utf-8"))
     verification = payload.get("verification", {})
     if not isinstance(verification, dict) or verification.get("cross_role_orcid_overlap") != 0:
         raise ValueError(f"Block role manifest {path} does not certify zero cross-role ORCID overlap for scoring")
@@ -124,8 +140,8 @@ def load_block_roles(path: Path) -> BlockRoles:
         raise ValueError(f"Block role manifest {path} is missing roles")
     by_block: dict[str, str] = {}
     for role, blocks in roles.items():
-        if role == "unassigned":
-            raise ValueError(f"Unassigned blocks cannot have a role in {path}")
+        if role not in VALID_ROLES:
+            raise ValueError(f"Unknown block role {role!r} in {path}. Expected one of {VALID_ROLES}.")
         if not isinstance(blocks, list):
             raise ValueError(f"Expected a list of blocks for role {role!r} in {path}")
         for block in blocks:
@@ -135,6 +151,13 @@ def load_block_roles(path: Path) -> BlockRoles:
             by_block[key] = role
     if "block_to_role" in payload and payload["block_to_role"] != by_block:
         raise ValueError(f"Inconsistent block_to_role and roles in {path}")
+    validation = payload.get("pairwise_validation_blocks")
+    if (
+        not isinstance(validation, list)
+        or any(not isinstance(block, str) or by_block.get(block) != "fit_pool" for block in validation)
+        or len(set(validation)) != len(validation)
+    ):
+        raise ValueError(f"Expected unique fit_pool keys in pairwise_validation_blocks in {path}")
     bound = payload.get("format_version") == 2
     raw_orcids = payload.get("block_orcids")
     evidence_blocks = payload.get("evidence_blocks", {}) if bound else {}
@@ -180,7 +203,7 @@ def load_block_roles(path: Path) -> BlockRoles:
             gate_block_orcids[block] = frozenset(cast(list[str], orcids))
     result = BlockRoles(
         by_block,
-        sha256_file(path),
+        canonical_json_digest(payload),
         block_orcids,
         assigned_identity_roles(block_orcids, by_block),
         digests.get("identity_evidence_sha256"),
@@ -189,6 +212,7 @@ def load_block_roles(path: Path) -> BlockRoles:
         evidence_blocks,
         payload.get("excluded_orcid_groups_sha256") if bound else None,
         gate_block_orcids,
+        frozenset(cast(list[str], validation)),
     )
     result.require_current_exclusions()
     return result

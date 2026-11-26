@@ -30,6 +30,7 @@ from s2and.text import normalize_orcid  # noqa: E402
 from scripts.common.arrow_roots import read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     BLOCK_BINDINGS_FIELD,
+    ROLE_SHA256_FIELD,
     BlockRoles,
     load_block_roles,
     normalize_block_key,
@@ -41,8 +42,14 @@ from scripts.common.orcid_references import (  # noqa: E402
     EXCLUDED_ORCID_GROUPS,
     read_external_reference_identity_evidence,
 )
+from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
 
-TASK_ROLES = ("linker_train", "gate_fit", "gate_thresh")
+TASK_BLOCK_ROLES = {
+    "fit_pool": frozenset({"fit_pool"}),
+    "gate_fit": frozenset({"gate_fit"}),
+    "gate_thresh": frozenset({"gate_thresh"}),
+}
+TASK_ROLES = tuple(TASK_BLOCK_ROLES)
 TASK_MANIFEST = "linker_tasks.json"
 _PLAN_BATCH_SIZE = 128
 _TASK_COLUMNS = (
@@ -105,9 +112,11 @@ def _freeze_block_rows(
     signatures = _read_signatures(arrow, block, include_orcid=eligibility is None)
     if missing := (set(seeds) | set(query_ids) | set(identities)) - signatures.keys():
         raise ValueError(f"{block!r} inputs reference missing signatures: {sorted(missing)[:5]}")
-    if len(set(query_ids)) != len(query_ids) or set(query_ids) & seeds.keys():
+    query_set = set(query_ids)
+    if len(query_set) != len(query_ids) or query_set & seeds.keys():
         raise ValueError(f"Queries in {block!r} must be unique and absent from the pre-attachment seeds")
     scored = {}
+    decisions = {}
     if eligibility is None:
         scored = {
             sid: orcid
@@ -116,12 +125,23 @@ def _freeze_block_rows(
         }
     else:
         eligibility.require_signatures(signatures.keys())
-        if role != "gate_thresh":
-            scored = eligibility.scored()
-        if any(not eligibility.eligibility(sid).fit_ok for sid in query_ids):
+        decisions = {sid: eligibility.eligibility(sid) for sid in signatures}
+        eligible = {sid for sid, decision in decisions.items() if decision.fit_ok}
+        if query_set - eligible:
             raise ValueError(f"Ineligible query in {block!r}")
-        if role != "gate_thresh" and any(not eligibility.eligibility(sid).fit_ok for sid in seeds):
-            raise ValueError(f"Ineligible fitting seed in {block!r}")
+        if role != "gate_thresh":
+            scored = {
+                sid: decision.score_orcid for sid, decision in decisions.items() if decision.score_orcid is not None
+            }
+            if unscored := query_set - scored.keys():
+                raise ValueError(f"Unscored fitting queries in {block!r}: {sorted(unscored)[:5]}")
+            expected_seeds = eligible - query_set
+            if seeds.keys() != expected_seeds:
+                raise ValueError(
+                    f"Fitting seed coverage differs in {block!r}: "
+                    f"missing={sorted(expected_seeds - seeds.keys())[:5]}, "
+                    f"ineligible={sorted(seeds.keys() - expected_seeds)[:5]}"
+                )
     queries = [query for query in query_ids if query in scored or role == "gate_thresh"]
     members: dict[str, list[str]] = defaultdict(list)
     components_by_orcid: dict[str, set[str]] = defaultdict(set)
@@ -132,7 +152,7 @@ def _freeze_block_rows(
         if eligibility is None:
             evidence_ids = {identities.get(sid), signatures[sid][1]}
         else:
-            decision = eligibility.eligibility(sid)
+            decision = decisions[sid]
             evidence_ids = decision.identities
             if decision.identity_veto:
                 vetoed_components.add(component)
@@ -274,7 +294,11 @@ def build_linker_task_tables(
     by_block = {normalize_block_key(key): spec for key, spec in inputs.items()}
     if len(inputs) != len(by_block):
         raise ValueError("Duplicate normalized block keys in linker inputs")
-    required = {block for block, role in roles.block_to_role.items() if role in TASK_ROLES}
+    task_blocks = {
+        task: {block for block, role in roles.block_to_role.items() if role in allowed}
+        for task, allowed in TASK_BLOCK_ROLES.items()
+    }
+    required = set().union(*task_blocks.values())
     if blocks is not None:
         requested = {normalize_block_key(block) for block in blocks}
         if not requested or len(requested) != len(blocks) or requested - required:
@@ -288,13 +312,15 @@ def build_linker_task_tables(
         )
     common_binding = None
     if ledger is not None:
-        common_binding = read_json_object(inputs_path.parent / "inputs_binding.json")
-        if common_binding.get("index_sha256") != ledger.evidence.name_counts_index_sha256:
-            raise ValueError("Linker inputs use a different name-counts index")
+        common_binding = require_linker_input_binding(
+            roles,
+            read_json_object(inputs_path.parent / "inputs_binding.json"),
+            index_sha256=ledger.evidence.name_counts_index_sha256,
+        )
     tables: dict[str, Any] = {}
     output_dir.mkdir(parents=True, exist_ok=False)
     for role in TASK_ROLES:
-        role_blocks = sorted(key for key in by_block if roles.role_for(key) == role)
+        role_blocks = sorted(task_blocks[role] & by_block.keys())
         if not role_blocks:
             continue
         block_records = {}
@@ -312,22 +338,23 @@ def build_linker_task_tables(
                 ):
                     raise ValueError(f"Expected real request signature IDs in {query_path}")
                 eligibility = None
+                receipt_path = None
                 identities, labels = {}, {}
+                seed_digest = sha256_file(seed_path)
                 if ledger is None:
                     label_path = (inputs_path.parent / str(spec["labels"])).resolve()
                     identities, labels = read_external_reference_identity_evidence(label_path, require_scored=True)
                 else:
                     eligibility = ledger.for_block(block, dataset_dir=arrow_dir)
-                    input_manifest = read_json_object(inputs_path.parent / spec["input_manifest"])
-                    observed = input_manifest["binding"]
-                    roles.require_bindings(observed, {block}, context="Linker inputs")
-                    if common_binding is None or any(
-                        observed.get(key) != value for key, value in common_binding.items()
-                    ):
-                        raise ValueError(f"Input model, index, or ledger digest mismatch for {block!r}")
-                    for path in (seed_path, query_path):
-                        if input_manifest["files"].get(path.name) != sha256_file(path):
-                            raise ValueError(f"Linker input digest mismatch: {path}")
+                    receipt_path = (inputs_path.parent / spec["input_manifest"]).resolve()
+                    assert common_binding is not None
+                    require_linker_input_receipt(
+                        roles,
+                        block,
+                        read_json_object(receipt_path),
+                        common_binding,
+                        {seed_path: seed_digest, query_path: sha256_file(query_path)},
+                    )
                 with ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow:
                     frame, counts = _freeze_block_rows(
                         arrow,
@@ -346,7 +373,8 @@ def build_linker_task_tables(
                         "arrow_dir": str(arrow_dir),
                         "arrow_generation_id": arrow.generation_id,
                         "seeds": str(seed_path),
-                        "seeds_sha256": sha256_file(seed_path),
+                        "seeds_sha256": seed_digest,
+                        **({"input_manifest": str(receipt_path)} if receipt_path is not None else {}),
                         "counts": counts,
                     }
                 if not frame.empty:
@@ -361,11 +389,8 @@ def build_linker_task_tables(
             raise ValueError(f"No candidate rows in frozen role {role!r}")
         tables[role] = {"path": role_path.name, "sha256": sha256_file(role_path), "blocks": block_records}
     manifest = {
-        **(
-            {BLOCK_BINDINGS_FIELD: roles.bindings_for(required)}
-            if ledger is not None
-            else {"block_role_assignments_sha256": roles.sha256}
-        ),
+        ROLE_SHA256_FIELD: roles.sha256,
+        **({BLOCK_BINDINGS_FIELD: roles.bindings_for(required)} if ledger is not None else {}),
         "distance_policy_version": DISTANCE_POLICY_VERSION,
         "s2and_version": __version__,
         "retrieval_top_k": DEFAULT_RETRIEVAL_TOP_K,

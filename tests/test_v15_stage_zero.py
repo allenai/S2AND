@@ -20,7 +20,7 @@ from s2and.arrow_tables import write_cluster_seeds_arrow, write_name_counts_inde
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from s2and.production_model import load_production_model
-from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles, load_identity_evidence
 from scripts.eps import apply_reviewed_eps, orcid_b3, sweep_eps_on_linking_gold
 from scripts.intake import (
@@ -35,14 +35,31 @@ from scripts.judging import review_packets
 from scripts.linker import build_linker_inputs, build_linker_task_tables
 from scripts.linker.train_linker_and_finalize import _apply_blind_gate_labels, _validate_frozen_task_bindings
 from scripts.pairwise import mine_pairwise_pairs
+from tests.helpers import request_bundle
 from tests.test_giant_eps_release import _complete_model
-from tests.test_identity_ledger import DEPOSITED, GOLD, HOLDOUT, request_bundle
+from tests.test_identity_ledger import DEPOSITED, GOLD, HOLDOUT
 
 pytestmark = pytest.mark.tooling
 
 
 def _run(module: ModuleType, *args: str | Path) -> None:
     assert module.main(list(map(str, args))) in (0, None)
+
+
+def _build_freeze_input(evidence: Path, gold_blocks: Path, output: Path) -> None:
+    origins = output.with_suffix(".origins.csv")
+    origins.write_text("surname,broad\n", encoding="utf-8")
+    _run(
+        build_freeze_input,
+        "--identity-evidence",
+        evidence,
+        "--gold-blocks",
+        gold_blocks,
+        "--surname-origin-csv",
+        origins,
+        "--output",
+        output,
+    )
 
 
 def _json(path: Path, payload: object) -> Path:
@@ -112,7 +129,7 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
     _run(build_identity_evidence, "--snapshot", snapshot, "--gold-parquet", gold, "--output-dir", evidence.parent)
     gold_blocks = _parquet(tmp_path / "gold-blocks.parquet", cluster_block_key=[block, fit], split=["development"] * 2)
     blocks = tmp_path / "blocks.parquet"
-    _run(build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", gold_blocks, "--output", blocks)
+    _build_freeze_input(evidence, gold_blocks, blocks)
     freeze = tmp_path / "freeze"
     _run(
         assign_block_roles,
@@ -148,6 +165,7 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
         {
             "tables": {"gate_thresh": {"blocks": {block: spec}}},
             BLOCK_BINDINGS_FIELD: roles.bindings_for({block}),
+            ROLE_SHA256_FIELD: roles.sha256,
         },
     )
     return block, ledger, task
@@ -204,6 +222,22 @@ def test_gate_controls_show_verified_identity(
         allowed_roles={"gate_thresh"},
         ledger=ledger,
     )
+
+
+def test_gate_control_exemplars_check_the_frozen_dataset(
+    gate_packet_inputs: tuple[str, IdentityLedger, Path],
+) -> None:
+    block, ledger, task = gate_packet_inputs
+    manifest = json.loads(task.read_text(encoding="utf-8"))
+    spec = manifest["tables"]["gate_thresh"]["blocks"][block]
+    datasets = ledger.evidence.snapshot_root / "datasets"
+    foreign_dir = next(path for path in datasets.iterdir() if path != Path(spec["arrow_dir"]))
+    with ArrowDataset.open(foreign_dir) as foreign:
+        spec.update(arrow_dir=str(foreign_dir), arrow_generation_id=foreign.generation_id)
+    _json(task, manifest)
+    items = [{"block_key": block, "candidates": [{"candidate_key": "other"}]}]
+    with pytest.raises(ValueError, match="Identity evidence was built for a different dataset generation"):
+        review_packets.resolve_gate_exemplars(items, ledger.roles, task, control_ledger=ledger)
 
 
 def test_gate_query_metadata_follows_frozen_signature(
@@ -515,6 +549,8 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         ("a lovelace", 101, GOLD, "development", True),
         ("a lovelace", 103, GOLD, "development", True),
         ("a lovelace", 104, unscored, "development", False),
+        ("a lovelace", 106, unscored, "development", True),
+        ("a lovelace", 107, unscored, "development", True),
         ("b ross", 201, eps_orcid, "development", True),
         ("b ross", 202, eps_orcid, "development", True),
         ("b ross", 203, eps_orcid, "development", False),
@@ -551,10 +587,10 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     abstract_permissions = _json(tmp_path / "abstracts.json", [])
     reviewed = _json(tmp_path / "errors.json", {"a lovelace": ["105-0"]})
     snapshot = tmp_path / "snapshot"
-    targets = _json(tmp_path / "targets.json", {"pairwise_train": 1, "eps_cal": 1, "final_test": 2})
+    targets = _json(tmp_path / "targets.json", {"fit_pool": 1, "eps_cal": 1, "final_test": 2})
     pins = _json(
         tmp_path / "pins.json",
-        {"a lovelace": "pairwise_train", "b ross": "eps_cal", "d hopper": "final_test_a", "e turing": "final_test_b"},
+        {"a lovelace": "fit_pool", "b ross": "eps_cal", "d hopper": "final_test_a", "e turing": "final_test_b"},
     )
     gate = "g schneider"
     raw_gate = exports[gate].parent / "g_schneider"
@@ -606,7 +642,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         )
         evidence = evidence_dir / "manifest.json"
         blocks = tmp_path / f"{name}-blocks.parquet"
-        _run(build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", source_blocks, "--output", blocks)
+        _build_freeze_input(evidence, source_blocks, blocks)
         output = tmp_path / name
         prior_args = ["--pinned-roles-json", prior] if prior else []
         _run(
@@ -632,6 +668,42 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     old_roles, roles = load_block_roles(prior), load_block_roles(role_path)
     assert roles.block_to_role == {**old_roles.block_to_role, gate: "gate_thresh"}
+    fresh_dir = tmp_path / "fresh"
+    with pytest.raises(ValueError, match="requires the master assignment"):
+        _run(
+            assign_block_roles,
+            "--fresh",
+            "--blocks",
+            tmp_path / "next-blocks.parquet",
+            "--identity-evidence",
+            evidence,
+            "--output-dir",
+            fresh_dir,
+        )
+    _run(
+        assign_block_roles,
+        "--fresh",
+        "--blocks",
+        tmp_path / "next-blocks.parquet",
+        "--identity-evidence",
+        evidence,
+        "--output-dir",
+        fresh_dir,
+        "--pinned-roles-json",
+        role_path,
+    )
+    assert (fresh_dir / "assignments.json").read_bytes() == role_path.read_bytes()
+    # Owner decision 2026-11-25: a formatting-only rewrite keeps the assignment's identity.
+    reformatted = tmp_path / "reformatted.json"
+    reformatted.write_text(json.dumps(json.loads(role_path.read_text("utf-8")), indent=4) + "\n\n", encoding="utf-8")
+    assert load_block_roles(reformatted).sha256 == roles.sha256
+    ledger_for_roles(evidence, load_block_roles(reformatted))
+    altered = tmp_path / "altered.json"
+    payload = json.loads(role_path.read_text("utf-8"))
+    payload["seed"] = payload.get("seed", 0) + 1
+    altered.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="recorded master block role assignment"):
+        ledger_for_roles(evidence, load_block_roles(altered))
     binding = ["--identity-evidence", evidence, "--block-role-assignments", role_path]
     ledger = ledger_for_roles(evidence, roles)
     assert ledger is not None
@@ -671,8 +743,18 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "2026-10-20",
         "--requests-per-block",
         "2",
+        "--queries-per-block",
+        "1",
     )
     built = json.loads((inputs / "inputs.json").read_text())
+    fit_inputs = built["a lovelace"]
+    fit_assignments = {
+        row["signature_id"]: row["cluster_id"] for row in pq.read_table(fit_inputs["assignments"]).to_pylist()
+    }
+    fit_queries = set(json.loads(Path(fit_inputs["queries"]).read_text(encoding="utf-8")))
+    assert fit_queries == {"106-0"}
+    assert fit_assignments.keys() == {"102-0", "104-0", "107-0"}
+    assert build_linker_task_tables.read_seed_components(Path(fit_inputs["seeds"])) == fit_assignments
     assert json.loads(Path(built[gate]["queries"]).read_text()) == ["532-0", "531-0"]
     seed_map = build_linker_task_tables.read_seed_components(Path(built[gate]["seeds"]))
     assert seed_map["500-0"] == seed_map["501-0"] == "mixed"
@@ -798,6 +880,15 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     gate_table = pq.read_table(tasks / "gate_thresh.parquet").to_pandas()
     task_manifest = json.loads((tasks / build_linker_task_tables.TASK_MANIFEST).read_text())
     gate_blocks = task_manifest["tables"]["gate_thresh"]["blocks"]
+    index_digest = ledger.evidence.name_counts_index_sha256
+    _validate_frozen_task_bindings(task_manifest, roles, index_sha256=index_digest)
+    for field, error in (
+        ("index_sha256", "Linker inputs use a different name-counts index"),
+        ("model_sha256", "Input model, index, or role digest mismatch"),
+    ):
+        rebound = {**task_manifest, "linker_input_binding": {**task_manifest["linker_input_binding"], field: "0" * 64}}
+        with pytest.raises(ValueError, match=error):
+            _validate_frozen_task_bindings(rebound, roles, index_sha256=index_digest)
     stale_seed_report = {**report, "gate_seed_sha256": {gate: "0" * 64}}
     with pytest.raises(ValueError, match="frozen seed assignments"):
         _apply_blind_gate_labels(gate_table, stale_seed_report, roles, gate_blocks)
@@ -823,8 +914,6 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
 
     pairs = tmp_path / "pairs.csv"
     assignments = inputs / "a_lovelace" / "assignments.parquet"
-    hashed = set(pq.read_table(assignments)["signature_id"].to_pylist())
-    assert hashed == {"102-0", "104-0", "106-0", "107-0"}
     miner = _json(
         tmp_path / "miner.json",
         {"a lovelace": {"arrow_dir": arrow_dirs["a lovelace"], "assignments": str(assignments)}},
@@ -832,7 +921,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     _run(mine_pairwise_pairs, *binding, "--blocks-json", miner, "--pairs-per-block", "10", "--output", pairs)
     with pairs.open(encoding="utf-8", newline="") as handle:
         mined = list(csv.DictReader(handle))
-    assert mined and all({row["signature_id_1"], row["signature_id_2"]} <= hashed for row in mined)
+    assert not mined
+    fit_counts = json.loads(pairs.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))["blocks"]["a lovelace"]
+    assert fit_counts["eligible_signatures"] == 3
+    assert fit_counts["excluded_query_signatures"] == 1
+    assert fit_counts["excluded_non_home_signatures"] == 4
+    assert fit_counts["ineligible_signatures"] == 5
 
     paper = {"paper_id": "201", "signature_id": "201-0", "name": "B Ross", "title": "Study"}
     items = _json(
@@ -991,6 +1085,23 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     assert load_production_model(reviewed_model).cluster_model.eps == 0.38
     assert json.loads(report.read_text())["identity_evidence_sha256"] == sha256_file(evidence)
+    for duplicate in ("b_ross", "B Ross"):
+        with pytest.raises(ValueError, match="EPS review datasets must be unique"):
+            apply_reviewed_eps.apply_reviewed_eps(
+                model,
+                tmp_path / "duplicate-model",
+                eps_root,
+                ["b_ross", duplicate],
+                0.38,
+                "Synthetic review",
+                tmp_path / "duplicate-report.json",
+                expected_batching_threshold=3,
+                precision_f1_tolerance=0.01,
+                block_role_assignments=role_path,
+                identity_evidence=evidence,
+            )
+    assert not (tmp_path / "duplicate-model").exists()
+    assert not (tmp_path / "duplicate-report.json").exists()
 
     old_evidence = load_identity_evidence(evidence)
     filenames = [
@@ -1040,9 +1151,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert all(appended.blocks[block] == entry for block, entry in old_evidence.blocks.items())
     assert appended.blocks["f aba"]["permission_sha256"] != old_evidence.blocks[gate]["permission_sha256"]
     readded_blocks = tmp_path / "appended-blocks.parquet"
-    _run(
-        build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", source_blocks, "--output", readded_blocks
-    )
+    _build_freeze_input(evidence, source_blocks, readded_blocks)
     common = ["--blocks", readded_blocks, "--identity-evidence", evidence, "--targets-json", targets]
     with pytest.raises(ValueError, match="prior.*--fresh"):
         _run(assign_block_roles, *common, "--output-dir", tmp_path / "unbound-freeze")
@@ -1055,12 +1164,13 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     with pytest.raises(ValueError, match="absent from the frozen role assignments"):
         newer_roles.bindings_for({"z last"})
     assert {path: sha256_file(path) for path in filenames} == old_files
-    _validate_frozen_task_bindings(task_manifest, newer_roles)
+    with pytest.raises(ValueError, match="master block role assignment"):
+        _validate_frozen_task_bindings(task_manifest, newer_roles)
     foreign_roles = replace(
         newer_roles, identity_roles={**newer_roles.identity_roles, gate_a: frozenset({"gate_thresh", "final_test_b"})}
     )
     with pytest.raises(ValueError, match="block provenance"):
-        _validate_frozen_task_bindings(task_manifest, foreign_roles)
+        _validate_frozen_task_bindings({**task_manifest, ROLE_SHA256_FIELD: foreign_roles.sha256}, foreign_roles)
     with pytest.raises(ValueError, match="block provenance"):
         _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), foreign_roles, gate_blocks)
     assert _apply_blind_gate_labels(gate_table, json.loads(judged_path.read_text()), newer_roles, gate_blocks).equals(
@@ -1081,7 +1191,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert newer_judged.read_bytes() == judged_path.read_bytes()
     raised_targets = _json(
         tmp_path / "raised-targets.json",
-        {"pairwise_train": 1, "pairwise_val": 1, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
+        {"fit_pool": 2, "eps_cal": 1, "final_test_a": 1, "final_test_b": 2},
     )
     new_pins = _json(tmp_path / "new-pins.json", {"z last": "final_test_b"})
     raised = tmp_path / "raised-freeze"
@@ -1102,9 +1212,10 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     )
     assert load_block_roles(raised / "assignments.json").block_to_role == {
         **roles.block_to_role,
-        "f aba": "pairwise_val",
+        "f aba": "fit_pool",
         "z last": "final_test_b",
     }
+    assert load_block_roles(raised / "assignments.json").pairwise_validation_blocks == {"f aba"}
     for directory in (snapshot, evidence.parent):
         receipt = directory / ".role_freeze.json"
         receipt.rename(receipt.with_suffix(".bak"))

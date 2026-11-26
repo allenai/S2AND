@@ -98,7 +98,7 @@ def test_intake_rejects_bundle_named_for_another_block(tmp_path: Path) -> None:
 
 def test_failed_intake_append_preserves_prior_permissions(tmp_path: Path) -> None:
     from scripts.intake.requests_to_datasets import SNAPSHOT_BINDING, convert_requests
-    from tests.test_identity_ledger import request_bundle
+    from tests.helpers import request_bundle
 
     exports = tmp_path / "exports"
     prior = request_bundle(exports, "a lovelace", [("1", None)])

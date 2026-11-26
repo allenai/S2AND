@@ -22,6 +22,7 @@ from s2and.incremental_linking_training.classic import (
 )
 from s2and.text import normalize_orcid
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, BlockRoles, load_block_roles, normalize_block_key
+from scripts.common.block_roles import ROLE_SHA256_FIELD as BLOCK_ROLE_SHA256_FIELD
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
 from scripts.common.initial_query_sources import (
     MAP_SHA256_FIELD,
@@ -33,7 +34,6 @@ from scripts.common.orcid_references import EXCLUDED_ORCID_GROUPS, read_external
 # Selection references exclude final-test identities and reviewed ORCID errors.
 REFERENCE_POLICY = "final_test_orcid_groups_and_reviewed_error_records_excluded"
 REFERENCE_POLICY_ALL_IDENTITIES = "all_reference_identities_block_disjoint"
-BLOCK_ROLE_SHA256_FIELD = "block_role_assignments_sha256"
 ORCID_ERROR_RECORDS = "orcid_error_query_signatures.json"
 
 
@@ -161,6 +161,7 @@ def read_reference(
                 "reference_kind": "repeated_orcid_identity",
                 "reference_policy": REFERENCE_POLICY_ALL_IDENTITIES,
                 "reference_source": "identity_ledger",
+                **ledger.bindings,
                 BLOCK_BINDINGS_FIELD: ledger.roles.bindings_for({dataset}),
                 MAP_SHA256_FIELD: query_sources.sha256 if query_sources is not None else None,
                 "reference_signatures": len(repeated),

@@ -46,6 +46,7 @@ from s2and.incremental_linking.features import promoted_linker_feature_columns  
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view  # noqa: E402
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch  # noqa: E402
 from s2and.incremental_linking.policy import (  # noqa: E402
+    NAME_COUNTS_MANIFEST_SHA256_FIELD,
     PROMOTED_LINKER_MODEL_SUPPRESS_ORCID,
     require_arrow_name_counts_index_for_clusterer,
 )
@@ -92,6 +93,7 @@ from s2and.production_training_contract import (  # noqa: E402
 )
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
+from scripts.common.arrow_roots import read_json_object  # noqa: E402
 from scripts.common.block_roles import (  # noqa: E402
     GATE_BINDINGS_FIELD,
     GATE_CANDIDATE_ORCIDS,
@@ -111,8 +113,9 @@ from scripts.common.linker_seeds import (  # noqa: E402
     members_by_component,
     read_frozen_seeds,
 )
+from scripts.common.stage0_invariants import require_linker_input_binding, require_linker_input_receipt  # noqa: E402
 from scripts.linker.blind_gate_metrics import update_blind_gate_metrics  # noqa: E402
-from scripts.linker.build_linker_task_tables import TASK_ROLES  # noqa: E402
+from scripts.linker.build_linker_task_tables import TASK_BLOCK_ROLES, TASK_ROLES  # noqa: E402
 
 # Keep the pre-split names importable from this command module.
 evaluate_classic = evaluate_linker
@@ -2035,13 +2038,16 @@ def _apply_blind_gate_labels(
     return labeled
 
 
-def _validate_frozen_task_bindings(manifest: Mapping[str, Any], roles: BlockRoles) -> None:
+def _validate_frozen_task_bindings(
+    manifest: Mapping[str, Any], roles: BlockRoles, *, index_sha256: str | None = None
+) -> None:
     """Check the roles and block provenance of every frozen task table."""
     roles.require_current_exclusions()
+    roles.require_assignment(manifest, context="Frozen linker tasks")
     bound_blocks = set()
     for role, table in manifest["tables"].items():
         blocks = set(table["blocks"])
-        assigned = {block for block, assignment in roles.block_to_role.items() if assignment == role}
+        assigned = {block for block, assignment in roles.block_to_role.items() if assignment in TASK_BLOCK_ROLES[role]}
         if not blocks or blocks != assigned:
             raise ValueError(
                 f"Linker task {role!r} does not match the frozen block roles. "
@@ -2050,8 +2056,15 @@ def _validate_frozen_task_bindings(manifest: Mapping[str, Any], roles: BlockRole
         bound_blocks.update(blocks)
     if roles.evidence_sha256 is not None:
         roles.require_bindings(manifest, bound_blocks, context="Frozen linker tasks")
-    elif manifest["block_role_assignments_sha256"] != roles.sha256:
-        raise ValueError("The linker task tables must use the same frozen block roles")
+        common = require_linker_input_binding(roles, manifest.get("linker_input_binding"), index_sha256=index_sha256)
+        for table in manifest["tables"].values():
+            for block, spec in table["blocks"].items():
+                path = spec.get("input_manifest")
+                if not isinstance(path, str) or not path:
+                    raise ValueError(f"Missing frozen linker input receipt for {block!r}. Rebuild frozen linker tasks.")
+                require_linker_input_receipt(
+                    roles, block, read_json_object(Path(path)), common, {Path(spec["seeds"]): spec["seeds_sha256"]}
+                )
 
 
 def _materialize_frozen_linker_tasks(
@@ -2080,8 +2093,11 @@ def _materialize_frozen_linker_tasks(
     if gate_judgments is not None and roles.evidence_sha256 is None:
         raise ValueError("Gate threshold judgments require ledger-backed linker tasks")
     if manifest["retrieval_top_k"] != DEFAULT_RETRIEVAL_TOP_K or set(manifest["tables"]) != set(TASK_ROLES):
-        raise ValueError("The linker manifest must contain exactly linker_train, gate_fit and gate_thresh at top-25")
-    _validate_frozen_task_bindings(manifest, roles)
+        raise ValueError("The linker manifest must contain exactly fit_pool, gate_fit and gate_thresh at top-25")
+    index_sha256 = (
+        clusterer.feature_contract[NAME_COUNTS_MANIFEST_SHA256_FIELD] if roles.evidence_sha256 is not None else None
+    )
+    _validate_frozen_task_bindings(manifest, roles, index_sha256=index_sha256)
     tasks: dict[str, pd.DataFrame] = {}
     summaries = []
     for role in TASK_ROLES:
@@ -2429,7 +2445,9 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--gate-thresh-judgments", type=Path, help="Bound blind judging consensus for production requests."
     )
-    parser.add_argument("--linker-task-manifest", type=Path, help="Use frozen linker_train, gate_fit and gate_thresh.")
+    parser.add_argument(
+        "--linker-task-manifest", type=Path, help="Use frozen fit_pool, gate_fit and gate_thresh tasks."
+    )
     parser.add_argument("--block-role-assignments", type=Path, help="Role manifest used to build the linker tables.")
     parser.add_argument(
         "--expected-initial-query-map-sha256",

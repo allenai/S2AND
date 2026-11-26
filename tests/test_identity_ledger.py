@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from s2and.arrow_tables import write_name_counts_index
-from tests.helpers import write_arrow_tables_bundle
+from tests.helpers import request_bundle
 
 pytestmark = pytest.mark.tooling
 GOLD = "0000-0002-1694-233X"
@@ -15,53 +15,6 @@ DEPOSITED = "0000-0001-5109-3700"
 HOLDOUT = "0000-0003-3808-2083"
 # The synthetic block has one mismatched name among three gold rows.
 FIXTURE_UNMATCHED_LIMIT = 1 / 3
-
-
-def request_bundle(root: Path, block: str, rows: list[tuple[str, str | None]]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    name = block.replace(" ", "_")
-    first, last = block.split()
-    papers = [paper for paper, _ in rows]
-    author = f"{first} {last}"
-    directory = root / name
-    write_arrow_tables_bundle(
-        directory,
-        {
-            "signatures": pa.table(
-                {
-                    "signature_id": [f"{paper}-0" for paper in papers],
-                    "paper_id": papers,
-                    "author_position": [0] * len(papers),
-                    "author_first": [first] * len(papers),
-                    "author_middle": [""] * len(papers),
-                    "author_last": [last] * len(papers),
-                    "author_suffix": [""] * len(papers),
-                    "author_affiliations": pa.array([[]] * len(papers), type=pa.list_(pa.string())),
-                    "author_block": [block] * len(papers),
-                    "author_orcid": pa.array([orcid for _, orcid in rows], type=pa.string()),
-                }
-            ),
-            "papers": pa.table(
-                {
-                    "paper_id": papers,
-                    "title": ["Study"] * len(papers),
-                    "venue": [""] * len(papers),
-                    "journal_name": [""] * len(papers),
-                }
-            ),
-            "paper_authors": pa.table(
-                {"paper_id": papers, "position": [0] * len(papers), "author_name": [author] * len(papers)}
-            ),
-            "specter": pa.table(
-                {"paper_id": papers, "embedding": pa.array([[1.0, 0.0]] * len(papers), type=pa.list_(pa.float32(), 2))}
-            ),
-        },
-    )
-    path = root / f"{name}.arrow.tar.gz"
-    with tarfile.open(path, "w:gz") as archive:
-        for arrow in directory.glob("*.arrow"):
-            archive.add(arrow, arcname=arrow.name)
-    return path
 
 
 @pytest.fixture
@@ -125,7 +78,7 @@ def test_evidence_keeps_all_verified_sources_and_flags(evidence_inputs: tuple[Pa
         ledger.read_block("a lovelace")
 
 
-@pytest.mark.parametrize("role", ["pairwise_train", "gate_thresh"])
+@pytest.mark.parametrize("role", ["fit_pool", "gate_thresh"])
 def test_rejected_gold_vetoes_a_foreign_role(evidence_inputs: tuple[Path, Path], tmp_path: Path, role: str) -> None:
     from dataclasses import replace
 
@@ -178,7 +131,7 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
     from scripts.intake.build_identity_evidence import _block_rows
     from scripts.intake.prepare_identity_labels import SignatureJoin
 
-    block, role, paper = "c klein", "pairwise_train", "173993366"
+    block, role, paper = "c klein", "fit_pool", "173993366"
     rows = [
         {
             "signature_id": f"{paper}-{pos}",
@@ -212,8 +165,10 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
     assert audit["dropped_ambiguous_paper_block"] == 1
 
 
-def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
-    from scripts.intake.build_freeze_input import build_freeze_input
+def test_freeze_input_counts_both_sources_once(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.intake.build_freeze_input import main
     from scripts.intake.build_identity_evidence import build_identity_evidence
 
     snapshot, gold = evidence_inputs
@@ -224,12 +179,29 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
         pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["holdout", "development"]}), source
     )
     output = tmp_path / "freeze-input.parquet"
-    build_freeze_input(evidence / "manifest.json", source, output, strata={"a_lovelace": "tiny"})
+    origins = tmp_path / "origins.csv"
+    origins.write_text("surname,broad\nLovelace,northern_european\n", encoding="utf-8")
+    args = [
+        "--identity-evidence",
+        str(evidence / "manifest.json"),
+        "--gold-blocks",
+        str(source),
+        "--output",
+        str(output),
+    ]
+    with pytest.raises(SystemExit, match="2"):
+        main(args)
+    assert "--surname-origin-csv" in capsys.readouterr().err
+    assert not output.exists()
+    assert main([*args, "--surname-origin-csv", str(origins)]) == 0
+    coverage = json.loads(capsys.readouterr().out)["surname_origin_coverage"]
+    assert coverage == {"matched_blocks": 1, "matched_surnames": 1, "missing_blocks": 1, "missing_surnames": 1}
     first, second = pq.read_table(output).to_pylist()
     assert first["signature_count"] == 4
-    assert first["stratum"] == "tiny"
+    assert first["stratum"] == "<=1000|northern_european"
     assert dict(first["orcid_mention_counts"]) == {DEPOSITED: 2, GOLD: 2}
     assert second["source_split"] == "holdout"
+    assert second["stratum"] == "<=1000|other"
 
 
 @pytest.mark.parametrize(
@@ -249,7 +221,7 @@ def test_rejected_gold_never_supplies_an_identity_or_label(gold_block: str, gold
     from scripts.intake.build_identity_evidence import _block_rows
     from scripts.intake.prepare_identity_labels import SignatureJoin
 
-    block, role = "a lovelace", "linker_train"
+    block, role = "a lovelace", "fit_pool"
     signatures = pd.DataFrame(
         {
             "signature_id": ["1-0", "2-0"],
@@ -303,7 +275,7 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     )
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence / "manifest.json", source, blocks)
-    targets = {"pairwise_train": 1, "final_test_a": 1}
+    targets = {"fit_pool": 1, "final_test_a": 1}
     frozen = freeze_identity_roles(blocks, evidence / "manifest.json", targets)
     manifest = tmp_path / "assignments.json"
     manifest.write_text(json.dumps(frozen))
@@ -312,14 +284,14 @@ def test_freeze_masks_shared_identities_and_reserves_both_halves(
     assert not roles.scores("g hopper", GOLD)
     assert roles.scores("a lovelace", DEPOSITED)
     assert "orcid_home_role" not in frozen
-    assert frozen["verification"]["cross_role_mentions_by_role"]["pairwise_train"] == 2
+    assert frozen["verification"]["cross_role_mentions_by_role"]["fit_pool"] == 2
     with pytest.raises(ValueError, match="new or previously unassigned exported blocks"):
         freeze_identity_roles(
             blocks,
             evidence / "manifest.json",
             targets,
             prior_path=manifest,
-            extra_pins={"a lovelace": "pairwise_train"},
+            extra_pins={"a lovelace": "fit_pool"},
         )
     allocation = assign_block_roles(
         [
@@ -353,7 +325,7 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
     blocks = tmp_path / "freeze.parquet"
     build_freeze_input(evidence, source, blocks)
     frozen = tmp_path / "roles.json"
-    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"pairwise_train": 1, "final_test_a": 1})))
+    frozen.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(frozen))
     assert ledger is not None
     block = ledger.for_block("a lovelace")
@@ -371,8 +343,6 @@ def test_eligibility_blocks_conflicting_and_cross_role_mentions(
 def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     evidence_inputs: tuple[Path, Path], tmp_path: Path
 ) -> None:
-    import csv
-
     from s2and._sha256 import sha256_file
     from scripts.common.block_roles import load_block_roles
     from scripts.common.identity_ledger import ledger_for_roles
@@ -394,29 +364,33 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     blocks = tmp_path / "freeze-input.parquet"
     build_freeze_input(evidence, source, blocks)
     role_path = tmp_path / "roles.json"
-    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"pairwise_train": 1, "final_test_a": 1})))
+    role_path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 1, "final_test_a": 1})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
     assignment_root = tmp_path / "assignments"
     assignment_root.mkdir()
     assignments = assignment_root / "assignments.parquet"
     pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
+    queries = assignments.with_name("queries.json")
+    queries.write_text("[]", encoding="utf-8")
     manifest = assignment_root / "manifest.json"
     record = {
         "binding": {
             "block_bindings": ledger.roles.bindings_for({"a lovelace"}),
+            "block_role_assignments_sha256": ledger.roles.sha256,
             "model_sha256": "a" * 64,
-            "index_sha256": "b" * 64,
+            "index_sha256": ledger.evidence.name_counts_index_sha256,
         },
-        "files": {assignments.name: sha256_file(assignments)},
+        "files": {assignments.name: sha256_file(assignments), queries.name: sha256_file(queries)},
     }
     manifest.write_text(json.dumps(record))
     specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
     output = tmp_path / "pairs.csv"
-    assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 1
-    with output.open(newline="", encoding="utf-8") as source_file:
-        (row,) = csv.DictReader(source_file)
-    assert {row["signature_id_1"], row["signature_id_2"]} == {"2-0", "3-0"}
+    assert mine_pairs(role_path, specs, output, per_block=1, identity_evidence=evidence) == 0
+    summary = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))["blocks"]["a lovelace"]
+    assert summary["eligible_signatures"] == 2
+    assert summary["verified_within_block_pairs"] == 0
+    assert summary["pair_cap"] == 0
     record["binding"]["block_bindings"]["a lovelace"]["role_sha256"] = "old"
     manifest.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="does not match"):
@@ -425,7 +399,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     pq.write_table(pa.table({"cluster_block_key": ["g hopper", "a lovelace"], "split": ["development"] * 2}), source)
     both = tmp_path / "both-blocks.parquet"
     build_freeze_input(evidence, source, both)
-    role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"pairwise_train": 2})))
+    role_path.write_text(json.dumps(freeze_identity_roles(both, evidence, {"fit_pool": 2})))
     ledger = ledger_for_roles(evidence, load_block_roles(role_path))
     assert ledger is not None
     pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
@@ -433,15 +407,18 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     other.parent.mkdir()
     pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)
     for block, model_sha, path in (("a lovelace", "a" * 64, assignments), ("g hopper", "c" * 64, other)):
+        queries = path.with_name("queries.json")
+        queries.write_text("[]", encoding="utf-8")
         (path.parent / "manifest.json").write_text(
             json.dumps(
                 {
                     "binding": {
                         "block_bindings": ledger.roles.bindings_for({block}),
+                        "block_role_assignments_sha256": ledger.roles.sha256,
                         "model_sha256": model_sha,
-                        "index_sha256": "b" * 64,
+                        "index_sha256": ledger.evidence.name_counts_index_sha256,
                     },
-                    "files": {path.name: sha256_file(path)},
+                    "files": {path.name: sha256_file(path), queries.name: sha256_file(queries)},
                 }
             )
         )
@@ -543,6 +520,7 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
 ) -> None:
     from scripts.common import orcid_references
     from scripts.common.block_roles import load_block_roles
+    from scripts.common.identity_ledger import load_identity_evidence
     from scripts.intake.assign_block_roles import freeze_identity_roles
     from scripts.intake.build_freeze_input import build_freeze_input
     from scripts.intake.build_identity_evidence import build_identity_evidence
@@ -556,11 +534,35 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
     blocks = tmp_path / "blocks.parquet"
     build_freeze_input(evidence, source, blocks)
     path = tmp_path / "assignments.json"
-    path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"linker_train": 2})), encoding="utf-8")
+    path.write_text(json.dumps(freeze_identity_roles(blocks, evidence, {"fit_pool": 2})), encoding="utf-8")
     roles = load_block_roles(path)
+    common_binding = {
+        "index_sha256": load_identity_evidence(evidence).name_counts_index_sha256,
+        "model_sha256": "a" * 64,
+        "block_role_assignments_sha256": roles.sha256,
+    }
+    task_blocks = {}
+    for block in roles.block_to_role:
+        receipt = tmp_path / f"{block}.json"
+        receipt.write_text(
+            json.dumps(
+                {
+                    "binding": {**common_binding, "block_bindings": roles.bindings_for({block})},
+                    "files": {"seeds.parquet": "b" * 64},
+                }
+            ),
+            encoding="utf-8",
+        )
+        task_blocks[block] = {
+            "input_manifest": str(receipt),
+            "seeds": "seeds.parquet",
+            "seeds_sha256": "b" * 64,
+        }
     manifest = {
-        "tables": {"linker_train": {"blocks": dict.fromkeys(roles.block_to_role)}},
+        "tables": {"fit_pool": {"blocks": task_blocks}},
         "block_bindings": roles.bindings_for(roles.block_to_role),
+        "block_role_assignments_sha256": roles.sha256,
+        "linker_input_binding": common_binding,
     }
     _validate_frozen_task_bindings(manifest, roles)
     if check in {"load", "train"}:
@@ -575,7 +577,8 @@ def test_frozen_trainer_requires_current_exclusions_and_complete_roles(
         subset = {"a lovelace": {}} if check == "subset" else {}
         with pytest.raises(ValueError, match="Missing.*g hopper"):
             _validate_frozen_task_bindings(
-                {"tables": {"linker_train": {"blocks": subset}}, "block_bindings": roles.bindings_for(subset)}, roles
+                {**manifest, "tables": {"fit_pool": {"blocks": subset}}, "block_bindings": roles.bindings_for(subset)},
+                roles,
             )
 
 

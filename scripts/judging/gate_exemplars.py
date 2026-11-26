@@ -98,6 +98,7 @@ def resolve_gate_exemplars(
     if task_manifest_path is None:
         raise ValueError("Ledger-backed gate packets require --linker-task-manifest")
     manifest = read_json_object(task_manifest_path)
+    roles.require_assignment(manifest, context="Frozen gate tasks")
     blocks = manifest["tables"]["gate_thresh"]["blocks"]
     bindings = manifest[BLOCK_BINDINGS_FIELD]
     if any(bindings.get(block) != binding for block, binding in roles.bindings_for(by_block).items()):
@@ -106,6 +107,7 @@ def resolve_gate_exemplars(
     seed_digests = {}
     for block, block_items in by_block.items():
         spec = blocks[block]
+        dataset_dir = Path(spec["arrow_dir"])
         members = members_by_component(read_frozen_seeds(spec))
         keys = {str(candidate["candidate_key"]) for item in block_items for candidate in item["candidates"]}
         if missing := keys - members.keys():
@@ -113,13 +115,13 @@ def resolve_gate_exemplars(
         if control_ledger is None:
             exemplar_ids = {key: members[key][:PRODUCTION_MAX_EXEMPLARS] for key in keys}
         else:
-            rows = control_ledger.for_block(block).rows
+            rows = control_ledger.for_block(block, dataset_dir=dataset_dir).rows
             # Eligible controls have one component identity. Preserve seed order within each group.
             exemplar_ids = {
                 key: sorted(members[key], key=lambda sid: not evidence_identities(rows[sid]))[:PRODUCTION_MAX_EXEMPLARS]
                 for key in keys
             }
-        with ArrowDataset.open(spec["arrow_dir"]) as arrow:
+        with ArrowDataset.open(dataset_dir) as arrow:
             if arrow.generation_id != spec["arrow_generation_id"]:
                 raise ValueError(f"Frozen linker Arrow generation changed for {block!r}")
         for item in block_items:

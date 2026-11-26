@@ -134,6 +134,71 @@ def _preflight_plan(args: Any, datasets: dict[str, ModelDataset], work_dir: Path
     )
 
 
+def test_pairwise_bundle_adds_mined_pairs_to_both_heads_without_fitting_the_validation_fold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from s2and.featurizer import resolve_selection_pairs
+    from scripts.common.block_roles import ROLE_SHA256_FIELD
+    from tests.stage0_world import build_stage0_world
+
+    world = build_stage0_world(tmp_path)
+    name_counts = world.name_counts
+    args = pairwise_training_args(
+        tmp_path,
+        train_pairs_size=24,
+        validation_pairs_size=6,
+        mined_pairs=world.mined,
+        identity_evidence=world.evidence_path,
+        block_role_assignments=world.roles_path,
+        name_counts_index_root=name_counts,
+    )
+
+    benchmark, files = _arrow_plan_dataset(tmp_path / "data", "qian", tmp_path / "benchmarks", name_counts)
+    args.model_plan = tmp_path / "plan.json"
+    args.model_plan.write_text(
+        json.dumps(
+            {
+                "release_version": "9.9",
+                "datasets": {
+                    "qian": {
+                        key: {"path": str(path), "sha256": benchmark.sha256[key]}
+                        for key, path in benchmark.files.items()
+                    }
+                },
+                "eps": {"grid": [0.5], "minimum_dataset_f1": 0.0, "minimum_signature_weighted_f1": 0.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    expected = resolve_selection_pairs(_json_selection(files, "qian", args))
+    mined_labels = {"train": [1, 0, 0, 0, 0, 1], "val": [1]}
+    fit = train_pairwise._fit_pairwise_model
+    heads = []
+
+    def confirm_union(*fit_args: Any, **kwargs: Any) -> Any:
+        heads.append(kwargs["feature_prefix"])
+        for split, benchmark_pairs in zip(("train", "val"), expected, strict=True):
+            np.testing.assert_array_equal(
+                np.load(fit_args[1][f"y_{split}"])[len(benchmark_pairs) :], mined_labels[split]
+            )
+        return fit(*fit_args, **kwargs)
+
+    monkeypatch.setattr(train_pairwise, "_fit_pairwise_model", confirm_union)
+    result = train_pairwise.train_pairwise_bundle(args)
+    assert heads == ["", "nameless_"]
+    summary = result["training_summary"]
+    for head in ("main", "nameless"):
+        for split, benchmark_pairs in zip(("train", "val"), expected, strict=True):
+            assert summary[f"{head}_{split}_rows"] == len(benchmark_pairs) + len(mined_labels[split])
+    assert summary["mined_pairs_by_block"] == {
+        "a ross": {"split": "train", "labeled_pairs": 6, "unscored_pairs": 2},
+        "b crane": {"split": "val", "labeled_pairs": 1, "unscored_pairs": 0},
+    }
+    config = json.loads((args.output_dir / "reproducibility" / "pairwise_training_config.json").read_text("utf-8"))
+    assert config["mined_pairs"][ROLE_SHA256_FIELD] == world.roles.sha256
+    assert config["mined_pairs"]["pairwise_validation_blocks"] == ["b crane"]
+
+
 @pytest.mark.parametrize(
     "augmented_population",
     ["test", "changed-arrow", "unknown-validation"],

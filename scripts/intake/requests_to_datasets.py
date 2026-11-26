@@ -36,12 +36,12 @@ from scripts.common.arrow_roots import (
 )
 from scripts.common.block_roles import normalize_block_key
 from scripts.common.email_redaction import redact_source_tree, scan_tree_for_plaintext_emails
+from scripts.common.identity_ledger import SNAPSHOT_BINDING as SNAPSHOT_BINDING
 from scripts.intake.gate_public_snapshot import REDACTED_ABSTRACT_MARKER, load_paper_id_set
 
 REQUEST_SUFFIX = ".arrow.tar.gz"
 DATASET_TABLES = ("signatures", "papers", "paper_authors", "specter")
 SOURCE_RECORD = "request_source.json"
-SNAPSHOT_BINDING = "intake_manifest.json"
 INTAKE_LOCK = ".intake.lock"
 
 

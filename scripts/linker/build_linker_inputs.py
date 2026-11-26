@@ -24,9 +24,10 @@ from s2and.arrow_inputs import ArrowDataset
 from s2and.arrow_tables import read_cluster_seeds_arrow
 from s2and.production_model import load_production_model
 from scripts.common.arrow_roots import _replace_json, read_json_object, resolved_manifest_artifact_path
-from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles, normalize_block_key
+from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
 from scripts.common.orcid_references import read_external_reference_identity_evidence
+from scripts.common.stage0_invariants import read_fit_pool_queries, require_assignment_coverage
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
 from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
 from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
@@ -170,7 +171,7 @@ def build_linker_inputs(
     arrivals_sha256 = sha256_file(arrivals) if arrivals is not None else None
     for block, spec in sorted(blocks.items()):
         role = roles.role_for(block)
-        if role not in (*TASK_ROLES, "pairwise_train"):
+        if role not in TASK_ROLES:
             raise ValueError(f"{block!r} cannot supply linker or mining inputs from role {role!r}")
         name = block.replace(" ", "_")
         arrow_dir = (blocks_path.parent / spec["arrow_dir"]).resolve()
@@ -186,9 +187,12 @@ def build_linker_inputs(
             raise ValueError("gate_thresh requires --arrivals, --requests-per-block, --since and an incremental bundle")
 
         target = output_dir / name
-        assigned = target / ("assignments.parquet" if role == "pairwise_train" else "seeds.parquet")
+        assignments_path = target / "assignments.parquet"
+        seed_path = target / "seeds.parquet"
         query_path = target / "queries.json"
-        expected_files = [assigned] if role == "pairwise_train" else [assigned, query_path]
+        expected_files = [seed_path, query_path]
+        if role == "fit_pool":
+            expected_files.append(assignments_path)
         with (
             exclusive_file_lock(output_dir / f".{name}.lock"),
             ArrowDataset.open(arrow_dir, require_specter=True, require_name_counts_index=True) as arrow,
@@ -200,7 +204,7 @@ def build_linker_inputs(
             common_binding = {
                 "index_sha256": sha256_file(index_path / "manifest.json"),
                 "model_sha256": model_digest,
-                **({"roles_sha256": roles.sha256} if ledger is None else {}),
+                ROLE_SHA256_FIELD: roles.sha256,
             }
             if ledger is not None and common_binding["index_sha256"] != ledger.evidence.name_counts_index_sha256:
                 raise ValueError(f"Linker input name-counts index does not match intake for {block!r}")
@@ -230,6 +234,11 @@ def build_linker_inputs(
                     path.name: sha256_file(path) for path in expected_files
                 }:
                     raise ValueError(f"Existing linker inputs have changed: {target}")
+                if role == "fit_pool":
+                    frozen_queries = read_fit_pool_queries(query_path, block, record)
+                    assigned_ids = set(pq.read_table(assignments_path, columns=["signature_id"])[0].to_pylist())
+                    seed_ids = set(pq.read_table(seed_path, columns=["signature_id"])[0].to_pylist())
+                    require_assignment_coverage(block, assigned_ids, seed_ids, frozen_queries)
             else:
                 signatures = _read_signatures(arrow, block, include_orcid=ledger is None)
                 if ledger is None:
@@ -249,32 +258,35 @@ def build_linker_inputs(
                         for sid, decision in decisions.items()
                         if decision.score_orcid is not None
                     }
-                queries = []
                 request_stats: dict[str, Any] = {}
-                if role in TASK_ROLES:
-                    if use_arrivals:
-                        assert ledger is not None and arrivals is not None and since is not None
-                        assert requests_per_block is not None
-                        queries, request_stats = _arrival_requests(
-                            arrivals, block, view.rows, eligible, _utc(since), requests_per_block
-                        )
-                    elif request:
-                        queries = _request_queries(request)
-                    else:
-                        queries = sorted(
-                            scored, key=lambda sid: (hashlib.sha256(f"{seed}:{block}:{sid}".encode()).digest(), sid)
-                        )[:queries_per_block]
-                    if (
-                        (not queries and not use_arrivals)
-                        or len(set(queries)) != len(queries)
-                        or set(queries) - signatures.keys()
-                    ):
-                        raise ValueError(f"{block!r} needs unique, real query signatures from its full dataset")
-                remaining = sorted((signatures.keys() if role == "gate_thresh" else eligible) - set(queries))
-                if not remaining:
-                    raise ValueError(f"No seed signatures remain in {block!r}")
-                component_key = "cluster_id" if role == "pairwise_train" else "component_key"
                 if use_arrivals:
+                    assert ledger is not None and arrivals is not None and since is not None
+                    assert requests_per_block is not None
+                    queries, request_stats = _arrival_requests(
+                        arrivals, block, view.rows, eligible, _utc(since), requests_per_block
+                    )
+                elif request:
+                    queries = _request_queries(request)
+                else:
+                    limit = min(queries_per_block, max(0, len(eligible) - 1))
+                    queries = sorted(
+                        scored, key=lambda sid: (hashlib.sha256(f"{seed}:{block}:{sid}".encode()).digest(), sid)
+                    )[:limit]
+                query_set = set(queries)
+                if (
+                    (not queries and role != "fit_pool")
+                    or len(query_set) != len(queries)
+                    or query_set - signatures.keys()
+                ):
+                    raise ValueError(f"{block!r} needs unique, real query signatures from its full dataset")
+                remaining = sorted((signatures.keys() if role == "gate_thresh" else eligible) - query_set)
+                if role == "fit_pool" and not eligible:
+                    rows = []
+                    components = 0
+                    request_stats["empty_reason"] = "no_eligible_signatures"
+                elif not remaining:
+                    raise ValueError(f"No seed signatures remain in {block!r}")
+                elif use_arrivals:
                     assert request is not None and ledger is not None
                     production = _production_seeds(request, block, view.rows, queries)
                     if not production:
@@ -292,15 +304,29 @@ def build_linker_inputs(
                         )
                     rows = [(sid, str(cid)) for cid, members in clusters.items() for sid in members]
                     if sorted(sid for sid, _ in rows) != remaining:
-                        raise ValueError(f"Prediction coverage differs from the seed set for {block!r}")
-                    components = len(clusters)
+                        raise ValueError(f"Prediction coverage differs from the requested signatures for {block!r}")
+                    components = len({cid for _, cid in rows})
                 staging = Path(tempfile.mkdtemp(dir=output_dir, prefix=f".{name}."))
                 pq.write_table(
-                    pa.table({"signature_id": [sid for sid, _ in rows], component_key: [cid for _, cid in rows]}),
-                    staging / assigned.name,
+                    pa.table(
+                        {
+                            "signature_id": pa.array([sid for sid, _ in rows], type=pa.string()),
+                            "component_key": pa.array([cid for _, cid in rows], type=pa.string()),
+                        }
+                    ),
+                    staging / seed_path.name,
                 )
-                if role in TASK_ROLES:
-                    _replace_json(staging / query_path.name, queries)
+                if role == "fit_pool":
+                    pq.write_table(
+                        pa.table(
+                            {
+                                "signature_id": pa.array([sid for sid, _ in rows], type=pa.string()),
+                                "cluster_id": pa.array([cid for _, cid in rows], type=pa.string()),
+                            }
+                        ),
+                        staging / assignments_path.name,
+                    )
+                _replace_json(staging / query_path.name, queries)
                 record = {
                     "binding": binding,
                     "files": {path.name: sha256_file(staging / path.name) for path in expected_files},
@@ -314,22 +340,22 @@ def build_linker_inputs(
                 _replace_json(staging / "manifest.json", record)
                 staging.rename(target)
         counts[block] = record["counts"]
-        if role in TASK_ROLES:
-            with exclusive_file_lock(output_dir / ".inputs.lock"):
-                entries = read_json_object(inputs_path) if inputs_path.is_file() else {}
-                entries[block] = {
-                    "arrow_dir": str(arrow_dir),
-                    **({"labels": str(label_path)} if label_path is not None else {}),
-                    "input_manifest": str(target / "manifest.json"),
-                    "seeds": str(assigned),
-                    "queries": str(query_path),
-                }
-                _replace_json(inputs_path, entries)
+        with exclusive_file_lock(output_dir / ".inputs.lock"):
+            entries = read_json_object(inputs_path) if inputs_path.is_file() else {}
+            entries[block] = {
+                "arrow_dir": str(arrow_dir),
+                **({"labels": str(label_path)} if label_path is not None else {}),
+                **({"assignments": str(assignments_path)} if role == "fit_pool" else {}),
+                "input_manifest": str(target / "manifest.json"),
+                "seeds": str(seed_path),
+                "queries": str(query_path),
+            }
+            _replace_json(inputs_path, entries)
     return counts
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Build task inputs or full 1.4 assignments for pairwise training blocks."""
+    """Build task inputs and non-query 1.4 assignments for pairwise training blocks."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", required=True, type=Path)

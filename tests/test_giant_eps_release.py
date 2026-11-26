@@ -435,7 +435,7 @@ def test_review_requires_frozen_test_separated_curves(tmp_path: Path) -> None:
     manifest.write_text("{}", encoding="utf-8")
     dataset = _curve(tmp_path / "curves", sha256_file(manifest), with_source_map=True, test_signature="r2")
 
-    with pytest.raises(ValueError, match="must match the snapshot's calibration assignments"):
+    with pytest.raises(ValueError, match="EPS review datasets must be unique"):
         _apply(tmp_path, source, datasets=("unit", "unit"))
     with pytest.raises(ValueError, match="contains final-test records"):
         _apply(tmp_path, source)
@@ -769,7 +769,7 @@ def test_eps_release_accepts_shared_orcid_only_when_sweep_masks_it(tmp_path: Pat
         )
 
     set_sweep(reference.with_singletons, bind_manifest=False)
-    with pytest.raises(ValueError, match="same frozen block roles"):
+    with pytest.raises(ValueError, match="master block role assignment"):
         apply()
     set_sweep({**reference.with_singletons, "q1": shared}, bind_manifest=True)
     with pytest.raises(ValueError, match="outside its home role"):
@@ -910,6 +910,8 @@ def test_pooled_curve_weights_each_scored_reference_equally(tmp_path: Path) -> N
 
     assert pooled["recall"].tolist() == pytest.approx([(2 * 0.8 + 6 * 0.4) / 8, (2 * 1.0 + 6 * 0.6) / 8])
     assert pooled["precision"].tolist() == pytest.approx([1.0, (2 * 0.8 + 6 * 1.0) / 8])
+    duplicate = apply_reviewed_eps_module._pooled_curve(tmp_path / "curves", ["unit", "unit", "other"])
+    pd.testing.assert_frame_equal(pooled, duplicate)
 
     shutil.rmtree(tmp_path / "curves" / "other")
     _second_block(tmp_path, eps=[0.65, 0.75], recall=[0.4, 0.6], references=6)

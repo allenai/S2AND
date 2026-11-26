@@ -572,7 +572,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
 
     def fit_linker(_bundle: Any, **_kwargs: Any) -> Any:
         if problem == "frozen":
-            assert set(_kwargs["frozen_task_rows"]) == {"linker_train", "gate_fit", "gate_thresh"}
+            assert set(_kwargs["frozen_task_rows"]) == {"fit_pool", "gate_fit", "gate_thresh"}
         else:
             assert _kwargs["holdout_identities"] is training_authorities[0]
             assert _kwargs["pre_materialization_holdout_summary"] == {"rows_removed": 0}
@@ -634,7 +634,7 @@ def test_release_serializes_complete_bundle_before_evaluation(
         str(output_dir),
     ]
     if problem in {"frozen", "non-top25"}:
-        role_names = ("linker_train", "gate_fit", "gate_thresh")
+        role_names = ("fit_pool", "gate_fit", "gate_thresh")
         roles = tmp_path / "roles.json"
         roles.write_text(
             json.dumps(assign_block_roles([BlockSpec(f"test {i}", 2) for i in range(3)], dict.fromkeys(role_names, 1))),

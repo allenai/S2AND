@@ -9,7 +9,7 @@ import math
 import random
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from functools import partial
 from itertools import chain, groupby
@@ -33,6 +33,8 @@ from scripts.common.stage0_invariants import (
     PairId,
     PairStratum,
     pairwise_fold,
+    read_fit_pool_queries,
+    require_assignment_coverage,
     require_assignment_receipts,
     require_fit_pool_coverage,
 )
@@ -114,7 +116,7 @@ def _mention_orcids(root: Path, block: str) -> dict[str, str | None]:
 
 def _eligible_mentions(
     spec: BlockInput, block: str, frozen_orcids: frozenset[str], identity_roles: Mapping[str, frozenset[str]]
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], int]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], int, int]:
     deposited = _mention_orcids(spec.arrow_dir, block)
     if spec.labels is None:
         raise ValueError("Legacy pairwise inputs require labels")
@@ -123,7 +125,7 @@ def _eligible_mentions(
         raise ValueError(f"Joined labels contain signatures outside {block!r}: {sorted(unknown)[:5]}")
     if frozen_orcids and frozen_orcids.isdisjoint(chain(identities.values(), deposited.values())):
         raise ValueError(f"Neither label nor Arrow input names a frozen ORCID in {block!r}")
-    eligible = {}
+    eligible: dict[str, str] = {}
     for sid, orcid in deposited.items():
         gold = identities.get(sid)
         if any(identity_roles.get(oid, frozenset({"fit_pool"})) != {"fit_pool"} for oid in (gold, orcid) if oid):
@@ -136,29 +138,28 @@ def _eligible_mentions(
         if sid not in deposited or sid in components or type(cid) not in {str, int} or cid == "":
             raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {spec.assignments}")
         components[sid] = str(cid)
-    if components.keys() != deposited.keys():
-        raise ValueError(f"Expected 1.4 assignments for every real signature in {block!r}")
-    return eligible, labels, components, len(deposited) - len(eligible)
+    query_path = spec.assignments.with_name("queries.json")
+    # Legacy assignments built without linker requests cover every real signature.
+    queries = (
+        read_fit_pool_queries(query_path, block, read_json_object(query_path.with_name("manifest.json")))
+        if query_path.exists()
+        else set()
+    )
+    if unknown_queries := queries - deposited.keys():
+        raise ValueError(f"Unknown query signatures in {block!r}: {sorted(unknown_queries)[:5]}")
+    require_assignment_coverage(block, components.keys(), deposited.keys(), queries)
+    excluded = len(deposited) - len(eligible)
+    excluded_queries = len(queries & eligible.keys())
+    for sid in queries:
+        eligible.pop(sid, None)
+        labels.pop(sid, None)
+    return eligible, labels, components, excluded, excluded_queries
 
 
-def ledger_population(view: BlockEligibility) -> tuple[dict[str, str], dict[str, str], int]:
-    """Return eligible identities, scoring labels and excluded mentions."""
-    decisions = {sid: view.eligibility(sid) for sid in view.rows}
-    eligible = {
-        sid: next(iter(decision.identities), f"signature:{sid}")
-        for sid, decision in decisions.items()
-        if decision.fit_ok
-    }
-    gold = {sid: decision.score_orcid for sid, decision in decisions.items() if decision.score_orcid is not None}
-    return eligible, gold, len(view.rows) - len(eligible)
-
-
-def read_assignment_partition(
-    path: Path, block: str, eligible: Collection[str], manifest: Mapping[str, Any]
-) -> tuple[dict[str, str], str]:
-    """Verify the frozen assignment file and read its eligible partition."""
+def _read_assignment_partition(path: Path, receipt: Mapping[str, object]) -> tuple[dict[str, str], str]:
+    """Verify the frozen assignment file and read its partition."""
     digest = sha256_file(path)
-    files = manifest.get("files")
+    files = receipt.get("files")
     if not isinstance(files, dict) or files.get(path.name) != digest:
         raise ValueError(f"Assignment digest mismatch: {path}")
     rows = pq.read_table(path, columns=["signature_id", "cluster_id"]).to_pylist()
@@ -168,8 +169,6 @@ def read_assignment_partition(
         if sid in components or type(cid) not in {str, int} or cid == "":
             raise ValueError(f"Invalid or duplicate assignment for {sid!r} in {path}")
         components[sid] = str(cid)
-    if components.keys() != set(eligible):
-        raise ValueError(f"Expected assignments for every eligible pairwise signature in {block!r}")
     return components, digest
 
 
@@ -295,6 +294,8 @@ def select_block_pairs(
     clusters: Mapping[str, str],
     excluded: int,
     policy: SamplingPolicy,
+    *,
+    excluded_queries: int,
 ) -> BlockSample:
     """Derive one block's fitted and judge samples from frozen inputs."""
     rng = random.Random(f"{policy.seed}:{block}")
@@ -351,7 +352,8 @@ def select_block_pairs(
         {
             "eligible_signatures": len(signatures),
             "excluded_non_home_signatures": excluded,
-            "ineligible_signatures": excluded,
+            "excluded_query_signatures": excluded_queries,
+            "ineligible_signatures": excluded + excluded_queries,
             "verified_signatures": len(labeled),
             "verified_within_block_pairs": verified_pairs,
             "pair_cap": cap,
@@ -359,6 +361,36 @@ def select_block_pairs(
             "strata": strata,
         },
     )
+
+
+@dataclass(frozen=True)
+class FrozenMiningBlock:
+    """Hold the shared mining and replay results for a frozen block."""
+
+    sample: BlockSample
+    gold: dict[str, str]
+    queries: set[str]
+    assignments_digest: str
+
+
+def sample_frozen_block(
+    view: BlockEligibility, path: Path, receipt: Mapping[str, object], policy: SamplingPolicy
+) -> FrozenMiningBlock:
+    """Mine one block using its frozen non-query assignments and evidence."""
+    block = view.block
+    queries = read_fit_pool_queries(path.with_name("queries.json"), block, receipt)
+    decisions = {sid: view.eligibility(sid) for sid in view.rows}
+    eligible = {sid for sid, decision in decisions.items() if decision.fit_ok}
+    clusters, digest = _read_assignment_partition(path, receipt)
+    require_assignment_coverage(block, clusters.keys(), eligible, queries)
+    if ineligible_queries := queries - eligible:
+        raise ValueError(f"Ineligible query signatures in {block!r}: {sorted(ineligible_queries)[:5]}")
+    identities = {sid: next(iter(decisions[sid].identities), f"signature:{sid}") for sid in clusters}
+    gold = {sid: orcid for sid in clusters if (orcid := decisions[sid].score_orcid) is not None}
+    sample = select_block_pairs(
+        block, identities, gold, clusters, len(view.rows) - len(eligible), policy, excluded_queries=len(queries)
+    )
+    return FrozenMiningBlock(sample, gold, queries, digest)
 
 
 def mine_pairs(
@@ -403,21 +435,23 @@ def mine_pairs(
     rows: list[tuple[str, str, str, str, float]] = []
     for block, spec in sorted(normalized.items()):
         if ledger is None:
-            identities, gold, clusters, excluded = _eligible_mentions(
+            identities, gold, clusters, excluded, excluded_queries = _eligible_mentions(
                 spec, block, roles.block_orcids[block], roles.identity_roles
+            )
+            sample = select_block_pairs(
+                block, identities, gold, clusters, excluded, policy, excluded_queries=excluded_queries
             )
             assignments_digest = sha256_file(spec.assignments)
             assignment_input = {}
         else:
             view = ledger.for_block(block, dataset_dir=spec.arrow_dir)
-            identities, gold, excluded = ledger_population(view)
             receipt = assignment_manifests[block]
-            clusters, assignments_digest = read_assignment_partition(spec.assignments, block, identities, receipt)
+            frozen = sample_frozen_block(view, spec.assignments, receipt, policy)
+            sample, assignments_digest = frozen.sample, frozen.assignments_digest
             assignment_input = {
                 "assignments_path": str(spec.assignments.resolve()),
                 "assignment_binding": receipt["binding"],
             }
-        sample = select_block_pairs(block, identities, gold, clusters, excluded, policy)
         rows.extend(
             (block, left, right, stratum, inclusion) for (left, right), (stratum, inclusion) in sample.pairs.items()
         )

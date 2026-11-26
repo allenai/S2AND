@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+import json
+from collections.abc import Collection, Mapping, Set
 from pathlib import Path
 from typing import Literal, cast
 
-from s2and._sha256 import is_lowercase_sha256
+from s2and._sha256 import is_lowercase_sha256, sha256_file
 from scripts.common.block_roles import ROLE_SHA256_FIELD, BlockRoles
 
 PairId = tuple[str, str]
@@ -28,6 +29,31 @@ def require_fit_pool_coverage(roles: BlockRoles, blocks: Collection[str]) -> Non
             f"Expected all fit_pool blocks: missing={sorted(required - observed)}, "
             f"outside fit_pool={sorted(observed - required)}"
         )
+
+
+def read_fit_pool_queries(path: Path, block: str, receipt: Mapping[str, object]) -> set[str]:
+    """Read the query IDs bound to the assignment receipt."""
+    files = receipt.get("files")
+    if not isinstance(files, dict) or not path.is_file() or files.get(path.name) != sha256_file(path):
+        raise ValueError(f"Query file missing or digest mismatch for {block!r}: {path}")
+    queries = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(queries, list)
+        or any(not isinstance(sid, str) or not sid for sid in queries)
+        or len(set(queries)) != len(queries)
+    ):
+        raise ValueError(f"Expected unique query signature IDs for {block!r}: {path}")
+    return set(cast(list[str], queries))
+
+
+def require_assignment_coverage(block: str, assigned: Set[str], eligible: Set[str], queries: Set[str]) -> None:
+    """Require one assignment for each eligible non-query signature."""
+    if overlap := assigned & queries:
+        raise ValueError(
+            f"Query signatures in assignments for {block!r}: {sorted(overlap)[:5]}. Rebuild linker inputs."
+        )
+    if assigned != eligible - queries:
+        raise ValueError(f"Expected assignments for every eligible non-query signature in {block!r}")
 
 
 def require_intake_index(intake_sha256: str, index_sha256: object, *, context: str) -> None:

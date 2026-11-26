@@ -51,6 +51,28 @@ def test_handoff_preserves_exact_train_validation_and_judge_pairs(tmp_path: Path
     require_intake_index(world.ledger.evidence.name_counts_index_sha256, manifest["index_sha256"], context="Miner")
 
 
+def test_handoff_excludes_the_frozen_query_from_pairs_and_counts(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path, with_query=True)
+    result = _load(world)
+    train = result.blocks["a ross"]
+    assert train.fit == [
+        FitPair("a ross", "10-0", "11-0", "missed_link", 1, "train"),
+        FitPair("a ross", "10-0", "12-0", "false_merge", 0, "train"),
+        FitPair("a ross", "11-0", "12-0", "random", 0, "train"),
+    ]
+    assert train.judge == [JudgePair("a ross", "10-0", "14-0"), JudgePair("a ross", "12-0", "14-0")]
+    assert result.blocks["b crane"].fit == [FitPair("b crane", "20-0", "21-0", "random", 1, "val")]
+    blocks = json.loads(world.manifest.read_text(encoding="utf-8"))["blocks"]
+    counts = blocks["a ross"]
+    assert counts["excluded_query_signatures"] == 1
+    assert counts["excluded_non_home_signatures"] == 0
+    assert counts["eligible_signatures"] == 4
+    assert counts["ineligible_signatures"] == 1
+    assert counts["verified_signatures"] == 3
+    assert counts["verified_within_block_pairs"] == 3
+    assert blocks["b crane"]["excluded_query_signatures"] == 0
+
+
 @pytest.mark.parametrize(
     ("hazard", "error"),
     [
@@ -135,6 +157,27 @@ def test_handoff_replays_the_frozen_sample(tmp_path: Path, hazard: str, detail: 
         assert manifest["blocks"][block]["assignments_sha256"] == sha256_file(entry.assignments)
     with pytest.raises(ValueError, match="Mined pair selection differs from frozen inputs in " + detail):
         _load(world)
+
+
+@pytest.mark.parametrize(
+    ("hazard", "error"),
+    [
+        ("query_in_assignments", r"Query signatures in assignments for 'a ross': \['13-0'\]"),
+        ("query_in_mined_pair", r"Query signature in mined pair \('12-0', '13-0'\) for 'a ross' fold 'train'"),
+    ],
+)
+def test_handoff_rejects_query_signatures_with_recomputed_digests(tmp_path: Path, hazard: str, error: str) -> None:
+    world = build_stage0_world(tmp_path, sampling_hazard=hazard)
+    manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
+    assert manifest["output_sha256"] == sha256_file(world.mined)
+    assert manifest["blocks"]["a ross"]["assignments_sha256"] == sha256_file(world.inputs["a ross"].assignments)
+    with pytest.raises(ValueError, match=error):
+        _load(world)
+    if hazard == "query_in_assignments":
+        rejected = tmp_path / "rejected.csv"
+        with pytest.raises(ValueError, match=error):
+            mine_pairs(world.roles_path, world.inputs, rejected, identity_evidence=world.evidence_path)
+        assert not rejected.exists()
 
 
 def test_judge_budget_is_independent_of_zero_fitted_cap(tmp_path: Path) -> None:

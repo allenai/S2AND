@@ -25,13 +25,7 @@ from scripts.common.stage0_invariants import (
     require_pairwise_fold,
     require_unique_pair,
 )
-from scripts.pairwise.mine_pairwise_pairs import (
-    PAIR_COLUMNS,
-    SamplingPolicy,
-    ledger_population,
-    read_assignment_partition,
-    select_block_pairs,
-)
+from scripts.pairwise.mine_pairwise_pairs import PAIR_COLUMNS, SamplingPolicy, sample_frozen_block
 
 DEFAULT_MIN_MINED_VALIDATION_PAIRS = 1
 
@@ -156,7 +150,6 @@ def training_pairs(
         evidence = ledger.evidence.blocks[block]
         arrow_dir = dataset_manifests[evidence["dataset"]].parent
         view = ledger.for_block(block, dataset_dir=arrow_dir)
-        identities, gold, excluded = ledger_population(view)
         raw_path = spec.get("assignments_path")
         if not isinstance(raw_path, str) or not raw_path:
             raise ValueError(f"Missing frozen assignments path for {block!r}. Re-mine pairs.")
@@ -164,12 +157,15 @@ def training_pairs(
         receipt = read_json_object(path.parent / "manifest.json")
         if receipt.get("binding") != spec.get("assignment_binding"):
             raise ValueError(f"Mined assignment binding differs from the frozen receipt for {block!r}")
-        clusters, assignments_digest = read_assignment_partition(path, block, identities, receipt)
-        if spec.get("assignments_sha256") != assignments_digest:
+        frozen = sample_frozen_block(view, path, receipt, policy)
+        if spec.get("assignments_sha256") != frozen.assignments_digest:
             raise ValueError(f"Mined assignment digest differs from the frozen partition for {block!r}")
-        sample = select_block_pairs(block, identities, gold, clusters, excluded, policy)
+        sample, gold = frozen.sample, frozen.gold
         observed = pairs_by_block.pop(block)
         if observed != sample.pairs:
+            for pair in observed:
+                if frozen.queries.intersection(pair):
+                    raise ValueError(f"Query signature in mined pair {pair!r} for {block!r} fold {fold!r}")
             pair = next(
                 pair
                 for pair in sorted(observed.keys() | sample.pairs.keys())

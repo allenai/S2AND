@@ -170,10 +170,11 @@ shortfall against K, missing timestamps, and the actual timestamp range. Arrival
 nonnegative integers or canonical decimal strings. Invalid arrival keys and empty request sets fail.
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `fit_pool` and `gate_fit`, sample eligible scored mentions using `--queries-per-block`. The
-ORCID-hidden `fit_pool` partition supplies full assignments for mining and query-excluded seeds for
-retrieval. A `fit_pool` block with no eligible signatures writes empty assignments, seeds, and queries
-with reason `no_eligible_signatures`. Cluster the remaining `gate_fit` mentions with ORCID hidden. Re-run with the same inputs
-to verify and reuse completed blocks.
+ORCID-hidden `fit_pool` population is clustered without the queries, and the same partition supplies
+assignments for mining and seeds for retrieval. Mining skips query endpoints and counts excluded
+query signatures per block. A `fit_pool` block with no eligible signatures writes empty assignments,
+seeds, and queries with reason `no_eligible_signatures`. Cluster the remaining `gate_fit` mentions with
+ORCID hidden. Re-run with the same inputs to verify and reuse completed blocks.
 
 ### 9. Freeze linker and gate tasks
 

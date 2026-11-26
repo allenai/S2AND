@@ -752,11 +752,9 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         row["signature_id"]: row["cluster_id"] for row in pq.read_table(fit_inputs["assignments"]).to_pylist()
     }
     fit_queries = set(json.loads(Path(fit_inputs["queries"]).read_text(encoding="utf-8")))
-    assert len(fit_queries) == 1
-    assert fit_queries <= fit_assignments.keys()
-    assert build_linker_task_tables.read_seed_components(Path(fit_inputs["seeds"])) == {
-        sid: component for sid, component in fit_assignments.items() if sid not in fit_queries
-    }
+    assert fit_queries == {"106-0"}
+    assert fit_assignments.keys() == {"102-0", "104-0", "107-0"}
+    assert build_linker_task_tables.read_seed_components(Path(fit_inputs["seeds"])) == fit_assignments
     assert json.loads(Path(built[gate]["queries"]).read_text()) == ["532-0", "531-0"]
     seed_map = build_linker_task_tables.read_seed_components(Path(built[gate]["seeds"]))
     assert seed_map["500-0"] == seed_map["501-0"] == "mixed"
@@ -916,8 +914,6 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
 
     pairs = tmp_path / "pairs.csv"
     assignments = inputs / "a_lovelace" / "assignments.parquet"
-    hashed = set(pq.read_table(assignments)["signature_id"].to_pylist())
-    assert hashed == {"102-0", "104-0", "106-0", "107-0"}
     miner = _json(
         tmp_path / "miner.json",
         {"a lovelace": {"arrow_dir": arrow_dirs["a lovelace"], "assignments": str(assignments)}},
@@ -925,7 +921,12 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     _run(mine_pairwise_pairs, *binding, "--blocks-json", miner, "--pairs-per-block", "10", "--output", pairs)
     with pairs.open(encoding="utf-8", newline="") as handle:
         mined = list(csv.DictReader(handle))
-    assert mined and all({row["signature_id_1"], row["signature_id_2"]} <= hashed for row in mined)
+    assert not mined
+    fit_counts = json.loads(pairs.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))["blocks"]["a lovelace"]
+    assert fit_counts["eligible_signatures"] == 3
+    assert fit_counts["excluded_query_signatures"] == 1
+    assert fit_counts["excluded_non_home_signatures"] == 4
+    assert fit_counts["ineligible_signatures"] == 5
 
     paper = {"paper_id": "201", "signature_id": "201-0", "name": "B Ross", "title": "Study"}
     items = _json(

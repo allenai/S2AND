@@ -27,6 +27,7 @@ from scripts.common.arrow_roots import _replace_json, read_json_object, resolved
 from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, ROLE_SHA256_FIELD, load_block_roles, normalize_block_key
 from scripts.common.identity_ledger import MentionEvidence, ledger_for_roles
 from scripts.common.orcid_references import read_external_reference_identity_evidence
+from scripts.common.stage0_invariants import read_fit_pool_queries, require_assignment_coverage
 from scripts.eps.sweep_eps_on_linking_gold import _hash_directory, _write_orcid_free_dataset
 from scripts.intake.prepare_identity_labels import canonical_gold_block_filter
 from scripts.intake.requests_to_datasets import extract_request_tables, request_dataset_name
@@ -233,6 +234,11 @@ def build_linker_inputs(
                     path.name: sha256_file(path) for path in expected_files
                 }:
                     raise ValueError(f"Existing linker inputs have changed: {target}")
+                if role == "fit_pool":
+                    frozen_queries = read_fit_pool_queries(query_path, block, record)
+                    assigned_ids = set(pq.read_table(assignments_path, columns=["signature_id"])[0].to_pylist())
+                    seed_ids = set(pq.read_table(seed_path, columns=["signature_id"])[0].to_pylist())
+                    require_assignment_coverage(block, assigned_ids, seed_ids, frozen_queries)
             else:
                 signatures = _read_signatures(arrow, block, include_orcid=ledger is None)
                 if ledger is None:
@@ -274,7 +280,6 @@ def build_linker_inputs(
                 ):
                     raise ValueError(f"{block!r} needs unique, real query signatures from its full dataset")
                 remaining = sorted((signatures.keys() if role == "gate_thresh" else eligible) - query_set)
-                full_rows: list[tuple[str, str]] = []
                 if role == "fit_pool" and not eligible:
                     rows = []
                     components = 0
@@ -293,16 +298,13 @@ def build_linker_inputs(
                     if model is None:
                         model = load_production_model(model_path, n_jobs=n_jobs)
                     free = _write_orcid_free_dataset(arrow_dir, output_dir / "orcid_free_arrow" / name)
-                    # Mining needs full assignments. Remove queries from the shared partition before retrieval.
-                    prediction_ids = sorted(eligible) if role == "fit_pool" else remaining
                     with ArrowDataset.open(free, require_specter=True, require_name_counts_index=True) as hidden:
                         clusters, _ = model.predict_from_arrow(
-                            {block: prediction_ids}, hidden, batching_threshold=batching_threshold
+                            {block: remaining}, hidden, batching_threshold=batching_threshold
                         )
-                    full_rows = [(sid, str(cid)) for cid, members in clusters.items() for sid in members]
-                    if sorted(sid for sid, _ in full_rows) != prediction_ids:
+                    rows = [(sid, str(cid)) for cid, members in clusters.items() for sid in members]
+                    if sorted(sid for sid, _ in rows) != remaining:
                         raise ValueError(f"Prediction coverage differs from the requested signatures for {block!r}")
-                    rows = [(sid, cid) for sid, cid in full_rows if sid not in query_set]
                     components = len({cid for _, cid in rows})
                 staging = Path(tempfile.mkdtemp(dir=output_dir, prefix=f".{name}."))
                 pq.write_table(
@@ -318,8 +320,8 @@ def build_linker_inputs(
                     pq.write_table(
                         pa.table(
                             {
-                                "signature_id": pa.array([sid for sid, _ in full_rows], type=pa.string()),
-                                "cluster_id": pa.array([cid for _, cid in full_rows], type=pa.string()),
+                                "signature_id": pa.array([sid for sid, _ in rows], type=pa.string()),
+                                "cluster_id": pa.array([cid for _, cid in rows], type=pa.string()),
                             }
                         ),
                         staging / assignments_path.name,
@@ -353,7 +355,7 @@ def build_linker_inputs(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Build task inputs or full 1.4 assignments for pairwise training blocks."""
+    """Build task inputs and non-query 1.4 assignments for pairwise training blocks."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--block-role-assignments", required=True, type=Path)

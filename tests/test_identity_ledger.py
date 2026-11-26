@@ -371,6 +371,8 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     assignment_root.mkdir()
     assignments = assignment_root / "assignments.parquet"
     pq.write_table(pa.table({"signature_id": ["2-0", "3-0"], "cluster_id": ["a", "b"]}), assignments)
+    queries = assignments.with_name("queries.json")
+    queries.write_text("[]", encoding="utf-8")
     manifest = assignment_root / "manifest.json"
     record = {
         "binding": {
@@ -379,7 +381,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
             "model_sha256": "a" * 64,
             "index_sha256": ledger.evidence.name_counts_index_sha256,
         },
-        "files": {assignments.name: sha256_file(assignments)},
+        "files": {assignments.name: sha256_file(assignments), queries.name: sha256_file(queries)},
     }
     manifest.write_text(json.dumps(record))
     specs = {"a lovelace": BlockInput(snapshot / "datasets" / "a_lovelace", None, assignments)}
@@ -405,6 +407,8 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
     other.parent.mkdir()
     pq.write_table(pa.table({"signature_id": ["5-0"], "cluster_id": ["a"]}), other)
     for block, model_sha, path in (("a lovelace", "a" * 64, assignments), ("g hopper", "c" * 64, other)):
+        queries = path.with_name("queries.json")
+        queries.write_text("[]", encoding="utf-8")
         (path.parent / "manifest.json").write_text(
             json.dumps(
                 {
@@ -414,7 +418,7 @@ def test_miner_uses_ledger_endpoints_and_rejects_stale_roles(
                         "model_sha256": model_sha,
                         "index_sha256": ledger.evidence.name_counts_index_sha256,
                     },
-                    "files": {path.name: sha256_file(path)},
+                    "files": {path.name: sha256_file(path), queries.name: sha256_file(queries)},
                 }
             )
         )

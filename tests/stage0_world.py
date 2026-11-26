@@ -53,6 +53,7 @@ def build_stage0_world(
     all_ineligible_block: bool = False,
     validation_blocks: tuple[str, ...] = ("b crane",),
     sampling_hazard: str | None = None,
+    with_query: bool = False,
 ) -> Stage0World:
     """Build a real intake, freeze, and mined sample, with optional rebound hazards."""
     _, name_counts, _ = write_pairwise_artifacts(root)
@@ -114,6 +115,7 @@ def build_stage0_world(
     model = root / "model"
     model.write_bytes(b"fixture model")
     model_digest = sha256_file(model) if all_ineligible_block else "a" * 64
+    query = "13-0" if with_query or sampling_hazard in {"query_in_assignments", "query_in_mined_pair"} else None
     inputs = {}
     for block, cluster_ids in clusters.items():
         name = block.replace(" ", "_")
@@ -127,8 +129,15 @@ def build_stage0_world(
             continue
         assignments = root / name / "assignments.parquet"
         assignments.parent.mkdir()
+        queries = [query] if query is not None and block == "a ross" else []
+        assignments.with_name("queries.json").write_text(json.dumps(queries), encoding="utf-8")
+        rows = [
+            (sid, cid)
+            for paper, cid in zip(papers[block], cluster_ids, strict=True)
+            if (sid := f"{paper}-0") not in queries
+        ]
         pq.write_table(
-            pa.table({"signature_id": [f"{paper}-0" for paper in papers[block]], "cluster_id": cluster_ids}),
+            pa.table({"signature_id": [sid for sid, _ in rows], "cluster_id": [cid for _, cid in rows]}),
             assignments,
         )
         inputs[block] = BlockInput(snapshot / "datasets" / name, None, assignments)
@@ -148,7 +157,10 @@ def build_stage0_world(
                 spec.assignments.parent / "manifest.json",
                 {
                     "binding": bindings[block],
-                    "files": {spec.assignments.name: sha256_file(spec.assignments)},
+                    "files": {
+                        path.name: sha256_file(path)
+                        for path in (spec.assignments, spec.assignments.with_name("queries.json"))
+                    },
                 },
             )
         return bindings
@@ -160,6 +172,14 @@ def build_stage0_world(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     with mined.open(encoding="utf-8", newline="") as handle:
         columns, *rows = csv.reader(handle)
+    if sampling_hazard == "query_in_assignments":
+        assignments = inputs["a ross"].assignments
+        table = pq.read_table(assignments)
+        pq.write_table(pa.concat_tables([table, pa.table({"signature_id": [query], "cluster_id": ["z"]})]), assignments)
+        write_receipts()
+        manifest["blocks"]["a ross"]["assignments_sha256"] = sha256_file(assignments)
+    if sampling_hazard == "query_in_mined_pair":
+        rows.append(["a ross", "12-0", "13-0", "missed_link", "1.0"])
 
     if lost_ledger_score:
         next(row for row in gold_rows if row["corpus_paper_id"] == 21)["scored"] = False
@@ -210,7 +230,8 @@ def build_stage0_world(
         missing_fit_pool_block
         or judge_as_fitted
         or fitted_as_judge
-        or sampling_hazard in {"lost_validation", "empty_frame", "swapped_strata", "zeroed_judge_frame"}
+        or sampling_hazard
+        in {"lost_validation", "empty_frame", "swapped_strata", "zeroed_judge_frame", "query_in_mined_pair"}
     )
     if changed_rows:
         with mined.open("w", encoding="utf-8", newline="") as handle:
@@ -218,7 +239,7 @@ def build_stage0_world(
             writer.writerow(columns)
             writer.writerows(rows)
         manifest["output_sha256"] = sha256_file(mined)
-    if changed_rows or foreign_index or ledger_changed:
+    if changed_rows or foreign_index or ledger_changed or sampling_hazard == "query_in_assignments":
         _write_json(manifest_path, manifest)
 
     ledger = ledger_for_roles(evidence, roles)

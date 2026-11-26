@@ -17,6 +17,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping, Sequence
+from html import escape
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -267,7 +268,48 @@ def validate_blind_packet_records(records: Sequence[Mapping[str, Any]], *, packe
     return violations
 
 
-def _resolve_answer_key_path(output_dir: Path, answer_key_path: Path | None) -> Path:
+def render_author_pair_package(records: Sequence[Mapping[str, Any]], *, private_ids: Collection[str]) -> str:
+    """Render validated author evidence as one blind Markdown package."""
+    if violations := validate_blind_packet_records(records, packet_type="linker"):
+        raise ValueError("\n".join(violations))
+    secret = (
+        re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, sorted(private_ids))) + r")(?![\w-])")
+        if private_ids
+        else None
+    )
+    lines = [
+        "# Author identity judging package",
+        "",
+        "Compare the author in Record A with the author represented by Group B.",
+        "Choose Cannot tell when the evidence is insufficient or Group B contains multiple people.",
+        "",
+        "Return one JSON line per item with its number in `item`,",
+        "`same`, `different`, or `cannot_tell` in `verdict`,",
+        "and `high`, `medium`, or `low` in `confidence`.",
+        "",
+    ]
+    for number, record in enumerate(records, 1):
+        lines.extend([f"## Item {number}", ""])
+        for heading, papers in (
+            ("Record A", [record["query"]]),
+            ("Group B", record["candidates"][0]["exemplars"]),
+        ):
+            lines.extend([f"### {heading}", ""])
+            for paper in papers:
+                for field, value in paper.items():
+                    if value is None or value == []:
+                        continue
+                    text = " · ".join(value) if isinstance(value, list) else str(value)
+                    if secret is not None and isinstance(value, (str, list)):
+                        text = secret.sub("[ID_REDACTED]", text)
+                    escaped = re.sub(r"([\\`*_[\]~|])", r"\\\1", escape(" ".join(text.split())))
+                    lines.append(f"- **{field.replace('_', ' ').capitalize()}** {escaped}")
+                lines.append("")
+    return "\n".join(lines)
+
+
+def resolve_answer_key_path(output_dir: Path, answer_key_path: Path | None) -> Path:
+    """Resolve a fresh private key destination outside the blind directory."""
     resolved_out = output_dir.resolve()
     key_path = (
         (resolved_out.parent / f"{resolved_out.name}_answer_key.json")
@@ -605,7 +647,7 @@ def build_blind_pair_packets(
     output_dir = output_dir.resolve()
     if output_dir.exists():
         raise FileExistsError(f"Blind packet builder requires a fresh output directory: {output_dir}")
-    key_path = _resolve_answer_key_path(output_dir, answer_key_path)
+    key_path = resolve_answer_key_path(output_dir, answer_key_path)
 
     effective_control_seed = seed if control_seed is None else control_seed
     _validate_packet_roles(items, block_roles, allowed_roles)
@@ -741,7 +783,7 @@ def build_blind_linker_packets(
     output_dir = output_dir.resolve()
     if output_dir.exists():
         raise FileExistsError(f"Blind packet builder requires a fresh output directory: {output_dir}")
-    key_path = _resolve_answer_key_path(output_dir, answer_key_path)
+    key_path = resolve_answer_key_path(output_dir, answer_key_path)
 
     effective_control_seed = seed if control_seed is None else control_seed
     _validate_packet_roles(queries, block_roles, allowed_roles)

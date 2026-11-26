@@ -381,8 +381,6 @@ def mine_pairs(
     if len(normalized) != len(blocks):
         raise ValueError("Duplicate normalized block keys in pairwise inputs")
     require_fit_pool_coverage(roles, normalized.keys())
-    if not normalized:
-        raise ValueError("Expected at least one frozen fit_pool block")
     manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
     if manifest_path.exists() or output_path.exists():
         raise FileExistsError(output_path)

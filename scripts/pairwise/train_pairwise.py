@@ -19,7 +19,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -76,7 +76,11 @@ from scripts.pairwise.augmented_leakage import (  # noqa: E402
     require_validation_members,
     source_members,
 )
-from scripts.pairwise.training_pairs import TrainingBlock, training_pairs  # noqa: E402
+from scripts.pairwise.training_pairs import (  # noqa: E402
+    DEFAULT_MIN_MINED_VALIDATION_PAIRS,
+    TrainingBlock,
+    training_pairs,
+)
 
 logger = logging.getLogger("s2and")
 
@@ -578,11 +582,15 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     artifact_hashes = _canonical_training_artifact_hashes(artifact_authority)
     mined = None
     if mined_csv is not None:
-        roles = load_block_roles(assignments)
+        roles = load_block_roles(cast(Path, assignments))
         ledger = ledger_for_roles(evidence, roles)
         assert ledger is not None
         mined = training_pairs(
-            roles, ledger, mined_csv, name_counts_sha256=artifact_hashes["name_counts_manifest_sha256"]
+            roles,
+            ledger,
+            mined_csv,
+            name_counts_sha256=artifact_hashes["name_counts_manifest_sha256"],
+            min_mined_validation_pairs=getattr(args, "min_mined_validation_pairs", DEFAULT_MIN_MINED_VALIDATION_PAIRS),
         )
     mined_blocks = mined.blocks if mined is not None else {}
     training_config = _training_config(
@@ -818,6 +826,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--matrix-work-dir", type=Path, required=True)
     parser.add_argument("--mined-pairs", type=Path, help="CSV and sidecar from mine_pairwise_pairs.")
+    parser.add_argument(
+        "--min-mined-validation-pairs",
+        type=int,
+        default=DEFAULT_MIN_MINED_VALIDATION_PAIRS,
+        help="Require at least this many fitted mined pairs in the frozen validation fold.",
+    )
     parser.add_argument("--identity-evidence", type=Path, help="Identity ledger used to label mined pairs.")
     parser.add_argument("--block-role-assignments", type=Path, help="Master assignment that defines the mined fold.")
     parser.add_argument(

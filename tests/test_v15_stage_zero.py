@@ -46,6 +46,22 @@ def _run(module: ModuleType, *args: str | Path) -> None:
     assert module.main(list(map(str, args))) in (0, None)
 
 
+def _build_freeze_input(evidence: Path, gold_blocks: Path, output: Path) -> None:
+    origins = output.with_suffix(".origins.csv")
+    origins.write_text("surname,broad\n", encoding="utf-8")
+    _run(
+        build_freeze_input,
+        "--identity-evidence",
+        evidence,
+        "--gold-blocks",
+        gold_blocks,
+        "--surname-origin-csv",
+        origins,
+        "--output",
+        output,
+    )
+
+
 def _json(path: Path, payload: object) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -113,7 +129,7 @@ def gate_packet_inputs(tmp_path: Path) -> tuple[str, IdentityLedger, Path]:
     _run(build_identity_evidence, "--snapshot", snapshot, "--gold-parquet", gold, "--output-dir", evidence.parent)
     gold_blocks = _parquet(tmp_path / "gold-blocks.parquet", cluster_block_key=[block, fit], split=["development"] * 2)
     blocks = tmp_path / "blocks.parquet"
-    _run(build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", gold_blocks, "--output", blocks)
+    _build_freeze_input(evidence, gold_blocks, blocks)
     freeze = tmp_path / "freeze"
     _run(
         assign_block_roles,
@@ -610,7 +626,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         )
         evidence = evidence_dir / "manifest.json"
         blocks = tmp_path / f"{name}-blocks.parquet"
-        _run(build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", source_blocks, "--output", blocks)
+        _build_freeze_input(evidence, source_blocks, blocks)
         output = tmp_path / name
         prior_args = ["--pinned-roles-json", prior] if prior else []
         _run(
@@ -1085,9 +1101,7 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
     assert all(appended.blocks[block] == entry for block, entry in old_evidence.blocks.items())
     assert appended.blocks["f aba"]["permission_sha256"] != old_evidence.blocks[gate]["permission_sha256"]
     readded_blocks = tmp_path / "appended-blocks.parquet"
-    _run(
-        build_freeze_input, "--identity-evidence", evidence, "--gold-blocks", source_blocks, "--output", readded_blocks
-    )
+    _build_freeze_input(evidence, source_blocks, readded_blocks)
     common = ["--blocks", readded_blocks, "--identity-evidence", evidence, "--targets-json", targets]
     with pytest.raises(ValueError, match="prior.*--fresh"):
         _run(assign_block_roles, *common, "--output-dir", tmp_path / "unbound-freeze")

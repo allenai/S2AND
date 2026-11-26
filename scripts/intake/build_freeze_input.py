@@ -84,8 +84,14 @@ def build_freeze_input(
     evidence_path: Path, gold_blocks: Path, output: Path, *, surname_origin_csv: Path | None = None
 ) -> list[dict[str, Any]]:
     """Write signatures, source split, stratum, and both sources of identities per exported block."""
-    evidence = load_identity_evidence(evidence_path)
     origins = _read_origins(surname_origin_csv) if surname_origin_csv is not None else {}
+    return _write_freeze_input(evidence_path, gold_blocks, output, origins)
+
+
+def _write_freeze_input(
+    evidence_path: Path, gold_blocks: Path, output: Path, origins: dict[str, str]
+) -> list[dict[str, Any]]:
+    evidence = load_identity_evidence(evidence_path)
     source_splits = _source_splits(gold_blocks, set(evidence.blocks))
     rows = []
     for block, entry in sorted(evidence.blocks.items()):
@@ -121,13 +127,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity-evidence", required=True, type=Path)
     parser.add_argument("--gold-blocks", required=True, type=Path)
-    parser.add_argument("--surname-origin-csv", type=Path)
+    parser.add_argument("--surname-origin-csv", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
-    rows = build_freeze_input(
-        args.identity_evidence, args.gold_blocks, args.output, surname_origin_csv=args.surname_origin_csv
+    origins = _read_origins(args.surname_origin_csv)
+    rows = _write_freeze_input(args.identity_evidence, args.gold_blocks, args.output, origins)
+    surnames = Counter(row["block_key"].partition(" ")[2] for row in rows)
+    missing = surnames.keys() - origins.keys()
+    missing_blocks = sum(surnames[surname] for surname in missing)
+    print(
+        json.dumps(
+            {
+                "blocks": len(rows),
+                "signatures": sum(row["signature_count"] for row in rows),
+                "surname_origin_coverage": {
+                    "matched_blocks": len(rows) - missing_blocks,
+                    "missing_blocks": missing_blocks,
+                    "matched_surnames": len(surnames) - len(missing),
+                    "missing_surnames": len(missing),
+                },
+            }
+        )
     )
-    print(json.dumps({"blocks": len(rows), "signatures": sum(row["signature_count"] for row in rows)}))
     return 0
 
 

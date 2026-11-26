@@ -19,6 +19,7 @@ from scripts.intake.assign_block_roles import freeze_identity_roles
 from scripts.intake.build_freeze_input import build_freeze_input
 from scripts.intake.build_identity_evidence import build_identity_evidence
 from scripts.intake.requests_to_datasets import convert_requests
+from scripts.linker.build_linker_inputs import build_linker_inputs
 from scripts.pairwise.mine_pairwise_pairs import BlockInput, mine_pairs
 from tests.helpers import request_bundle
 from tests.pairwise_release_helpers import write_pairwise_artifacts
@@ -49,6 +50,8 @@ def build_stage0_world(
     fitted_as_judge: bool = False,
     lost_ledger_score: bool = False,
     empty_block: bool = False,
+    all_ineligible_block: bool = False,
+    validation_blocks: tuple[str, ...] = ("b crane",),
     sampling_hazard: str | None = None,
 ) -> Stage0World:
     """Build a real intake, freeze, and mined sample, with optional rebound hazards."""
@@ -56,7 +59,7 @@ def build_stage0_world(
     snapshot = root / "snapshot"
     papers = {"a ross": [10, 11, 12, 13, 14], "b crane": [20, 21], "c lane": [30]}
     clusters = {"a ross": ["x", "y", "x", "z", "x"], "b crane": ["x", "x"]}
-    if empty_block:
+    if empty_block or all_ineligible_block:
         papers["e vale"] = [40]
         clusters["e vale"] = ["x"]
     if sampling_hazard in {"stale_frame", "judge_zero_cap", "zeroed_judge_frame"}:
@@ -94,22 +97,34 @@ def build_stage0_world(
         gold = root / "gold.parquet"
         pq.write_table(pa.Table.from_pylist(gold_rows), gold)
         evidence = directory / "manifest.json"
-        build_identity_evidence(snapshot, gold, directory)
+        build_identity_evidence(
+            snapshot, gold, directory, reviewed_errors={"e vale": ["40-0"]} if all_ineligible_block else None
+        )
         freeze_input = directory / "freeze.parquet"
         build_freeze_input(evidence, source, freeze_input)
         frozen = freeze_identity_roles(
             freeze_input, evidence, {"fit_pool": len(clusters), "gate_fit": 1}, extra_pins={"c lane": "gate_fit"}
         )
-        # Keep the only validation pair in the same block across fixture variants.
-        frozen["pairwise_validation_blocks"] = ["b crane"]
+        frozen["pairwise_validation_blocks"] = list(validation_blocks)
         _write_json(roles_path, frozen)
         return evidence, load_block_roles(roles_path)
 
     evidence, roles = freeze(root / "evidence")
     index = sha256_file(name_counts / "manifest.json")
+    model = root / "model"
+    model.write_bytes(b"fixture model")
+    model_digest = sha256_file(model) if all_ineligible_block else "a" * 64
     inputs = {}
     for block, cluster_ids in clusters.items():
         name = block.replace(" ", "_")
+        if all_ineligible_block and block == "e vale":
+            arrow_dir = snapshot / "datasets" / name
+            linker_input = root / "linker-input.json"
+            _write_json(linker_input, {block: {"arrow_dir": str(arrow_dir)}})
+            output = root / "linker-inputs"
+            build_linker_inputs(roles_path, linker_input, output, model, identity_evidence=evidence)
+            inputs[block] = BlockInput(arrow_dir, None, output / name / "assignments.parquet")
+            continue
         assignments = root / name / "assignments.parquet"
         assignments.parent.mkdir()
         pq.write_table(
@@ -121,10 +136,12 @@ def build_stage0_world(
     def write_receipts() -> dict[str, Any]:
         bindings = {}
         for block, spec in inputs.items():
+            if all_ineligible_block and block == "e vale":
+                continue
             bindings[block] = {
                 ROLE_SHA256_FIELD: roles.sha256,
                 BLOCK_BINDINGS_FIELD: roles.bindings_for({block}),
-                "model_sha256": "a" * 64,
+                "model_sha256": model_digest,
                 "index_sha256": index,
             }
             _write_json(

@@ -33,6 +33,8 @@ from scripts.pairwise.mine_pairwise_pairs import (
     select_block_pairs,
 )
 
+DEFAULT_MIN_MINED_VALIDATION_PAIRS = 1
+
 
 @dataclass(frozen=True, slots=True)
 class FitPair:
@@ -105,9 +107,16 @@ def _read_pairs(mined_csv: Path, blocks: Collection[str]) -> dict[str, dict[Pair
 
 
 def training_pairs(
-    roles: BlockRoles, ledger: IdentityLedger, mined_csv: Path, *, name_counts_sha256: str
+    roles: BlockRoles,
+    ledger: IdentityLedger,
+    mined_csv: Path,
+    *,
+    name_counts_sha256: str,
+    min_mined_validation_pairs: int = DEFAULT_MIN_MINED_VALIDATION_PAIRS,
 ) -> TrainValPairs:
     """Verify the complete mining handoff before returning any pairs for training."""
+    if min_mined_validation_pairs < 1:
+        raise ValueError("Minimum mined validation pairs must be positive")
     roles.require_assignment(ledger.bindings, context="Identity ledger")
     manifest_path = mined_csv.with_suffix(mined_csv.suffix + ".manifest.json")
     manifest = read_json_object(manifest_path)
@@ -177,6 +186,12 @@ def training_pairs(
             else:
                 fit.append(FitPair(block, left, right, stratum, int(gold[left] == gold[right]), fold))
         result[block] = TrainingBlock(arrow_dir, evidence["dataset_manifest_sha256"], fold, fit, judge)
+
+    validation_pairs = sum(len(spec.fit) for spec in result.values() if spec.fold == "val")
+    if validation_pairs < min_mined_validation_pairs:
+        raise ValueError(
+            f"Expected at least {min_mined_validation_pairs} fitted mined validation pairs, found {validation_pairs}"
+        )
 
     return TrainValPairs(
         result,

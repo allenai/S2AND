@@ -274,9 +274,14 @@ def build_linker_inputs(
                 ):
                     raise ValueError(f"{block!r} needs unique, real query signatures from its full dataset")
                 remaining = sorted((signatures.keys() if role == "gate_thresh" else eligible) - query_set)
-                if not remaining:
+                full_rows: list[tuple[str, str]] = []
+                if role == "fit_pool" and not eligible:
+                    rows = []
+                    components = 0
+                    request_stats["empty_reason"] = "no_eligible_signatures"
+                elif not remaining:
                     raise ValueError(f"No seed signatures remain in {block!r}")
-                if use_arrivals:
+                elif use_arrivals:
                     assert request is not None and ledger is not None
                     production = _production_seeds(request, block, view.rows, queries)
                     if not production:
@@ -301,13 +306,21 @@ def build_linker_inputs(
                     components = len({cid for _, cid in rows})
                 staging = Path(tempfile.mkdtemp(dir=output_dir, prefix=f".{name}."))
                 pq.write_table(
-                    pa.table({"signature_id": [sid for sid, _ in rows], "component_key": [cid for _, cid in rows]}),
+                    pa.table(
+                        {
+                            "signature_id": pa.array([sid for sid, _ in rows], type=pa.string()),
+                            "component_key": pa.array([cid for _, cid in rows], type=pa.string()),
+                        }
+                    ),
                     staging / seed_path.name,
                 )
                 if role == "fit_pool":
                     pq.write_table(
                         pa.table(
-                            {"signature_id": [sid for sid, _ in full_rows], "cluster_id": [cid for _, cid in full_rows]}
+                            {
+                                "signature_id": pa.array([sid for sid, _ in full_rows], type=pa.string()),
+                                "cluster_id": pa.array([cid for _, cid in full_rows], type=pa.string()),
+                            }
                         ),
                         staging / assignments_path.name,
                     )

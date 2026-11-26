@@ -2,11 +2,15 @@
 
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from s2and._sha256 import sha256_file
+from scripts.common.block_roles import load_block_roles
+from scripts.common.identity_ledger import ledger_for_roles
 from scripts.common.stage0_invariants import require_fit_pool_coverage, require_intake_index
 from scripts.pairwise.mine_pairwise_pairs import mine_pairs
 from scripts.pairwise.training_pairs import FitPair, JudgePair, TrainValPairs, training_pairs
@@ -15,12 +19,15 @@ from tests.stage0_world import Stage0World, build_stage0_world
 pytestmark = pytest.mark.tooling
 
 
-def _load(world: Stage0World, *, name_counts_sha256: str | None = None) -> TrainValPairs:
+def _load(
+    world: Stage0World, *, name_counts_sha256: str | None = None, min_mined_validation_pairs: int = 1
+) -> TrainValPairs:
     return training_pairs(
         world.roles,
         world.ledger,
         world.mined,
         name_counts_sha256=name_counts_sha256 or sha256_file(world.name_counts / "manifest.json"),
+        min_mined_validation_pairs=min_mined_validation_pairs,
     )
 
 
@@ -127,6 +134,65 @@ def test_handoff_accepts_an_explicit_empty_block(tmp_path: Path) -> None:
         "random": 0,
         "merged_unlabeled": 0,
     }
+
+
+def test_all_ineligible_fit_block_reaches_mining(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path, all_ineligible_block=True)
+    assignment = world.inputs["e vale"].assignments
+    receipt = json.loads(assignment.with_name("manifest.json").read_text(encoding="utf-8"))
+    assert receipt["counts"] == {
+        "assigned_signatures": 0,
+        "components": 0,
+        "queries": 0,
+        "empty_reason": "no_eligible_signatures",
+    }
+    assert pq.read_table(assignment).num_rows == pq.read_table(assignment.with_name("seeds.parquet")).num_rows == 0
+    assert json.loads(assignment.with_name("queries.json").read_text(encoding="utf-8")) == []
+    assert receipt["files"][assignment.name] == sha256_file(assignment)
+    empty = _load(world).blocks["e vale"]
+    assert not empty.fit and not empty.judge
+
+
+def test_empty_fit_pool_fails_at_both_boundaries(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path)
+    payload = json.loads(world.roles_path.read_text(encoding="utf-8"))
+    payload["roles"]["fit_pool"] = []
+    payload["block_to_role"] = {"c lane": "gate_fit"}
+    payload["pairwise_validation_blocks"] = []
+    world.roles_path.write_text(json.dumps(payload), encoding="utf-8")
+    roles = load_block_roles(world.roles_path)
+    ledger = ledger_for_roles(world.evidence_path, roles)
+    assert ledger is not None
+    world.mined.write_text(world.mined.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+    world.manifest.write_text(
+        json.dumps(
+            {
+                "role": "fit_pool",
+                "block_role_assignments_sha256": roles.sha256,
+                "block_bindings": {},
+                "blocks": {},
+                "output_sha256": sha256_file(world.mined),
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Expected at least one frozen fit_pool block"):
+        _load(replace(world, roles=roles, ledger=ledger))
+    with pytest.raises(ValueError, match="Expected at least one frozen fit_pool block"):
+        mine_pairs(world.roles_path, {}, tmp_path / "rejected.csv", identity_evidence=world.evidence_path)
+
+
+@pytest.mark.parametrize("validation_blocks", [(), ("e vale",)])
+def test_validation_requires_a_fitted_mined_pair(tmp_path: Path, validation_blocks: tuple[str, ...]) -> None:
+    world = build_stage0_world(tmp_path, empty_block=True, validation_blocks=validation_blocks)
+    with pytest.raises(ValueError, match="Expected at least 1 fitted mined validation pairs, found 0"):
+        _load(world)
+
+
+def test_validation_minimum_can_be_raised(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path)
+    with pytest.raises(ValueError, match="Expected at least 2 fitted mined validation pairs, found 1"):
+        _load(world, min_mined_validation_pairs=2)
 
 
 def test_sample_budget_is_conserved_in_the_manifest(tmp_path: Path) -> None:

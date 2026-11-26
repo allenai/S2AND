@@ -165,8 +165,10 @@ def test_ambiguous_gold_position_is_never_a_mining_endpoint() -> None:
     assert audit["dropped_ambiguous_paper_block"] == 1
 
 
-def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path], tmp_path: Path) -> None:
-    from scripts.intake.build_freeze_input import build_freeze_input
+def test_freeze_input_counts_both_sources_once(
+    evidence_inputs: tuple[Path, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.intake.build_freeze_input import main
     from scripts.intake.build_identity_evidence import build_identity_evidence
 
     snapshot, gold = evidence_inputs
@@ -179,7 +181,21 @@ def test_freeze_input_counts_both_sources_once(evidence_inputs: tuple[Path, Path
     output = tmp_path / "freeze-input.parquet"
     origins = tmp_path / "origins.csv"
     origins.write_text("surname,broad\nLovelace,northern_european\n", encoding="utf-8")
-    build_freeze_input(evidence / "manifest.json", source, output, surname_origin_csv=origins)
+    args = [
+        "--identity-evidence",
+        str(evidence / "manifest.json"),
+        "--gold-blocks",
+        str(source),
+        "--output",
+        str(output),
+    ]
+    with pytest.raises(SystemExit, match="2"):
+        main(args)
+    assert "--surname-origin-csv" in capsys.readouterr().err
+    assert not output.exists()
+    assert main([*args, "--surname-origin-csv", str(origins)]) == 0
+    coverage = json.loads(capsys.readouterr().out)["surname_origin_coverage"]
+    assert coverage == {"matched_blocks": 1, "matched_surnames": 1, "missing_blocks": 1, "missing_surnames": 1}
     first, second = pq.read_table(output).to_pylist()
     assert first["signature_count"] == 4
     assert first["stratum"] == "<=1000|northern_european"

@@ -19,6 +19,8 @@ PAIR_STRATA: tuple[PairStratum, ...] = ("false_merge", "missed_link", "random", 
 def require_fit_pool_coverage(roles: BlockRoles, blocks: Collection[str]) -> None:
     """Require exactly the frozen fit pool, including blocks with no sampled pairs."""
     required = {block for block, role in roles.block_to_role.items() if role == "fit_pool"}
+    if not required:
+        raise ValueError("Expected at least one frozen fit_pool block")
     observed = set(blocks)
     if observed != required:
         raise ValueError(

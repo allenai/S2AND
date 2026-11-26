@@ -111,7 +111,8 @@ uv run --offline --no-sync python -m scripts.intake.build_freeze_input \
 ~~~
 
 Strata combine the existing Arrow size bands (at most 1,000, 1,001 to 15,000, and above 15,000)
-and the `broad` origin of the block surname. Missing surnames use `other`.
+and the `broad` origin of the block surname. The required CSV lists `surname` and `broad`. Missing
+surnames use `other`. The command reports matched and missing block and surname counts.
 
 ### 6. Freeze exported block roles
 
@@ -170,7 +171,8 @@ nonnegative integers or canonical decimal strings. Invalid arrival keys and empt
 Keep production cluster IDs for the remaining seeded mentions. The manifest counts remaining mentions without production seeds.
 For `fit_pool` and `gate_fit`, sample eligible scored mentions using `--queries-per-block`. The
 ORCID-hidden `fit_pool` partition supplies full assignments for mining and query-excluded seeds for
-retrieval. Cluster the remaining `gate_fit` mentions with ORCID hidden. Re-run with the same inputs
+retrieval. A `fit_pool` block with no eligible signatures writes empty assignments, seeds, and queries
+with reason `no_eligible_signatures`. Cluster the remaining `gate_fit` mentions with ORCID hidden. Re-run with the same inputs
 to verify and reuse completed blocks.
 
 ### 9. Freeze linker and gate tasks
@@ -203,7 +205,7 @@ uv run --offline --no-sync python -m scripts.pairwise.train_pairwise \
   --output-dir pairwise-model --n-jobs N --run-full
 ~~~
 
-Map every frozen `fit_pool` block to its `arrow_dir` and `assignments` entry from step 8. The mining
+Map every block in the nonempty frozen `fit_pool` to its `arrow_dir` and `assignments` entry from step 8. The mining
 manifest records each block's frozen fold, assignment path, and binding, including blocks with zero
 sampled pairs. Keep the frozen assignment files and receipts available for training. Assignment
 receipts and the trainer's name-counts index must match the intake index.
@@ -213,7 +215,9 @@ scores for each fitted pair and uses them to compute the label. `merged_unlabele
 at least one unscored endpoint and go to judging only. Each block uses its own random sequence
 derived from the run seed and block key. Judge-only pairs have a separate `--pairs-per-block` budget.
 The trainer replays selection from the ledger, frozen assignments, and recorded policy. It checks
-pair IDs, strata, inclusion probabilities, and the report counts against the replay. The report
+pair IDs, strata, inclusion probabilities, and the report counts against the replay. Training
+requires at least one fitted mined pair in the frozen validation fold. Set
+`--min-mined-validation-pairs` to require more. The report
 counts drops by reason from the eligible population through the frame and sample. Re-mine older
 samples before training.
 

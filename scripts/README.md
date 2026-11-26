@@ -21,6 +21,7 @@ Follow the [release process](../docs/release.md) for production runs.
 | `intake/assign_block_roles.py` | Deterministically partition production blocks into ORCID-disjoint 1.5 training, tuning, and test pools |
 | `intake/gate_public_snapshot.py` | Intake-once S2AG paper filtering, abstract redaction, email scrubbing, and `population_corrections.json` generation |
 | `judging/review_packets.py` | Leak-proof blind Sol 6.2 review packet builder, embedded ORCID control injector, and pre-launch validator |
+| `judging/judged_bank.py` | [Assemble blind author-pair packages, merge frozen verdicts, and check planted controls](../docs/judged_bank.md) |
 | `linker/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](intake/README.md) |
 | `intake/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `intake/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](intake/counts/README.md) |

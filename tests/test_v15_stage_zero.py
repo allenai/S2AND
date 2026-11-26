@@ -692,9 +692,16 @@ def test_stage_zero_commands_use_one_ledger_and_production_requests(tmp_path: Pa
         "--pinned-roles-json",
         role_path,
     )
-    assert sha256_file(fresh_dir / "assignments.json") == roles.sha256
+    assert (fresh_dir / "assignments.json").read_bytes() == role_path.read_bytes()
+    # Owner decision 2026-11-25: a formatting-only rewrite keeps the assignment's identity.
+    reformatted = tmp_path / "reformatted.json"
+    reformatted.write_text(json.dumps(json.loads(role_path.read_text("utf-8")), indent=4) + "\n\n", encoding="utf-8")
+    assert load_block_roles(reformatted).sha256 == roles.sha256
+    ledger_for_roles(evidence, load_block_roles(reformatted))
     altered = tmp_path / "altered.json"
-    altered.write_bytes(role_path.read_bytes() + b"\n")
+    payload = json.loads(role_path.read_text("utf-8"))
+    payload["seed"] = payload.get("seed", 0) + 1
+    altered.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="recorded master block role assignment"):
         ledger_for_roles(evidence, load_block_roles(altered))
     binding = ["--identity-evidence", evidence, "--block-role-assignments", role_path]

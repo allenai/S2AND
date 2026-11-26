@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections import defaultdict
@@ -17,6 +16,13 @@ from s2and.text import normalize_orcid
 
 BLOCK_BINDINGS_FIELD = "block_bindings"
 ROLE_SHA256_FIELD = "block_role_assignments_sha256"
+
+
+def assignment_digest(path: Path) -> str:
+    """Hash a role assignment by its JSON content, so whitespace or key order never changes its identity."""
+    return canonical_json_digest(json.loads(path.read_text(encoding="utf-8")))
+
+
 GATE_BINDINGS_FIELD = "gate_thresh_block_bindings"
 GATE_CANDIDATE_ORCIDS = "gate_thresh_candidate_orcids"
 FINAL_TEST_ROLES = ("final_test_a", "final_test_b")
@@ -197,7 +203,7 @@ def load_block_roles(path: Path) -> BlockRoles:
             gate_block_orcids[block] = frozenset(cast(list[str], orcids))
     result = BlockRoles(
         by_block,
-        hashlib.sha256(content).hexdigest(),
+        canonical_json_digest(payload),
         block_orcids,
         assigned_identity_roles(block_orcids, by_block),
         digests.get("identity_evidence_sha256"),

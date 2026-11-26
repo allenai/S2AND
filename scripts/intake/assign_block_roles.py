@@ -36,6 +36,7 @@ from scripts.common.block_roles import (  # noqa: E402
     FINAL_TEST_ROLES,
     VALID_ROLES,
     assigned_identity_roles,
+    assignment_digest,
     load_block_roles,
     normalize_block_key,
 )
@@ -870,7 +871,7 @@ def freeze_identity_roles(
             raise ValueError(
                 "Snapshot or evidence already has a freeze binding; pass the prior manifest even with --fresh"
             )
-        if receipts != {sha256_file(prior_path)}:
+        if receipts != {assignment_digest(prior_path)}:
             raise ValueError("The prior role manifest does not match the latest freeze binding")
     metadata = pq.read_schema(blocks_path).metadata or {}
     for digest_field, digest in {
@@ -1056,7 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if out_json.exists() and (
-            args.pinned_roles_json is None or sha256_file(args.pinned_roles_json) != sha256_file(out_json)
+            args.pinned_roles_json is None or assignment_digest(args.pinned_roles_json) != assignment_digest(out_json)
         ):
             raise ValueError("Pass the existing assignments.json as the prior manifest when re-freezing")
         result = freeze_identity_roles(
@@ -1087,7 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
             writer.writerow(["block_key", "role"])
             for key, role in result["block_to_role"].items():
                 writer.writerow([key, role])
-        receipt = {"assignments_sha256": sha256_file(out_json)}
+        receipt = {"assignments_sha256": assignment_digest(out_json)}
         intake_path = evidence.snapshot_root / SNAPSHOT_BINDING
         intake = read_json_object(intake_path)
         _replace_json(intake_path, {**intake, FREEZE_SHA256_FIELD: receipt["assignments_sha256"]})

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from s2and.arrow_inputs import ArrowDataset
+from scripts.common.block_roles import load_block_roles
 from scripts.intake.assign_block_roles import BlockSpec, assign_block_roles
 from tests.test_build_linker_task_tables import _ORCIDS, _OUTSIDE_HOME, _block_inputs
 
@@ -187,7 +188,7 @@ def test_pair_miner_excludes_non_home_before_sampling(tmp_path: Path, deposited_
     assert not set(rows["signature_id_2"]) & {"q_outside_home", "s03"}
     manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
     info = manifest["blocks"][block]
-    assert manifest["block_role_assignments_sha256"] == sha256_file(roles_path)
+    assert manifest["block_role_assignments_sha256"] == load_block_roles(roles_path).sha256
     assert manifest["output_sha256"] == sha256_file(output)
     assert info["labels_sha256"] == sha256_file(spec.labels)
     assert info["assignments_sha256"] == sha256_file(spec.assignments)

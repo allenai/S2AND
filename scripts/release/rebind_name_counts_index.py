@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from s2and._sha256 import sha256_file
 from s2and.incremental_linking.policy import NAME_COUNTS_MANIFEST_SHA256_FIELD
 from s2and.name_counts_index import NameCountsIndex
-from s2and.production_bundle import _staged_production_bundle
+from s2and.production_bundle import _staged_production_bundle, _write_json
 from s2and.production_model import (
     _featurization_info_from_payload,
     _pairwise_binding_from_validated_parts,
@@ -36,10 +36,6 @@ from s2and.production_model import (
 
 # The only files a rebind may change.
 _REBOUND_FILES = frozenset({"clusterer.json", "incremental_linker/metadata.json"})
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
 def rebind_name_counts_index(

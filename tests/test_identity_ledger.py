@@ -824,5 +824,5 @@ def test_refreeze_can_declare_a_previously_unassigned_dev_test_block(
     assert "a lovelace" in prior["unassigned"]
     path = tmp_path / "prior.json"
     path.write_text(json.dumps(prior), encoding="utf-8")
-    refrozen = freeze_identity_roles(blocks, evidence, targets, prior_path=path, dev_test_blocks=["a_lovelace"])
+    refrozen = freeze_identity_roles(blocks, evidence, targets, prior_path=path, extra_pins={"a_lovelace": "dev_test"})
     assert refrozen["block_to_role"]["a lovelace"] == "dev_test"

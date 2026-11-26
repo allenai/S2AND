@@ -70,9 +70,6 @@ class SamplingPolicy:
             pairs_per_block=getattr(args, "pairs_per_block", cls.pairs_per_block),
             verified_pair_fraction=getattr(args, "verified_pair_fraction", cls.verified_pair_fraction),
             pairs_per_block_floor=getattr(args, "pairs_per_block_floor", cls.pairs_per_block_floor),
-            pairs_per_identity_per_stratum=getattr(
-                args, "pairs_per_identity_per_stratum", cls.pairs_per_identity_per_stratum
-            ),
         )
 
 
@@ -81,7 +78,6 @@ def add_sampling_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pairs-per-block", type=int, default=DEFAULT_PAIRS_PER_BLOCK)
     parser.add_argument("--verified-pair-fraction", type=float, default=DEFAULT_VERIFIED_PAIR_FRACTION)
     parser.add_argument("--pairs-per-block-floor", type=int, default=DEFAULT_PAIRS_PER_BLOCK_FLOOR)
-    parser.add_argument("--pairs-per-identity", type=int, dest="pairs_per_identity_per_stratum", default=25)
     parser.add_argument("--seed", type=int, default=20261123, help="Seed for choosing mined pairs.")
 
 
@@ -442,7 +438,6 @@ def main(argv: list[str] | None = None) -> int:
         verified_pair_fraction=args.verified_pair_fraction,
         per_block_floor=args.pairs_per_block_floor,
         identity_evidence=args.identity_evidence,
-        per_identity=args.pairs_per_identity_per_stratum,
         seed=args.seed,
     )
     print(json.dumps({"blocks": len(blocks), "pairs": count}))

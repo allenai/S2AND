@@ -62,7 +62,6 @@ def check_training_overlap(
     roles_path: Path,
     training_paths: Sequence[Path],
     *,
-    allow_no_training_orcids: bool = False,
     identity_evidence: Path,
 ) -> dict[str, Any]:
     """Count distinct signature, paper-position and ORCID overlaps for the sealed test role."""
@@ -149,10 +148,7 @@ def check_training_overlap(
         "benchmark_overlap": "unobservable",
         "training_shards": training,
         "distinct_training_orcids": len(training_orcids),
-        "passed": (bool(training_orcids) or allow_no_training_orcids)
-        and not signature_overlap
-        and not position_overlap
-        and not orcid_overlap,
+        "passed": bool(training_orcids) and not signature_overlap and not position_overlap and not orcid_overlap,
         "sealed_roles": {
             FINAL_TEST_ROLE: {
                 "signatures": len(signatures),
@@ -171,12 +167,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--block-role-assignments", type=Path, required=True)
     parser.add_argument("--training-parquet", type=Path, action="append", required=True)
-    parser.add_argument("--allow-no-training-orcids", action="store_true")
     args = parser.parse_args(argv)
     report = check_training_overlap(
         args.block_role_assignments,
         args.training_parquet,
-        allow_no_training_orcids=args.allow_no_training_orcids,
         identity_evidence=args.identity_evidence,
     )
     print(json.dumps(report, indent=2, sort_keys=True))

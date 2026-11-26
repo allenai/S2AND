@@ -315,20 +315,17 @@ def test_sealed_role_covers_single_block_strata() -> None:
 @pytest.mark.parametrize("count_key", ["https://orcid.org/0000-0002-1694-233x", "0000-0001-5000-0007"])
 def test_load_blocks_normalizes_mention_counts(tmp_path: Path, count_key: str) -> None:
     orcid = "0000-0002-1694-233X"
-    path = tmp_path / "blocks.json"
-    path.write_text(
-        json.dumps(
-            [
-                {
-                    "block_key": "train",
-                    "signature_count": 100,
-                    "orcids": [orcid],
-                    "orcid_mention_counts": {count_key: 50},
-                },
-                {"block_key": "tune", "signature_count": 100, "orcids": [orcid, orcid]},
-            ]
+    path = tmp_path / "blocks.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "block_key": ["train", "tune"],
+                "signature_count": [100, 100],
+                "orcids": [[orcid], [orcid, orcid]],
+                "orcid_mention_counts": pa.array([[(count_key, 50)], None], type=pa.map_(pa.string(), pa.int64())),
+            }
         ),
-        encoding="utf-8",
+        path,
     )
     if count_key != "https://orcid.org/0000-0002-1694-233x":
         with pytest.raises(ValueError, match="Missing ORCID mention counts"):
@@ -342,25 +339,17 @@ def test_load_blocks_normalizes_mention_counts(tmp_path: Path, count_key: str) -
     assert result["verification"]["raw_cross_role_orcid_overlap"] == 1
 
 
-@pytest.mark.parametrize("require_orcid_lists", [False, True])
-def test_missing_orcid_list_obeys_input_requirement(tmp_path: Path, require_orcid_lists: bool) -> None:
-    path = tmp_path / "blocks.json"
-    path.write_text(json.dumps([{"block_key": "a ross", "signature_count": 3}]), encoding="utf-8")
-    if require_orcid_lists:
-        with pytest.raises(ValueError, match="Expected an ORCID list"):
-            load_blocks(path, require_orcid_lists=True)
-    else:
-        (block,) = load_blocks(path, require_orcid_lists=False)
-        assert not block.orcids
+def test_load_blocks_requires_orcid_list(tmp_path: Path) -> None:
+    path = tmp_path / "blocks.parquet"
+    pq.write_table(pa.table({"block_key": ["a ross"], "signature_count": [3]}), path)
+    with pytest.raises(ValueError, match="Expected an ORCID list"):
+        load_blocks(path)
 
 
 def test_implicit_mention_counts_normalize_repeated_orcids(tmp_path: Path) -> None:
     orcid = "0000-0002-1694-233X"
     url = f"https://orcid.org/{orcid}"
-    path = tmp_path / "blocks.json"
-    path.write_text(
-        json.dumps([{"block_key": "a ross", "signature_count": 3, "orcids": [orcid, url, ""]}]),
-        encoding="utf-8",
-    )
-    (block,) = load_blocks(path, require_orcid_lists=True)
+    path = tmp_path / "blocks.parquet"
+    pq.write_table(pa.table({"block_key": ["a ross"], "signature_count": [3], "orcids": [[orcid, url, ""]]}), path)
+    (block,) = load_blocks(path)
     assert block.orcid_mention_counts == {orcid: 2}

@@ -19,7 +19,7 @@ import json
 import sys
 import tempfile
 from collections import Counter, defaultdict, deque
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -554,44 +554,37 @@ def assign_block_roles(
     }
 
 
-def load_blocks(path: Path, *, require_orcid_lists: bool = False) -> list[BlockSpec]:
-    """Load block metadata from JSON or Parquet."""
-    rows: Iterable[dict[str, Any]]
-    if path.suffix.casefold() == ".parquet":
-        import pyarrow.parquet as pq
+def load_blocks(path: Path) -> list[BlockSpec]:
+    """Load frozen block metadata from Parquet."""
+    import pyarrow.parquet as pq
 
-        parquet = pq.ParquetFile(path)
-        fields = {
-            "block_key",
-            "cluster_block_key",
-            "signature_count",
-            "orcids",
-            "orcid_mention_counts",
-            "size_band",
-            "stratum",
-            "script_region",
-            "script",
-            "region",
-            "source_split",
-            "split",
-        }
-        columns = sorted(fields & set(parquet.schema_arrow.names))
-        rows = (
-            dict(zip(columns, values, strict=True))
-            for batch in parquet.iter_batches(columns=columns)
-            for values in zip(*(batch.column(name).to_pylist() for name in columns), strict=True)
-        )
-    else:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
-            raise ValueError(f"Expected a list of block specs in {path}")
-        rows = cast(list[dict[str, Any]], raw)
+    parquet = pq.ParquetFile(path)
+    fields = {
+        "block_key",
+        "cluster_block_key",
+        "signature_count",
+        "orcids",
+        "orcid_mention_counts",
+        "size_band",
+        "stratum",
+        "script_region",
+        "script",
+        "region",
+        "source_split",
+        "split",
+    }
+    columns = sorted(fields & set(parquet.schema_arrow.names))
+    rows = (
+        dict(zip(columns, values, strict=True))
+        for batch in parquet.iter_batches(columns=columns)
+        for values in zip(*(batch.column(name).to_pylist() for name in columns), strict=True)
+    )
     specs: list[BlockSpec] = []
     for item in rows:
         key = item.get("block_key") or item.get("cluster_block_key")
         if not isinstance(key, str) or not key.strip():
             raise ValueError(f"Missing block_key in {path}")
-        orcids = item.get("orcids", None if require_orcid_lists else [])
+        orcids = item.get("orcids")
         if not isinstance(orcids, list):
             raise ValueError(f"Expected an ORCID list for {key!r} in {path}")
         mention_counts = item.get("orcid_mention_counts")
@@ -637,9 +630,7 @@ def freeze_identity_roles(
     prior_path: Path | None = None,
     fresh: bool = False,
     extra_pins: Mapping[str, str] | None = None,
-    dev_test_blocks: Collection[str] = (),
     fit_pool_blocks: Collection[str] = (),
-    excluded_blocks: Collection[str] = (),
     giant_caps: Mapping[str, int] | None = None,
     pairwise_validation_fraction: float | None = None,
     gate_training_block_count: int | None = None,
@@ -657,9 +648,7 @@ def freeze_identity_roles(
     if fresh and (
         targets
         or extra_pins
-        or dev_test_blocks
         or fit_pool_blocks
-        or excluded_blocks
         or giant_caps is not None
         or pairwise_validation_fraction is not None
         or gate_training_block_count is not None
@@ -680,7 +669,7 @@ def freeze_identity_roles(
     }.items():
         if metadata.get(digest_field.encode()) != digest.encode():
             raise ValueError(f"Freeze input {digest_field} does not match the identity evidence")
-    blocks = load_blocks(blocks_path, require_orcid_lists=True)
+    blocks = load_blocks(blocks_path)
     if {block.block_key for block in blocks} != evidence.blocks.keys():
         raise ValueError("Freeze input must cover exactly the exported blocks")
     evidence_blocks = evidence.block_digests()
@@ -711,10 +700,9 @@ def freeze_identity_roles(
             or prior_roles.snapshot_sha256 != evidence.snapshot_sha256
         ):
             raise ValueError("--fresh must use the master assignment's evidence, blocks and source splits")
-        requested_changes = (
-            {normalize_block_key(block) for block in (*dev_test_blocks, *fit_pool_blocks)}
-            & (prior_blocks - prior_unassigned)
-        ) | ({normalize_block_key(block) for block in excluded_blocks} & prior_blocks)
+        requested_changes = {normalize_block_key(block) for block in fit_pool_blocks} & (
+            prior_blocks - prior_unassigned
+        )
         if requested_changes:
             raise ValueError(f"Re-freeze cannot move prior blocks: {sorted(requested_changes)}")
     extra = {normalize_block_key(block): role for block, role in (extra_pins or {}).items()}
@@ -748,10 +736,9 @@ def freeze_identity_roles(
                 blocks,
                 targets,
                 seed=seed,
-                extra_dev_test_blocks=dev_test_blocks,
                 fit_pool_blocks=fit_pool_blocks,
                 pinned_roles=pins,
-                excluded_blocks=(*prior_exclusions, *excluded_blocks, *excluded_reasons),
+                excluded_blocks=(*prior_exclusions, *excluded_reasons),
                 giant_caps=giant_caps if giant_caps is not None else prior["giant_caps"] if prior is not None else None,
                 pairwise_validation_fraction=fraction,
                 gate_training_block_count=gate_count,
@@ -854,13 +841,7 @@ def freeze_identity_roles(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--blocks",
-        "--blocks-json",
-        type=Path,
-        required=True,
-        help="Parquet produced by build_freeze_input.",
-    )
+    parser.add_argument("--blocks", type=Path, required=True, help="Parquet produced by build_freeze_input.")
     parser.add_argument("--identity-evidence", type=Path, required=True)
     parser.add_argument("--targets-json", type=Path, help="JSON dict of {role: target_block_count}.")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -872,7 +853,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Prior assignments.json to preserve on a re-freeze.",
     )
     parser.add_argument("--extra-pins-json", type=Path, help="Pin new or previously unassigned blocks to roles.")
-    parser.add_argument("--dev-test-blocks", nargs="*", default=())
     parser.add_argument("--fit-pool-blocks", nargs="*", default=(), help="Pin leakage-test blocks to fit_pool.")
     parser.add_argument("--giant-caps-json", type=Path, help="JSON dict of {role: maximum_giant_block_count}.")
     parser.add_argument(
@@ -881,7 +861,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--gate-training-block-count", type=int, help="Target gate training blocks within fit_pool (default 20)."
     )
-    parser.add_argument("--exclude-blocks", nargs="*", default=())
     parser.add_argument(
         "--fresh", action="store_true", help="Reproduce the master assignment without allocating blocks."
     )
@@ -909,9 +888,7 @@ def main(argv: list[str] | None = None) -> int:
             prior_path=args.pinned_roles_json,
             fresh=args.fresh,
             extra_pins=read_json_object(args.extra_pins_json) if args.extra_pins_json else None,
-            dev_test_blocks=args.dev_test_blocks,
             fit_pool_blocks=args.fit_pool_blocks,
-            excluded_blocks=args.exclude_blocks,
             giant_caps=read_json_object(args.giant_caps_json) if args.giant_caps_json else None,
             pairwise_validation_fraction=args.pairwise_validation_fraction,
             gate_training_block_count=args.gate_training_block_count,

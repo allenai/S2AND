@@ -361,7 +361,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--block-inputs", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--blocks", nargs="+", help="Build only these frozen task blocks.")
-    parser.add_argument("--holdout-fraction", type=float, default=1 / 3)
     parser.add_argument("--seed", type=int, default=20261123)
     parser.add_argument("--n-jobs", type=int, default=1)
     args = parser.parse_args(argv)
@@ -369,7 +368,6 @@ def main(argv: list[str] | None = None) -> int:
         args.block_role_assignments,
         args.block_inputs,
         args.output_dir,
-        holdout_fraction=args.holdout_fraction,
         seed=args.seed,
         n_jobs=args.n_jobs,
         blocks=args.blocks,

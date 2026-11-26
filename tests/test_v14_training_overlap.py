@@ -18,19 +18,21 @@ from tests.helpers import request_bundle
 pytestmark = pytest.mark.tooling
 
 
-@pytest.mark.parametrize("orcid_source", [None, "manifest", "arrow"])
+@pytest.mark.parametrize("orcid_source", [None, "disjoint", "manifest", "arrow"])
 @pytest.mark.parametrize("signature_hit", [False, True])
 def test_training_overlap_cli_checks_all_sealed_blocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], signature_hit: bool, orcid_source: str | None
 ) -> None:
     from scripts.intake.check_v14_training_overlap import main
 
-    orcid_hit = orcid_source is not None
-    expected_overlap = signature_hit or orcid_hit
+    orcid_hit = orcid_source in {"manifest", "arrow"}
+    expected_pass = orcid_source == "disjoint" and not signature_hit
 
     a_orcid, b_orcid = "0000-0002-1694-233X", "0000-0001-5000-0007"
     arrow_orcid = "0000-0003-0011-7637"
-    training_orcid = {"manifest": b_orcid, "arrow": arrow_orcid}.get(orcid_source or "")
+    training_orcid = {"manifest": b_orcid, "arrow": arrow_orcid, "disjoint": "0000-0001-5109-3700"}.get(
+        orcid_source or ""
+    )
     roles_path, train_path = (tmp_path / name for name in ("roles.json", "train.parquet"))
     snapshot = tmp_path / "snapshot"
     index, _ = write_name_counts_index(tmp_path, ({}, {}, {}, {}))
@@ -81,13 +83,12 @@ def test_training_overlap_cli_checks_all_sealed_blocks(
             str(evidence),
             "--training-parquet",
             str(train_path),
-            *(["--allow-no-training-orcids"] if not training_orcid else []),
         ]
-    ) == int(expected_overlap)
+    ) == int(not expected_pass)
     report = json.loads(capsys.readouterr().out)
-    assert report["passed"] == (not expected_overlap)
+    assert report["passed"] == expected_pass
     assert report["training_shards"][0]["rows"] == 3
-    assert report["distinct_training_orcids"] == int(orcid_hit)
+    assert report["distinct_training_orcids"] == int(training_orcid is not None)
     assert report["sealed_roles"] == {
         "final_test": {
             "signatures": 2,

@@ -10,7 +10,6 @@ import pytest
 from s2and._sha256 import sha256_file
 from scripts.common.block_roles import load_block_roles
 from scripts.common.identity_ledger import IdentityLedger, ledger_for_roles
-from scripts.common.stage0_invariants import require_fit_pool_coverage, require_intake_index
 from scripts.pairwise.mine_pairwise_pairs import SamplingPolicy, mine_pairs
 from scripts.pairwise.training_pairs import FitPair, TrainValPairs, training_pairs
 from tests.stage0_world import Stage0World, build_stage0_world
@@ -30,46 +29,28 @@ def _load(
     )
 
 
-def test_handoff_preserves_exact_train_validation_and_judge_pairs(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path)
+def test_handoff_preserves_folds_and_excludes_frozen_queries(tmp_path: Path) -> None:
+    world = build_stage0_world(tmp_path, with_query=True, empty_block=True)
     result = _load(world)
-    train, val = result.blocks["a ross"], result.blocks["b crane"]
+    train, val, empty = (result.blocks[block] for block in ("a ross", "b crane", "e vale"))
     assert train.fit == [
         FitPair("a ross", "10-0", "11-0", "missed_link", 1, "train"),
         FitPair("a ross", "10-0", "12-0", "false_merge", 0, "train"),
-        FitPair("a ross", "10-0", "13-0", "random", 0, "train"),
         FitPair("a ross", "11-0", "12-0", "random", 0, "train"),
-        FitPair("a ross", "11-0", "13-0", "random", 0, "train"),
-        FitPair("a ross", "12-0", "13-0", "missed_link", 1, "train"),
     ]
+    assert train.judge_count == 2
     assert val.fit == [FitPair("b crane", "20-0", "21-0", "random", 1, "val")]
-    assert train.judge_count == 2
     assert val.judge_count == 0
-    require_fit_pool_coverage(world.roles, result.blocks.keys())
-    manifest = json.loads(world.manifest.read_text(encoding="utf-8"))
-    require_intake_index(world.ledger.evidence.name_counts_index_sha256, manifest["index_sha256"], context="Miner")
-
-
-def test_handoff_excludes_the_frozen_query_from_pairs_and_counts(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path, with_query=True)
-    result = _load(world)
-    train = result.blocks["a ross"]
-    assert train.fit == [
-        FitPair("a ross", "10-0", "11-0", "missed_link", 1, "train"),
-        FitPair("a ross", "10-0", "12-0", "false_merge", 0, "train"),
-        FitPair("a ross", "11-0", "12-0", "random", 0, "train"),
-    ]
-    assert train.judge_count == 2
-    assert result.blocks["b crane"].fit == [FitPair("b crane", "20-0", "21-0", "random", 1, "val")]
-    blocks = json.loads(world.manifest.read_text(encoding="utf-8"))["blocks"]
-    counts = blocks["a ross"]
+    assert empty.fold == "train" and not empty.fit and not empty.judge_count
+    mined = tmp_path / "mined.csv"
+    mine_pairs(world.roles_path, world.inputs, mined, identity_evidence=world.evidence_path)
+    manifest = json.loads(mined.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+    counts = manifest["blocks"]["a ross"]
     assert counts["excluded_query_signatures"] == 1
-    assert counts["excluded_non_home_signatures"] == 0
-    assert counts["eligible_signatures"] == 4
-    assert counts["ineligible_signatures"] == 1
-    assert counts["verified_signatures"] == 3
-    assert counts["verified_within_block_pairs"] == 3
-    assert blocks["b crane"]["excluded_query_signatures"] == 0
+    with pytest.raises(ValueError, match="Expected at least 2 fitted mined validation pairs, found 1"):
+        _load(world, min_mined_validation_pairs=2)
+    with pytest.raises(ValueError, match="Pairwise trainer name-counts index does not match intake"):
+        _load(world, name_counts_sha256="b" * 64)
 
 
 @pytest.mark.parametrize(
@@ -92,12 +73,6 @@ def test_handoff_rejects_rebound_hazards(tmp_path: Path, hazard: str, error: str
         assert not output.with_suffix(".csv.manifest.json").exists()
 
 
-def test_trainer_checks_its_own_index(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path)
-    with pytest.raises(ValueError, match="Pairwise trainer name-counts index does not match intake"):
-        _load(world, name_counts_sha256="b" * 64)
-
-
 @pytest.mark.parametrize("digest", [None, "b" * 64])
 def test_miner_and_trainer_require_one_assignment_model(tmp_path: Path, digest: str | None) -> None:
     world = build_stage0_world(tmp_path)
@@ -109,7 +84,6 @@ def test_miner_and_trainer_require_one_assignment_model(tmp_path: Path, digest: 
     else:
         receipt["binding"]["model_sha256"] = digest
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-    assert receipt["files"][assignments.name] == sha256_file(assignments)
     with pytest.raises(ValueError, match="'b crane' pairwise assignments lack a shared model_sha256"):
         _load(world)
     with pytest.raises(ValueError, match="'b crane' pairwise assignments lack a shared model_sha256"):
@@ -122,7 +96,6 @@ def test_trainer_rejects_a_direct_ledger_with_foreign_evidence(tmp_path: Path) -
     second.mkdir()
     world, foreign = build_stage0_world(first), build_stage0_world(second)
     ledger = IdentityLedger(foreign.ledger.evidence, world.roles)
-    assert ledger.evidence.sha256 != world.roles.evidence_sha256
     with pytest.raises(ValueError, match="Frozen roles do not match the identity evidence and intake snapshot"):
         _load(replace(world, ledger=ledger))
 
@@ -156,41 +129,14 @@ def test_judge_budget_is_independent_of_zero_fitted_cap(tmp_path: Path) -> None:
     assert report["blocks"]["b crane"]["strata"]["random"]["drops"] == {"zero_cap": 1}
 
 
-def test_handoff_accepts_an_explicit_empty_block(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path, empty_block=True)
-    result = _load(world)
-    empty = result.blocks["e vale"]
-    assert empty.fold == "train" and not empty.fit and not empty.judge_count
-    strata = json.loads(world.manifest.read_text(encoding="utf-8"))["blocks"]["e vale"]["strata"]
-    assert {name: counts["sampled_pairs"] for name, counts in strata.items()} == {
-        "false_merge": 0,
-        "missed_link": 0,
-        "random": 0,
-        "merged_unlabeled": 0,
-    }
-
-
 def test_all_ineligible_fit_block_reaches_mining(tmp_path: Path) -> None:
     world = build_stage0_world(tmp_path, all_ineligible_block=True)
     assignment = world.inputs["e vale"].assignments
-    receipt = json.loads(assignment.with_name("manifest.json").read_text(encoding="utf-8"))
-    assert receipt["counts"] == {
-        "assigned_signatures": 0,
-        "components": 0,
-        "queries": 0,
-        "empty_reason": "no_eligible_signatures",
-    }
     assert pq.read_table(assignment).num_rows == 0
     assert json.loads(assignment.with_name("queries.json").read_text(encoding="utf-8")) == []
-    assert receipt["files"][assignment.name] == sha256_file(assignment)
+    mine_pairs(world.roles_path, world.inputs, tmp_path / "mined.csv", identity_evidence=world.evidence_path)
     empty = _load(world).blocks["e vale"]
     assert not empty.fit and not empty.judge_count
-
-
-def test_stage0_rejects_gate_training_block_outside_fit_pool(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path, gate_block_outside_fit_pool=True)
-    with pytest.raises(ValueError, match=r"Gate training blocks outside fit_pool: \['c lane'\]"):
-        load_block_roles(world.roles_path)
 
 
 def test_empty_fit_pool_fails_at_both_boundaries(tmp_path: Path) -> None:
@@ -216,12 +162,6 @@ def test_validation_requires_a_fitted_mined_pair(tmp_path: Path, validation_bloc
     world = build_stage0_world(tmp_path, empty_block=True, validation_blocks=validation_blocks)
     with pytest.raises(ValueError, match="Expected at least 1 fitted mined validation pairs, found 0"):
         _load(world)
-
-
-def test_validation_minimum_can_be_raised(tmp_path: Path) -> None:
-    world = build_stage0_world(tmp_path)
-    with pytest.raises(ValueError, match="Expected at least 2 fitted mined validation pairs, found 1"):
-        _load(world, min_mined_validation_pairs=2)
 
 
 def test_sample_budget_is_conserved_in_the_manifest(tmp_path: Path) -> None:

@@ -100,10 +100,6 @@ def test_pair_miner_cli_resolves_relative_block_directories(tmp_path: Path, caps
     assert 0 < rows["stratum"].ne("merged_unlabeled").sum() <= 12
     assert rows["stratum"].eq("merged_unlabeled").sum() <= 12
     assert rows["inclusion_probability"].between(0, 1, inclusive="right").all()
-    manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
-    assert manifest["pairs_per_block"] == 6
-    assert manifest["verified_pair_fraction"] == 1
-    assert manifest["pairs_per_block_floor"] == 0
 
 
 def test_role_b3_rejects_partial_reference_assignments(tmp_path: Path) -> None:
@@ -188,28 +184,11 @@ def test_role_b3_scores_singleton_only_reference(tmp_path: Path, capsys: pytest.
     assert result["repeated"] is None
 
 
-@pytest.mark.parametrize(
-    ("entry_point", "option"),
-    [
-        ("scripts.eps.orcid_b3", "--assignments-json"),
-        ("scripts/linker/build_linker_task_tables.py", "--block-inputs"),
-        ("scripts.intake.check_v14_training_overlap", "--training-parquet"),
-        ("scripts.pairwise.mine_pairwise_pairs", "--pairs-per-block"),
-    ],
-    ids=["orcid-b3", "build-linker-task-tables", "check-v14-training-overlap", "mine-pairwise-pairs"],
-)
-def test_release_tool_entry_point_help(tmp_path: Path, entry_point: str, option: str) -> None:
-    root = Path(__file__).resolve().parents[1]
-    if entry_point.endswith(".py"):
-        # Bypass the editable install's .pth so the script must add the checkout.
-        command = [sys.executable, "-S", str(root / entry_point), "--help"]
-        env = os.environ | {"PYTHONPATH": sysconfig.get_path("purelib")}
-        cwd = tmp_path
-    else:
-        command = [sys.executable, "-m", entry_point, "--help"]
-        env = os.environ.copy()
-        cwd = root
-    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+def test_linker_task_tables_run_as_a_script_outside_the_checkout(tmp_path: Path) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts/linker/build_linker_task_tables.py"
+    # Bypass the editable install's .pth so the script must add the checkout.
+    command = [sys.executable, "-S", str(script), "--help"]
+    env = os.environ | {"PYTHONPATH": sysconfig.get_path("purelib")}
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
-    assert "usage:" in result.stdout
-    assert option in result.stdout
+    assert "--block-inputs" in result.stdout

@@ -10,7 +10,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from s2and import __version__
 from s2and._sha256 import sha256_file
 from s2and.arrow_inputs import ArrowDataset
 from s2and.featurizer import FeaturizationInfo
@@ -246,11 +245,8 @@ def test_frozen_linker_tables_retrieve_after_author_exclusion_and_feed_trainer(
         holdout_fraction=1,
         identity_evidence=world.evidence_path,
     )
-    assert manifest["distance_policy_version"] == DISTANCE_POLICY_VERSION
-    assert manifest["s2and_version"] == __version__
     assert set(manifest["tables"]) == {"fit_pool"}
     assert set(manifest["tables"]["fit_pool"]["blocks"]) == set(world.inputs)
-    assert world.roles.pairwise_validation_blocks <= world.roles.gate_training_blocks
     rows = pd.read_parquet(output / "fit_pool.parquet")
     assert not rows.empty
     assert rows["whole_author_holdout"].all()

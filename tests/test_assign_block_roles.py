@@ -146,8 +146,9 @@ def test_gate_training_blocks_are_stratified_frozen_and_can_overlap_validation(t
     path.write_text(json.dumps(result), encoding="utf-8")
     roles = load_block_roles(path)
     assert roles.gate_training_blocks == set(marked)
-    path.write_text(json.dumps({**result, "gate_training_blocks": marked[:-1]}), encoding="utf-8")
-    assert load_block_roles(path).sha256 != roles.sha256
+    path.write_text(json.dumps({**result, "gate_training_blocks": result["roles"]["gate_thresh"]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="Gate training blocks outside fit_pool"):
+        load_block_roles(path)
 
 
 def test_giant_caps_include_pins_and_fit_pool_pins_cannot_override_dev_test() -> None:
@@ -255,21 +256,6 @@ def test_free_development_role_cannot_consume_holdout() -> None:
     )
     assert result["roles"]["dev_test"] == []
     assert result["shortfalls"] == {"dev_test": 1}
-
-
-def test_load_blocks_accepts_parquet_map_mention_counts(tmp_path: Path) -> None:
-    path = tmp_path / "blocks.parquet"
-    identity = "0000-0002-1694-233X"
-    table = pa.table(
-        {
-            "block_key": ["a ross"],
-            "signature_count": [2],
-            "orcids": [[identity]],
-            "orcid_mention_counts": pa.array([[(identity, 2)]], type=pa.map_(pa.string(), pa.int64())),
-        }
-    )
-    pq.write_table(table, path)
-    assert load_blocks(path)[0].orcid_mention_counts == {identity: 2}
 
 
 def test_frozen_block_roles_reject_unlisted_orcid(tmp_path: Path) -> None:

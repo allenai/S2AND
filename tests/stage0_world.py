@@ -19,7 +19,7 @@ from scripts.intake.build_freeze_input import build_freeze_input
 from scripts.intake.build_identity_evidence import build_identity_evidence
 from scripts.intake.requests_to_datasets import convert_requests
 from scripts.linker.build_linker_inputs import build_linker_inputs
-from scripts.pairwise.mine_pairwise_pairs import BlockInput, mine_pairs
+from scripts.pairwise.mine_pairwise_pairs import BlockInput
 from tests.helpers import request_bundle
 from tests.pairwise_release_helpers import write_pairwise_artifacts
 
@@ -31,8 +31,6 @@ class Stage0World:
     name_counts: Path
     inputs: dict[str, BlockInput]
     inputs_path: Path
-    mined: Path
-    manifest: Path
     roles: BlockRoles
     ledger: IdentityLedger
 
@@ -50,11 +48,10 @@ def build_stage0_world(
     empty_block: bool = False,
     all_ineligible_block: bool = False,
     validation_blocks: tuple[str, ...] = ("b crane",),
-    gate_block_outside_fit_pool: bool = False,
     sampling_hazard: str | None = None,
     with_query: bool = False,
 ) -> Stage0World:
-    """Build a real intake, freeze, and mined sample, with optional rebound hazards."""
+    """Build a real intake and frozen assignments with optional handoff hazards."""
     _, name_counts, _ = write_pairwise_artifacts(root)
     snapshot = root / "snapshot"
     papers = {"a ross": [10, 11, 12, 13, 14], "b crane": [20, 21], "c lane": [30]}
@@ -162,9 +159,6 @@ def build_stage0_world(
             )
 
     write_receipts()
-    mined = root / "mined.csv"
-    mine_pairs(roles_path, inputs, mined, identity_evidence=evidence)
-    manifest_path = mined.with_suffix(".csv.manifest.json")
     if sampling_hazard == "query_in_assignments":
         assignments = inputs["a ross"].assignments
         table = pq.read_table(assignments)
@@ -186,8 +180,4 @@ def build_stage0_world(
     _write_json(inputs_path, {block: {"seeds": str(spec.assignments)} for block, spec in inputs.items()})
 
     ledger = load_identity_ledger(evidence, roles)
-    if gate_block_outside_fit_pool:
-        payload = json.loads(roles_path.read_text(encoding="utf-8"))
-        payload["gate_training_blocks"].append("c lane")
-        _write_json(roles_path, payload)
-    return Stage0World(roles_path, evidence, name_counts, inputs, inputs_path, mined, manifest_path, roles, ledger)
+    return Stage0World(roles_path, evidence, name_counts, inputs, inputs_path, roles, ledger)

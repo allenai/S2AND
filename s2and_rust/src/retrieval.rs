@@ -370,21 +370,13 @@ impl RustHybridCentroidRetriever {
         } else {
             overlaps[idx]
         };
-        let (coauthor_score, affiliation_score) =
-            overlap_scores(query_data, prepared, summary, &overlap);
         // A precomputed row holds this query's SPECTER score of every summary;
         // an override summary is not in it.
         let specter_score = match specter_scores {
             Some(row) if !overridden => row[idx],
             _ => fused_specter_score(query_data, summary),
         };
-        hybrid_centroid_score(
-            query_data,
-            summary,
-            coauthor_score,
-            affiliation_score,
-            specter_score,
-        )
+        score_candidate_with_overlap(query_data, prepared, summary, &overlap, specter_score)
     }
 
     /// SPECTER scores of each query against every summary, one row per query.
@@ -1063,7 +1055,7 @@ impl RustHybridCentroidRetriever {
             current_query,
             row_query_first_token,
             query_signature_index,
-            component_member_indices,
+            |_, key| component_member_indices.get(key).cloned(),
             &scored,
         )
     }
@@ -1074,7 +1066,7 @@ impl RustHybridCentroidRetriever {
         current_query: &RetrievalQueryData,
         row_query_first_token: &str,
         query_signature_index: u32,
-        component_member_indices: &HashMap<String, Vec<u32>>,
+        member_indices_for: impl Fn(usize, &str) -> Option<Vec<u32>>,
         scored: &[(usize, f32)],
     ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
         let mut result = RetrievalPairPlanQueryResult::default();
@@ -1083,7 +1075,8 @@ impl RustHybridCentroidRetriever {
         let query_has_coauthors = u8::from(!current_query.coauthor_hashes.is_empty());
         for (rank_offset, (summary_index, score)) in scored.iter().enumerate() {
             let summary = &self.summaries[*summary_index];
-            let Some(member_indices) = component_member_indices.get(&summary.component_key) else {
+            let Some(member_indices) = member_indices_for(*summary_index, &summary.component_key)
+            else {
                 return Err(RetrievalError::MissingKey(format!(
                     "Missing component members for retrieved component_key: {}",
                     summary.component_key
@@ -1160,12 +1153,21 @@ impl RustHybridCentroidRetriever {
             result
                 .row_specter_exemplar_similarity
                 .push(chooser_features[7]);
-            result
-                .right_signature_indices_by_row
-                .push(member_indices.clone());
+            result.right_signature_indices_by_row.push(member_indices);
         }
         Ok(result)
     }
+}
+
+fn score_candidate_with_overlap(
+    query: &RetrievalQueryData,
+    prepared: &PreparedQuery,
+    summary: &RetrievalSummaryData,
+    overlap: &ComponentOverlap,
+    specter_score: f64,
+) -> f32 {
+    let (coauthor, affiliation) = overlap_scores(query, prepared, summary, overlap);
+    hybrid_centroid_score(query, summary, coauthor, affiliation, specter_score)
 }
 
 /// Summaries per pool task when bounding a block of queries.

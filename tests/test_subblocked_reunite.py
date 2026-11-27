@@ -2,7 +2,12 @@
 
 import pytest
 
-from s2and.model import _ARROW_ATTACH_NAME_CHECK_EXEMPT, _ARROW_BULK_DISTANCE_OVERRIDES, Clusterer
+from s2and.model import (
+    _ARROW_ATTACH_BLOCK_STATE,
+    _ARROW_ATTACH_NAME_CHECK_EXEMPT,
+    _ARROW_BULK_DISTANCE_OVERRIDES,
+    Clusterer,
+)
 from tests.incremental_test_helpers import _dataset, _predict
 from tests.incremental_test_helpers import empty_orcid_priors as empty_orcid_priors
 
@@ -70,6 +75,7 @@ def _record_incremental_seeds(monkeypatch, route):
                     "seeds": {str(key) for key in kwargs["cluster_seeds_require"]},
                     "name_check_exempt": _ARROW_ATTACH_NAME_CHECK_EXEMPT.get(),
                     "bulk_distance_overrides": _ARROW_BULK_DISTANCE_OVERRIDES.get(),
+                    "attachment_state": _ARROW_ATTACH_BLOCK_STATE.get(),
                 }
             )
             return original(self, block_signatures, arrow_dataset, **kwargs)
@@ -210,6 +216,7 @@ def test_reunite_joins_only_marked_pieces_before_initial_attachment(tmp_path, mo
     dataset = _dataset(NAMES + [("W", "", "Wang")], {})
     blocks = {"w wang": list(dataset.signatures)}
     calls = _record_attach_calls(monkeypatch, route)
+    seen = _record_incremental_seeds(monkeypatch, route)
 
     clusters = _predict(tmp_path, dataset, blocks, route)
 
@@ -219,6 +226,9 @@ def test_reunite_joins_only_marked_pieces_before_initial_attachment(tmp_path, mo
     assert _partition(reunite_call["visible"]) == {frozenset({"0", "1", "2"})}
     assert [set(members) for members in reunite_call["groups"].values()] == [{"3", "4", "5"}, {"6", "7", "8"}]
     assert [members for members in initial_call["groups"].values()] == [["14"]]
+    assert len(seen) == 3
+    assert seen[0]["attachment_state"] is not None
+    assert all(call["attachment_state"] is seen[0]["attachment_state"] for call in seen)
     assert _partition(initial_call["visible"]) == {
         frozenset(NO_MIDDLE),
         frozenset({"10", "11", "12"}),

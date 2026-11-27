@@ -71,7 +71,13 @@ def _patch_fake_raw_arrow_planner(
             self._disallows_index = len(recorded)
             recorded.append(disallows)
 
-        def reload_seed_sidecars(self, _cluster_seeds_path: str, disallow_path: str | None = None) -> bool:
+        def reload_seed_sidecars(
+            self,
+            _cluster_seeds_path: str,
+            disallow_path: str | None = None,
+            *,
+            allow_seed_replacement: bool = False,
+        ) -> bool:
             # A reloaded planner plans as one built for these sidecars, so it
             # records their disallows in place of the ones it was built with.
             if captured is not None:

@@ -390,8 +390,8 @@ def dataset_small_block_signatures(block_dict: Mapping[str, Sequence[str]], data
 def arrow_small_block_signatures(arrow_lease: Any, block_dict: Mapping[str, Sequence[str]]) -> frozenset[str] | None:
     """Return the request signatures whose ``author_block`` has under ``SMALL_SURNAME_BLOCK`` rows in the dataset.
 
-    Reads two signature columns, and only when a request block is that small. None when the
-    signatures table has no ``author_block`` column.
+    Look up the requested IDs by batch, then count their surname blocks from the
+    projected ``author_block`` column. Return None when that column is absent.
     """
     request_small = _request_small_block_signatures(block_dict)
     if not request_small:
@@ -402,32 +402,44 @@ def arrow_small_block_signatures(arrow_lease: Any, block_dict: Mapping[str, Sequ
     candidates: dict[str, str | None] = {}
     sizes: dict[str, int] = defaultdict(int)
     with arrow_lease.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
-        reader = pa.ipc.open_file(source)
-        if "author_block" not in reader.schema.names:
+        schema = pa.ipc.open_file(source).schema
+        block_index = schema.get_field_index("author_block")
+        if block_index < 0:
             return None
-        id_index = reader.schema.get_field_index("signature_id")
-        block_index = reader.schema.get_field_index("author_block")
-        value_set = arrow_string_array(sorted(request_small))
-        block_columns = []
-        for batch_index in range(reader.num_record_batches):
+        id_index = schema.get_field_index("signature_id")
+        columns = sorted((id_index, block_index))
+        reader = pa.ipc.open_file(source, options=pa.ipc.IpcReadOptions(included_fields=columns))
+        requested = sorted(request_small)
+        value_set = arrow_string_array(requested)
+        for batch_index in arrow_lease.native.batch_indices("signatures", requested):
             batch = reader.get_batch(batch_index)
-            block_column = batch.column(block_index)
-            block_columns.append(block_column)
-            mask = pc.is_in(batch.column(id_index), value_set=value_set)
+            id_column = batch.column(columns.index(id_index))
+            block_column = batch.column(columns.index(block_index))
+            mask = pc.is_in(id_column, value_set=value_set)
             if bool(pc.any(mask).as_py()):
                 for signature_id, block in zip(
-                    pc.filter(batch.column(id_index), mask).to_pylist(),
+                    pc.filter(id_column, mask).to_pylist(),
                     pc.filter(block_column, mask).to_pylist(),
                     strict=True,
                 ):
                     candidates[str(signature_id)] = block
-        needed = sorted({block for block in candidates.values() if block is not None})
+        needed = {block for block in candidates.values() if block is not None}
         if needed:
-            needed_set = arrow_string_array(needed)
-            for block_column in block_columns:
+            # Request partitions can differ from author_block, so its counts
+            # cover the dataset. A block that reaches the cutoff is settled.
+            reader = pa.ipc.open_file(source, options=pa.ipc.IpcReadOptions(included_fields=[block_index]))
+            needed_set = arrow_string_array(sorted(needed))
+            for batch_index in range(reader.num_record_batches):
+                block_column = reader.get_batch(batch_index).column(0)
                 kept = pc.filter(block_column, pc.is_in(block_column, value_set=needed_set))
                 for entry in pc.value_counts(kept).to_pylist():
                     sizes[entry["values"]] += int(entry["counts"])
+                remaining = {block for block in needed if sizes[block] < SMALL_SURNAME_BLOCK}
+                if not remaining:
+                    break
+                if remaining != needed:
+                    needed = remaining
+                    needed_set = arrow_string_array(sorted(needed))
     for signature_id in request_small - candidates.keys():
         candidates[signature_id] = None
     return _count_small_blocks(candidates, sizes, request_small)

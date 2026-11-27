@@ -151,7 +151,8 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
             "multi_b": ["1", "3", "4"],
         }
         assert max(map(len, subblocks.values())) <= kwargs["maximum_size"]
-        return subblocks, {"final_subblock_count": 3, "input_signature_count": 9}, {}
+        firsts = {sid: "j" if sid in {"6", "7", "8"} else "john" for sid in signature_ids}
+        return subblocks, {"final_subblock_count": 3, "input_signature_count": 9, "subblock_firsts": firsts}, {}
 
     def fake_load_name_parts(_dataset: Any, signature_ids: list[str]):
         events.append("names")
@@ -229,18 +230,14 @@ def test_large_arrow_block_uses_native_subblocking_and_reuses_seeds(
     assert events == [
         "native_subblocking",
         "names",
-        "names",
-        "names",
         "featurizer",
         "bulk_predict",
         "incremental_attach",
     ]
     assert native_calls[0]["signature_ids"] == [str(index) for index in range(9)]
     assert native_calls[0]["maximum_size"] == 3
-    # Compound keys depend on the whole oversized block: seed packing and the partition read all of
-    # its names. The small block is not subblocked, so only its first member is read.
-    large = [str(index) for index in range(9)]
-    assert name_calls == [large, ["9"], large]
+    assert native_calls[0]["firsts_for_seed_ids"] == {"0", "1"}
+    assert name_calls == [["9"]]
     assert len(build_calls) == 1
     assert build_calls[0]["signature_ids"] == ["0", "1", "2", "5", "3", "4", "9"]
     assert build_calls[0]["cluster_seeds_path"] is not None

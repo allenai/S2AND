@@ -6,6 +6,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence, Set
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
@@ -59,11 +60,11 @@ from s2and.orcid_prefix_counts import (
     load_packaged_orcid_prefix_counts,
 )
 from s2and.prediction_state import PredictionState
-from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
+from s2and.runtime import RuntimeContext, build_runtime_context, load_s2and_rust_extension, stage_uses_rust
 from s2and.subblocking import (
     GraphSubblockingConfig,
-    _make_subblocks_with_telemetry_arrow_rust,
     _resolve_graph_subblocking_config,
+    _resolved_orcid_prefix_counts,
     subblocking_name_parts,
 )
 from s2and.supervision import effective_dataset_disallows
@@ -149,6 +150,7 @@ def _group_subblocking_firsts(
     original_blocks: Mapping[str, Sequence[Any]],
     maximum_size: int,
     load_name_parts: Callable[[Sequence[Any]], Sequence[tuple[str, str]]],
+    known_firsts: Mapping[str, str] | None = None,
 ) -> dict[Any, str]:
     """Return the subblock-key first name of the first member of each nonempty group.
 
@@ -160,11 +162,16 @@ def _group_subblocking_firsts(
     representatives = {members[0] for members in groups.values() if members}
     firsts: dict[Any, str] = {}
     for block_signatures in original_blocks.values():
+        local = [sid for sid in block_signatures if sid in representatives]
+        if not local:
+            continue
+        if known_firsts is not None and all(sid in known_firsts for sid in local):
+            firsts.update((sid, known_firsts[sid]) for sid in local)
+            continue
         if len(block_signatures) > maximum_size:
             block_firsts = _subblocking_firsts(block_signatures, load_name_parts(block_signatures), maximum_size)
-            firsts.update((sid, block_firsts[sid]) for sid in block_signatures if sid in representatives)
+            firsts.update((sid, block_firsts[sid]) for sid in local)
         else:
-            local = [sid for sid in block_signatures if sid in representatives]
             firsts.update((sid, first) for sid, (first, _middle) in zip(local, load_name_parts(local), strict=True))
     return firsts
 
@@ -497,6 +504,35 @@ def _predict_from_prepared_rust_featurizer(
     return dict(pred_clusters), out_dists
 
 
+def _make_subblocks_with_telemetry_arrow_rust(
+    arrow_dataset: Any,
+    signature_ids: list[str],
+    *,
+    maximum_size: int,
+    first_k_letter_counts_sorted: Mapping[str, Mapping[str, int]],
+    graph_subblocking_config: GraphSubblockingConfig,
+    graph_subblocking_random_seed: int,
+    use_orcid_subblocking: bool,
+    num_threads: int,
+    firsts_for_seed_ids: set[str],
+) -> tuple[dict[str, list[str]], dict[str, Any], dict[str, list[str]]]:
+    """Run subblocking on the request's pool and return first names with the plan."""
+    counts = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
+    native = load_s2and_rust_extension()
+    subblocks, telemetry, dead_ends = native.make_subblocks_with_telemetry_arrow_native_graph(
+        arrow_dataset.native,
+        signature_ids,
+        maximum_size,
+        {prefix: dict(nested) for prefix, nested in counts.items()},
+        graph_subblocking_config,
+        graph_subblocking_random_seed,
+        use_orcid_subblocking,
+        num_threads=num_threads,
+        firsts_for_seed_ids=firsts_for_seed_ids,
+    )
+    return subblocks, telemetry, dict(dead_ends)
+
+
 def _build_arrow_subblocked_block_dict(
     self: Clusterer,
     block_dict: Mapping[str, Sequence[str]],
@@ -505,6 +541,7 @@ def _build_arrow_subblocked_block_dict(
     batching_threshold: int,
     cluster_seeds_require: Mapping[str, int | str],
     prediction_state: PredictionState | None = None,
+    firsts_out: dict[str, str] | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
     """Partition oversized blocks without splitting required seed components.
 
@@ -557,6 +594,8 @@ def _build_arrow_subblocked_block_dict(
             subblocked[block_key] = block_signatures
             continue
 
+        seed_components = seed_components_by_block[block_key]
+        seed_ids = {sid for members in seed_components.values() for sid in members}
         native_subblocks, telemetry, no_middle_buckets = _make_subblocks_with_telemetry_arrow_rust(
             arrow_dataset,
             block_signatures,
@@ -565,7 +604,11 @@ def _build_arrow_subblocked_block_dict(
             graph_subblocking_config=self._subblocking_graph_config(),
             graph_subblocking_random_seed=int(getattr(self, "random_state", 0) or 0),
             use_orcid_subblocking=True,
+            num_threads=resolve_n_jobs(self.n_jobs),
+            firsts_for_seed_ids=seed_ids,
         )
+        # Seed packing can promote a different member to the head of a subblock.
+        firsts = telemetry.pop("subblock_firsts", None)
         for first, bucket in no_middle_buckets.items():
             no_middle_dead_ends.update(dict.fromkeys(bucket, first))
         normalized_native_subblocks: dict[str, list[str]] = {}
@@ -595,23 +638,18 @@ def _build_arrow_subblocked_block_dict(
                 f"unexpected={unexpected_signature_ids} duplicates={duplicate_signature_ids})"
             )
 
-        seed_components = seed_components_by_block[block_key]
-        component_by_signature_id = {
-            signature_id: component_id
-            for component_id, component_signatures in seed_components.items()
-            for signature_id in component_signatures
-        }
         repacked_seed_component_count = sum(
             len({output_locations[signature_id][0] for signature_id in component_signatures}) > 1
             for component_signatures in seed_components.values()
         )
         full_name_subblocks: set[str] = set()
         if repacked_seed_component_count:
-            firsts = _subblocking_firsts(
-                block_signatures,
-                _load_arrow_canonical_name_parts(arrow_dataset, block_signatures),
-                batching_threshold,
-            )
+            if firsts is None:
+                firsts = _subblocking_firsts(
+                    block_signatures,
+                    _load_arrow_canonical_name_parts(arrow_dataset, block_signatures),
+                    batching_threshold,
+                )
             full_name_subblocks = {
                 key for key, members in normalized_native_subblocks.items() if members and len(firsts[members[0]]) > 1
             }
@@ -633,13 +671,15 @@ def _build_arrow_subblocked_block_dict(
                     emitted_block_keys=subblocked.keys(),
                 )
                 subblocked[repaired_key] = repaired_part
+                if firsts_out is not None and firsts is not None:
+                    firsts_out[repaired_part[0]] = firsts[repaired_part[0]]
                 repaired_subblock_count += 1
 
         block_telemetry = dict(telemetry)
         block_telemetry.update(
             {
                 "seed_component_count": int(len(seed_components)),
-                "seed_signature_count": int(len(component_by_signature_id)),
+                "seed_signature_count": len(seed_ids),
                 "seed_components_repacked": int(repacked_seed_component_count),
                 "repaired_final_subblock_count": int(repaired_subblock_count),
             }
@@ -667,6 +707,49 @@ class _AttachmentSubblocks:
     telemetry: dict[str, Any]
 
 
+class _AttachmentBlockCache:
+    """Hold at most one original block's attachment state across passes."""
+
+    def __init__(
+        self,
+        arrow_dataset: ArrowDataset,
+        original_blocks: Mapping[str, Sequence[str]],
+        name_tuples: frozenset[tuple[str, str]],
+        num_threads: int,
+        attach_reuse: AttachReuse | None,
+    ) -> None:
+        self.arrow_dataset = arrow_dataset
+        self.original_blocks = original_blocks
+        self.name_tuples = name_tuples
+        self.num_threads = num_threads
+        self.attach_reuse = attach_reuse
+        self.current: tuple[str, _AttachmentBlockState] | None = None
+
+    def get(self, origin: str) -> _AttachmentBlockState:
+        if self.current is not None and self.current[0] == origin:
+            return self.current[1]
+        self.close(background=False)
+        members = [str(signature_id) for signature_id in self.original_blocks[origin]]
+        state = _AttachmentBlockState(self.arrow_dataset, members, self.name_tuples, self.num_threads)
+        reuse = self.attach_reuse
+        if reuse is not None:
+            key = (attachment_dataset_key(self.arrow_dataset), tuple(members), self.name_tuples)
+            setup = reuse.blocks.get(key)
+            if setup is None and reuse.blocks.fits(len(members)):
+                setup = _AttachmentBlockSetup()
+                reuse.blocks.store(key, setup, len(members))
+            if setup is not None:
+                state.setup = setup
+                state.attach_reuse = reuse
+        self.current = (origin, state)
+        return state
+
+    def close(self, *, background: bool = True) -> None:
+        if self.current is not None:
+            self.current[1].release(background=background)
+            self.current = None
+
+
 def _predict_subblocked_single_letter_groups_from_arrow(
     self: Clusterer,
     block_dict_single_letter: Mapping[str, Sequence[str]],
@@ -683,6 +766,7 @@ def _predict_subblocked_single_letter_groups_from_arrow(
     original_blocks: Mapping[str, Sequence[str]],
     attach_reuse: AttachReuse | None = None,
     cache_residuals: bool = False,
+    attachment_cache: _AttachmentBlockCache | None = None,
 ) -> dict[str, list[str]]:
     """Attach initial-only groups using already normalized caller supervision."""
 
@@ -695,89 +779,80 @@ def _predict_subblocked_single_letter_groups_from_arrow(
         if sid in origins:
             scoped_seeds[origins[sid]][sid] = component
     disallow_adjacency = seed_disallow_adjacency(cluster_seeds_disallow, partial_supervision)
-    block_state: tuple[str, _AttachmentBlockState] | None = None
-    for block_key in sorted(block_dict_single_letter):
-        group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
-        origin = origins[group_signature_ids[0]]
-        if block_state is None or block_state[0] != origin:
-            # Keep one block's native state at a time; release the previous one first.
-            if block_state is not None:
-                block_state[1].release()
-            block_state = None
-            members = [str(signature_id) for signature_id in original_blocks[origin]]
-            state = _AttachmentBlockState(arrow_dataset, members, name_tuples, self.n_jobs)
-            if attach_reuse is not None:
-                key = (attachment_dataset_key(arrow_dataset), tuple(members), name_tuples)
-                setup = attach_reuse.blocks.get(key)
-                if setup is None and attach_reuse.blocks.fits(len(members)):
-                    setup = _AttachmentBlockSetup()
-                    attach_reuse.blocks.store(key, setup, len(members))
-                if setup is not None:
-                    state.setup = setup
-                    state.attach_reuse = attach_reuse
-            block_state = (origin, state)
-        if cache_residuals:
-            block_state[1].residual_group = tuple(group_signature_ids)
-        synthetic_seed_map = restore_seed_membership(scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency)
-        # Future initial-only groups are not known to this request's planner.
-        # Retain the full disallows above and expose only currently addressable
-        # endpoints here; later passes will see those queries as seeds.
-        # Known ids are the seeds and this group. Test membership in both
-        # rather than copy every seed into a set on each pass.
-        group_ids = set(group_signature_ids)
-        current_disallows = {
-            (left, right)
-            for left, right in cluster_seeds_disallow
-            if (left in synthetic_seed_map or left in group_ids) and (right in synthetic_seed_map or right in group_ids)
-        }
-        current_supervision = {
-            (left, right): distance
-            for (left, right), distance in partial_supervision.items()
-            if (left in synthetic_seed_map or left in group_ids) and (right in synthetic_seed_map or right in group_ids)
-        }
-        current_disallows, current_supervision = filter_generated_seed_negatives(
-            synthetic_seed_map, current_disallows, current_supervision
-        )
-        bulk_context_token = _ARROW_BULK_DISTANCE_OVERRIDES.set(True)
-        name_check_token = _ARROW_ATTACH_NAME_CHECK_EXEMPT.set(frozenset(scoped_seeds[origin]))
-        block_state_token = _ARROW_ATTACH_BLOCK_STATE.set(block_state[1])
-        try:
-            incremental_result = self.predict_incremental_from_arrow(
-                group_signature_ids,
-                arrow_dataset,
-                prevent_new_incompatibilities=True,
-                batching_threshold=batching_threshold,
-                partial_supervision=current_supervision,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_bytes,
-                name_tuples=name_tuples,
-                cluster_seeds_require=synthetic_seed_map,
-                cluster_seeds_disallow=current_disallows,
-                altered_cluster_signatures=[],
+    with ExitStack() as stack:
+        if attachment_cache is None:
+            attachment_cache = _AttachmentBlockCache(
+                arrow_dataset, original_blocks, name_tuples, self.n_jobs, attach_reuse
             )
-        finally:
-            _ARROW_ATTACH_BLOCK_STATE.reset(block_state_token)
-            _ARROW_ATTACH_NAME_CHECK_EXEMPT.reset(name_check_token)
-            _ARROW_BULK_DISTANCE_OVERRIDES.reset(bulk_context_token)
-        clusters_payload = incremental_result.get("clusters")
-        if not isinstance(clusters_payload, dict):
-            raise RuntimeError(
-                "predict_incremental_from_arrow returned invalid clusters payload; expected dict "
-                f"got {type(clusters_payload).__name__}"
+            stack.callback(attachment_cache.close)
+        for block_key in sorted(block_dict_single_letter):
+            group_signature_ids = [str(signature_id) for signature_id in block_dict_single_letter[block_key]]
+            origin = origins[group_signature_ids[0]]
+            state = attachment_cache.get(origin)
+            if cache_residuals:
+                state.residual_group = tuple(group_signature_ids)
+            synthetic_seed_map = restore_seed_membership(
+                scoped_clusters[origin], scoped_seeds[origin], disallow_adjacency
             )
-        pred_clusters_intermediate: dict[str, list[str]] = {}
-        for cluster_id, signatures in clusters_payload.items():
-            if not isinstance(signatures, list):
-                raise RuntimeError(
-                    "predict_incremental_from_arrow returned invalid cluster member payload; expected list "
-                    f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
+            # Future initial-only groups are not known to this request's planner.
+            # Retain the full disallows above and expose only currently addressable
+            # endpoints here; later passes will see those queries as seeds.
+            # Known ids are the seeds and this group. Test membership in both
+            # rather than copy every seed into a set on each pass.
+            group_ids = set(group_signature_ids)
+            current_disallows = {
+                (left, right)
+                for left, right in cluster_seeds_disallow
+                if (left in synthetic_seed_map or left in group_ids)
+                and (right in synthetic_seed_map or right in group_ids)
+            }
+            current_supervision = {
+                (left, right): distance
+                for (left, right), distance in partial_supervision.items()
+                if (left in synthetic_seed_map or left in group_ids)
+                and (right in synthetic_seed_map or right in group_ids)
+            }
+            current_disallows, current_supervision = filter_generated_seed_negatives(
+                synthetic_seed_map, current_disallows, current_supervision
+            )
+            bulk_context_token = _ARROW_BULK_DISTANCE_OVERRIDES.set(True)
+            name_check_token = _ARROW_ATTACH_NAME_CHECK_EXEMPT.set(frozenset(scoped_seeds[origin]))
+            block_state_token = _ARROW_ATTACH_BLOCK_STATE.set(state)
+            try:
+                incremental_result = self.predict_incremental_from_arrow(
+                    group_signature_ids,
+                    arrow_dataset,
+                    prevent_new_incompatibilities=True,
+                    batching_threshold=batching_threshold,
+                    partial_supervision=current_supervision,
+                    runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
+                    name_tuples=name_tuples,
+                    cluster_seeds_require=synthetic_seed_map,
+                    cluster_seeds_disallow=current_disallows,
+                    altered_cluster_signatures=[],
                 )
-            cluster_key = str(cluster_id)
-            normalized_signatures = [str(signature_id) for signature_id in signatures]
-            pred_clusters_intermediate[cluster_key] = normalized_signatures
-        scoped_clusters[origin] = pred_clusters_intermediate
-    if block_state is not None:
-        block_state[1].release()
+            finally:
+                _ARROW_ATTACH_BLOCK_STATE.reset(block_state_token)
+                _ARROW_ATTACH_NAME_CHECK_EXEMPT.reset(name_check_token)
+                _ARROW_BULK_DISTANCE_OVERRIDES.reset(bulk_context_token)
+            clusters_payload = incremental_result.get("clusters")
+            if not isinstance(clusters_payload, dict):
+                raise RuntimeError(
+                    "predict_incremental_from_arrow returned invalid clusters payload; expected dict "
+                    f"got {type(clusters_payload).__name__}"
+                )
+            pred_clusters_intermediate: dict[str, list[str]] = {}
+            for cluster_id, signatures in clusters_payload.items():
+                if not isinstance(signatures, list):
+                    raise RuntimeError(
+                        "predict_incremental_from_arrow returned invalid cluster member payload; expected list "
+                        f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
+                    )
+                cluster_key = str(cluster_id)
+                normalized_signatures = [str(signature_id) for signature_id in signatures]
+                pred_clusters_intermediate[cluster_key] = normalized_signatures
+            scoped_clusters[origin] = pred_clusters_intermediate
     return _combine_subblocked_predictions(scoped_clusters)
 
 
@@ -876,18 +951,21 @@ def _predict_from_arrow(
             )
             subblocks = attach_reuse.subblocks.get(subblock_key)
         if subblocks is None:
+            native_firsts: dict[str, str] = {}
             block_dict_subblocked, no_middle_dead_ends = self._build_arrow_subblocked_block_dict(
                 block_dict,
                 arrow_lease,
                 batching_threshold=batching_threshold,
                 cluster_seeds_require=atomic_cluster_seeds_require,
                 prediction_state=prediction_state,
+                firsts_out=native_firsts,
             )
             subblocking_firsts = _group_subblocking_firsts(
                 block_dict_subblocked,
                 block_dict,
                 batching_threshold,
                 lambda signature_ids: _load_arrow_canonical_name_parts(arrow_lease, signature_ids),
+                native_firsts,
             )
             (
                 block_dict_multiple_letter,
@@ -1024,39 +1102,42 @@ def _predict_from_arrow(
             del proxy_dataset
         else:
             pred_clusters = bulk_clusters(block_dict_multiple_letter)
-        # The sequential attachment path constructs a request-local planner
-        # for each initial-only group. Release the bulk native state first so
-        # the two large representations never overlap in memory.
+        # Release the bulk featurizer before building any attachment state.
         del rust_featurizer
-        attach_from_arrow = partial(
-            self._predict_subblocked_single_letter_groups_from_arrow,
-            arrow_dataset=arrow_dataset,
-            batching_threshold=batching_threshold,
-            partial_supervision=effective_partial_supervision,
-            runtime_context=runtime_context,
-            total_ram_bytes=total_ram_bytes,
-            name_tuples=prediction_name_tuples,
-            cluster_seeds_disallow=cluster_seed_disallows,
-            original_blocks=block_dict,
-            attach_reuse=attach_reuse,
+        attachment_cache = _AttachmentBlockCache(
+            arrow_dataset, block_dict, prediction_name_tuples, self.n_jobs, attach_reuse
         )
-        pred_clusters = self._reunite_no_middle_dead_ends(
-            pred_clusters,
-            no_middle_dead_ends=no_middle_dead_ends,
-            required_seed_ids=active_cluster_seeds_require.keys(),
-            bulk_groups=block_dict_multiple_letter,
-            original_blocks=block_dict,
-            # No required seed member is marked, so none is visible or queried here. The
-            # empty map still turns on the attach name checks.
-            attach=lambda queries, seeds: attach_from_arrow(queries, pred_clusters=seeds, cluster_seeds_require={}),
-            prediction_state=prediction_state,
-        )
-        pred_clusters = attach_from_arrow(
-            block_dict_single_letter,
-            pred_clusters=pred_clusters,
-            cluster_seeds_require=active_cluster_seeds_require,
-            cache_residuals=attach_reuse is not None,
-        )
+        with ExitStack() as stack:
+            stack.callback(attachment_cache.close)
+            attach_from_arrow = partial(
+                self._predict_subblocked_single_letter_groups_from_arrow,
+                arrow_dataset=arrow_dataset,
+                batching_threshold=batching_threshold,
+                partial_supervision=effective_partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+                name_tuples=prediction_name_tuples,
+                cluster_seeds_disallow=cluster_seed_disallows,
+                original_blocks=block_dict,
+                attachment_cache=attachment_cache,
+            )
+            pred_clusters = self._reunite_no_middle_dead_ends(
+                pred_clusters,
+                no_middle_dead_ends=no_middle_dead_ends,
+                required_seed_ids=active_cluster_seeds_require.keys(),
+                bulk_groups=block_dict_multiple_letter,
+                original_blocks=block_dict,
+                # No required seed member is marked, so none is visible or queried here. The
+                # empty map still turns on the attach name checks.
+                attach=lambda queries, seeds: attach_from_arrow(queries, pred_clusters=seeds, cluster_seeds_require={}),
+                prediction_state=prediction_state,
+            )
+            pred_clusters = attach_from_arrow(
+                block_dict_single_letter,
+                pred_clusters=pred_clusters,
+                cluster_seeds_require=active_cluster_seeds_require,
+                cache_residuals=attach_reuse is not None,
+            )
         if orcid_join_enabled(self) and average_linkage_cut(self.cluster_model, cluster_model_params) is not None:
             oversized = {key: members for key, members in block_dict.items() if len(members) > batching_threshold}
             pred_clusters = _join_arrow_subblock_clusters(

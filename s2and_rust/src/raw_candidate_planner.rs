@@ -151,7 +151,7 @@ struct ReusableRawArrowCandidatePlanState {
     summary_signals_by_component: HashMap<String, RawArrowSummarySignalData>,
     retriever: RustHybridCentroidRetriever,
     component_order: Vec<String>,
-    seed_signature_ids: Vec<String>,
+    seed_members: SeedComponentMembers,
     seed_signature_id_set: HashSet<String>,
     cluster_seed_disallows: HashSet<(String, String)>,
     unidecode_char_map: HashMap<char, String>,
@@ -454,14 +454,35 @@ fn build_retriever_reusing_summaries(
     Ok((retriever, reused_count))
 }
 
-/// Every component's members, in component order: the seed order that plans
-/// index into.
+/// The seed portion of the plan's signature table, in retriever summary order.
+#[derive(Default)]
+struct SeedComponentMembers {
+    signature_ids: Vec<String>,
+    offsets: Vec<u32>,
+}
+
 fn flat_component_members(
     component_order: &[String],
     members_by_component: &HashMap<String, Vec<String>>,
     num_threads: Option<usize>,
-) -> PyResult<Vec<String>> {
-    let members: Vec<String> = install_with_optional_rayon_pool(num_threads, || {
+) -> PyResult<SeedComponentMembers> {
+    let mut offsets = Vec::with_capacity(component_order.len() + 1);
+    let mut end = 0u32;
+    offsets.push(end);
+    for key in component_order {
+        end = members_by_component
+            .get(key)
+            .map_or(Some(end), |members| {
+                u32::try_from(members.len())
+                    .ok()
+                    .and_then(|size| end.checked_add(size))
+            })
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("seed signature count exceeds u32")
+            })?;
+        offsets.push(end);
+    }
+    let signature_ids = install_with_optional_rayon_pool(num_threads, || {
         component_order
             .par_iter()
             .flat_map_iter(|component_key| {
@@ -473,46 +494,10 @@ fn flat_component_members(
             })
             .collect()
     });
-    if u32::try_from(members.len()).is_err() {
-        return Err(pyo3::exceptions::PyOverflowError::new_err(
-            "seed signature count exceeds u32",
-        ));
-    }
-    Ok(members)
-}
-
-fn raw_arrow_component_member_indices_for_batch(
-    component_order: &[String],
-    members_by_component: &HashMap<String, Vec<String>>,
-    query_count: usize,
-) -> PyResult<(HashMap<String, Vec<u32>>, Vec<String>, Vec<String>)> {
-    let mut component_member_indices = HashMap::<String, Vec<u32>>::default();
-    let mut seed_signature_ids = Vec::<String>::new();
-    let mut seed_component_keys = Vec::<String>::new();
-    let query_count_u32 = u32::try_from(query_count)
-        .map_err(|_| pyo3::exceptions::PyOverflowError::new_err("query count exceeds u32"))?;
-    for component_key in component_order.iter() {
-        let mut member_indices = Vec::<u32>::new();
-        if let Some(members) = members_by_component.get(component_key) {
-            for signature_id in members.iter() {
-                let seed_offset = u32::try_from(seed_signature_ids.len()).map_err(|_| {
-                    pyo3::exceptions::PyOverflowError::new_err("seed signature count exceeds u32")
-                })?;
-                let member_index = query_count_u32.checked_add(seed_offset).ok_or_else(|| {
-                    pyo3::exceptions::PyOverflowError::new_err("signature index exceeds u32")
-                })?;
-                member_indices.push(member_index);
-                seed_signature_ids.push(signature_id.clone());
-                seed_component_keys.push(component_key.clone());
-            }
-        }
-        component_member_indices.insert(component_key.clone(), member_indices);
-    }
-    Ok((
-        component_member_indices,
-        seed_signature_ids,
-        seed_component_keys,
-    ))
+    Ok(SeedComponentMembers {
+        signature_ids,
+        offsets,
+    })
 }
 
 fn raw_arrow_excluded_candidate_indices_by_query(
@@ -1008,7 +993,11 @@ struct PrefetchedRawArrowRows {
 
 impl PrefetchedRawArrowRows {
     /// The query inputs a read would return, or None unless every row is here.
-    fn query_inputs(&self, query_signature_ids: &[String]) -> Option<RawArrowQueryInputReadResult> {
+    fn query_inputs(
+        &self,
+        query_signature_ids: &[String],
+        state: &ReusableRawArrowCandidatePlanState,
+    ) -> Option<RawArrowQueryInputReadResult> {
         let mut signatures =
             HashMap::with_capacity_and_hasher(query_signature_ids.len(), Default::default());
         for signature_id in query_signature_ids {
@@ -1028,17 +1017,30 @@ impl PrefetchedRawArrowRows {
             }
             // A cached paper carries all of its rows: absent authors or SPECTER
             // rows are absent from the dataset too.
-            papers.insert(paper_id.clone(), self.papers.get(paper_id)?.clone());
-            if let Some(authors) = self.paper_authors.get(paper_id) {
+            let (paper, authors, vectors) = if let Some(paper) = self.papers.get(paper_id) {
+                (
+                    paper,
+                    self.paper_authors.get(paper_id),
+                    self.specter_by_paper_id.as_ref(),
+                )
+            } else {
+                // A demoted seed can share its paper with a current seed.
+                let retained = state.retained_seed_rows.as_ref()?;
+                (
+                    retained.papers.get(paper_id)?,
+                    state.paper_authors.get(paper_id),
+                    retained.specter_by_paper_id.as_ref(),
+                )
+            };
+            papers.insert(paper_id.clone(), paper.clone());
+            if let Some(authors) = authors {
                 paper_authors.insert(paper_id.clone(), authors.clone());
             }
-            if let (Some(cached), Some(out)) = (
-                self.specter_by_paper_id.as_ref(),
+            if let (Some(vector), Some(out)) = (
+                vectors.and_then(|vectors| vectors.get(paper_id)),
                 specter_by_paper_id.as_mut(),
             ) {
-                if let Some(vector) = cached.get(paper_id) {
-                    out.insert(paper_id.clone(), Arc::clone(vector));
-                }
+                out.insert(paper_id.clone(), Arc::clone(vector));
             }
         }
         Some(RawArrowQueryInputReadResult {
@@ -1552,7 +1554,7 @@ impl RawBlockQueryCandidatePlanner {
                 summary_signals_by_component: HashMap::default(),
                 retriever,
                 component_order,
-                seed_signature_ids: flat_seed_signature_ids,
+                seed_members: flat_seed_signature_ids,
                 seed_signature_id_set,
                 cluster_seed_disallows,
                 unidecode_char_map,
@@ -1612,6 +1614,7 @@ impl RawBlockQueryCandidatePlanner {
         py: Python<'_>,
         cluster_seeds_path: &str,
         cluster_seed_disallows_path: Option<&str>,
+        allow_seed_replacement: bool,
     ) -> PyResult<bool> {
         // Declared-query planners carry request rows that a reload would not restore.
         if self.state.retained_seed_rows.is_none()
@@ -1632,8 +1635,26 @@ impl RawBlockQueryCandidatePlanner {
                     .par_iter()
                     .all(|signature_id| layout.seed_signature_id_set.contains(signature_id))
             });
-        if !seeds_grew {
-            return Ok(false);
+        let replace_seeds = !seeds_grew;
+        if replace_seeds {
+            // A bucket can replace seeds only when this planner already owns
+            // the rows it needs. Keep the ordinary growing-seed contract.
+            let Some(cache) = self
+                .state
+                .prefetched_rows
+                .as_ref()
+                .filter(|_| allow_seed_replacement)
+            else {
+                return Ok(false);
+            };
+            let all_cached = install_with_optional_rayon_pool(self.num_threads, || {
+                layout.seed_signature_id_set.par_iter().all(|id| {
+                    self.state.signatures.contains_key(id) || cache.signatures.contains_key(id)
+                })
+            });
+            if !all_cached {
+                return Ok(false);
+            }
         }
         let retained = self
             .state
@@ -1649,7 +1670,7 @@ impl RawBlockQueryCandidatePlanner {
             added_signature_ids: Vec::new(),
             added_paper_ids: Vec::new(),
         };
-        match self.reload_seed_rows_from_parts(py, layout, &mut parts) {
+        match self.reload_seed_rows_from_parts(py, layout, &mut parts, replace_seeds) {
             Ok(planner) => {
                 *self = planner;
                 Ok(true)
@@ -1688,6 +1709,7 @@ impl RawBlockQueryCandidatePlanner {
         py: Python<'_>,
         layout: RawArrowSeedLayout,
         parts: &mut ReloadParts,
+        replace_seeds: bool,
     ) -> PyResult<Self> {
         let signatures = &mut parts.signatures;
         let paper_authors = &mut parts.paper_authors;
@@ -1698,9 +1720,8 @@ impl RawBlockQueryCandidatePlanner {
 
         // The planner holds exactly its seeds' rows: signatures for every seed,
         // papers for every seed's paper, and authors and SPECTER rows only for
-        // those papers. Seeds only grow between passes, so adding the new seeds'
-        // rows gives what a fresh read of every seed would, without rescanning
-        // the half million seeds a large block carries.
+        // those papers. Read only new seed rows. For a replacement, park the
+        // rows that the new layout no longer needs after the reads succeed.
         let read_signatures_start = Instant::now();
         let new_signature_ids: Vec<String> = install_with_optional_rayon_pool(num_threads, || {
             layout
@@ -1801,6 +1822,30 @@ impl RawBlockQueryCandidatePlanner {
             paper_author_index_stats: rows.paper_author_index_stats,
             specter_index_stats: rows.specter_index_stats,
         };
+        if replace_seeds {
+            let cache = prefetched
+                .as_mut()
+                .expect("seed replacement requires prefetched rows");
+            cache
+                .signatures
+                .extend(signatures.extract_if(|id, _| !layout.seed_signature_id_set.contains(id)));
+            let active_papers: HashSet<&str> = signatures
+                .values()
+                .map(|row| row.paper_id.as_str())
+                .collect();
+            cache
+                .papers
+                .extend(papers.extract_if(|id, _| !active_papers.contains(id.as_str())));
+            cache
+                .paper_authors
+                .extend(paper_authors.extract_if(|id, _| !active_papers.contains(id.as_str())));
+            if let (Some(cached), Some(active)) = (
+                cache.specter_by_paper_id.as_mut(),
+                specter_by_paper_id.as_mut(),
+            ) {
+                cached.extend(active.extract_if(|id, _| !active_papers.contains(id.as_str())));
+            }
+        }
         let seed_paper_count = papers.len();
         let previous = ReusableSeedState {
             features_by_signature_id: std::mem::take(&mut self.state.features_by_signature_id),
@@ -1946,19 +1991,22 @@ impl RawBlockQueryCandidatePlanner {
     ///
     /// Subblocked attachment passes call this between passes. Only rows of the new
     /// seeds are read, and the rebuilt state equals a fresh `from_auto_queries`
-    /// build over the same sidecars.
-    #[pyo3(signature = (cluster_seeds_path, cluster_seed_disallows_path = None))]
+    /// build over the same sidecars. Attachment buckets may also replace seeds
+    /// when the planner already holds all the new seeds' rows.
+    #[pyo3(signature = (cluster_seeds_path, cluster_seed_disallows_path = None, *, allow_seed_replacement = false))]
     fn reload_seed_sidecars(
         &mut self,
         py: Python<'_>,
         cluster_seeds_path: String,
         cluster_seed_disallows_path: Option<String>,
+        allow_seed_replacement: bool,
     ) -> PyResult<bool> {
         self.ensure_not_released()?;
         self.reload_seed_rows(
             py,
             &cluster_seeds_path,
             cluster_seed_disallows_path.as_deref(),
+            allow_seed_replacement,
         )
     }
 
@@ -1980,7 +2028,7 @@ impl RawBlockQueryCandidatePlanner {
             std::mem::take(&mut state.summary_signals_by_component),
             state.retriever.take_contents(),
             std::mem::take(&mut state.component_order),
-            std::mem::take(&mut state.seed_signature_ids),
+            std::mem::take(&mut state.seed_members),
             std::mem::take(&mut state.seed_signature_id_set),
             std::mem::take(&mut state.cluster_seed_disallows),
             std::mem::take(&mut state.unidecode_char_map),
@@ -2020,7 +2068,10 @@ impl RawBlockQueryCandidatePlanner {
         payload.set_item("paper_count", self.state.seed_paper_count)?;
         payload.set_item("paper_author_paper_count", self.state.paper_authors.len())?;
         payload.set_item("cluster_count", self.state.component_order.len())?;
-        payload.set_item("seed_signature_count", self.state.seed_signature_ids.len())?;
+        payload.set_item(
+            "seed_signature_count",
+            self.state.seed_members.signature_ids.len(),
+        )?;
         payload.set_item("query_signature_count", self.planner_query_signature_count)?;
         payload.set_item(
             "cluster_seed_disallow_pair_count",
@@ -2208,7 +2259,7 @@ impl RawBlockQueryCandidatePlanner {
             .state
             .prefetched_rows
             .as_ref()
-            .and_then(|cache| cache.query_inputs(&query_signature_ids))
+            .and_then(|cache| cache.query_inputs(&query_signature_ids, &self.state))
         {
             Some(query_inputs) => query_inputs,
             None => read_reusable_raw_arrow_query_inputs(
@@ -2385,12 +2436,24 @@ impl RawBlockQueryCandidatePlanner {
             };
 
         let component_members_start = Instant::now();
-        let (component_member_indices, seed_signature_ids, _seed_component_keys) =
-            raw_arrow_component_member_indices_for_batch(
-                component_order,
-                members_by_component,
-                query_signature_ids.len(),
-            )?;
+        let filtered_seed_members = needs_filtered_retriever
+            .then(|| {
+                flat_component_members(component_order, members_by_component, self.num_threads)
+            })
+            .transpose()?;
+        let seed_members = filtered_seed_members
+            .as_ref()
+            .unwrap_or(&self.state.seed_members);
+        let seed_signature_ids = &seed_members.signature_ids;
+        let query_count_u32 = u32::try_from(query_signature_ids.len())
+            .map_err(|_| pyo3::exceptions::PyOverflowError::new_err("query count exceeds u32"))?;
+        if let Some(last_offset) = seed_signature_ids.len().checked_sub(1) {
+            query_count_u32
+                .checked_add(last_offset as u32)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err("signature index exceeds u32")
+                })?;
+        }
         let component_members_secs = component_members_start.elapsed().as_secs_f64();
 
         let (
@@ -2530,7 +2593,14 @@ impl RawBlockQueryCandidatePlanner {
                                             current_query,
                                             query_first_tokens[query_offset].as_str(),
                                             query_index,
-                                            &component_member_indices,
+                                            |index, _| {
+                                                Some(
+                                                    (seed_members.offsets[index]
+                                                        ..seed_members.offsets[index + 1])
+                                                        .map(|offset| query_count_u32 + offset)
+                                                        .collect(),
+                                                )
+                                            },
                                             &scored,
                                         )
                                     })();
@@ -3000,56 +3070,93 @@ impl RawBlockQueryCandidatePlanner {
             "signature_count",
             query_signature_ids.len() + seed_signature_ids.len(),
         )?;
-        // These counts walk every planned seed; one thread took most of a second.
         let state = &self.state;
-        let (telemetry_paper_ids, telemetry_paper_author_count, telemetry_specter_count) = py
-            .allow_threads(|| {
-                install_with_optional_rayon_pool(self.num_threads, || {
-                    fn distinct(mut ids: Vec<&str>) -> Vec<&str> {
-                        ids.par_sort_unstable();
-                        ids.dedup();
-                        ids
-                    }
-                    let paper_ids: Vec<&str> = distinct(
-                        query_signature_ids
-                            .par_iter()
-                            .filter_map(|signature_id| query_inputs.signatures.get(signature_id))
-                            .chain(
-                                seed_signature_ids
-                                    .par_iter()
-                                    .filter_map(|signature_id| state.signatures.get(signature_id)),
-                            )
-                            .map(|signature| signature.paper_id.as_str())
-                            .collect(),
+        let count_from_retained_rows = state
+            .retained_seed_rows
+            .as_ref()
+            .filter(|_| !needs_filtered_retriever);
+        let (telemetry_paper_count, telemetry_paper_author_count, telemetry_specter_count) =
+            if let Some(seed_rows) = count_from_retained_rows {
+                // Retained rows cover exactly the seed papers. Add only new query
+                // paper, author and embedding entries, counting shared papers once.
+                let query_papers: HashSet<&str> = query_signature_ids
+                    .iter()
+                    .filter_map(|id| query_inputs.signatures.get(id))
+                    .map(|signature| signature.paper_id.as_str())
+                    .collect();
+                let (mut papers, mut authors, mut specter) = (
+                    state.seed_paper_count,
+                    state.paper_authors.len(),
+                    state.seed_specter_count,
+                );
+                for id in query_papers {
+                    papers += usize::from(!seed_rows.papers.contains_key(id));
+                    authors += usize::from(
+                        query_inputs.paper_authors.contains_key(id)
+                            && !state.paper_authors.contains_key(id),
                     );
-                    let paper_author_count = paper_ids
-                        .par_iter()
-                        .filter(|paper_id| {
-                            state.paper_authors.contains_key(**paper_id)
-                                || query_inputs.paper_authors.contains_key(**paper_id)
-                        })
-                        .count();
-                    let seed_specter_ids =
-                        seed_signature_ids.par_iter().filter_map(|signature_id| {
-                            state
-                                .features_by_signature_id
-                                .get(signature_id)
-                                .and_then(|feature| feature.query.specter.as_ref())
-                                .and_then(|_| state.signatures.get(signature_id))
-                                .map(|signature| signature.paper_id.as_str())
-                        });
-                    let query_specter_ids = paper_ids.par_iter().copied().filter(|paper_id| {
+                    specter += usize::from(
                         query_inputs
                             .specter_by_paper_id
                             .as_ref()
-                            .is_some_and(|query_specter| query_specter.contains_key(*paper_id))
-                    });
-                    let specter_count =
-                        distinct(seed_specter_ids.chain(query_specter_ids).collect()).len();
-                    (paper_ids, paper_author_count, specter_count)
+                            .is_some_and(|rows| rows.contains_key(id))
+                            && !seed_rows
+                                .specter_by_paper_id
+                                .as_ref()
+                                .is_some_and(|rows| rows.contains_key(id)),
+                    );
+                }
+                (papers, authors, specter)
+            } else {
+                py.allow_threads(|| {
+                    install_with_optional_rayon_pool(self.num_threads, || {
+                        fn distinct(mut ids: Vec<&str>) -> Vec<&str> {
+                            ids.par_sort_unstable();
+                            ids.dedup();
+                            ids
+                        }
+                        let paper_ids: Vec<&str> =
+                            distinct(
+                                query_signature_ids
+                                    .par_iter()
+                                    .filter_map(|signature_id| {
+                                        query_inputs.signatures.get(signature_id)
+                                    })
+                                    .chain(seed_signature_ids.par_iter().filter_map(
+                                        |signature_id| state.signatures.get(signature_id),
+                                    ))
+                                    .map(|signature| signature.paper_id.as_str())
+                                    .collect(),
+                            );
+                        let paper_author_count = paper_ids
+                            .par_iter()
+                            .filter(|paper_id| {
+                                state.paper_authors.contains_key(**paper_id)
+                                    || query_inputs.paper_authors.contains_key(**paper_id)
+                            })
+                            .count();
+                        let seed_specter_ids =
+                            seed_signature_ids.par_iter().filter_map(|signature_id| {
+                                state
+                                    .features_by_signature_id
+                                    .get(signature_id)
+                                    .and_then(|feature| feature.query.specter.as_ref())
+                                    .and_then(|_| state.signatures.get(signature_id))
+                                    .map(|signature| signature.paper_id.as_str())
+                            });
+                        let query_specter_ids = paper_ids.par_iter().copied().filter(|paper_id| {
+                            query_inputs
+                                .specter_by_paper_id
+                                .as_ref()
+                                .is_some_and(|query_specter| query_specter.contains_key(*paper_id))
+                        });
+                        let specter_count =
+                            distinct(seed_specter_ids.chain(query_specter_ids).collect()).len();
+                        (paper_ids.len(), paper_author_count, specter_count)
+                    })
                 })
-            });
-        telemetry.set_item("paper_count", telemetry_paper_ids.len())?;
+            };
+        telemetry.set_item("paper_count", telemetry_paper_count)?;
         telemetry.set_item("paper_author_paper_count", telemetry_paper_author_count)?;
         telemetry.set_item("cluster_count", component_order.len())?;
         telemetry.set_item("seed_signature_count", seed_signature_ids.len())?;

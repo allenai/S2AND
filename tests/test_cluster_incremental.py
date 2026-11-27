@@ -615,8 +615,8 @@ def test_load_arrow_incremental_signature_info_uses_signature_batch_index(
             read_batch_indices.append(index)
             return self._reader.get_batch(index)
 
-    def counting_open_file(source: Any) -> CountingReader:
-        return CountingReader(original_open_file(source))
+    def counting_open_file(source: Any, **kwargs: Any) -> CountingReader:
+        return CountingReader(original_open_file(source, **kwargs))
 
     monkeypatch.setattr(pa.ipc, "open_file", counting_open_file)
 

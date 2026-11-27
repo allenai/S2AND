@@ -521,7 +521,7 @@ def _eps_sweep_and_production_subblocks(
     from s2and.model import Clusterer
     from scripts.eps.sweep_eps_on_linking_gold import _build_arrow_subblocked_block_dict
 
-    monkeypatch.setattr(subblocking, "_resolved_orcid_prefix_counts", lambda counts: {})
+    monkeypatch.setattr(Clusterer, "_subblocking_prefix_counts", lambda self: {})
     clusterer = Clusterer(FeaturizationInfo(["year_diff"]), None, n_jobs=1, random_state=7)
     clusterer.subblocking_graph_config = subblocking.GraphSubblockingConfig(
         neighbor_mode="exact",
@@ -578,6 +578,23 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_and_records_tel
         assert swept[orcid] == production
         assert sweep_telemetry[orcid][0]["subblocking_telemetry"]["graph_fallback_native"] is True
         assert sweep_telemetry[orcid][0]["subblocking_telemetry"]["graph_fallback_invocation_count"] == 1
+
+
+def test_parallel_projection_keeps_subblock_order_and_member_firsts(tmp_path: Path) -> None:
+    native_subblocking = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
+    ids = ["s4", "s1", "s3", "s2"]
+    config = subblocking.GraphSubblockingConfig(projection_window=1, max_candidate_edges=2)
+    with _hui_wang_graph_arrow_dataset(tmp_path) as dataset:
+        serial = native_subblocking(dataset.native, ids, 2, {}, config, 7)
+        parallel = native_subblocking(dataset.native, ids, 2, {}, config, 7, num_threads=6, firsts_for_seed_ids={"s1"})
+
+    assert parallel[0] == serial[0]
+    assert parallel[2] == serial[2]
+    representatives_or_seed_subblock = {
+        sid for members in parallel[0].values() for sid in (members if "s1" in members else members[:1])
+    }
+    assert parallel[1]["subblock_firsts"] == dict.fromkeys(representatives_or_seed_subblock, "hui")
+    assert parallel[1]["graph_fallback_invocation_count"] == 1
 
 
 def test_eps_sweep_orcid_subblocking_flag_matches_production_only_when_enabled(tmp_path, monkeypatch):

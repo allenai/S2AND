@@ -139,12 +139,13 @@ class _AttachmentBlockState:
         requested = set(signature_ids)
         return {signature_id: info for signature_id, info in self._orcid_info.items() if signature_id in requested}
 
-    def release(self) -> None:
-        """Release paper buffers, then drop remaining native state in the background."""
+    def release(self, *, background: bool = True) -> None:
+        """Drop native state synchronously when another block will allocate next."""
 
-        for handle in (self._featurizer, self.planner):
-            if handle is not None:
-                release_rust_handle(handle)
+        if background:
+            for handle in (self._featurizer, self.planner):
+                if handle is not None:
+                    release_rust_handle(handle)
         self._featurizer = None
         self.planner = None
 
@@ -435,23 +436,25 @@ def _load_arrow_incremental_signature_info(
 
     value_set = arrow_string_array(requested_signature_ids)
     signatures: dict[str, _ArrowIncrementalSignatureInfo] = {}
+    canonical_firsts: dict[tuple[str | None, str | None, str | None], str] = {}
     with arrow_dataset.open_file("signatures") as source_file, pa.PythonFile(source_file, mode="r") as source:
-        reader = pa.ipc.open_file(source)
-        missing_columns = sorted(required_columns.difference(reader.schema.names))
+        schema = pa.ipc.open_file(source).schema
+        missing_columns = sorted(required_columns.difference(schema.names))
         if missing_columns:
             raise ValueError(
                 f"signatures Arrow is missing required columns for incremental metadata: {missing_columns}"
             )
-        selected_columns = required_columns.union({"author_orcid"}.intersection(reader.schema.names))
-        required_column_names = sorted(selected_columns)
-        signature_id_column_index = reader.schema.get_field_index("signature_id")
+        selected_columns = required_columns.union({"author_orcid"}.intersection(schema.names))
+        columns = sorted(schema.get_field_index(name) for name in selected_columns)
+        reader = pa.ipc.open_file(source, options=pa.ipc.IpcReadOptions(included_fields=columns))
+        signature_id_column_index = columns.index(schema.get_field_index("signature_id"))
         for batch_index in _signature_batch_indices_for_request(arrow_dataset, requested_signature_ids):
             batch = reader.get_batch(batch_index)
             signature_id_column = batch.column(signature_id_column_index)
             mask = pc.is_in(signature_id_column, value_set=value_set)
             if not bool(pc.any(mask).as_py()):
                 continue
-            filtered = pa.Table.from_batches([batch], schema=reader.schema).select(required_column_names).filter(mask)
+            filtered = batch.filter(mask)
             for row in filtered.to_pylist():
                 signature_id_value = row.get("signature_id")
                 if signature_id_value is None:
@@ -464,7 +467,11 @@ def _load_arrow_incremental_signature_info(
                 first = _optional_arrow_string(row.get("author_first"))
                 middle = _optional_arrow_string(row.get("author_middle"))
                 last = _optional_arrow_string(row.get("author_last"))
-                first_normalized = canonicalize_name_parts(first, middle, last).first
+                name = (first, middle, last)
+                first_normalized = canonical_firsts.get(name)
+                if first_normalized is None:
+                    first_normalized = canonicalize_name_parts(first, middle, last).first
+                    canonical_firsts[name] = first_normalized
                 signatures[signature_id] = _ArrowIncrementalSignatureInfo(
                     paper_id=_optional_arrow_string(row.get("paper_id")),
                     author_info_first=first,

@@ -918,6 +918,21 @@ def test_raw_arrow_candidate_plan_without_member_lists_reports_their_counts(tmp_
         RawArrowPlanBundle.from_native_mapping({**without_members, "component_member_counts": (1, -2)})
 
 
+def test_repeated_plan_counts_match_with_retained_seed_rows(tmp_path: Path) -> None:
+    paths = base_arrow_paths(tmp_path)
+    baseline = native_auto_planner(paths, top_k=2, orcid_enabled=False, num_threads=1)
+    with open_arrow_dataset(paths) as dataset:
+        retained = load_s2and_rust_extension().RawBlockQueryCandidatePlanner.from_auto_queries(
+            dataset.native, paths["cluster_seeds"], 2, orcid_enabled=False, num_threads=1, retain_seed_rows=True
+        )
+    for ids in (["q1"], ["s1"], ["q1"]):
+        expected = baseline.plan(ids)
+        actual = retained.plan(ids)
+        _assert_raw_candidate_plans_equal(actual, expected)
+        for key in ("paper_count", "paper_author_paper_count", "specter_count", "seed_signature_count"):
+            assert actual["telemetry"][key] == expected["telemetry"][key]
+
+
 def test_rust_featurizer_from_arrow_dataset_reuses_cached_language(tmp_path: Path) -> None:
     paths = base_arrow_paths(tmp_path)
     with pa.memory_map(paths["papers"], "r") as source:

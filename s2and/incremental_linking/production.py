@@ -1550,20 +1550,18 @@ def _predict_incremental_promoted_linker_from_arrow(
                 clusterer.n_jobs,
                 legacy_linker_years,
             )
-            if (
-                attachment_state is not None
-                and attachment_state.planner is not None
-                and attachment_state.planner_key == planner_key
-                and attachment_state.planner.reload_seed_sidecars(str(cluster_seeds_path), disallows_path_text)
-            ):
-                # The previous pass's planner, rebuilt for this pass's seeds from its
-                # retained rows: same state as a fresh build, without re-reading the block.
-                raw_request_planner = attachment_state.planner
-            elif seed_planner is not None and (
-                (early_planner := seed_planner.take(cluster_seeds_path, disallows_path_text)) is not None
-            ):
-                raw_request_planner = early_planner
-            else:
+            if attachment_state is not None and attachment_state.planner is not None:
+                if attachment_state.planner_key == planner_key and attachment_state.planner.reload_seed_sidecars(
+                    str(cluster_seeds_path), disallows_path_text, allow_seed_replacement=True
+                ):
+                    raw_request_planner = attachment_state.planner
+                else:
+                    # A planner that cannot serve these seeds must release its rows
+                    # before the replacement reads the block.
+                    attachment_state.planner = None
+            if raw_request_planner is None and seed_planner is not None:
+                raw_request_planner = seed_planner.take(cluster_seeds_path, disallows_path_text)
+            if raw_request_planner is None:
                 planner_class = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner  # noqa: SLF001
                 raw_request_planner = planner_class.from_auto_queries(
                     arrow_dataset.native,

@@ -390,25 +390,28 @@ impl RustHybridCentroidRetriever {
             centroid_weight,
             survivors,
         } = pending;
-        let extra: Vec<usize> = survivors
-            .iter()
+        let mut extra = survivors
+            .into_iter()
             .zip(tight_bounds)
-            .filter_map(|(&(index, rest), &tight)| {
+            .filter_map(|((index, rest), &tight)| {
                 let bound = with_order_slack(centroid_weight * f64::from(tight) + rest);
                 (bound >= cutoff || bound.is_nan()).then_some(index as usize)
             })
-            .collect();
-        if !extra.is_empty() {
+            .peekable();
+        if extra.peek().is_some() {
             let prepared = self.prepare_query(query_data);
-            let overlaps = self.overlap_index().component_overlaps(
-                query_data,
-                &prepared,
-                self.summaries.len(),
-            );
-            scored.extend(extra.into_iter().map(|idx| {
+            scored.extend(extra.map(|idx| {
+                let summary = &self.summaries[idx];
+                let overlap = component_overlap(query_data, &prepared, summary);
                 (
                     idx,
-                    self.score_candidate(query_data, &prepared, &overlaps, idx, None, None, None),
+                    score_candidate_with_overlap(
+                        query_data,
+                        &prepared,
+                        summary,
+                        &overlap,
+                        fused_specter_score(query_data, summary),
+                    ),
                 )
             }));
         }

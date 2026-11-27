@@ -345,6 +345,38 @@ def test_planner_prefetched_block_rows_plan_and_reload_like_reads(tmp_path: Path
         assert _same_plan(prefetched.plan(later_queries), expected_later)
 
 
+def test_attachment_planner_replaces_disjoint_cached_seeds(tmp_path: Path) -> None:
+    from s2and.feature_port import _require_rust_runtime
+    from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
+
+    paths = _write_varied_arrow_bundle(tmp_path / "data")
+    with pa.ipc.open_file(paths["signatures"]) as reader:
+        block = reader.read_all().column("signature_id").to_pylist()
+    first = tmp_path / "first.arrow"
+    second = tmp_path / "second.arrow"
+    write_cluster_seeds_arrow(first, {"0": "a", "1": "a", "2": "b"})
+    write_cluster_seeds_arrow(second, {"q3": "c", "4": "d"})
+    planner_class = _require_rust_runtime().RawBlockQueryCandidatePlanner
+    with ArrowDataset.open_trusted(paths, require_specter=True) as dataset:
+        reused = planner_class.from_auto_queries(
+            dataset.native, str(first), top_k=2, retain_seed_rows=True, prefetch_signature_ids=block, num_threads=2
+        )
+        assert reused.reload_seed_sidecars(str(second)) is False
+        assert reused.reload_seed_sidecars(str(second), allow_seed_replacement=True) is True
+        assert reused.build_telemetry()["signature_batches_read"] == 0
+        assert reused.build_telemetry()["paper_author_batches_read"] == 0
+
+        # Query the demoted 0, whose paper is now retained for the new seed q3.
+        queries = ["0", "1", "q1"]
+        fresh = planner_class.from_auto_queries(dataset.native, str(second), top_k=2, num_threads=2)
+        actual = reused.plan(queries)
+        expected = fresh.plan(queries)
+        assert _same_plan(actual, expected)
+        assert actual["telemetry"]["signature_batches_read"] == 0
+        for key in ("paper_count", "paper_author_paper_count", "specter_count"):
+            assert actual["telemetry"][key] == expected["telemetry"][key]
+
+
 def _write_varied_arrow_bundle(bundle_dir: Path) -> dict[str, str]:
     # Signatures on several papers with distinct names, coauthors, years, and
     # vectors. Paper p4 has no author rows and p5 has no SPECTER row.

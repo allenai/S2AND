@@ -322,6 +322,10 @@ class NumpyLogisticGate:
 
         features = self.fill_missing(matrix)
         logits = features @ self.weights + self.bias
+        return self._probabilities_from_logits(logits)
+
+    @staticmethod
+    def _probabilities_from_logits(logits: np.ndarray) -> np.ndarray:
         shifted = logits - logits.max(axis=1, keepdims=True)
         exp_logits = np.exp(shifted)
         return exp_logits / exp_logits.sum(axis=1, keepdims=True)
@@ -329,7 +333,20 @@ class NumpyLogisticGate:
     def predict_link(self, matrix: np.ndarray) -> np.ndarray:
         """Return True for link decisions and False for abstentions."""
 
-        proba = self.predict_proba(matrix)
+        return self._link_from_probabilities(self.predict_proba(matrix))
+
+    def predict_link_rowwise(self, matrix: np.ndarray) -> np.ndarray:
+        """Batch gate decisions while keeping the original one-row matrix products."""
+
+        features = self.fill_missing(matrix)
+        logits = np.empty((len(features), len(self.classes)), dtype=np.float64)
+        for row in range(len(features)):
+            # A multirow matrix product can round differently at the decision boundary.
+            logits[row : row + 1] = features[row : row + 1] @ self.weights
+        logits += self.bias
+        return self._link_from_probabilities(self._probabilities_from_logits(logits))
+
+    def _link_from_probabilities(self, proba: np.ndarray) -> np.ndarray:
         false_abstain = float(self.error_weights["false_abstain"])
         false_link = float(self.error_weights["false_link"])
         wrong = float(self.error_weights["wrong_candidate_link"])
@@ -387,19 +404,24 @@ def _array_ranked_groups(
         ranks = rank_array.astype(np.int64)
     else:
         return None
-    if component_keys is None:
-        key_ranks = np.zeros(row_count, dtype=np.int64)
-    else:
-        keys = [str(key) for key in component_keys]
-        key_rank = {key: position for position, key in enumerate(sorted(set(keys)))}
-        key_ranks = np.fromiter((key_rank[key] for key in keys), dtype=np.int64, count=row_count)
     _, first_rows, inverse = np.unique(query_array, return_index=True, return_inverse=True)
     group_of_query = np.empty(len(first_rows), dtype=np.int64)
     group_of_query[np.argsort(first_rows, kind="stable")] = np.arange(len(first_rows))
     group_of_row = group_of_query[inverse.reshape(-1)]
     boundaries = np.cumsum(np.bincount(group_of_row, minlength=len(first_rows)))[:-1]
-    grouped_rows = np.argsort(group_of_row, kind="stable").astype(np.int64)
-    ranked_rows = np.lexsort((key_ranks, ranks, -probability_array, group_of_row)).astype(np.int64)
+    grouped_rows = np.argsort(group_of_row, kind="stable").astype(np.int64, copy=False)
+    ranked_rows = np.lexsort((ranks, -probability_array, group_of_row)).astype(np.int64, copy=False)
+    if component_keys is not None:
+        before, after = ranked_rows[:-1], ranked_rows[1:]
+        tied = np.flatnonzero(
+            (group_of_row[before] == group_of_row[after])
+            & (ranks[before] == ranks[after])
+            & (probability_array[before] == probability_array[after])
+        )
+        if tied.size:
+            for run in np.split(tied, np.flatnonzero(np.diff(tied) > 1) + 1):
+                rows = ranked_rows[run[0] : run[-1] + 2]
+                rows[:] = sorted(rows, key=lambda row: str(component_keys[row]))
     return tuple(np.split(grouped_rows, boundaries)), tuple(np.split(ranked_rows, boundaries))
 
 

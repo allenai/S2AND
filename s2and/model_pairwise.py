@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -25,6 +26,9 @@ MAX_CLOSE_PAIR_BONUS = 100.0
 # Giant blocks can hold hard negatives in most pairs; scan in bounded chunks so
 # the temporary mask stays small, not one byte or index per pair.
 _HARD_NEGATIVE_SCAN_CHUNK = 1 << 22
+_NATIVE_LINKAGE_TRANSFORM: ContextVar[Callable[[np.ndarray, float, float, float, float], None] | None] = ContextVar(
+    "_NATIVE_LINKAGE_TRANSFORM", default=None
+)
 
 
 def _hard_negative_chunks(distances: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
@@ -100,13 +104,21 @@ def constrained_linkage(
     shared = isinstance(distances, np.ndarray) and np.may_share_memory(condensed, distances)
     if (shared and preserve_input) or not condensed.flags.writeable:
         condensed = condensed.copy()
-    for chunk, mask in _hard_negative_chunks(condensed):
-        if close_pair_bonus > 0:
-            # Raising every other distance equals lowering the close pairs, and keeps distances
-            # non-negative. Soft values above one rise too, so the later shift of heights leaves
-            # them where the caller put them; hard negatives get their barrier on the next line.
-            chunk[chunk >= close_pair_distance] += close_pair_bonus
-        chunk[mask] = HARD_LINKAGE_DISTANCE
+    native_transform = _NATIVE_LINKAGE_TRANSFORM.get()
+    if (
+        native_transform is not None
+        and not preserve_input
+        and condensed.ndim == 1
+        and len(condensed) >= _HARD_NEGATIVE_SCAN_CHUNK
+        and 0.0 <= close_pair_bonus <= MAX_CLOSE_PAIR_BONUS
+    ):
+        native_transform(condensed, LARGE_DISTANCE, HARD_LINKAGE_DISTANCE, close_pair_bonus, close_pair_distance)
+    else:
+        for chunk, mask in _hard_negative_chunks(condensed):
+            if close_pair_bonus > 0:
+                # Raise other distances so the shift of merge heights lowers only close pairs.
+                chunk[chunk >= close_pair_distance] += close_pair_bonus
+            chunk[mask] = HARD_LINKAGE_DISTANCE
     # condensed is now owned by this call, or released by the caller.
     tree = _linkage_in_place(condensed, method)
     if close_pair_bonus > 0:

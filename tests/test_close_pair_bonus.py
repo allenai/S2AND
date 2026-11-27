@@ -6,8 +6,10 @@ from fastcluster import linkage
 from scipy.cluster.hierarchy import fcluster
 from scipy.spatial.distance import squareform
 
-from s2and.consts import LARGE_DISTANCE
+from s2and import model_pairwise
+from s2and.consts import HARD_LINKAGE_DISTANCE, LARGE_DISTANCE
 from s2and.model_pairwise import FastCluster, constrained_linkage
+from s2and.runtime import load_s2and_rust_extension
 
 BONUS, CLOSE = 8.0, 0.05
 
@@ -96,6 +98,50 @@ def test_read_only_input_is_copied() -> None:
     model = FastCluster(eps=0.41, preserve_input=False, close_pair_bonus=BONUS, close_pair_distance=CLOSE)
 
     assert len(set(model.fit(distances).labels_)) == 1
+
+
+@pytest.mark.parametrize("bonus", [0.0, BONUS])
+def test_native_transform_produces_the_same_linkage_bits(monkeypatch: pytest.MonkeyPatch, bonus: float) -> None:
+    transform = load_s2and_rust_extension().RustFeaturizer._transform_linkage_distances
+    monkeypatch.setattr(model_pairwise, "_HARD_NEGATIVE_SCAN_CHUNK", 8)
+    distances = _two_groups(
+        [
+            np.nextafter(CLOSE, 0),
+            CLOSE,
+            np.nextafter(CLOSE, 1),
+            LARGE_DISTANCE,
+            np.nextafter(LARGE_DISTANCE, 0),
+            np.nextafter(LARGE_DISTANCE, np.inf),
+            HARD_LINKAGE_DISTANCE,
+            0.6,
+            0.3,
+        ]
+    )
+    expected = constrained_linkage(
+        distances, "average", preserve_input=True, close_pair_bonus=bonus, close_pair_distance=CLOSE
+    )
+    expected_distances = distances.copy()
+    if bonus > 0:
+        expected_distances[distances >= CLOSE] += bonus
+    expected_distances[distances == LARGE_DISTANCE] = HARD_LINKAGE_DISTANCE
+
+    native_calls = 0
+
+    def native(values: np.ndarray, sentinel: float, barrier: float, amount: float, cutoff: float) -> None:
+        nonlocal native_calls
+        native_calls += 1
+        transform(values, sentinel, barrier, amount, cutoff)
+        np.testing.assert_array_equal(values.view(np.uint64), expected_distances.view(np.uint64))
+
+    token = model_pairwise._NATIVE_LINKAGE_TRANSFORM.set(native)
+    try:
+        actual = constrained_linkage(
+            distances.copy(), "average", preserve_input=False, close_pair_bonus=bonus, close_pair_distance=CLOSE
+        )
+    finally:
+        model_pairwise._NATIVE_LINKAGE_TRANSFORM.reset(token)
+    assert native_calls == 1
+    np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
 
 
 @pytest.mark.parametrize(

@@ -453,15 +453,14 @@ def _gate_decisions_for_row_sets(
     )
     if len(subset_gate_rows.groups) != len(row_sets):
         raise RuntimeError("batched gate must form one group per query row set")
+    gate_links = gate.predict_link_rowwise(subset_gate_matrix)
     decisions: list[tuple[int, float, bool]] = []
-    for position in range(len(row_sets)):
-        gate_link = bool(gate.predict_link(subset_gate_matrix[position : position + 1])[0])
-        subset_ranked = subset_gate_rows.ranked_groups[position]
+    for position, subset_ranked in enumerate(subset_gate_rows.ranked_groups):
         best_row = int(rows[int(subset_gate_rows.best_rows[position])])
         runner_up_score = (
             float(probabilities[int(rows[int(subset_ranked[1])])]) if len(subset_ranked) > 1 else float("nan")
         )
-        decisions.append((best_row, runner_up_score, gate_link))
+        decisions.append((best_row, runner_up_score, bool(gate_links[position])))
     return decisions
 
 

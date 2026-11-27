@@ -53,7 +53,7 @@ from s2and.incremental_linking.policy import (
 from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
-from s2and.model_pairwise import FastCluster, clone_cluster_model, intify
+from s2and.model_pairwise import _NATIVE_LINKAGE_TRANSFORM, FastCluster, clone_cluster_model, intify
 from s2and.orcid_prefix_counts import (
     DEFAULT_ORCID_PREFIX_COUNTS_DATA_SHA256,
     ORCID_PREFIX_COUNTS_DATA_SHA256_FIELD,
@@ -346,22 +346,27 @@ def _predict_from_prepared_rust_featurizer(
         blocks_largest_first = sorted(block_dict.items(), key=lambda item: len(item[1]), reverse=True)
         pending: Future[tuple[np.ndarray | list[int], float]] | None = None
         pending_bytes = 0
+        native_transform = getattr(rust_featurizer, "_transform_linkage_distances", None)
 
         def timed_cluster(
             block_key: str, signatures: list[str], dist_matrix: np.ndarray | None
         ) -> tuple[np.ndarray | list[int], float]:
             start = time.perf_counter()
-            labels = self._cluster_one_block_with_logging(
-                signatures,
-                dist_matrix,
-                effective_cluster_model_params,
-                cast(Any, proxy_dataset),
-                disallow_adjacency,
-                block_key=block_key,
-                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                corrections=corrections,
-                **_profile_exclusion_kwargs(prediction_state),
-            )
+            token = _NATIVE_LINKAGE_TRANSFORM.set(native_transform)
+            try:
+                labels = self._cluster_one_block_with_logging(
+                    signatures,
+                    dist_matrix,
+                    effective_cluster_model_params,
+                    cast(Any, proxy_dataset),
+                    disallow_adjacency,
+                    block_key=block_key,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    corrections=corrections,
+                    **_profile_exclusion_kwargs(prediction_state),
+                )
+            finally:
+                _NATIVE_LINKAGE_TRANSFORM.reset(token)
             return labels, time.perf_counter() - start
 
         def block_distances(

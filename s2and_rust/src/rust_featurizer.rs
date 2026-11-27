@@ -4103,6 +4103,77 @@ impl RustFeaturizer {
         Ok((labeled.into_inner(), scored_total.into_inner()))
     }
 
+    /// Prepare the consumed condensed buffer after corrections read its raw distances.
+    #[staticmethod]
+    fn _transform_linkage_distances<'py>(
+        py: Python<'py>,
+        mut distances: numpy::PyReadwriteArray1<'py, f64>,
+        sentinel: f64,
+        barrier: f64,
+        bonus: f64,
+        close_distance: f64,
+    ) -> PyResult<()> {
+        let distances = distances.as_slice_mut()?;
+        // Run on the linkage worker. The shared pool may be scoring the next block.
+        py.allow_threads(|| {
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx")]
+            unsafe fn transform_avx<const WITH_BONUS: bool>(
+                distances: &mut [f64],
+                sentinel: f64,
+                barrier: f64,
+                bonus: f64,
+                close_distance: f64,
+            ) -> &mut [f64] {
+                use std::arch::x86_64::{
+                    _mm256_add_pd, _mm256_blendv_pd, _mm256_cmp_pd, _mm256_loadu_pd,
+                    _mm256_set1_pd, _mm256_storeu_pd, _CMP_EQ_OQ, _CMP_GE_OQ,
+                };
+
+                let sentinel = _mm256_set1_pd(sentinel);
+                let barrier = _mm256_set1_pd(barrier);
+                let bonus = _mm256_set1_pd(bonus);
+                let close_distance = _mm256_set1_pd(close_distance);
+                let mut chunks = distances.chunks_exact_mut(4);
+                for chunk in chunks.by_ref() {
+                    let raw = _mm256_loadu_pd(chunk.as_ptr());
+                    let hard = _mm256_cmp_pd(raw, sentinel, _CMP_EQ_OQ);
+                    let shifted = if WITH_BONUS {
+                        let distant = _mm256_cmp_pd(raw, close_distance, _CMP_GE_OQ);
+                        _mm256_blendv_pd(raw, _mm256_add_pd(raw, bonus), distant)
+                    } else {
+                        raw
+                    };
+                    _mm256_storeu_pd(chunk.as_mut_ptr(), _mm256_blendv_pd(shifted, barrier, hard));
+                }
+                chunks.into_remainder()
+            }
+
+            let tail = distances;
+            #[cfg(target_arch = "x86_64")]
+            let tail = if std::arch::is_x86_feature_detected!("avx") {
+                // SAFETY: AVX is available and the kernel reads and writes only full chunks.
+                unsafe {
+                    if bonus > 0.0 {
+                        transform_avx::<true>(tail, sentinel, barrier, bonus, close_distance)
+                    } else {
+                        transform_avx::<false>(tail, sentinel, barrier, bonus, close_distance)
+                    }
+                }
+            } else {
+                tail
+            };
+            for distance in tail {
+                if *distance == sentinel {
+                    *distance = barrier;
+                } else if bonus > 0.0 && *distance >= close_distance {
+                    *distance += bonus;
+                }
+            }
+        });
+        Ok(())
+    }
+
     #[pyo3(
         signature = (
             left_signature_indices,

@@ -78,7 +78,7 @@ pub(crate) fn specter_ball(summary: &RetrievalSummaryData) -> Option<SpecterBall
 
 /// Whether `norm` is the vector's norm, so cosines built from it are true cosines.
 fn norm_agrees(vector: &[f32], norm: f64) -> bool {
-    (vector_norm_f32(vector) - norm).abs() <= 1e-9 * norm
+    norm.is_finite() && (vector_norm_f32(vector) - norm).abs() <= 1e-9 * norm
 }
 
 /// An upper bound of a SPECTER score, the largest of 0.0 and the summary's
@@ -239,8 +239,9 @@ impl RustHybridCentroidRetriever {
         // Without a query vector every SPECTER score is exactly 0.0.
         let has_specter = query_data.specter.is_some() && query_data.specter_norm.is_some();
         let zero_overlaps_score_zero = prepared.zero_numerators_score_zero();
-        // (estimate, loose bound, non-SPECTER part, candidate)
-        let mut entries: Vec<(f64, f64, f64, usize)> = candidate_indices
+        // Keep only what selects the initial exact scores. The ball bound is
+        // needed once the cutoff exists, for candidates that were not scored.
+        let mut entries: Vec<(f64, f64, usize)> = candidate_indices
             .iter()
             .map(|&idx| {
                 let overlap = &overlaps[idx];
@@ -254,39 +255,43 @@ impl RustHybridCentroidRetriever {
                     + weights.affiliation * affiliation
                     + name_terms[idx];
                 let x = centroid_bounds[idx];
-                let (specter_loose, specter_estimate) = if !has_specter {
-                    (0.0, 0.0)
+                let estimate = if !has_specter {
+                    0.0
                 } else if x.is_finite() {
-                    let ball = self.specter_balls[idx].expect("finite centroid bounds have a ball");
-                    (ball_bound(x, ball), f64::from(x).max(0.0))
+                    f64::from(x).max(0.0)
                 } else {
-                    (f64::INFINITY, 1.0)
+                    1.0
                 };
-                let loose = with_order_slack(weights.centroid * specter_loose + rest);
-                (weights.centroid * specter_estimate + rest, loose, rest, idx)
+                (weights.centroid * estimate + rest, rest, idx)
             })
             .collect();
         let first_pass = (4 * top_k).max(top_k + 16).min(entries.len());
         entries.select_nth_unstable_by(first_pass - 1, |left, right| right.0.total_cmp(&left.0));
         let mut scored: Vec<(usize, f32)> = entries[..first_pass]
             .iter()
-            .map(|(_, _, _, idx)| exact(*idx))
+            .map(|(_, _, idx)| exact(*idx))
             .collect();
         let mut kth = scored.clone();
         self.keep_sorted_top_k_scored_candidates(&mut kth, top_k, None, None);
         let Some(&(_, threshold)) = kth.last().filter(|_| kth.len() == top_k) else {
-            scored.extend(
-                entries[first_pass..]
-                    .iter()
-                    .map(|(_, _, _, idx)| exact(*idx)),
-            );
+            scored.extend(entries[first_pass..].iter().map(|(_, _, idx)| exact(*idx)));
             self.keep_sorted_top_k_scored_candidates(&mut scored, top_k, None, None);
             return PlanFirstPass::Done(scored);
         };
         let spacing = f64::from(threshold.abs().next_up() - threshold.abs());
         let cutoff = f64::from(threshold) - 2.0 * spacing;
         let mut survivors = Vec::new();
-        for &(_, loose, rest, idx) in &entries[first_pass..] {
+        for &(_, rest, idx) in &entries[first_pass..] {
+            let x = centroid_bounds[idx];
+            let specter_loose = if !has_specter {
+                0.0
+            } else if x.is_finite() {
+                let ball = self.specter_balls[idx].expect("finite centroid bounds have a ball");
+                ball_bound(x, ball)
+            } else {
+                f64::INFINITY
+            };
+            let loose = with_order_slack(weights.centroid * specter_loose + rest);
             if !(loose >= cutoff || loose.is_nan()) {
                 continue;
             }
@@ -316,8 +321,8 @@ impl RustHybridCentroidRetriever {
     }
 
     /// Tight SPECTER bounds of each pending query's survivors, in survivor
-    /// order: the bound `specter_bound_column` gives, with the centroid term
-    /// from `centroid_bounds` where it is finite. Summaries go to the pool, so
+    /// order. Use the centroid term from `centroid_bounds` where it is finite
+    /// and the exact score otherwise. Summaries go to the pool, so
     /// each one's exemplars are read once for all queries that need them.
     pub(crate) fn specter_survivor_bounds(
         &self,
@@ -435,15 +440,15 @@ fn centroid_column_bounds(
     columns: &mut [f32],
 ) {
     let length = group[0].1.len();
-    let vectors: Vec<&[f32]> = group.iter().map(|(_, vector, _)| *vector).collect();
+    let mut vectors: [&[f32]; 5] = [&[]; 5];
+    for (slot, &(_, vector, _)) in group.iter().enumerate() {
+        vectors[slot] = vector;
+    }
+    let vectors = &vectors[..group.len()];
     let error = f32_dot_relative_error_bound(length);
     let mut write = |query_index: usize, query_norm: f64, dots: &[f32; 5]| {
         for (slot, (offset, _, norm)) in group.iter().enumerate() {
-            let cosine = if query_norm == 0.0 {
-                0.0
-            } else {
-                f64::from(dots[slot]) / (query_norm * norm) + error
-            };
+            let cosine = f32_cosine_upper_bound(dots[slot], query_norm, *norm, error);
             columns[offset * query_count + query_index] = f32_at_or_above(cosine);
         }
     };
@@ -457,7 +462,7 @@ fn centroid_column_bounds(
         }
         match pending.take() {
             Some((first_index, first_values, first_norm)) => {
-                let (first_dots, second_dots) = f32_lane_dots_pair(first_values, values, &vectors);
+                let (first_dots, second_dots) = f32_lane_dots_pair(first_values, values, vectors);
                 write(first_index, first_norm, &first_dots);
                 write(query_index, norm, &second_dots);
             }
@@ -465,7 +470,7 @@ fn centroid_column_bounds(
         }
     }
     if let Some((query_index, values, norm)) = pending {
-        write(query_index, norm, &f32_lane_dots(values, &vectors));
+        write(query_index, norm, &f32_lane_dots(values, vectors));
     }
 }
 
@@ -479,7 +484,12 @@ fn survivor_bounds(
     centroid_bounds: &[Vec<f32>],
     out: &mut Vec<(u32, u32, f32)>,
 ) {
-    let exemplars: Vec<&[f32]> = summary.exemplar_vectors.iter().map(|v| &v[..]).collect();
+    // Only summaries with a ball use the fused exemplar kernel.
+    let mut vectors: [&[f32]; 5] = [&[]; 5];
+    for (slot, vector) in vectors.iter_mut().zip(&summary.exemplar_vectors) {
+        *slot = vector;
+    }
+    let exemplars = &vectors[..summary.exemplar_vectors.len().min(vectors.len())];
     let exemplar_length = exemplars.first().map(|vector| vector.len());
     // The centroid bound, then exemplar cosine bounds, as `specter_bound_column` takes them.
     let finish = |query: &RetrievalQueryData, centroid: f32, dots: &[f32; 5]| -> f32 {
@@ -488,11 +498,7 @@ fn survivor_bounds(
         let error = f32_dot_relative_error_bound(len);
         let mut bound = f64::from(centroid).max(0.0);
         for (slot, norm) in summary.exemplar_norms.iter().enumerate() {
-            let cosine = if query_norm == 0.0 || *norm == 0.0 {
-                0.0
-            } else {
-                f64::from(dots[slot]) / (query_norm * norm) + error
-            };
+            let cosine = f32_cosine_upper_bound(dots[slot], query_norm, *norm, error);
             bound = bound.max(cosine);
         }
         f32_at_or_above(bound)
@@ -503,10 +509,10 @@ fn survivor_bounds(
         let centroid = centroid_bounds[query_index as usize][summary_index];
         let values: &[f32] = query.specter.as_ref().map_or(&[], |values| &values[..]);
         if !centroid.is_finite() {
-            // No ball bound for this pair: the full single-query bound.
-            let mut column = [0.0f32];
-            specter_bound_column(summary, std::slice::from_ref(query), &mut column);
-            out.push((query_index, position, column[0]));
+            // A ball may be absent because the vectors disagree with the
+            // stored norms. A relative f32 dot error bound cannot use those norms.
+            let bound = f32_at_or_above(fused_specter_score(query, summary));
+            out.push((query_index, position, bound));
             continue;
         }
         // A finite centroid bound means the ball applies: every exemplar has
@@ -518,8 +524,7 @@ fn survivor_bounds(
         }
         match pending.take() {
             Some((first_index, first_position, first_values, first_centroid)) => {
-                let (first_dots, second_dots) =
-                    f32_lane_dots_pair(first_values, values, &exemplars);
+                let (first_dots, second_dots) = f32_lane_dots_pair(first_values, values, exemplars);
                 let first_query = &queries[first_index as usize];
                 out.push((
                     first_index,
@@ -532,7 +537,7 @@ fn survivor_bounds(
         }
     }
     if let Some((query_index, position, values, centroid)) = pending {
-        let dots = f32_lane_dots(values, &exemplars);
+        let dots = f32_lane_dots(values, exemplars);
         out.push((
             query_index,
             position,

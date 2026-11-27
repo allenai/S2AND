@@ -2296,12 +2296,90 @@ impl RustFeaturizer {
     }
 }
 
+/// Borrowed paper rows from the planner's seed state, query window or prefetch.
+pub(crate) struct BorrowedFeaturizerPaper<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) paper: &'a RawArrowPaper,
+    pub(crate) authors: Option<&'a Vec<(i64, String)>>,
+    pub(crate) specter: Option<&'a arrow::buffer::ScalarBuffer<f32>>,
+}
+
 /// Raw rows of the signatures and papers one featurizer covers.
-pub(crate) struct RawFeaturizerRows {
-    pub(crate) signatures: HashMap<String, RawArrowSignature>,
-    pub(crate) papers: HashMap<String, RawArrowPaper>,
-    pub(crate) authors_by_paper: HashMap<String, Vec<(i64, String)>>,
-    pub(crate) specter_by_paper: HashMap<String, arrow::buffer::ScalarBuffer<f32>>,
+pub(crate) enum RawFeaturizerRows<'a> {
+    Arrow {
+        signatures: HashMap<String, RawArrowSignature>,
+        papers: HashMap<String, RawArrowPaper>,
+        authors_by_paper: HashMap<String, Vec<(i64, String)>>,
+        specter_by_paper: HashMap<String, arrow::buffer::ScalarBuffer<f32>>,
+        needed_paper_ids: HashSet<String>,
+    },
+    Planner {
+        signatures: Vec<&'a RawArrowSignature>,
+        papers: Vec<BorrowedFeaturizerPaper<'a>>,
+        unidecode_char_map: &'a HashMap<char, String>,
+    },
+}
+
+fn stage_raw_signature(
+    id: &str,
+    signature: &RawArrowSignature,
+    use_orcid_id: bool,
+) -> PyResult<StageSignatureInput> {
+    let position = signature.position.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "signatures Arrow author_position is null for signature_id '{id}'"
+        ))
+    })?;
+    Ok(StageSignatureInput {
+        sig_id: id.to_owned(),
+        paper_id: signature.paper_id.clone(),
+        raw_first: signature.author_first.clone(),
+        raw_middle: signature.author_middle.clone(),
+        raw_last: signature.author_last.clone(),
+        email: signature.email.clone(),
+        position,
+        affiliation_values: signature.affiliations.clone(),
+        orcid: if use_orcid_id {
+            signature.orcid.clone()
+        } else {
+            None
+        },
+    })
+}
+
+fn stage_raw_paper(
+    id: &str,
+    paper: &RawArrowPaper,
+    authors: Vec<(i64, String)>,
+) -> PyResult<StagePaperInput> {
+    let (predicted_language, language_reliability) = if paper.predicted_language.is_some() {
+        paper.is_reliable.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow predicted_language requires is_reliable for paper_id {id:?}"
+            ))
+        })?;
+        let reliability = paper.language_reliability.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow predicted_language requires language_reliability for paper_id {id:?}"
+            ))
+        })?;
+        (paper.predicted_language.clone(), reliability)
+    } else {
+        let audit = detect_language_compat(&paper.title);
+        (Some(audit.predicted_language), audit.language_reliability)
+    };
+    Ok(StagePaperInput {
+        paper_id: id.to_owned(),
+        raw_title: paper.title.clone(),
+        raw_venue: paper.venue.clone(),
+        raw_journal: paper.journal_name.clone(),
+        raw_authors: authors,
+        // Preserve source stamps for the historical year-gap placement rule.
+        year: paper.year,
+        has_abstract: paper.has_abstract,
+        predicted_language,
+        language_reliability,
+    })
 }
 
 impl RustFeaturizer {
@@ -2355,9 +2433,8 @@ impl RustFeaturizer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_raw_rows(
         py: Python<'_>,
-        rows: RawFeaturizerRows,
+        mut rows: RawFeaturizerRows<'_>,
         signature_ids: Vec<String>,
-        needed_paper_ids: HashSet<String>,
         cluster_seeds_require: HashMap<String, ClusterId>,
         cluster_seeds_disallow: HashSet<(String, String)>,
         raw_name_counts: RawNameCountMaps,
@@ -2368,127 +2445,98 @@ impl RustFeaturizer {
         num_threads: Option<usize>,
         use_orcid_id: bool,
     ) -> PyResult<Self> {
-        let RawFeaturizerRows {
-            signatures: raw_signatures,
-            papers: raw_papers,
-            authors_by_paper: mut raw_authors_by_paper,
-            specter_by_paper,
-        } = rows;
         let text_module = py.import("s2and.text")?;
         let stop_words = extract_required_string_set(&text_module.getattr("STOPWORDS")?)?;
         let venue_stop_words =
             extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let parallel_free = raw_papers.len() >= PARALLEL_FREE_MIN_PAPERS;
-        // Staging, language detection and assembly run on the request's pool:
-        // they were serial loops over every signature and paper of the window.
+        let parallel_free = match &rows {
+            RawFeaturizerRows::Arrow { papers, .. } => papers.len(),
+            RawFeaturizerRows::Planner { papers, .. } => papers.len(),
+        } >= PARALLEL_FREE_MIN_PAPERS;
+        // Staging, language detection and assembly share the request's pool.
         let (signatures, papers, name_grams) = py.allow_threads(|| {
             install_with_optional_rayon_pool(num_threads, || -> PyResult<_> {
-                let needed_paper_ids: Vec<&String> = needed_paper_ids.iter().collect();
-                // Patched CLD2 uses thread-local detection state, so titles share the request pool.
-                let (detected_languages, (unidecode_char_map, signature_inputs)) = rayon::join(
-                    || {
-                        needed_paper_ids
-                            .par_iter()
-                            .map(|paper_id| {
-                                raw_papers
-                                    .get(*paper_id)
-                                    .filter(|paper| paper.predicted_language.is_none())
-                                    .map(|paper| detect_language_compat(&paper.title))
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                    || {
-                        let unidecode_char_map = unidecode_map_for_raw_arrow_inputs(
-                            &raw_signatures,
-                            &raw_papers,
-                            &raw_authors_by_paper,
+                let (unidecode_char_map, signature_inputs, paper_inputs, specter) = match &mut rows {
+                    RawFeaturizerRows::Arrow {
+                        signatures,
+                        papers,
+                        authors_by_paper,
+                        specter_by_paper,
+                        needed_paper_ids,
+                    } => {
+                        let unidecode_char_map =
+                            unidecode_map_for_raw_arrow_inputs(signatures, papers, authors_by_paper);
+                        let needed_paper_ids: Vec<&String> = needed_paper_ids.iter().collect();
+                        let paper_authors: Vec<_> = needed_paper_ids
+                            .iter()
+                            .map(|id| authors_by_paper.remove(*id).unwrap_or_default())
+                            .collect();
+                        let (signature_inputs, paper_inputs) = rayon::join(
+                            || {
+                                signature_ids
+                                    .par_iter()
+                                    .map(|id| {
+                                        let signature = signatures.get(id).ok_or_else(|| {
+                                            pyo3::exceptions::PyKeyError::new_err(format!(
+                                                "Arrow signatures input is missing signature_id '{id}'"
+                                            ))
+                                        })?;
+                                        stage_raw_signature(id, signature, use_orcid_id)
+                                    })
+                                    .collect::<PyResult<Vec<_>>>()
+                            },
+                            || {
+                                needed_paper_ids
+                                    .par_iter()
+                                    .zip(paper_authors.into_par_iter())
+                                    .map(|(&id, authors)| {
+                                        let paper = papers.get(id).ok_or_else(|| {
+                                            pyo3::exceptions::PyValueError::new_err(format!(
+                                                "Arrow signatures reference missing paper_id '{id}'"
+                                            ))
+                                        })?;
+                                        stage_raw_paper(id, paper, authors)
+                                    })
+                                    .collect::<PyResult<Vec<_>>>()
+                            },
                         );
-                        let signature_inputs = signature_ids
-                            .par_iter()
-                            .map(|signature_id| -> PyResult<StageSignatureInput> {
-                                let raw_signature = raw_signatures.get(signature_id).ok_or_else(|| {
-                                    pyo3::exceptions::PyKeyError::new_err(format!(
-                                        "Arrow signatures input is missing signature_id '{signature_id}'"
-                                    ))
-                                })?;
-                                let position = raw_signature.position.ok_or_else(|| {
-                                    pyo3::exceptions::PyValueError::new_err(format!(
-                                        "signatures Arrow author_position is null for signature_id '{signature_id}'"
-                                    ))
-                                })?;
-                                Ok(StageSignatureInput {
-                                    sig_id: signature_id.clone(),
-                                    paper_id: raw_signature.paper_id.clone(),
-                                    raw_first: raw_signature.author_first.clone(),
-                                    raw_middle: raw_signature.author_middle.clone(),
-                                    raw_last: raw_signature.author_last.clone(),
-                                    email: raw_signature.email.clone(),
-                                    position,
-                                    affiliation_values: raw_signature.affiliations.clone(),
-                                    orcid: if use_orcid_id {
-                                        raw_signature.orcid.clone()
-                                    } else {
-                                        None
-                                    },
-                                })
-                            })
-                            .collect::<PyResult<Vec<_>>>();
-                        (unidecode_char_map, signature_inputs)
-                    },
-                );
-                let signature_inputs = signature_inputs?;
-
-                // Move each paper's authors out first; the map is then read-only.
-                let paper_authors: Vec<Vec<(i64, String)>> = needed_paper_ids
-                    .iter()
-                    .map(|paper_id| raw_authors_by_paper.remove(*paper_id).unwrap_or_default())
-                    .collect();
-                let paper_inputs = needed_paper_ids
-                    .par_iter()
-                    .zip(paper_authors.into_par_iter())
-                    .zip(detected_languages.into_par_iter())
-                    .map(|((paper_id, raw_authors), detected)| -> PyResult<StagePaperInput> {
-                        let Some(raw_paper) = raw_papers.get(*paper_id) else {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "Arrow signatures reference missing paper_id '{paper_id}'"
-                            )));
-                        };
-                        let (predicted_language, language_reliability) =
-                            if raw_paper.predicted_language.is_some() {
-                                raw_paper.is_reliable.ok_or_else(|| {
-                                    pyo3::exceptions::PyValueError::new_err(format!(
-                                        "papers Arrow predicted_language requires is_reliable for paper_id {paper_id:?}"
-                                    ))
-                                })?;
-                                let language_reliability =
-                                    raw_paper.language_reliability.ok_or_else(|| {
-                                        pyo3::exceptions::PyValueError::new_err(format!(
-                                            "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
-                                        ))
-                                    })?;
-                                (raw_paper.predicted_language.clone(), language_reliability)
-                            } else {
-                                let audit = detected
-                                    .expect("titles without a stored language were detected");
-                                (Some(audit.predicted_language), audit.language_reliability)
-                            };
-                        Ok(StagePaperInput {
-                            paper_id: (*paper_id).clone(),
-                            raw_title: raw_paper.title.clone(),
-                            raw_venue: raw_paper.venue.clone(),
-                            raw_journal: raw_paper.journal_name.clone(),
-                            raw_authors,
-                            // Preserve source stamps for the historical year-gap placement rule.
-                            year: raw_paper.year,
-                            has_abstract: raw_paper.has_abstract,
-                            predicted_language,
-                            language_reliability,
-                        })
-                    })
-                    .collect::<PyResult<Vec<_>>>()?;
-
+                        (
+                            std::borrow::Cow::Owned(unidecode_char_map),
+                            signature_inputs?,
+                            paper_inputs?,
+                            needed_paper_ids
+                                .iter()
+                                .map(|id| specter_by_paper.get(*id))
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                    RawFeaturizerRows::Planner { signatures, papers, unidecode_char_map } => {
+                        let (signature_inputs, paper_inputs) = rayon::join(
+                            || {
+                                signature_ids
+                                    .par_iter()
+                                    .zip(signatures.par_iter())
+                                    .map(|(id, signature)| stage_raw_signature(id, signature, use_orcid_id))
+                                    .collect::<PyResult<Vec<_>>>()
+                            },
+                            || {
+                                papers
+                                    .par_iter()
+                                    .map(|row| stage_raw_paper(row.id, row.paper, row.authors.cloned().unwrap_or_default()))
+                                    .collect::<PyResult<Vec<_>>>()
+                            },
+                        );
+                        // Missing characters in prefetched rows use the same built-in table.
+                        (
+                            std::borrow::Cow::Borrowed(*unidecode_char_map),
+                            signature_inputs?,
+                            paper_inputs?,
+                            papers.iter().map(|row| row.specter).collect(),
+                        )
+                    }
+                };
                 let computed_papers = preprocess_stage_papers(
                     &paper_inputs,
                     preprocess,
@@ -2533,8 +2581,9 @@ impl RustFeaturizer {
                 let paper_rows: Vec<(PaperId, PaperData)> = computed_papers
                     .into_par_iter()
                     .zip(paper_coauthors.into_par_iter())
-                    .map(|((paper_id, paper), coauthors)| {
-                        let specter = specter_by_paper.get(&paper_id).cloned();
+                    .zip(specter.into_par_iter())
+                    .map(|(((paper_id, paper), coauthors), specter)| {
+                        let specter = specter.cloned();
                         let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
                         (
                             paper_id,
@@ -2560,26 +2609,30 @@ impl RustFeaturizer {
                 Ok((signatures, papers, name_grams))
             })
         })?;
-        if parallel_free {
-            // The raw rows hold many small allocations; free them on the pool,
-            // then return the pages those workers hold, so the scoring that
-            // follows does not add to them.
-            py.allow_threads(|| {
-                install_with_optional_rayon_pool(num_threads, || {
-                    rayon::join(
-                        || raw_signatures.into_par_iter().for_each(drop),
-                        || {
-                            rayon::join(
-                                || raw_papers.into_par_iter().for_each(drop),
-                                || specter_by_paper.into_par_iter().for_each(drop),
-                            )
-                        },
-                    );
+        if let RawFeaturizerRows::Arrow {
+            signatures,
+            papers,
+            specter_by_paper,
+            ..
+        } = rows
+        {
+            if parallel_free {
+                // Return the pages held by the workers before allocating scoring buffers.
+                py.allow_threads(|| {
+                    install_with_optional_rayon_pool(num_threads, || {
+                        rayon::join(
+                            || signatures.into_par_iter().for_each(drop),
+                            || {
+                                rayon::join(
+                                    || papers.into_par_iter().for_each(drop),
+                                    || specter_by_paper.into_par_iter().for_each(drop),
+                                )
+                            },
+                        );
+                    });
+                    crate::rayon_pool::collect_freed_memory_on_pool_workers();
                 });
-                crate::rayon_pool::collect_freed_memory_on_pool_workers();
-            });
-        } else {
-            drop((raw_signatures, raw_papers, specter_by_paper));
+            }
         }
         let name_tuples = extract_name_tuples_argument(name_tuples)?;
 
@@ -2715,14 +2768,14 @@ impl RustFeaturizer {
         )?;
         Self::from_raw_rows(
             py,
-            RawFeaturizerRows {
+            RawFeaturizerRows::Arrow {
                 signatures: raw_signatures,
                 papers: raw_papers,
                 authors_by_paper: raw_authors_by_paper,
                 specter_by_paper,
+                needed_paper_ids,
             },
             signature_ids,
-            needed_paper_ids,
             cluster_seeds_require,
             cluster_seeds_disallow,
             dataset.name_counts(),

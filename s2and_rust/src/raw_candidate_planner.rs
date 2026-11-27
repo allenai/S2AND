@@ -1124,31 +1124,27 @@ impl RawBlockQueryCandidatePlanner {
     ///
     /// Each source holds all of a paper's rows: a paper without author or
     /// SPECTER rows there has none in the dataset either.
-    fn featurizer_rows(&self, signature_ids: &[String]) -> Option<RawFeaturizerRows> {
+    fn featurizer_rows(&self, signature_ids: &[String]) -> Option<RawFeaturizerRows<'_>> {
         let retained = self.state.retained_seed_rows.as_ref()?;
         let query = self.state.last_query_inputs.as_ref();
         let prefetched = self.state.prefetched_rows.as_ref();
-        // Rows are cloned in parallel: windows cover hundreds of thousands of
-        // signatures, and the serial copies dominated the featurizer build.
-        let signature_rows = signature_ids
+        let signatures = signature_ids
             .par_iter()
-            .map(|signature_id| {
-                let signature = self
-                    .state
+            .map(|id| {
+                self.state
                     .signatures
-                    .get(signature_id)
-                    .or_else(|| query.and_then(|rows| rows.signatures.get(signature_id)))
-                    .or_else(|| prefetched.and_then(|rows| rows.signatures.get(signature_id)))?;
-                Some((signature_id.clone(), signature.clone()))
+                    .get(id)
+                    .or_else(|| query.and_then(|rows| rows.signatures.get(id)))
+                    .or_else(|| prefetched.and_then(|rows| rows.signatures.get(id)))
             })
             .collect::<Option<Vec<_>>>()?;
-        let mut paper_ids: Vec<&str> = signature_rows
+        let mut paper_ids: Vec<&str> = signatures
             .iter()
-            .map(|(_, signature)| signature.paper_id.as_str())
+            .map(|signature| signature.paper_id.as_str())
             .collect();
         paper_ids.par_sort_unstable();
         paper_ids.dedup();
-        let paper_rows = paper_ids
+        let papers = paper_ids
             .par_iter()
             .map(|paper_id| {
                 // The seed state, then the latest queries, then prefetched rows.
@@ -1181,34 +1177,18 @@ impl RawBlockQueryCandidatePlanner {
                             .and_then(|specter| specter.get(*paper_id)),
                     )
                 };
-                Some((
-                    paper_id.to_string(),
-                    paper.clone(),
-                    authors.cloned(),
-                    specter.map(|vector| vector.as_ref().clone()),
-                ))
+                Some(crate::rust_featurizer::BorrowedFeaturizerPaper {
+                    id: paper_id,
+                    paper,
+                    authors,
+                    specter: specter.map(Arc::as_ref),
+                })
             })
             .collect::<Option<Vec<_>>>()?;
-        let signatures: HashMap<String, RawArrowSignature> = signature_rows.into_iter().collect();
-        let mut papers = HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
-        let mut authors_by_paper =
-            HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
-        let mut specter_by_paper =
-            HashMap::with_capacity_and_hasher(paper_rows.len(), Default::default());
-        for (paper_id, paper, authors, specter) in paper_rows {
-            if let Some(authors) = authors {
-                authors_by_paper.insert(paper_id.clone(), authors);
-            }
-            if let Some(vector) = specter {
-                specter_by_paper.insert(paper_id.clone(), vector);
-            }
-            papers.insert(paper_id, paper);
-        }
-        Some(RawFeaturizerRows {
+        Some(RawFeaturizerRows::Planner {
             signatures,
             papers,
-            authors_by_paper,
-            specter_by_paper,
+            unidecode_char_map: &self.state.unidecode_char_map,
         })
     }
 
@@ -2172,11 +2152,6 @@ impl RawBlockQueryCandidatePlanner {
         }) else {
             return Ok(None);
         };
-        let needed_paper_ids: HashSet<String> = rows
-            .signatures
-            .values()
-            .map(|signature| signature.paper_id.clone())
-            .collect();
         let (cluster_seeds_require, cluster_seeds_disallow) =
             RustFeaturizer::read_seed_constraints(
                 cluster_seeds_path.as_deref(),
@@ -2188,7 +2163,6 @@ impl RawBlockQueryCandidatePlanner {
             py,
             rows,
             signature_ids,
-            needed_paper_ids,
             cluster_seeds_require,
             cluster_seeds_disallow,
             self.state.raw_name_counts.clone(),

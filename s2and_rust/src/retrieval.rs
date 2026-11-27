@@ -1181,6 +1181,7 @@ const SPECTER_BOUND_SUMMARIES_PER_TASK: usize = 64;
 /// product plus `f32_dot_relative_error_bound`, so every bound is at or above
 /// the exact score. Summaries with more vectors than the fused kernel holds
 /// get an infinite bound. Queries without a vector keep the 0.0 in `column`.
+#[cfg(test)]
 fn specter_bound_column(
     summary: &RetrievalSummaryData,
     queries: &[RetrievalQueryData],
@@ -1223,11 +1224,7 @@ fn specter_bound_column(
         let mut bound = 0.0f64;
         for (position, slot) in slots.iter().enumerate() {
             let norm = norms[*slot];
-            let cosine = if query_norm == 0.0 || norm == 0.0 {
-                0.0
-            } else {
-                f64::from(dots[position]) / (query_norm * norm) + error
-            };
+            let cosine = f32_cosine_upper_bound(dots[position], query_norm, norm, error);
             bound = bound.max(cosine);
         }
         f32_at_or_above(bound)
@@ -1555,6 +1552,24 @@ fn f32_dot_relative_error_bound(len: usize) -> f64 {
     2.0 * m as f64 * f64::from(f32::EPSILON)
 }
 
+/// A cosine bound from its f32 dot. Extreme magnitudes can overflow or make
+/// absolute subnormal rounding exceed the relative error budget. Leave those
+/// pairs unpruned.
+fn f32_cosine_upper_bound(dot: f32, query_norm: f64, vector_norm: f64, error: f64) -> f64 {
+    if query_norm == 0.0 || vector_norm == 0.0 {
+        return 0.0;
+    }
+    let magnitude = query_norm * vector_norm;
+    // At 32 times the minimum normal, each subnormal rounding contributes
+    // at most 2^-29 of the magnitude. The dot bound includes that slack.
+    if !(32.0 * f64::from(f32::MIN_POSITIVE)..=0.5 * f64::from(f32::MAX)).contains(&magnitude)
+        || !dot.is_finite()
+    {
+        return f64::INFINITY;
+    }
+    f64::from(dot) / magnitude + error
+}
+
 /// Lane f32 dot products of one query with up to five vectors of its length.
 fn f32_lane_dots(query: &[f32], vectors: &[&[f32]]) -> [f32; 5] {
     #[cfg(target_arch = "x86_64")]
@@ -1562,7 +1577,7 @@ fn f32_lane_dots(query: &[f32], vectors: &[&[f32]]) -> [f32; 5] {
         if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
         {
             // SAFETY: the running CPU supports AVX2 and FMA.
-            return unsafe { f32_lane_dots_avx2(query, vectors) };
+            return unsafe { f32_lane_dots_avx2([query], vectors)[0] };
         }
     }
     let mut sums = [0.0f32; 5];
@@ -1578,47 +1593,15 @@ fn f32_lane_dots(query: &[f32], vectors: &[&[f32]]) -> [f32; 5] {
     sums
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn f32_lane_dots_avx2(query: &[f32], vectors: &[&[f32]]) -> [f32; 5] {
-    use std::arch::x86_64::{
-        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm256_storeu_ps,
-    };
-    let len = query.len();
-    let body = len - len % DOT_LANES;
-    let count = vectors.len().min(5);
-    let mut acc = [_mm256_setzero_ps(); 5];
-    let mut start = 0;
-    while start < body {
-        let q = _mm256_loadu_ps(query.as_ptr().add(start));
-        for slot in 0..count {
-            let v = _mm256_loadu_ps(vectors[slot].as_ptr().add(start));
-            acc[slot] = _mm256_fmadd_ps(q, v, acc[slot]);
-        }
-        start += DOT_LANES;
-    }
-    let mut sums = [0.0f32; 5];
-    for slot in 0..count {
-        let mut lanes = [0.0f32; DOT_LANES];
-        _mm256_storeu_ps(lanes.as_mut_ptr(), acc[slot]);
-        for index in body..len {
-            lanes[index % DOT_LANES] += query[index] * vectors[slot][index];
-        }
-        sums[slot] = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
-            + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
-    }
-    sums
-}
-
-/// `f32_lane_dots` of two queries of one length against the same vectors,
-/// sharing each vector load.
+/// Compute two query rows against the same vectors to share every vector load.
 fn f32_lane_dots_pair(first: &[f32], second: &[f32], vectors: &[&[f32]]) -> ([f32; 5], [f32; 5]) {
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
         {
             // SAFETY: the running CPU supports AVX2 and FMA.
-            return unsafe { f32_lane_dots_pair_avx2(first, second, vectors) };
+            let [first_dots, second_dots] = unsafe { f32_lane_dots_avx2([first, second], vectors) };
+            return (first_dots, second_dots);
         }
     }
     (
@@ -1629,44 +1612,58 @@ fn f32_lane_dots_pair(first: &[f32], second: &[f32], vectors: &[&[f32]]) -> ([f3
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn f32_lane_dots_pair_avx2(
-    first: &[f32],
-    second: &[f32],
+unsafe fn f32_lane_dots_avx2<const Q: usize>(
+    queries: [&[f32]; Q],
     vectors: &[&[f32]],
-) -> ([f32; 5], [f32; 5]) {
+) -> [[f32; 5]; Q] {
+    match *vectors {
+        [] => [[0.0; 5]; Q],
+        [a] => f32_lane_dot_tile(queries, [a]),
+        [a, b] => f32_lane_dot_tile(queries, [a, b]),
+        [a, b, c] => f32_lane_dot_tile(queries, [a, b, c]),
+        [a, b, c, d] => f32_lane_dot_tile(queries, [a, b, c, d]),
+        [a, b, c, d, e, ..] => f32_lane_dot_tile(queries, [a, b, c, d, e]),
+    }
+}
+
+/// Fix both tile dimensions at compile time so the accumulators stay in
+/// registers. Preserve each dot's lane order, including the scalar tail.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn f32_lane_dot_tile<const Q: usize, const V: usize>(
+    queries: [&[f32]; Q],
+    vectors: [&[f32]; V],
+) -> [[f32; 5]; Q] {
     use std::arch::x86_64::{
         _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm256_storeu_ps,
     };
-    let len = first.len();
+
+    let len = queries[0].len();
+    debug_assert!(queries.iter().chain(vectors.iter()).all(|v| v.len() == len));
     let body = len - len % DOT_LANES;
-    let count = vectors.len().min(5);
-    let mut acc_first = [_mm256_setzero_ps(); 5];
-    let mut acc_second = [_mm256_setzero_ps(); 5];
-    let mut start = 0;
-    while start < body {
-        let q1 = _mm256_loadu_ps(first.as_ptr().add(start));
-        let q2 = _mm256_loadu_ps(second.as_ptr().add(start));
-        for slot in 0..count {
-            let v = _mm256_loadu_ps(vectors[slot].as_ptr().add(start));
-            acc_first[slot] = _mm256_fmadd_ps(q1, v, acc_first[slot]);
-            acc_second[slot] = _mm256_fmadd_ps(q2, v, acc_second[slot]);
-        }
-        start += DOT_LANES;
-    }
-    let fold = |acc: &[std::arch::x86_64::__m256; 5], query: &[f32]| {
-        let mut sums = [0.0f32; 5];
-        for slot in 0..count {
-            let mut lanes = [0.0f32; DOT_LANES];
-            _mm256_storeu_ps(lanes.as_mut_ptr(), acc[slot]);
-            for index in body..len {
-                lanes[index % DOT_LANES] += query[index] * vectors[slot][index];
+    let mut acc = [[_mm256_setzero_ps(); V]; Q];
+    for start in (0..body).step_by(DOT_LANES) {
+        let q = queries.map(|values| _mm256_loadu_ps(values.as_ptr().add(start)));
+        for (slot, vector) in vectors.iter().enumerate() {
+            let v = _mm256_loadu_ps(vector.as_ptr().add(start));
+            for row in 0..Q {
+                acc[row][slot] = _mm256_fmadd_ps(q[row], v, acc[row][slot]);
             }
-            sums[slot] = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+        }
+    }
+    let mut sums = [[0.0; 5]; Q];
+    for row in 0..Q {
+        for (slot, vector) in vectors.iter().enumerate() {
+            let mut lanes = [0.0; DOT_LANES];
+            _mm256_storeu_ps(lanes.as_mut_ptr(), acc[row][slot]);
+            for index in body..len {
+                lanes[index % DOT_LANES] += queries[row][index] * vector[index];
+            }
+            sums[row][slot] = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
                 + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
         }
-        sums
-    };
-    (fold(&acc_first, first), fold(&acc_second, second))
+    }
+    sums
 }
 
 /// The smallest f32 at or above `value`.
@@ -3345,6 +3342,35 @@ mod overlap_index_tests {
         assert!(centroid_bounds[62].iter().all(|bound| bound.is_nan()));
         assert!(centroid_bounds[63].iter().all(|bound| bound.is_nan()));
         assert!(centroid_bounds[60][..120].iter().all(|bound| *bound == 0.0));
+    }
+
+    #[test]
+    fn extreme_specter_magnitudes_fall_back_to_exact_bounds() {
+        let mut rng = Lcg(103);
+        for scale in [1e-26_f32, 1e30_f32] {
+            let values = vec![scale; 17];
+            let norm = vector_norm_f32(&values);
+            let (mut summary, mut query) = (
+                summary(&mut rng, "component".to_owned()),
+                query(&mut rng, Vec::new()),
+            );
+            summary.specter_centroid = Some(values.clone());
+            summary.specter_centroid_norm = Some(norm);
+            summary.exemplar_vectors.clear();
+            summary.exemplar_norms.clear();
+            query.specter = Some(Arc::new(values.into()));
+            query.specter_norm = Some(norm);
+            let retriever = RustHybridCentroidRetriever::from_summaries(vec![summary], true)
+                .expect("retriever");
+            let queries = [query];
+            let centroid = retriever.specter_centroid_bounds(&queries);
+            assert_eq!(centroid[0][0], f32::INFINITY);
+            let pending = bounded::pending_for_tests(vec![0]);
+            let tight = retriever.specter_survivor_bounds(&queries, &[Some(&pending)], &centroid);
+            let exact = fused_specter_score(&queries[0], &retriever.summaries[0]);
+            assert!(exact > 0.99);
+            assert_eq!(tight[0][0], f32_at_or_above(exact));
+        }
     }
 
     #[test]

@@ -388,7 +388,7 @@ def _write_varied_arrow_bundle(bundle_dir: Path) -> dict[str, str]:
         ("4", "p3", "Ada", 0, None),
         ("5", "p4", "Ada", 0, None),
         ("6", "p5", "Alan", 1, "0000-0001"),
-        ("7", "p3", "Annabella", 1, None),
+        ("7", "p3", "Ãnnabella", 1, None),
         ("q1", "p2", "Ada", 0, None),
         ("q2", "p5", "Ada", 0, None),
         ("q3", "p0", "Ann", 1, None),

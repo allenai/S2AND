@@ -50,6 +50,7 @@ from scripts.eps.sweep_curves import (
     sha1_text,
     write_json,
 )
+from scripts.judging.decision_capture import DecisionCapture
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Ordering used with --max-subblocks.",
     )
     parser.add_argument("--write-assignments", action="store_true")
+    parser.add_argument("--capture-dir", type=Path, help="Write final linker decisions per block at one explicit EPS.")
     parser.add_argument(
         "--route",
         choices=["production", "bulk"],
@@ -197,6 +199,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--block-role-assignments requires --allow-all-reference-identities")
     if args.route == "production" and args.max_subblocks is not None:
         raise ValueError("--route production clusters whole blocks; use --route bulk with --max-subblocks")
+    if getattr(args, "capture_dir", None) is not None and (
+        args.route != "production" or args.dry_run or len(args.eps_values or ()) != 1
+    ):
+        raise ValueError("--capture-dir requires a production replay with one explicit --eps-values value")
 
 
 def _output_dir(args: argparse.Namespace) -> Path:
@@ -1210,6 +1216,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     b3_rows: list[dict[str, Any]] = []
     bulk_b3_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
+    capture_dir = getattr(args, "capture_dir", None)
+    capture = DecisionCapture()
     assignment_dir = output_dir / "assignments"
     if args.write_assignments:
         assignment_dir.mkdir(exist_ok=True)
@@ -1228,20 +1236,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 eps=eps,
                 cluster_blocks=selected_cluster_blocks,
             )
-            assignments = (
-                bulk_assignments
-                if production_dataset is None
-                else _production_assignments_for_eps(
-                    eps=eps,
-                    clusterer=clusterer,
-                    block_dict=block_dict,
-                    cluster_blocks=cluster_blocks,
-                    arrow_dataset=production_dataset,
-                    args=args,
-                    attach_reuse=attach_reuse,
+            with capture.patched() if capture_dir is not None else contextlib.nullcontext():
+                assignments = (
+                    bulk_assignments
+                    if production_dataset is None
+                    else _production_assignments_for_eps(
+                        eps=eps,
+                        clusterer=clusterer,
+                        block_dict=block_dict,
+                        cluster_blocks=cluster_blocks,
+                        arrow_dataset=production_dataset,
+                        args=args,
+                        attach_reuse=attach_reuse,
+                    )
                 )
-            )
             seconds = time.perf_counter() - started
+            if capture_dir is not None:
+                capture.write(capture_dir, blocks=block_dict, eps=eps)
             b3_row = score_assignments(identity_reference, assignments, eps)
             b3_row["cluster_seconds"] = round(seconds, 6)
             b3_rows.append(b3_row)
@@ -1267,6 +1278,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         # Bulk clustering alone, before the linker steps; a diagnostic, not the selection curve.
         pd.DataFrame(bulk_b3_rows).to_csv(output_dir / BULK_ONLY_CURVE, sep="\t", index=False)
         outputs["eps_b3_bulk_only"] = str(output_dir / BULK_ONLY_CURVE)
+    if capture_dir is not None:
+        outputs["decision_captures"] = str(capture_dir.resolve())
     summary = {
         "plan": plan,
         "distance_cache_rows": cache_rows,

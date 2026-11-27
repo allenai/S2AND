@@ -134,16 +134,16 @@ Start at 0.38, the EPS shipped in 1.4. With new heads, keep 0.38 if the cluster 
 1.4 on the same blocks. Otherwise blind-judge the marginal merges. To move EPS, judge the merges the
 new value adds or removes relative to 0.38. Require at most 15% wrong merges and a 95% Wilson upper
 bound of at most 25%. Keep the full clustering population with ORCID hidden. Use gold EPS curves as
-diagnostics. [Merge review and pass bar](../../s2and_v15_plan/gate_shape_blind/PASS_BAR.md#decisions)
+diagnostics. Merge review and pass bar (internal report `gate_shape_blind/PASS_BAR.md`)
 
 ### 4. Judge and set the gate cutoffs
 
 Set `t_full` for full-name queries and `t_init` for initial-only queries after training. Rejudge these
 probability cutoffs for each release ranker. With the 1.4 heads and the refit ranker, `t_init` is 0.792
 and judged cost is flat from 0.74 to 0.89. `t_full` is provisional at 0.702. Use probability alone.
-A top-two score margin failed independent confirmation. [Cutoff result](../../s2and_v15_plan/gate_cutoff_blind/RESULT.md) · [Margin result](../../s2and_v15_plan/margin_confirm/RESULT.md)
+A top-two score margin failed independent confirmation. Cutoff result (internal report `gate_cutoff_blind/RESULT.md`) · Margin result (internal report `margin_confirm/RESULT.md`)
 
-Use [the cutoff pass bar](../../s2and_v15_plan/gate_cutoff_blind/PASS_BAR.md) as the method. Freeze the
+Use the cutoff pass bar (internal report `gate_cutoff_blind/PASS_BAR.md`) as the method. Freeze the
 pass bar before building packages. Sample top candidates from final runtime decisions across probability
 bands, including ordinary gate abstentions. Record inclusion probabilities and exclusion counts. After
 the judge check passes, fit isotonic P(right) with inverse inclusion weights. Choose the lowest score
@@ -160,13 +160,13 @@ where the curve reaches 0.80. Give undecided items half credit and report both s
    rules up front and keep every planted control in the check.
 
 The bank supports a first cutoff estimate. Its initial-only bias check crossed at 0.738 versus 0.792
-for the weighted cutoff sample. [Bank bias check](../../s2and_v15_plan/judged_bank/README.md) · [Bank commands](judged_bank.md)
+for the weighted cutoff sample. Bank bias check (internal report `judged_bank/README.md`) · [Bank commands](judged_bank.md)
 
 In step 9, judge `t_full` on real incremental requests, including cases where both arms abstain.
 Full-name probabilities were poorly calibrated for the right links the candidate dropped. The shipped
 fitted gate recovered them using other evidence. Compare a lower `t_full` with a fitted gate for full
 names only. Keep the fitted gate only if judged evidence shows the cutoff fails.
-[Full-name analysis](../../s2and_v15_plan/fullname_drop/analyze.py) · [Step 9](../../s2and_v15_plan/NEXT_STEPS.md#status-after-checkpoint-4-step-6-done)
+Full-name analysis (internal report `fullname_drop/analyze.py`) · Step 9 (internal report `NEXT_STEPS.md`)
 
 For the cutoff candidate, stamp the reviewed EPS and cutoffs without refitting. Use the no-sweep form
 because the sweep's giant F1 tolerance can reject 0.38. Substitute the reviewed EPS if it moved.
@@ -186,8 +186,8 @@ Reload the reviewed bundle and verify its EPS and cutoffs. Freeze it before comp
 Report B-cubed (B3) with and without singletons. Require pooled B3 F1 ≥ −0.30 points, every size band
 ≥ −1.0 F1 points, B3 precision ≥ −0.10 points, and cluster count within ±2% of 1.4. Deltas are candidate minus shipped.
 
-Apply the [paired-cost rule](../../s2and_v15_plan/step6_compare/PASS_BAR.md#decision) to final runtime
+Apply the paired-cost rule (internal report `step6_compare/PASS_BAR.md`) to final runtime
 disagreements in both views. Match linked targets by shared decision-time seed members. Weight cost by
 volume and report paired block-bootstrap intervals and the undecided sensitivities. The 28-block replay
 and the 20-block gold holdout used the 1.4 heads. Complete the fresh comparison with the release bundle.
-[Recreation replay](../../s2and_v15_plan/step6_compare/RESULT.md) · [Gold holdout](../../s2and_v15_plan/untouched_holdout/RESULT.md) · [Release acceptance](release.md#stage-5-fit-evaluate-and-approve)
+Recreation replay (internal report `step6_compare/RESULT.md`) · Gold holdout (internal report `untouched_holdout/RESULT.md`) · [Release acceptance](release.md#stage-5-fit-evaluate-and-approve)

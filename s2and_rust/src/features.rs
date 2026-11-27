@@ -883,11 +883,80 @@ pub(crate) fn cosine_sim_with_norms(a: &[f32], norm_a: f64, b: &[f32], norm_b: f
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
-    let mut dot = 0.0;
-    for i in 0..a.len() {
-        dot += (a[i] as f64) * (b[i] as f64);
+    dot_f32_as_f64_scalar(a, b) / (norm_a * norm_b)
+}
+
+/// `cosine_sim_with_norms` for pair features, summed by `dot_f32_as_f64`.
+///
+/// Retrieval keeps the sequential `cosine_sim_with_norms`, so its scores and
+/// bounds do not move; the pair feature tolerates the ~1e-16 relative change.
+pub(crate) fn pair_cosine_sim_with_norms(a: &[f32], norm_a: f64, b: &[f32], norm_b: f64) -> f64 {
+    if a.len() != b.len() {
+        return f64::NAN;
     }
-    dot / (norm_a * norm_b)
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot_f32_as_f64(a, b) / (norm_a * norm_b)
+}
+
+/// The `f64` dot product of two equal-length `f32` vectors.
+///
+/// Each product of two widened `f32` values is exact in `f64`, so only the
+/// summation order differs from a sequential loop. The AVX2 kernel sums in
+/// 16 lanes, which moves the result by about 1e-16 relative; a sequential
+/// loop over 768 dimensions was latency-bound at ~3,200 cycles per pair.
+#[inline]
+pub(crate) fn dot_f32_as_f64(a: &[f32], b: &[f32]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+        // SAFETY: AVX2 and FMA were detected above.
+        return unsafe { dot_f32_as_f64_avx2(a, b) };
+    }
+    dot_f32_as_f64_scalar(a, b)
+}
+
+/// The sequential reference for `dot_f32_as_f64`.
+#[inline]
+pub(crate) fn dot_f32_as_f64_scalar(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0;
+    for (x, y) in a.iter().zip(b) {
+        dot += f64::from(*x) * f64::from(*y);
+    }
+    dot
+}
+
+/// `dot_f32_as_f64` with four 4-lane `f64` accumulators.
+///
+/// # Safety
+/// The CPU must support AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_as_f64_avx2(a: &[f32], b: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    let len = a.len().min(b.len());
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    let mut acc = [_mm256_setzero_pd(); 4];
+    let mut i = 0;
+    while i + 16 <= len {
+        // Widen four f32 values per lane group; the f64 products are exact.
+        for (lane, sum) in acc.iter_mut().enumerate() {
+            let x = _mm256_cvtps_pd(_mm_loadu_ps(pa.add(i + 4 * lane)));
+            let y = _mm256_cvtps_pd(_mm_loadu_ps(pb.add(i + 4 * lane)));
+            *sum = _mm256_fmadd_pd(x, y, *sum);
+        }
+        i += 16;
+    }
+    let sum = _mm256_add_pd(_mm256_add_pd(acc[0], acc[1]), _mm256_add_pd(acc[2], acc[3]));
+    let mut lanes = [0.0f64; 4];
+    _mm256_storeu_pd(lanes.as_mut_ptr(), sum);
+    let mut dot = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    while i < len {
+        dot += f64::from(*pa.add(i)) * f64::from(*pb.add(i));
+        i += 1;
+    }
+    dot
 }
 
 pub(crate) fn levenshtein_distance(a: &str, b: &str) -> usize {
@@ -1219,6 +1288,50 @@ pub(crate) fn resolve_matrix_aggregate_indices(
         aggregate_indices: resolved_aggregate_indices,
         aggregate_matrix_positions,
     })
+}
+
+#[cfg(test)]
+mod dot_tests {
+    use super::{
+        cosine_sim_with_norms, dot_f32_as_f64, dot_f32_as_f64_scalar, pair_cosine_sim_with_norms,
+    };
+    use crate::vector_norm_f32;
+
+    #[test]
+    fn simd_dot_stays_within_rounding_of_the_sequential_sum() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // Uniform in [-1, 1), like normalized embeddings.
+            ((state >> 40) as f32 / (1u64 << 23) as f32) - 1.0
+        };
+        for len in [0, 1, 3, 15, 16, 17, 31, 768, 769] {
+            for _ in 0..20 {
+                let a: Vec<f32> = (0..len).map(|_| next()).collect();
+                let b: Vec<f32> = (0..len).map(|_| next()).collect();
+                let fast = dot_f32_as_f64(&a, &b);
+                let sequential = dot_f32_as_f64_scalar(&a, &b);
+                let scale: f64 = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| (f64::from(*x) * f64::from(*y)).abs())
+                    .sum();
+                assert!(
+                    (fast - sequential).abs() <= 1e-13 * scale,
+                    "len={len}: {fast} vs {sequential}"
+                );
+                let (norm_a, norm_b) = (vector_norm_f32(&a), vector_norm_f32(&b));
+                let cosine = pair_cosine_sim_with_norms(&a, norm_a, &b, norm_b);
+                let reference = cosine_sim_with_norms(&a, norm_a, &b, norm_b);
+                assert!(
+                    (cosine - reference).abs() <= 1e-13,
+                    "{cosine} vs {reference}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

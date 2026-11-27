@@ -238,6 +238,68 @@ mod constraint_key_tests {
     }
 
     #[test]
+    fn name_memos_match_the_per_pair_results() {
+        let mut rng = XorShift(0x5eed_0000_0000_0042);
+        let featurizer = featurizer(&mut rng, 120);
+        let entries: Vec<(&str, &SignatureData)> = featurizer
+            .signature_ids
+            .iter()
+            .map(|signature_id| (signature_id.as_str(), &featurizer.signatures[signature_id]))
+            .collect();
+        let keys = featurizer.constraint_keys(&entries);
+        let signatures: Vec<&SignatureData> = entries.iter().map(|entry| entry.1).collect();
+        let count = signatures.len();
+        let mut conflicts = TileConflictMemo::default();
+        let mut tile_names = TileNameMemo::default();
+        // Kept across tiles, so it fills past NAME_MEMO_MAX_PAIRS and starts over.
+        let mut pair_names = PairNameMemo::default();
+        let mut conflict_outcomes = HashSet::default();
+        // The fill's tile shape, and one that cuts names across tile edges.
+        for (row_band, column_block) in [(64, 128), (7, 13)] {
+            for band_start in (0..count).step_by(row_band) {
+                let band_end = (band_start + row_band).min(count);
+                for column_start in (0..count).step_by(column_block) {
+                    let column_end = (column_start + column_block).min(count);
+                    conflicts.begin_tile(
+                        &keys.name_ids,
+                        band_start..band_end,
+                        column_start..column_end,
+                    );
+                    tile_names.begin_tile(
+                        signatures[band_start..band_end].iter().copied(),
+                        signatures[column_start..column_end].iter().copied(),
+                    );
+                    for left in band_start..band_end {
+                        for right in column_start..column_end {
+                            let (row, column) = (left - band_start, right - column_start);
+                            let conflict = RustFeaturizer::keyed_names_conflict(&keys, left, right);
+                            conflict_outcomes.insert(conflict);
+                            let names = name_only_features(signatures[left], signatures[right])
+                                .map(f64::to_bits);
+                            // The second read of a pair comes from the memo.
+                            for _ in 0..2 {
+                                let memo_conflict = conflicts.conflict(row, column, || {
+                                    RustFeaturizer::keyed_names_conflict(&keys, left, right)
+                                });
+                                assert_eq!(memo_conflict, conflict, "{left} {right}");
+                                let tile = tile_names
+                                    .features(row, column, signatures[left], signatures[right])
+                                    .map(f64::to_bits);
+                                assert_eq!(tile, names, "{left} {right}");
+                                let pair = pair_names
+                                    .features(signatures[left], signatures[right])
+                                    .map(f64::to_bits);
+                                assert_eq!(pair, names, "{left} {right}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(conflict_outcomes.len(), 2, "both conflict outcomes occur");
+    }
+
+    #[test]
     fn views_keep_a_subset_of_the_shared_signature_map() {
         let mut rng = XorShift(0x5eed_0000_0000_0007);
         let full = featurizer(&mut rng, 2);
@@ -312,6 +374,9 @@ mod compact_index_tests {
 struct ConstraintKeys<'a> {
     signature_ids: Vec<&'a str>,
     names: Vec<ConstraintNameKey<'a>>,
+    /// Interned (first, middle, last, CJK given name) per entry: entries with
+    /// equal ids have equal `names` and `first_ids`, so equal name conflicts.
+    name_ids: Vec<u32>,
     orcids: Vec<Option<&'a str>>,
     requires: Vec<Option<&'a ClusterId>>,
     /// Whether a signature appears in any disallowed seed pair.
@@ -379,6 +444,269 @@ fn has_full_first_name(signature: &SignatureData) -> bool {
             .split_whitespace()
             .any(|word| word.chars().nth(1).is_some())
     })
+}
+
+/// The signature strings `constraint_names_conflict` reads, through
+/// `ConstraintNameKey` and the interned first name.
+type NameConflictInputs<'a> = (&'a str, &'a str, &'a str, Option<&'a str>);
+
+/// Name-conflict results memoized over one fill tile.
+///
+/// Rows and columns get tile-local indices of their `ConstraintKeys` name
+/// ids, and each index pair is checked once. A tile has at most a few
+/// hundred names, so the table stays below 64 KiB and is reset per tile.
+#[derive(Default)]
+struct TileConflictMemo {
+    local: HashMap<u32, u32>,
+    row_ids: Vec<u32>,
+    column_ids: Vec<u32>,
+    /// Per (row index, column index): 0 unchecked, 1 no conflict, 2 conflict.
+    /// Empty when the tile has too many names to tabulate.
+    cells: Vec<u8>,
+    width: usize,
+}
+
+impl TileConflictMemo {
+    fn begin_tile(
+        &mut self,
+        name_ids: &[u32],
+        rows: std::ops::Range<usize>,
+        columns: std::ops::Range<usize>,
+    ) {
+        self.local.clear();
+        self.row_ids.clear();
+        self.column_ids.clear();
+        for &id in &name_ids[rows] {
+            let next = self.local.len() as u32;
+            self.row_ids.push(*self.local.entry(id).or_insert(next));
+        }
+        for &id in &name_ids[columns] {
+            let next = self.local.len() as u32;
+            self.column_ids.push(*self.local.entry(id).or_insert(next));
+        }
+        self.width = self.local.len();
+        self.cells.clear();
+        if self.width * self.width <= TILE_NAME_MEMO_MAX_CELLS {
+            self.cells.resize(self.width * self.width, 0);
+        }
+    }
+
+    /// `check()` for tile row `row` and column `column`, computed once per
+    /// pair of names.
+    #[inline]
+    fn conflict(&mut self, row: usize, column: usize, check: impl FnOnce() -> bool) -> bool {
+        if self.cells.is_empty() {
+            return check();
+        }
+        let cell = &mut self.cells
+            [self.row_ids[row] as usize * self.width + self.column_ids[column] as usize];
+        if *cell == 0 {
+            *cell = 1 + u8::from(check());
+        }
+        *cell == 2
+    }
+}
+
+/// Pair feature columns that read only the two signatures' first, middle and
+/// feature-name strings, in `name_only_features` order.
+const NAME_ONLY_COLUMNS: [usize; 9] = [
+    columns::FIRST_NAMES_EQUAL,
+    columns::MIDDLE_NAMES_EQUAL,
+    columns::MIDDLE_ONE_MISSING,
+    columns::SINGLE_CHAR_FIRST,
+    columns::SINGLE_CHAR_MIDDLE,
+    columns::LEVENSHTEIN,
+    columns::PREFIX,
+    columns::LCS,
+    columns::JARO,
+];
+
+/// The `NAME_ONLY_COLUMNS` values of one pair.
+#[inline]
+fn name_only_features(s1: &SignatureData, s2: &SignatureData) -> [f64; NAME_ONLY_COLUMNS.len()] {
+    let (first1, first2) = (s1.first_normalized(), s2.first_normalized());
+    let (middle1, middle2) = (s1.middle.as_deref(), s2.middle.as_deref());
+    let advanced = name_text_features(s1.adv_name_for_features(), s2.adv_name_for_features());
+    [
+        first_names_equal(first1, first2),
+        middle_names_equal(middle1, middle2),
+        middle_one_missing(middle1, middle2),
+        single_char_first(first1, first2),
+        single_char_middle(middle1, middle2),
+        advanced[0],
+        advanced[1],
+        advanced[2],
+        advanced[3],
+    ]
+}
+
+/// The strings `name_only_features` reads from one signature.
+type NameKey<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+fn name_key(signature: &SignatureData) -> NameKey<'_> {
+    (
+        signature.first_normalized(),
+        signature.middle.as_deref(),
+        signature.adv_name_for_features(),
+    )
+}
+
+/// Most name pairs one memo holds; a full memo starts over.
+const NAME_MEMO_MAX_PAIRS: usize = 4096;
+/// Most name-id cells a fill tile's dense memo table holds (256 KiB).
+const TILE_NAME_MEMO_MAX_CELLS: usize = 1 << 16;
+
+/// `name_only_features` memoized over one fill tile.
+///
+/// Subblocks group signatures by first name, so a tile's pairs repeat few
+/// name pairs, while the string distances cost ~2,700 cycles per pair. Each
+/// tile row and column gets a name id, and each id pair is computed once.
+/// `begin_tile` clears the memo, so it holds at most one tile's names and
+/// `NAME_MEMO_MAX_PAIRS` values: its memory does not grow with the block.
+#[derive(Default)]
+struct TileNameMemo<'a> {
+    ids: HashMap<NameKey<'a>, u32>,
+    row_ids: Vec<u32>,
+    column_ids: Vec<u32>,
+    /// Value slot per (row id, column id) cell; `u32::MAX` until computed.
+    /// Empty when the tile has too many names to tabulate.
+    slots: Vec<u32>,
+    width: usize,
+    values: Vec<[f64; NAME_ONLY_COLUMNS.len()]>,
+}
+
+impl<'a> TileNameMemo<'a> {
+    /// Name ids for a tile's rows and columns, in order.
+    fn begin_tile(
+        &mut self,
+        rows: impl Iterator<Item = &'a SignatureData>,
+        columns: impl Iterator<Item = &'a SignatureData>,
+    ) {
+        self.ids.clear();
+        self.values.clear();
+        self.row_ids.clear();
+        self.column_ids.clear();
+        for signature in rows {
+            let next = self.ids.len() as u32;
+            self.row_ids
+                .push(*self.ids.entry(name_key(signature)).or_insert(next));
+        }
+        for signature in columns {
+            let next = self.ids.len() as u32;
+            self.column_ids
+                .push(*self.ids.entry(name_key(signature)).or_insert(next));
+        }
+        self.width = self.ids.len();
+        self.slots.clear();
+        if self.width * self.width <= TILE_NAME_MEMO_MAX_CELLS {
+            self.slots.resize(self.width * self.width, u32::MAX);
+        }
+    }
+
+    /// Equal to `name_only_features(s1, s2)` for tile row `row` and column
+    /// `column`, which hold `s1` and `s2`.
+    #[inline]
+    fn features(
+        &mut self,
+        row: usize,
+        column: usize,
+        s1: &SignatureData,
+        s2: &SignatureData,
+    ) -> [f64; NAME_ONLY_COLUMNS.len()] {
+        if self.slots.is_empty() {
+            return name_only_features(s1, s2);
+        }
+        let cell = self.row_ids[row] as usize * self.width + self.column_ids[column] as usize;
+        let slot = self.slots[cell];
+        if slot != u32::MAX {
+            return self.values[slot as usize];
+        }
+        let values = name_only_features(s1, s2);
+        if self.values.len() < NAME_MEMO_MAX_PAIRS {
+            self.slots[cell] = self.values.len() as u32;
+            self.values.push(values);
+        }
+        values
+    }
+}
+
+/// `name_only_features` memoized over arbitrary pairs, such as linker pairs.
+///
+/// Name ids are looked up by signature address, then by name strings. The
+/// memo lives for one scoring call, whose borrowed signatures keep their
+/// addresses, and starts over when it holds `NAME_MEMO_MAX_PAIRS` pairs.
+#[derive(Default)]
+struct PairNameMemo<'a> {
+    by_signature: HashMap<usize, u32>,
+    by_names: HashMap<NameKey<'a>, u32>,
+    pairs: HashMap<u64, [f64; NAME_ONLY_COLUMNS.len()]>,
+}
+
+impl<'a> PairNameMemo<'a> {
+    fn name_id(&mut self, signature: &'a SignatureData) -> u32 {
+        let address = signature as *const SignatureData as usize;
+        if let Some(id) = self.by_signature.get(&address) {
+            return *id;
+        }
+        let next = self.by_names.len() as u32;
+        let id = *self.by_names.entry(name_key(signature)).or_insert(next);
+        self.by_signature.insert(address, id);
+        id
+    }
+
+    /// Equal to `name_only_features(s1, s2)`.
+    fn features(
+        &mut self,
+        s1: &'a SignatureData,
+        s2: &'a SignatureData,
+    ) -> [f64; NAME_ONLY_COLUMNS.len()] {
+        if self.pairs.len() >= NAME_MEMO_MAX_PAIRS
+            || self.by_signature.len() >= 4 * NAME_MEMO_MAX_PAIRS
+        {
+            self.by_signature.clear();
+            self.by_names.clear();
+            self.pairs.clear();
+        }
+        let key = (u64::from(self.name_id(s1)) << 32) | u64::from(self.name_id(s2));
+        *self
+            .pairs
+            .entry(key)
+            .or_insert_with(|| name_only_features(s1, s2))
+    }
+}
+
+/// The SPECTER cosine feature of one pair, plus one; NaN unless both papers
+/// are English or unknown and have nonzero vectors.
+fn specter_pair_feature(p1: &PaperData, p2: &PaperData) -> f64 {
+    let english_or_unknown =
+        |paper: &PaperData| matches!(paper.predicted_language.as_deref(), Some("en" | "un"));
+    if !(english_or_unknown(p1) && english_or_unknown(p2)) {
+        return f64::NAN;
+    }
+    let (Some(specter_a), Some(specter_b)) = (p1.specter.as_ref(), p2.specter.as_ref()) else {
+        return f64::NAN;
+    };
+    // Match s2and.featurizer._specter_vector_or_none: all-zero SPECTER
+    // vectors are treated as missing, yielding NaN.
+    // The Arrow ingest path keeps all-zero rows as real vectors, so the
+    // missing-vector check has to live here instead of at the ingest
+    // boundary.
+    let a_zero = p1
+        .specter_norm
+        .map_or_else(|| specter_a.iter().all(|v| *v == 0.0), |norm| norm == 0.0);
+    let b_zero = p2
+        .specter_norm
+        .map_or_else(|| specter_b.iter().all(|v| *v == 0.0), |norm| norm == 0.0);
+    if a_zero || b_zero {
+        return f64::NAN;
+    }
+    let score = match (p1.specter_norm, p2.specter_norm) {
+        (Some(norm_a), Some(norm_b)) if specter_a.len() == specter_b.len() => {
+            pair_cosine_sim_with_norms(specter_a, norm_a, specter_b, norm_b)
+        }
+        _ => cosine_sim_vec_f32(specter_a, specter_b),
+    };
+    score + 1.0
 }
 
 /// Pairs featurized and scored per pool task in fused scoring. Tiles of 64
@@ -800,20 +1128,32 @@ impl RustFeaturizer {
         p2: &PaperData,
         model_only_features: bool,
     ) -> [f64; FULL_FEATURE_COUNT] {
+        let names = name_only_features(s1, s2);
+        self.featurize_pair_data_named(s1, s2, p1, p2, model_only_features, &names, None)
+    }
+
+    /// `featurize_pair_data_with` given the pair's `name_only_features`,
+    /// which callers may reuse across pairs with the same names.
+    /// `specter`, when given, is the pair's `specter_pair_feature`.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn featurize_pair_data_named(
+        &self,
+        s1: &SignatureData,
+        s2: &SignatureData,
+        p1: &PaperData,
+        p2: &PaperData,
+        model_only_features: bool,
+        names: &[f64; NAME_ONLY_COLUMNS.len()],
+        specter: Option<f64>,
+    ) -> [f64; FULL_FEATURE_COUNT] {
         let mut feats = [f64::NAN; FULL_FEATURE_COUNT];
 
-        let first1 = s1.first_normalized();
-        let first2 = s2.first_normalized();
-        let middle1 = s1.middle.as_deref();
-        let middle2 = s2.middle.as_deref();
-
-        feats[columns::FIRST_NAMES_EQUAL] = first_names_equal(first1, first2);
+        for (column, value) in NAME_ONLY_COLUMNS.iter().zip(names) {
+            feats[*column] = *value;
+        }
         feats[columns::MIDDLE_INITIALS_OVERLAP] =
             middle_initials_overlap_counts(&s1.middle_initial_counts, &s2.middle_initial_counts);
-        feats[columns::MIDDLE_NAMES_EQUAL] = middle_names_equal(middle1, middle2);
-        feats[columns::MIDDLE_ONE_MISSING] = middle_one_missing(middle1, middle2);
-        feats[columns::SINGLE_CHAR_FIRST] = single_char_first(first1, first2);
-        feats[columns::SINGLE_CHAR_MIDDLE] = single_char_middle(middle1, middle2);
 
         feats[columns::AFFILIATION_OVERLAP] =
             counter_jaccard_data(&s1.affiliations, &s2.affiliations, f64::INFINITY);
@@ -890,46 +1230,11 @@ impl RustFeaturizer {
         feats[columns::FIRST_NAME_COUNT_MAX] = counts[4];
         feats[columns::LAST_FIRST_NAME_COUNT_MAX] = counts[5];
 
-        let specter_sim = if english_or_unknown_count == 2 {
-            if let (Some(specter_a), Some(specter_b)) = (p1.specter.as_ref(), p2.specter.as_ref()) {
-                // Match s2and.featurizer._specter_vector_or_none: all-zero SPECTER
-                // vectors are treated as missing, yielding NaN.
-                // The Arrow ingest path keeps all-zero rows as real vectors, so the
-                // missing-vector check has to live here instead of at the ingest
-                // boundary.
-                let a_zero = p1
-                    .specter_norm
-                    .map_or_else(|| specter_a.iter().all(|v| *v == 0.0), |norm| norm == 0.0);
-                let b_zero = p2
-                    .specter_norm
-                    .map_or_else(|| specter_b.iter().all(|v| *v == 0.0), |norm| norm == 0.0);
-                if a_zero || b_zero {
-                    f64::NAN
-                } else {
-                    let score = match (p1.specter_norm, p2.specter_norm) {
-                        (Some(norm_a), Some(norm_b)) if specter_a.len() == specter_b.len() => {
-                            cosine_sim_with_norms(specter_a, norm_a, specter_b, norm_b)
-                        }
-                        _ => cosine_sim_vec_f32(specter_a, specter_b),
-                    };
-                    score + 1.0
-                }
-            } else {
-                f64::NAN
-            }
-        } else {
-            f64::NAN
-        };
+        let specter_sim = specter.unwrap_or_else(|| specter_pair_feature(p1, p2));
         feats[columns::SPECTER_COSINE_SIM] = specter_sim;
 
         feats[columns::JOURNAL_OVERLAP] =
             counter_jaccard_data(&p1.journal_ngrams, &p2.journal_ngrams, f64::INFINITY);
-
-        let advanced = name_text_features(s1.adv_name_for_features(), s2.adv_name_for_features());
-        feats[columns::LEVENSHTEIN] = advanced[0];
-        feats[columns::PREFIX] = advanced[1];
-        feats[columns::LCS] = advanced[2];
-        feats[columns::JARO] = advanced[3];
         feats
     }
 
@@ -1075,6 +1380,21 @@ impl RustFeaturizer {
                 .map(|(signature_id, _)| members.contains(signature_id))
                 .collect()
         };
+        let mut name_index: HashMap<NameConflictInputs<'a>, u32> = HashMap::default();
+        let name_ids = entries
+            .iter()
+            .map(|(_, signature)| {
+                let next = name_index.len() as u32;
+                *name_index
+                    .entry((
+                        signature.first_normalized().unwrap_or(""),
+                        signature.middle.as_deref().unwrap_or(""),
+                        signature.last_normalized.as_deref().unwrap_or(""),
+                        signature.cjk_given_name.as_deref(),
+                    ))
+                    .or_insert(next)
+            })
+            .collect();
         // Intern first names so the name-tuple lookup becomes a search in a
         // short sorted list instead of two string hashes per pair.
         let mut first_index: ahash::AHashMap<&str, u32> = ahash::AHashMap::default();
@@ -1112,6 +1432,7 @@ impl RustFeaturizer {
                 .map(|(signature_id, _)| *signature_id)
                 .collect(),
             names,
+            name_ids,
             orcids: entries
                 .iter()
                 .map(|(_, signature)| signature.orcid.as_deref())
@@ -1306,6 +1627,35 @@ impl RustFeaturizer {
         incremental_dont_use_cluster_seeds: bool,
         suppress_orcid: bool,
     ) -> Option<f64> {
+        self.constraint_value_from_keys_with(
+            keys,
+            left,
+            right,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+            suppress_orcid,
+            || Self::keyed_names_conflict(keys, left, right),
+        )
+    }
+
+    /// `constraint_value_from_keys` with `names_conflict` standing in for
+    /// `keyed_names_conflict(keys, left, right)`, such as a memoized lookup.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn constraint_value_from_keys_with(
+        &self,
+        keys: &ConstraintKeys<'_>,
+        left: usize,
+        right: usize,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        suppress_orcid: bool,
+        names_conflict: impl FnOnce() -> bool,
+    ) -> Option<f64> {
         if keys.in_disallow[left]
             && keys.in_disallow[right]
             && self.cluster_seeds_disallow_contains(
@@ -1332,7 +1682,7 @@ impl RustFeaturizer {
                 }
             }
         }
-        if Self::keyed_names_conflict(keys, left, right) {
+        if names_conflict() {
             // Waivers rest on ORCIDs, so hidden ORCIDs waive nothing.
             let waived = !suppress_orcid
                 && keys
@@ -1661,23 +2011,40 @@ impl RustFeaturizer {
                         vec![0.0f64; tile * main_cols],
                         vec![0.0f64; tile * nameless_cols],
                         Vec::<usize>::with_capacity(tile),
+                        PairNameMemo::default(),
+                        Vec::<f64>::with_capacity(tile),
                     )
                 },
-                |(main_tile, nameless_tile, scored_rows),
+                |(main_tile, nameless_tile, scored_rows, memo, specter_values),
                  (tile_index, (distance_tile, aggregate_tile))| {
                     scored_rows.clear();
+                    // SPECTER first, apart from the other features, so the
+                    // tile's vectors stay cached across its pairs.
+                    let tile_start = tile_index * tile;
+                    specter_values.clear();
+                    specter_values.extend((tile_start..tile_start + distance_tile.len()).map(
+                        |pair_offset| {
+                            specter_pair_feature(
+                                lookup(left_indices[pair_offset]).1,
+                                lookup(right_indices[pair_offset]).1,
+                            )
+                        },
+                    ));
                     for row in 0..distance_tile.len() {
                         let pair_offset = tile_index * tile + row;
                         let (s1, p1) = lookup(left_indices[pair_offset]);
                         let (s2, p2) = lookup(right_indices[pair_offset]);
                         // A labeled pair takes its label as the distance downstream.
                         let labeled = labels.is_some_and(|values| !values[pair_offset].is_nan());
-                        let features = self.featurize_pair_data_with(
+                        let names = memo.features(s1, s2);
+                        let features = self.featurize_pair_data_named(
                             s1,
                             s2,
                             p1,
                             p2,
                             !(labeled && labeled_pairs_skip_model_only),
+                            &names,
+                            Some(specter_values[row]),
                         );
                         let aggregate_row = &mut aggregate_tile
                             [row * aggregate_stride..row * aggregate_stride + aggregate_cols];
@@ -3511,9 +3878,17 @@ impl RustFeaturizer {
                     }
                     keys
                 });
-                tiles
-                    .par_iter()
-                    .for_each(|&(band_start, band_end, column_start, column_end)| {
+                tiles.par_iter().for_each_init(
+                    <(TileNameMemo, Vec<f64>, TileConflictMemo)>::default,
+                    |(memo, specter_values, conflicts),
+                     &(band_start, band_end, column_start, column_end)| {
+                        if let Some(keys) = keys.as_ref() {
+                            conflicts.begin_tile(
+                                &keys.name_ids,
+                                band_start..band_end,
+                                column_start..column_end,
+                            );
+                        }
                         ONE_PASS_BUFFERS.with(|buffers| {
                             let mut buffers = buffers.borrow_mut();
                             let (scored, main_rows, nameless_rows) = &mut *buffers;
@@ -3545,7 +3920,7 @@ impl RustFeaturizer {
                                         None => keys
                                             .as_ref()
                                             .and_then(|keys| {
-                                                self.constraint_value_from_keys(
+                                                self.constraint_value_from_keys_with(
                                                     keys,
                                                     left,
                                                     right,
@@ -3554,6 +3929,17 @@ impl RustFeaturizer {
                                                     dont_merge_cluster_seeds,
                                                     incremental_dont_use_cluster_seeds,
                                                     suppress_orcid,
+                                                    || {
+                                                        conflicts.conflict(
+                                                            left - band_start,
+                                                            right - column_start,
+                                                            || {
+                                                                Self::keyed_names_conflict(
+                                                                    keys, left, right,
+                                                                )
+                                                            },
+                                                        )
+                                                    },
                                                 )
                                             })
                                             .map_or(f64::NAN, |value| value - large_integer),
@@ -3574,15 +3960,46 @@ impl RustFeaturizer {
                             if scored.is_empty() {
                                 return;
                             }
+                            memo.begin_tile(
+                                feature_lookup[band_start..band_end]
+                                    .iter()
+                                    .map(|entry| entry.0),
+                                feature_lookup[column_start..column_end]
+                                    .iter()
+                                    .map(|entry| entry.0),
+                            );
                             // Bounded batches keep each thread's feature buffers small.
                             for batch in scored.chunks(ONE_PASS_SCORING_BATCH) {
                                 let rows = batch.len();
                                 main_rows.resize(rows * main_cols, 0.0);
                                 nameless_rows.resize(rows * nameless_cols, 0.0);
+                                // SPECTER first, apart from the other features, so
+                                // the tile's vectors stay cached across its rows.
+                                specter_values.clear();
+                                specter_values.extend(batch.iter().map(|&(left, right, _)| {
+                                    specter_pair_feature(
+                                        feature_lookup[left as usize].1,
+                                        feature_lookup[right as usize].1,
+                                    )
+                                }));
                                 for (row, &(left, right, _)) in batch.iter().enumerate() {
                                     let (s1, p1) = feature_lookup[left as usize];
                                     let (s2, p2) = feature_lookup[right as usize];
-                                    let features = self.featurize_pair_data(s1, s2, p1, p2);
+                                    let names = memo.features(
+                                        left as usize - band_start,
+                                        right as usize - column_start,
+                                        s1,
+                                        s2,
+                                    );
+                                    let features = self.featurize_pair_data_named(
+                                        s1,
+                                        s2,
+                                        p1,
+                                        p2,
+                                        true,
+                                        &names,
+                                        Some(specter_values[row]),
+                                    );
                                     let main_row =
                                         &mut main_rows[row * main_cols..(row + 1) * main_cols];
                                     for (dest, index) in
@@ -3626,7 +4043,8 @@ impl RustFeaturizer {
                                 }
                             }
                         })
-                    });
+                    },
+                );
             })
         });
         Ok((labeled.into_inner(), scored_total.into_inner()))

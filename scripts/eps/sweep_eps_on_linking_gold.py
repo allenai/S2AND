@@ -157,7 +157,11 @@ def _safe_cache_name(dataset: str, index: int, block_key: str) -> str:
 
 
 def _eps_values(args: argparse.Namespace, model_eps: float | None) -> list[float]:
-    """Return sorted EPS values, including model EPS when it falls in range."""
+    """Return sorted EPS values, including model EPS when it falls in range.
+
+    A capture run records exactly its one explicit EPS. Adding the model EPS there would replay a
+    second EPS into the same capture files.
+    """
 
     if args.eps_values:
         values = [round(float(value), 10) for value in args.eps_values]
@@ -165,7 +169,8 @@ def _eps_values(args: argparse.Namespace, model_eps: float | None) -> list[float
         count = int(round((args.eps_stop - args.eps_start) / args.eps_step))
         values = [round(args.eps_start + i * args.eps_step, 10) for i in range(count + 1)]
         values = [value for value in values if value <= args.eps_stop + 1e-9]
-    if model_eps is not None and args.eps_start <= model_eps <= args.eps_stop:
+    capturing = getattr(args, "capture_dir", None) is not None
+    if model_eps is not None and not capturing and args.eps_start <= model_eps <= args.eps_stop:
         values.append(round(float(model_eps), 10))
     return sorted(set(values))
 

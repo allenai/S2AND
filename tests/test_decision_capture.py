@@ -194,3 +194,15 @@ def test_targets_match_on_seed_members() -> None:
     assert not targets_match(("seed-a",), ("seed-b",))
     assert not targets_match(("seed-a",), None)
     assert not targets_match((), ())
+
+
+def test_capture_replays_only_the_explicit_eps(tmp_path: Path) -> None:
+    # A model EPS inside the default grid range used to add a second replay into the same capture files.
+    from scripts.eps import sweep_eps_on_linking_gold as sweep
+
+    base = ["--dataset", "d", "--arrow-root", str(tmp_path), "--model-path", str(tmp_path)]
+    base += ["--batching-threshold", "15000", "--eps-values", "0.38"]
+    capture = sweep.parse_args([*base, "--route", "production", "--capture-dir", str(tmp_path / "capture")])
+    sweep._validate_args(capture)
+    assert sweep._eps_values(capture, 0.45) == [0.38]
+    assert sweep._eps_values(sweep.parse_args(base), 0.45) == [0.38, 0.45]

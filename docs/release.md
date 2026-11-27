@@ -79,7 +79,7 @@ When a filter removes records from data that a released model was fit on, publis
 It pairs each benchmark's original development-population fingerprint with the filtered one.
 Check first that every filtered block is a subset of the same original block.
 
-The selected local input path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
+Release 1.3 used the maintainers' `s2and_ca_mainline_20261017` snapshot.
 The snapshot passes relocation checks.
 It excludes `inventors_s2and` from corrected records, Arrow data, pairwise plans, and incremental inputs.
 

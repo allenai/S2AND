@@ -15,7 +15,7 @@ Reuse accepted augmentation when source identities and omission policy remain va
 Release `1.3` excludes patent data.
 Pairwise inputs contain eight sources: seven non-patent benchmarks and the existing non-patent augmented dataset.
 Incremental inputs contain the 13 inherited non-patent datasets.
-The selected local snapshot path is `D:/local-unsynced/s2and_ca_mainline_20261017/snapshot`.
+Release 1.3 used the maintainers' `s2and_ca_mainline_20261017` snapshot.
 The snapshot passes relocation checks.
 
 ```powershell

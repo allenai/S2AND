@@ -64,7 +64,7 @@ The Athena producer has focused tests and an offline plan. Live Athena execution
 
 ## Evidence and limits
 
-The run root was `D:/local-unsynced/s2and_ca_mainline_20261017`.
+The run root was the maintainers' local `s2and_ca_mainline_20261017` folder.
 Its `commands/`, `bounds/`, `orcid_audit/`, and `checks/` directories preserve commands, decisions, resource records, and verification outputs.
 The previous common artifacts remain in `archive/previous_common_v1.3_M` under that root.
 The [count guide](../../scripts/intake/counts/README.md) defines the Athena source and canonical key contract.

@@ -418,6 +418,35 @@ def _nonnegative_int(value: object, field: str) -> int:
     return value
 
 
+def _package_rows(captured: Path, quotas: Mapping[str, int], ledger: IdentityLedger | None) -> list[dict[str, Any]]:
+    table = pq.read_table(captured)
+    if "stratum" in table.column_names:
+        return table.to_pylist()
+    if "candidate_signature_ids" not in table.column_names or quotas.keys() - {"full", "initial_only"}:
+        raise ValueError("Production capture quotas must use the full and initial_only query views")
+
+    labels: dict[str, set[str]] = {}
+    rows = []
+    for row in table.to_pylist():
+        if row["exclusion_reason"] is not None or row["query_view"] not in quotas:
+            continue
+        if ledger is not None and row["block"] not in labels:
+            labels[row["block"]] = set(ledger.for_block(row["block"]).scored())
+        members = row["candidate_signature_ids"]
+        rows.append(
+            {
+                "block": row["block"],
+                "query_signature_id": row["query_signature_id"],
+                "target_signature_ids": members,
+                "labeled_signature_ids": sorted(labels.get(row["block"], set()).intersection(members)),
+                "stratum": row["query_view"],
+                "target_component": row["candidate_component"],
+                "score": row["chosen_probability"],
+            }
+        )
+    return rows
+
+
 def _given_names(orcid: str, cache: Path) -> str:
     if normalize_orcid(orcid) != orcid:
         raise ValueError(f"Invalid ledger ORCID {orcid!r}")
@@ -629,7 +658,7 @@ def build_package(
         raise ValueError("max_authors must be at least 1")
 
     version = latest_version(bank)
-    rows = pq.read_table(captured).to_pylist()
+    rows = _package_rows(captured, quotas, ledger)
     if unknown := {row["stratum"] for row in rows} - quotas.keys():
         raise ValueError(f"No quotas for captured strata {sorted(unknown)}")
     display_rng = Random(seed)

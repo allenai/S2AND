@@ -2,13 +2,40 @@
 
 Run `python -m scripts.judging.judged_bank` from the repository root through the project environment.
 
+## Capture production decisions
+
+Use an existing EPS replay with one explicit EPS. For example, reuse available distance caches:
+
+```text
+uv run --offline --no-sync python -m scripts.eps.sweep_eps_on_linking_gold --dataset DATASET --arrow-root ARROW_ROOT --model-path MODEL --batching-threshold 15000 --distance-cache-dir DISTANCES --output-dir SWEEP_DIR --eps-values 0.38 --capture-dir CAPTURE_DIR
+```
+
+The replay writes one Parquet file per block. Each row is the last linker decision for one
+`query_signature_id`. Bulk-only blocks have no linker decisions and get an empty table.
+Each row includes `query_view`, `eps`, `pass_index`, `final_action`, and `exclusion_reason`.
+`candidate_component`, `candidate_signature_ids`, and `chosen_probability` describe the scored
+choice, including ordinary gate abstentions. `runner_up_component` and `runner_up_score`
+describe the highest-scoring allowed row from another component. Forced links retain their
+scores and targets and are excluded from judging.
+
+`target_component` and `target_signature_ids` describe the accepted link, when present.
+`target_seed_signature_ids` omits members that attached in earlier passes. Residual clusters
+can supply new seeds. Compare linked targets across arms with `targets_match` in
+`scripts.judging.decision_capture`. The targets match when their seed lists intersect.
+
 ## Build a package
 
 ```text
 uv run --offline --no-sync python -m scripts.judging.judged_bank build-package --bank BANK --captured decisions.parquet --strata strata.json --snapshot ARROW_ROOT --output-dir BLIND_DIR --key PRIVATE/key.json
 ```
 
-Capture one row per comparison. The Parquet columns are:
+Pass a replay capture file or its directory to `--captured` directly. Set quotas for the
+`full` or `initial_only` views you want judged. The bank samples scored choices for links
+and ordinary gate abstentions. It skips rows with an exclusion reason and views without a
+quota. With an identity ledger, the bank uses its scored labels for reuse checks.
+
+For experiment-defined comparisons and strata, provide one row per comparison with these
+Parquet columns:
 
 | Column | Value |
 |---|---|

@@ -76,20 +76,21 @@ for omitted entries. The focal author remains visible in its own field.
 
 Supply `--block-role-assignments` and `--identity-evidence` to plant controls. The ledger
 identifies pure pairs among the unjudged candidates left after sampling. Set aside a capture
-stratum with quota zero if the experiment supplies a distinct control pool. Different-person
-controls require two nonempty, distinct public ORCID given names. Supply `--orcid-cache` outside
-the blind directory for these lookups. Use an empty `controls` map to build without controls.
+stratum with quota zero if the experiment supplies a distinct control pool. Use an empty `controls`
+map to build without controls. Set `--orcid-cache` outside the blind directory for public ORCID lookups.
 
 Set a positive `different_same_name` control quota to plant distinct ledger identities
 whose public ORCID person records show the same normalized given name or leading initial.
-The ordinary `different` control requires distinct normalized given names. The tool
+The ordinary `different` control requires two nonempty, distinct normalized given names. The tool
 assigns each pair to one slot when a pair qualifies for both.
 Both control types have gold verdict `different` and contribute to the combined judge check.
 
-Give judges only `BLIND_DIR/package.md`. Keep the answer key and bank private. If the draw
+Give each judge `BLIND_DIR/package.md` in a separate folder. Keep the answer key and bank private. If the draw
 produced zero items, use the key's reuse records directly.
 
 ## Freeze verdicts and check judges
+
+Freeze both verdict files before merging. Set the thresholds before building the package.
 
 ```text
 uv run --offline --no-sync python -m scripts.judging.judged_bank merge-verdicts --bank BANK --key PRIVATE/key.json --judge fable judgments_fable.jsonl --judge neon judgments_neon.jsonl

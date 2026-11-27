@@ -39,7 +39,7 @@ Keep source snapshots and fit outputs in separate directories.
 - Record the model's generating runtime version as provenance.
 - Rebuild unversioned model stages or export them explicitly under the current contract.
 - Train every release model from the published `inference` and `dataset` bundles.
-- Select hyperparameters and EPS on development data. Keep test metrics out of model selection.
+- Select hyperparameters and review operating points on development data. Keep test metrics out of model selection.
 - Rebuild distributions and rerun installed checks after a package change.
 - Rerun affected evaluations after a runtime change, even when the contract stays compatible.
 
@@ -170,7 +170,8 @@ calibration requires `--allow-zero-precision-f1-tolerance` to write the selected
 The rule needs no earlier model, so a dataset update or a new pairwise fit does not change how it works.
 Calibration writes a fresh calibrated sibling and preserves both boosters.
 Verify that only clusterer configuration and bundle metadata change.
-This benchmark selection supplies the initial EPS for giant-block review.
+This benchmark selection supplies the pairwise bundle for linker fitting.
+For 1.5 production EPS, follow the [pinned EPS review](v15_training_design.md#3-review-production-eps).
 
 Freeze the calibrated pairwise model, corrected incremental source, common assets, linker target, and fit resources.
 Recheck safe-action labels if query evidence or profile memberships change.
@@ -184,26 +185,21 @@ Compare old and new models on the same population when a matched comparison is r
 Do not compare historical rates from different data or split populations as a matched baseline.
 
 Run `train_linker_and_finalize.py` once against the calibrated model and the synced data root.
-The command computes fresh features, fits the linker, writes a complete sibling, reloads it, and evaluates its declared test split.
+The command requires initial ranker cutoffs. It computes fresh features, fits the ranker, writes a complete sibling, and reloads it.
+The [1.5 runbook](v15_training_design.md#2-reseed-freeze-tasks-and-fit-the-linker) uses frozen tasks. The legacy `--source-bundle-root` path evaluates its declared test split.
 
-The fixed classic booster uses 53 features and 675 trees and fits training rows.
+On the legacy path, the fixed classic booster uses 53 features and 675 trees and fits training rows.
 Before computing features, the trainer reads complete holdout query and base identities from the source tables.
 It needs only the identity columns, even when it computes features for calibration rows only.
 An overlap excludes the whole training query and preserves each retained query's candidate context.
 The trainer checks the same identities again before fitting and records the early exclusion counts.
 It uses origin maps to remove original queries from candidate profiles.
 
-Use `calibration_fit` and `calibration_check` as development splits for gate feature selection and coefficient fitting.
-Exclude verified query-paper exposure before gate calibration. Retain the remaining manual development labels.
-Keep the exposure annotations for pairwise training, EPS selection, and paper overlap.
+For 1.5, [judge the release ranker's cutoffs](v15_training_design.md#4-judge-and-set-the-gate-cutoffs) and stamp them with the reviewed EPS on the complete model.
+Freeze that bundle for the [fresh-block release bars](v15_training_design.md#5-validate-on-fresh-blocks).
+See the [giant-block EPS guide](eps_calibration.md) for earlier release decisions.
 
-Complete [giant-block EPS review](eps_calibration.md) before final release evaluation.
-The release owner selects the final EPS there; that guide also records the `1.3` decision.
-Apply the reviewed EPS to a fresh complete model without another fit.
-Freeze that package before final acceptance tests.
-
-Read `evaluation_summary.stratified_eval_test_split.overall.test` as regression evidence because earlier development used that population.
-Full-source diagnostics can also include gate-calibration queries.
+Read the legacy `evaluation_summary.stratified_eval_test_split.overall.test` as regression evidence because earlier development used that population.
 Score frozen identity-gold cases through the complete model with [evaluate_incremental_gold.py](../scripts/release/verification/evaluate_incremental_gold.py).
 Report those scores separately from the [manual safe-action label](data.md#incremental-tasks) scores.
 

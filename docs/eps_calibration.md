@@ -1,10 +1,8 @@
 # Giant-block EPS review
 
 Use this procedure before final release evaluation.
-Benchmark validation supplies the initial EPS.
-Giant-block curves supply the final operating-point review.
-The release owner chooses EPS after reviewing the giant-block curves and benchmark validation.
-The scripts do not choose EPS automatically.
+Through 1.4, benchmark validation supplied the initial EPS. The release owner reviewed the giant-block curves to choose the final EPS.
+For 1.5, follow the [pinned EPS review](v15_training_design.md#3-review-production-eps). Use the curves below as diagnostics.
 
 ## Inputs
 
@@ -19,7 +17,7 @@ No second giant-data copy is required.
 
 A candidate model can carry a close-pair bonus, selected with EPS in benchmark calibration.
 The sweep builds each cached tree with the candidate's bonus, so the curves review EPS for that linkage.
-`apply_reviewed_eps.py` then changes EPS only.
+In a sweep review, `apply_reviewed_eps.py` keeps the bonus and applies the reviewed EPS.
 To change the bonus itself, rerun the sweep on a candidate that carries the new value.
 Without snapshot curves, `--close-pair BONUS DISTANCE` sets a reviewed bonus, and the review note cites the evidence.
 `--release-version` names a model that differs from its source only in these linkage settings.
@@ -51,7 +49,7 @@ It excludes the 19 reviewed mixed-identity groups and synthetic initial-query co
 It also excludes each record in `orcid_error_query_signatures.json`; the rest of that ORCID group remains.
 A second B3 curve, `eps_b3_with_singletons.tsv`, also keeps one-record ORCID groups.
 Those records cannot lose recall, but a wrong merge lowers their precision.
-That curve is diagnostic; the repeated view selects EPS.
+The sweep review uses the repeated view and treats the singleton-inclusive curve as a diagnostic.
 ORCID IDs remain hidden from native features, constraints, and subblocking repair.
 Unknown identities remain in inference context; B3 scores only known references.
 
@@ -160,8 +158,8 @@ It reads the final-test assignments again and rejects a reference that contains 
 It requires identity B3 curves.
 It writes a fresh complete model and preserves every trained artifact byte.
 
-When internal exports supply the review, omit `--sweep-root` and the dataset and threshold options.
-The command cannot check those curves, so the review note must cite their location.
+When internal evidence supplies the review, omit `--sweep-root` and the dataset and threshold options.
+Cite the evidence in the review note.
 It still checks the EPS range, the fresh output paths, the model load, and the unchanged artifacts.
 Release `1.3` used this form:
 
@@ -171,8 +169,8 @@ uv run --no-sync python scripts/eps/apply_reviewed_eps.py `
   --eps 0.53 --review-note '<decision, tradeoff, and internal evidence location>' `
   --output-report "$EpsRun/eps_review.json"
 ```
-Only `clusterer.json` and `manifest.json` change.
-An EPS-only change requires no pairwise or incremental fit.
+An EPS-only review updates `clusterer.json` and the manifest. To stamp reviewed linker cutoffs in the
+same step, add `--gate-cutoffs T_FULL T_INIT`. Both reviews preserve the fitted boosters.
 Repeat affected cluster evaluation and real-model inference checks with the reviewed package before acceptance.
 
 Keep sweep outputs and distance caches local.

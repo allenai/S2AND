@@ -50,8 +50,8 @@ def load_external_reference_labels(path: Path, *, dataset: str | None = None) ->
 class OrcidReference:
     """Known ORCID identities for EPS curves, with the populations they exclude.
 
-    ``repeated`` selects EPS. ``with_singletons`` is a diagnostic: one-record
-    ORCID groups add merge penalties that the repeated view omits.
+    The sweep review uses ``repeated``. The ``with_singletons`` view adds
+    merge penalties for one-record ORCID groups.
     """
 
     repeated: dict[str, str]

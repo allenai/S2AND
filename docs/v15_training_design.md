@@ -8,15 +8,15 @@ Keep ineligible mentions as clustering context. Only verified, score-eligible Go
 
 | Role | Block targets | Use |
 | --- | --- | --- |
-| `fit_pool` | About 110 | Fit both pairwise heads, the 53-feature ranker, and the gate. Use the frozen validation fold for mined pairs and the marked subset for gate fitting. |
-| `eps_cal` | About 40 | Tune the production clustering threshold (EPS) on blocks disjoint from `fit_pool`. Require a repeated scored ORCID per block. |
+| `fit_pool` | About 110 | Fit both pairwise heads and the 53-feature ranker. Use the frozen validation fold for mined pairs. |
+| `eps_cal` | About 40 | Check the production clustering threshold (EPS) on blocks disjoint from `fit_pool`. Require a repeated scored ORCID per block. |
 | `gate_thresh` | 10–15 plus a non-ORCID blind sample | Review the operating point on natural incremental requests, including retrieval misses. Use production seeds and blind judgments. |
 | `dev_test` | About 40 fresh blocks plus pins, with at least 30 giants total | Iterate and check regressions. Pin the legacy 1.4 giants and the 27 Batch 1–6 blocks here. |
 | `final_test` | About 200 fresh blocks, including about 60 giants | Evaluate the frozen candidate with verified holdout labels, the sealed blind panel, and the classic outer-test regression report. |
 
 Draw development roles from Gold ORCID v2 development blocks across size and surname-origin strata.
 Draw `final_test` from the holdout split. Exclude `f matsen`. Pin leakage-test blocks with `--fit-pool-blocks`.
-The 28 recreation evaluation blocks have informed development. Reserve fresh blocks for final validation.
+Reserve fresh blocks for final validation. The 28 recreation blocks are spent for tuning.
 
 Export full Arrow requests for all candidate blocks and incremental requests with production `cluster_seeds`
 for `gate_thresh`, from one snapshot. Save model and name-counts index digests. Use its Semantic Scholar
@@ -102,9 +102,10 @@ uv run --offline --no-sync python -m scripts.pairwise.release_pairwise calibrate
 
 ### 2. Reseed, freeze tasks, and fit the linker
 
-Recluster the same `fit_pool` seed population with the calibrated 1.5 pairwise model. Cluster oversized
+Recluster the same `fit_pool` seed population with the benchmark-calibrated pairwise model. Cluster oversized
 blocks within native subblocks before the linker exists. For `gate_thresh`, use the latest eligible
 arrivals and keep the production seed IDs for remaining mentions. Inspect request shortfalls and seed coverage.
+Pass provisional values to the trainer's required `--gate-cutoffs`.
 
 ~~~sh
 uv run --offline --no-sync python -m scripts.linker.build_linker_inputs \
@@ -118,7 +119,8 @@ uv run --offline --no-sync python -m scripts.linker.build_linker_task_tables \
 uv run --offline --no-sync python -m scripts.linker.train_linker_and_finalize \
   --linker-task-manifest linker-tasks/linker_tasks.json --block-role-assignments freeze/assignments.json \
   --target-json linker-target.json --pairwise-model-path calibrated-pairwise-1.5 \
-  --name-counts-index-root inference/name_counts_index --output-dir finalized-1.5 --gate-cutoffs T_FULL T_INIT --n-jobs N
+  --name-counts-index-root inference/name_counts_index --output-dir finalized-1.5 \
+  --gate-cutoffs T_FULL T_INIT --n-jobs N
 ~~~
 
 Freeze native top-25 windows with real names and native first tokens. Hold out whole authors before
@@ -126,71 +128,66 @@ retrieval for constructed fitting abstentions. Check purity across all gold-labe
 Keep all `fit_pool` tasks and input receipts. The trainer checks the seed model, count index, and seed
 digests and writes `linker_training_report.json`. Ship the validated fit without pooling train and validation.
 
-### 3. Review the gate operating point
+### 3. Review production EPS
 
-Use natural `gate_thresh` windows for blind review and keep them outside fitting. Build packets with frozen
-signature and candidate keys. Display only paper metadata and keep answer keys private. Embed 10–15% gold
-controls. Use a separate output directory and `--seed` per judge family with a shared `--control-seed`.
-Audit 10–20% of sealed test and classic benchmark packets across families. Require at least 10 controls,
-both request classes, and 90% accuracy overall and within each request and verdict class.
+Start at 0.38, the EPS shipped in 1.4. With new heads, keep 0.38 if the cluster count is within ±2% of
+1.4 on the same blocks. Otherwise blind-judge the marginal merges. To move EPS, judge the merges the
+new value adds or removes relative to 0.38. Require at most 15% wrong merges and a 95% Wilson upper
+bound of at most 25%. Keep the full clustering population with ORCID hidden. Use gold EPS curves as
+diagnostics. [Merge review and pass bar](../../s2and_v15_plan/gate_shape_blind/PASS_BAR.md#decisions)
 
-~~~sh
-uv run --offline --no-sync python -m scripts.judging.review_packets build \
-  --packet-type linker --items-json gate-items.json --controls-json gate-controls.json \
-  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --allowed-role gate_thresh --linker-task-manifest linker-tasks/linker_tasks.json --output-dir packets
-uv run --offline --no-sync python -m scripts.judging.review_packets score \
-  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --judge sol sol.jsonl sol_key.json --judge claude claude.jsonl claude_key.json --output-json gate-judgments.json
-uv run --offline --no-sync python -m scripts.linker.blind_gate_metrics \
-  --model-path finalized-1.5 --linker-task-manifest linker-tasks/linker_tasks.json \
-  --block-role-assignments freeze/assignments.json --gate-thresh-judgments gate-judgments.json \
-  --name-counts-index-root inference/name_counts_index --n-jobs N
-~~~
+### 4. Judge and set the gate cutoffs
 
-Each verdict carries `item_id` and `display_sha256`, the canonical JSON digest of the full blind record.
-For linker items, map candidate slots to `same`, `different`, or `insufficient_evidence` in `candidate_verdicts`.
-Keep agreed candidate verdicts. Score an abstention only when every candidate has an agreed verdict.
-An abstention is correct when all verdicts are `different`. Review judged-choice coverage, undecided share,
-control accuracy, and agreement on jointly decided items.
+Set `t_full` for full-name queries and `t_init` for initial-only queries after training. Rejudge these
+probability cutoffs for each release ranker. With the 1.4 heads and the refit ranker, `t_init` is 0.792
+and judged cost is flat from 0.74 to 0.89. `t_full` is provisional at 0.702. Use probability alone.
+A top-two score margin failed independent confirmation. [Cutoff result](../../s2and_v15_plan/gate_cutoff_blind/RESULT.md) · [Margin result](../../s2and_v15_plan/margin_confirm/RESULT.md)
 
-Pass the reviewed full-name and initial-only ranker probability cutoffs with `--gate-cutoffs T_FULL T_INIT`.
+Use [the cutoff pass bar](../../s2and_v15_plan/gate_cutoff_blind/PASS_BAR.md) as the method. Freeze the
+pass bar before building packages. Sample top candidates from final runtime decisions across probability
+bands, including ordinary gate abstentions. Record inclusion probabilities and exclusion counts. After
+the judge check passes, fit isotonic P(right) with inverse inclusion weights. Choose the lowest score
+where the curve reaches 0.80. Give undecided items half credit and report both sensitivities from the pass bar.
 
-### 4. Sweep production EPS and score the frozen candidate
+1. Run `sweep_eps_on_linking_gold --capture-dir` with the production route and one `--eps-values` value.
+   Replay real incremental requests at the reviewed EPS with the same [decision recorder](../scripts/judging/decision_capture.py).
+2. Run `judged_bank build-package --captured`. Reserve 10–15% for planted same-person and different-person
+   controls, including same-name different-person pairs. The bank matches query and block, then requires
+   all previously shown signatures to remain and form a [strict majority of the evidence](judged_bank.md#build-a-package).
+3. Give Fable and Neon the blind package in separate folders. Neon replaced Astra after Astra failed
+   the planted-control check. Freeze both verdict files before unblinding.
+4. Run `merge-verdicts` and then `judge-check`. Stop if a judge fails the fixed bar. Freeze the control
+   rules up front and keep every planted control in the check.
 
-EPS stays at 0.38, the value 1.4 shipped, until judged evidence moves it. Gold B-cubed (B3) cannot choose EPS:
-the giant curve is flat, and it misses wrong merges among unlabeled mentions. The merges that EPS 0.40 adds over
-0.38 failed blind judging, with at least 30% wrong.
+The bank supports a first cutoff estimate. Its initial-only bias check crossed at 0.738 versus 0.792
+for the weighted cutoff sample. [Bank bias check](../../s2and_v15_plan/judged_bank/README.md) · [Bank commands](judged_bank.md)
 
-Sweep all `eps_cal` blocks into one folder per dataset as a diagnostic. Hide ORCID and keep the full
-clustering population. Apply 0.38 with the review's no-sweep form, which records a review note instead of a gold
-F1 check: the sweep form's giant F1 tolerance can reject 0.38, because gold F1 favors looser cuts. The same call
-stamps judged gate cutoffs onto the trained bundle with `--gate-cutoffs T_FULL T_INIT` and keeps the ranker bytes.
+In step 9, judge `t_full` on real incremental requests, including cases where both arms abstain.
+Full-name probabilities were poorly calibrated for the right links the candidate dropped. The shipped
+fitted gate recovered them using other evidence. Compare a lower `t_full` with a fitted gate for full
+names only. Keep the fitted gate only if judged evidence shows the cutoff fails.
+[Full-name analysis](../../s2and_v15_plan/fullname_drop/analyze.py) · [Step 9](../../s2and_v15_plan/NEXT_STEPS.md#status-after-checkpoint-4-step-6-done)
 
-To move EPS, blind-judge the merges a candidate value adds or removes relative to 0.38. Pass only if at most
-15% are wrong and the 95% upper bound is at most 25%. Reload the reviewed model and verify its EPS before
-final testing.
+For the cutoff candidate, stamp the reviewed EPS and cutoffs without refitting. Use the no-sweep form
+because the sweep's giant F1 tolerance can reject 0.38. Substitute the reviewed EPS if it moved.
 
 ~~~sh
-uv run --offline --no-sync python -m scripts.eps.sweep_eps_on_linking_gold \
-  --dataset a_ross --arrow-root snapshot --model-path finalized-1.5 \
-  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --allow-all-reference-identities --route production --batching-threshold 15000 \
-  --eps-start 0.34 --eps-stop 0.42 --eps-step 0.02 --compute-missing-dists --allow-full-run \
-  --output-dir eps/a_ross --n-jobs N
 uv run --offline --no-sync python -m scripts.eps.apply_reviewed_eps \
   --source-model finalized-1.5 --output-model reviewed-model \
   --eps 0.38 --gate-cutoffs T_FULL T_INIT \
   --review-note "Cite the judged merge check and the judged cutoff packages." \
   --output-report eps-review.json
-uv run --offline --no-sync python -m scripts.eps.orcid_b3 \
-  --identity-evidence evidence/manifest.json --block-role-assignments freeze/assignments.json \
-  --role final_test --block "BLOCK KEY" --arrow-dir "BLOCK ARROW DIRECTORY" --snapshot-root snapshot \
-  --assignments-json predicted-clusters.json --eps 0.38
 ~~~
 
-Pass every swept dataset once to the review. For sealed evaluation, score stored predictions over every
-eligible signature and report B3 with and without singletons. See [release acceptance](release.md#stage-5-fit-evaluate-and-approve).
+### 5. Validate on fresh blocks
 
-History is in the [plan-folder summary](../../s2and_v15_plan/MORNING_20261126.md).
-Evidence is in the [1.4 recreation report](../../s2and_v15_plan/RECREATE_14.md).
+Reload the reviewed bundle and verify its EPS and cutoffs. Freeze it before comparing it with shipped
+1.4 on fresh blocks disjoint from the cutoff review. Score every eligible signature with `orcid_b3`.
+Report B-cubed (B3) with and without singletons. Require pooled B3 F1 ≥ −0.30 points, every size band
+≥ −1.0 F1 points, B3 precision ≥ −0.10 points, and cluster count within ±2% of 1.4. Deltas are candidate minus shipped.
+
+Apply the [paired-cost rule](../../s2and_v15_plan/step6_compare/PASS_BAR.md#decision) to final runtime
+disagreements in both views. Match linked targets by shared decision-time seed members. Weight cost by
+volume and report paired block-bootstrap intervals and the undecided sensitivities. The 28-block replay
+and the 20-block gold holdout used the 1.4 heads. Complete the fresh comparison with the release bundle.
+[Recreation replay](../../s2and_v15_plan/step6_compare/RESULT.md) · [Gold holdout](../../s2and_v15_plan/untouched_holdout/RESULT.md) · [Release acceptance](release.md#stage-5-fit-evaluate-and-approve)

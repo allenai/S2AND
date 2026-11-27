@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 
 import pyarrow as pa
@@ -189,27 +190,130 @@ def test_planted_controls_use_ledger_and_cached_given_names(
         )
     spec = _spec(tmp_path / "spec.json", "controls", 0, {"same": 1, "different": 1})
     key = tmp_path / "key.json"
-    options = dict(
+    bank = tmp_path / "bank"
+    build = partial(
+        judged_bank.build_package,
         captured=candidate,
         strata=spec,
-        bank=tmp_path / "bank",
+        bank=bank,
         output_dir=tmp_path / "blind",
         key_path=key,
         ledger=ledger,
         orcid_cache=cache,
     )
     with pytest.raises(ValueError, match="Insufficient ledger-pure"):
-        judged_bank.build_package(**options)
+        build()
     different_path = cache / f"{labels['13-0']}.json"
     different_path.write_text(different_path.read_text(encoding="utf-8").replace("alex", "Alice"), encoding="utf-8")
-    assert judged_bank.build_package(**options)["items"] == 2
+    assert build()["items"] == 2
     items = json.loads(key.read_text(encoding="utf-8"))["items"]
     assert {row["gold_verdict"] for row in items.values() if row["control"]} == {"same", "different"}
     votes = [items[str(i)]["gold_verdict"] for i in (1, 2)]
     first = _votes(tmp_path / "first.jsonl", votes)
     second = _votes(tmp_path / "second.jsonl", ["same", "same"])
-    judged_bank.merge_verdicts(options["bank"], key, [("first", first), ("second", second)])
-    checks = ["judge-check", "--bank", str(options["bank"]), "--package", "controls", "--judge-same", "1"]
+    judged_bank.merge_verdicts(bank, key, [("first", first), ("second", second)])
+    checks = ["judge-check", "--bank", str(bank), "--package", "controls", "--judge-same", "1"]
     assert judged_bank.main([*checks, "--judge-different", "1"]) == 1
     assert judged_bank.main([*checks, "--judge-different", "1", "--judge", "first"]) == 0
     assert judged_bank.main([*checks, "--consensus-different", "1"]) == 1
+
+
+def test_sample_before_reuse_keeps_draw_and_probability(tmp_path: Path, frozen_snapshot: Path) -> None:
+    bank = tmp_path / "bank"
+    original_key = tmp_path / "original.json"
+    build = partial(judged_bank.build_package, bank=bank, snapshot=frozen_snapshot)
+    build(
+        captured=_capture(tmp_path / "one.parquet", [(1, [2, 3], [])]),
+        strata=_spec(tmp_path / "one.json", "one", 1),
+        key_path=original_key,
+        output_dir=tmp_path / "one",
+    )
+    judged_bank.merge_verdicts(bank, original_key, [("fable", _votes(tmp_path / "vote.jsonl", ["same"]))])
+
+    key = tmp_path / "next.json"
+    result = build(
+        captured=_capture(tmp_path / "next.parquet", [(1, [3, 2], [4]), (7, [8], [])]),
+        strata=_spec(tmp_path / "next-spec.json", "next", 1),
+        key_path=key,
+        output_dir=tmp_path / "next",
+        sample_before_reuse=True,
+    )
+    assert result == {"sampled": 0, "reused": 1, "items": 0}
+    data = json.loads(key.read_text(encoding="utf-8"))
+    assert data["strata"]["sample"] == {"eligible": 2, "sampled": 0, "reused": 1}
+    [reused] = data["reused"]
+    assert reused["inclusion_probability"] == 0.5
+    assert reused["bank_pair_ids"] == [json.loads(original_key.read_text(encoding="utf-8"))["items"]["1"]["pair_id"]]
+    assert data["items"] == {}
+
+
+def test_cap_author_lists_without_changing_pair(
+    tmp_path: Path, frozen_snapshot: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen = judged_bank.frozen_packet_papers
+
+    def papers(*args, **kwargs):
+        records = frozen(*args, **kwargs)
+        for paper in records.values():
+            paper["authors"].append("Second Displayed Author")
+        return records
+
+    monkeypatch.setattr(judged_bank, "frozen_packet_papers", papers)
+    build = partial(
+        judged_bank.build_package,
+        captured=_capture(tmp_path / "pairs.parquet", [(1, [2], [])]),
+        strata=_spec(tmp_path / "spec.json", "cap", 1),
+        bank=tmp_path / "bank",
+        snapshot=frozen_snapshot,
+    )
+    key, short_key = tmp_path / "full.json", tmp_path / "short.json"
+    build(key_path=key, output_dir=tmp_path / "full")
+    build(key_path=short_key, output_dir=tmp_path / "short", max_authors=1)
+    body = (tmp_path / "short/package.md").read_text(encoding="utf-8")
+    assert "…" in body and "**Author name**" in body and "Second Displayed Author" not in body
+    assert json.loads(key.read_text())["items"] == json.loads(short_key.read_text())["items"]
+
+
+def test_same_initial_controls_use_distinct_person_records(
+    tmp_path: Path, gate_packet_inputs: tuple[str, IdentityLedger, Path]
+) -> None:
+    block, ledger, _ = gate_packet_inputs
+    labels = ledger.for_block(block).scored()
+    first, second = labels["11-0"], labels["13-0"]
+    assert first != second
+    assert labels["14-0"] == first
+    cache = tmp_path / "orcid"
+    cache.mkdir()
+    for orcid, name in ((first, "Alex"), (second, "A.")):
+        (cache / f"{orcid}.json").write_text(
+            json.dumps(
+                {
+                    "status": 200,
+                    "person": {"path": f"/{orcid}/person", "name": {"given-names": {"value": name}}},
+                }
+            ),
+            encoding="utf-8",
+        )
+    key = tmp_path / "key.json"
+    build = partial(
+        judged_bank.build_package,
+        captured=_capture(tmp_path / "pairs.parquet", [(11, [14], []), (11, [13], [])], block=block),
+        strata=_spec(tmp_path / "spec.json", "match", 0, {"same": 1, "different_same_name": 1}),
+        bank=tmp_path / "bank",
+        output_dir=tmp_path / "blind",
+        key_path=key,
+        ledger=ledger,
+        orcid_cache=cache,
+    )
+    person = cache / f"{second}.json"
+    valid = person.read_text(encoding="utf-8")
+    person.write_text(valid.replace(second, first), encoding="utf-8")
+    with pytest.raises(ValueError, match="person record does not match"):
+        build()
+    person.write_text(valid, encoding="utf-8")
+    assert build()["items"] == 2
+    items = json.loads(key.read_text(encoding="utf-8"))["items"]
+    assert {row["stratum"]: row["gold_verdict"] for row in items.values()} == {
+        "control_same": "same",
+        "control_different_same_name": "different",
+    }

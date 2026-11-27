@@ -40,11 +40,24 @@ the candidate's labeled members and its previously or currently shown members. T
 key records every matching bank pair and the bank version. It also records the number drawn
 divided by the eligible unjudged count for each stratum.
 
+Pass `--sample-before-reuse` when the quota counts both new and reused judgments. Each
+stratum's eligible count then includes bank matches. The tool draws the quota from that
+full stratum before replacing matching draws with reused verdicts. Both kinds of draws
+carry the same inclusion probability. The private key reports fresh and reused counts.
+Pass `--max-authors N` to show the first N author-list entries per paper and an ellipsis
+for omitted entries. The focal author remains visible in its own field.
+
 Supply `--block-role-assignments` and `--identity-evidence` to plant controls. The ledger
 identifies pure pairs among the unjudged candidates left after sampling. Set aside a capture
 stratum with quota zero if the experiment supplies a distinct control pool. Different-person
 controls require two nonempty, distinct public ORCID given names. Supply `--orcid-cache` outside
 the blind directory for these lookups. Use an empty `controls` map to build without controls.
+
+Set a positive `different_same_name` control quota to plant distinct ledger identities
+whose public ORCID person records show the same normalized given name or leading initial.
+The ordinary `different` control requires distinct normalized given names. The tool
+assigns each pair to one slot when a pair qualifies for both.
+Both control types have gold verdict `different` and contribute to the combined judge check.
 
 Give judges only `BLIND_DIR/package.md`. Keep the answer key and bank private. If the draw
 produced zero items, use the key's reuse records directly.

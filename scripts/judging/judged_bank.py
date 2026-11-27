@@ -33,8 +33,10 @@ from scripts.judging.review_packets import render_author_pair_package, resolve_a
 
 Verdict = Literal["same", "different", "cannot_tell"]
 Gold = Literal["same", "different"]
+ControlKind = Literal["same", "different", "different_same_name"]
 VERDICTS: tuple[Verdict, ...] = ("same", "different", "cannot_tell")
 CLASSES: tuple[Gold, ...] = ("same", "different")
+CONTROL_KINDS: tuple[ControlKind, ...] = (*CLASSES, "different_same_name")
 CONFIDENCES = ("low", "medium", "high")
 FORMAT_VERSION = 1
 VERSION_NAME = re.compile(r"[0-9]{8}")
@@ -420,6 +422,7 @@ def _given_names(orcid: str, cache: Path) -> str:
     if normalize_orcid(orcid) != orcid:
         raise ValueError(f"Invalid ledger ORCID {orcid!r}")
     path = cache / f"{orcid}.json"
+    data: dict[str, Any]
     if path.is_file():
         data = _read_json(path)
     else:
@@ -442,19 +445,35 @@ def _given_names(orcid: str, cache: Path) -> str:
             staged.replace(path)
     if data["status"] != 200:
         return ""
-    names = (data["person"].get("name") or {}).get("given-names") or {}
+    person = data["person"]
+    if not isinstance(person, Mapping):
+        raise ValueError(f"Invalid ORCID person record for {orcid}")
+    person_path = person.get("path")
+    if person_path is not None and person_path != f"/{orcid}/person":
+        raise ValueError(f"ORCID person record does not match the requested ID {orcid}")
+    names = (person.get("name") or {}).get("given-names") or {}
     return " ".join(unicodedata.normalize("NFKC", names.get("value") or "").casefold().split())
 
 
 def _plant_controls(
-    pool: list[Item], quotas: dict[Gold, int], ledger: IdentityLedger, cache: Path, rng: Random
+    pool: list[Item],
+    quotas: dict[ControlKind, int],
+    ledger: IdentityLedger,
+    cache: Path,
+    rng: Random,
 ) -> list[Item]:
     rng.shuffle(pool)
     views = {}
     names: dict[str, str] = {}
-    selected: list[Item] = []
-    for item in pool:
-        if not any(quotas.values()):
+    same: list[Item] = []
+    different: list[Item] = []
+    same_name: list[Item] = []
+    either: list[Item] = []
+    order: dict[Pair, int] = {}
+    for index, item in enumerate(pool):
+        different_needed = max(0, quotas["different"] - len(different))
+        same_name_needed = max(0, quotas["different_same_name"] - len(same_name))
+        if len(same) == quotas["same"] and different_needed + same_name_needed <= len(either):
             break
         pair = item.pair
         if pair.block not in views:
@@ -468,25 +487,54 @@ def _plant_controls(
         target_identity = view.component_label(item.target_signature_ids)
         if target_identity is None:
             continue
-        gold: Gold = "same" if query_identity == target_identity else "different"
-        if not quotas[gold]:
+        order[pair] = index
+        if query_identity == target_identity:
+            if len(same) < quotas["same"]:
+                same.append(item)
             continue
-        if gold == "different":
-            for orcid in (query_identity, target_identity):
-                if orcid not in names:
-                    names[orcid] = _given_names(orcid, cache)
-            first, second = names[query_identity], names[target_identity]
-            if not first or not second or first == second:
-                continue
-        selected.append(replace(item, control=True, gold_verdict=gold, stratum=f"control_{gold}"))
-        quotas[gold] -= 1
-    if any(quotas.values()):
-        raise ValueError(f"Insufficient ledger-pure control candidates, shortfall {quotas}")
-    return selected
+        if different_needed + same_name_needed <= len(either):
+            continue
+        for orcid in (query_identity, target_identity):
+            if orcid not in names:
+                names[orcid] = _given_names(orcid, cache)
+        first, second = names[query_identity], names[target_identity]
+        if not first or not second:
+            continue
+        matches_initial = first[0] == second[0] and quotas["different_same_name"] > 0
+        if matches_initial and first != second and quotas["different"]:
+            either.append(item)
+        elif matches_initial and same_name_needed:
+            same_name.append(item)
+        elif first != second and different_needed:
+            different.append(item)
+
+    same_name_needed = quotas["different_same_name"] - len(same_name)
+    same_name.extend(either[:same_name_needed])
+    different.extend(either[same_name_needed : same_name_needed + quotas["different"] - len(different)])
+    candidates: dict[ControlKind, list[Item]] = {
+        "same": same,
+        "different": different,
+        "different_same_name": same_name,
+    }
+    if shortfall := {
+        kind: quotas[kind] - len(items) for kind, items in candidates.items() if len(items) < quotas[kind]
+    }:
+        raise ValueError(f"Insufficient ledger-pure control candidates, shortfall {shortfall}")
+    selected = [
+        replace(item, control=True, gold_verdict="same" if kind == "same" else "different", stratum=f"control_{kind}")
+        for kind, items in candidates.items()
+        for item in items
+    ]
+    return sorted(selected, key=lambda item: order[item.pair])
 
 
 def _sample_decisions(
-    decisions: Sequence[Decision], quotas: dict[str, int], version: Path | None, rng: Random
+    decisions: Sequence[Decision],
+    quotas: dict[str, int],
+    version: Path | None,
+    rng: Random,
+    *,
+    sample_before_reuse: bool,
 ) -> tuple[list[Item], list[Item], list[dict[str, Any]], dict[str, dict[str, int]]]:
     indexed: dict[tuple[str, str], list[Pair]] = defaultdict(list)
     for row in _bank_rows(version, "pairs"):
@@ -495,6 +543,7 @@ def _sample_decisions(
 
     pools: dict[str, list[Item]] = defaultdict(list)
     reused = []
+    matched: dict[str, list[str]] = {}
     skipped: Counter[str] = Counter()
     seen = set()
     for decision in decisions:
@@ -509,11 +558,13 @@ def _sample_decisions(
             for old in indexed[pair.block, pair.query_signature_id]
             if covers(old.shown_group_signature_ids, item.target_signature_ids, decision.labeled_or_shown)
         ]
-        if hits:
+        if hits and not sample_before_reuse:
             reused.append({**item.record(), "bank_pair_ids": hits})
             skipped[item.stratum] += 1
         else:
             pools[item.stratum].append(item)
+            if hits:
+                matched[pair.pair_id] = hits
 
     selected = []
     remaining = []
@@ -523,9 +574,20 @@ def _sample_decisions(
         take = min(quota, len(pool))
         sample = rng.sample(range(len(pool)), take)
         indices = set(sample)
-        selected.extend(replace(pool[i], inclusion_probability=take / len(pool)) for i in sample)
-        remaining.extend(item for i, item in enumerate(pool) if i not in indices)
-        counts[stratum] = {"eligible": len(pool), "reused": skipped[stratum], "sampled": take}
+        reused_in_sample = 0
+        for i in sample:
+            item = replace(pool[i], inclusion_probability=take / len(pool))
+            if hits := matched.get(item.pair.pair_id):
+                reused.append({**item.record(), "bank_pair_ids": hits})
+                reused_in_sample += 1
+            else:
+                selected.append(item)
+        remaining.extend(item for i, item in enumerate(pool) if i not in indices and item.pair.pair_id not in matched)
+        counts[stratum] = {
+            "eligible": len(pool),
+            "reused": skipped[stratum] + reused_in_sample,
+            "sampled": take - reused_in_sample,
+        }
     return selected, remaining, reused, counts
 
 
@@ -539,6 +601,8 @@ def build_package(
     snapshot: Path | None = None,
     ledger: IdentityLedger | None = None,
     orcid_cache: Path | None = None,
+    sample_before_reuse: bool = False,
+    max_authors: int | None = None,
 ) -> dict[str, int]:
     """Filter captured decisions, sample and plant controls, then publish a blind package."""
     key_path = resolve_answer_key_path(output_dir, key_path)
@@ -548,12 +612,12 @@ def build_package(
     package = _required_text(spec["package"], "package")
     quotas = {name: _nonnegative_int(n, f"quota for {name}") for name, n in spec["quotas"].items()}
     controls = {name: _nonnegative_int(n, f"control quota for {name}") for name, n in spec["controls"].items()}
-    if controls.keys() - set(CLASSES) or set(quotas) & {"control_same", "control_different"}:
-        raise ValueError("Use same/different control quotas separately from decision strata")
-    control_quotas = {gold: controls.get(gold, 0) for gold in CLASSES}
+    if controls.keys() - set(CONTROL_KINDS) or set(quotas) & {f"control_{kind}" for kind in CONTROL_KINDS}:
+        raise ValueError("Use control quotas separately from decision strata")
+    control_quotas = {kind: controls.get(kind, 0) for kind in CONTROL_KINDS}
     if any(control_quotas.values()) and ledger is None:
         raise ValueError("Planting controls requires a frozen identity ledger")
-    if control_quotas["different"] and (
+    if (control_quotas["different"] or control_quotas["different_same_name"]) and (
         orcid_cache is None or orcid_cache.resolve().is_relative_to(output_dir.resolve())
     ):
         raise ValueError("Different-person controls require a private ORCID cache outside the package directory")
@@ -561,6 +625,8 @@ def build_package(
     max_shown = _nonnegative_int(spec.get("max_shown", 8), "max_shown")
     if not max_shown:
         raise ValueError("max_shown must be at least 1")
+    if max_authors is not None and max_authors < 1:
+        raise ValueError("max_authors must be at least 1")
 
     version = latest_version(bank)
     rows = pq.read_table(captured).to_pylist()
@@ -569,7 +635,9 @@ def build_package(
     display_rng = Random(seed)
     decisions = [Decision.read(row, display_rng, max_shown) for row in rows]
     rng = Random(seed)
-    selected, remaining, reused, counts = _sample_decisions(decisions, quotas, version, rng)
+    selected, remaining, reused, counts = _sample_decisions(
+        decisions, quotas, version, rng, sample_before_reuse=sample_before_reuse
+    )
     if ledger is not None and any(control_quotas.values()):
         selected.extend(_plant_controls(remaining, control_quotas, ledger, orcid_cache or key_path.parent, rng))
     rng.shuffle(selected)
@@ -584,6 +652,14 @@ def build_package(
     )
     private_ids = set()
     records = []
+
+    def display(paper: Mapping[str, Any]) -> dict[str, Any]:
+        clean = sanitize_paper_item(paper)
+        authors = clean.get("authors") or []
+        if max_authors is not None and len(authors) > max_authors:
+            clean["authors"] = [*authors[:max_authors], "…"]
+        return clean
+
     for item in selected:
         pair = item.pair
         private_ids.update((pair.query_signature_id, *(item.target_signature_ids or ())))
@@ -594,8 +670,8 @@ def build_package(
         private_ids.update(str(paper["paper_id"]) for paper in [query, *shown])
         records.append(
             {
-                "query": sanitize_paper_item(query),
-                "candidates": [{"exemplars": [sanitize_paper_item(p) for p in shown]}],
+                "query": display(query),
+                "candidates": [{"exemplars": [display(p) for p in shown]}],
             }
         )
     body = render_author_pair_package(records, private_ids=private_ids)
@@ -680,6 +756,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     build.add_argument("--block-role-assignments", type=Path)
     build.add_argument("--identity-evidence", type=Path)
     build.add_argument("--orcid-cache", type=Path)
+    build.add_argument("--sample-before-reuse", action="store_true")
+    build.add_argument("--max-authors", type=int)
     merge = commands.add_parser("merge-verdicts")
     merge.add_argument("--key", type=Path, required=True)
     merge.add_argument("--judge", nargs=2, metavar=("NAME", "JSONL"), action="append", required=True)
@@ -710,6 +788,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     snapshot=args.snapshot,
                     ledger=ledger,
                     orcid_cache=args.orcid_cache,
+                    sample_before_reuse=args.sample_before_reuse,
+                    max_authors=args.max_authors,
                 )
             ),
             end="",

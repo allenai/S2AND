@@ -32,8 +32,10 @@
 //!   is 255, `v` exceeds every threshold and routes like NaN on NaN-right
 //!   splits.
 //! - **Sums.** Each row adds its leaf values in tree order to an `f64` that
-//!   starts at `0.0`, exactly as the baseline does. The parent applies the
-//!   same sigmoid afterwards.
+//!   starts at `0.0`, exactly as the baseline does. Lockstep walks also add
+//!   `-0.0` at every internal node they leave; `x + -0.0` is `x` for every
+//!   `x`, signed zeros included. The parent applies the same sigmoid
+//!   afterwards.
 //!
 //! `f32` rows widen losslessly to `f64` before normalization; this is
 //! equivalent to the baseline's `f32` normalization followed by widening,
@@ -127,6 +129,28 @@ impl FastPlan {
         } else {
             Lockstep::build(model, keys).map(Self::Lockstep)
         }
+    }
+
+    /// Raw margins from the portable kernels, skipping any CPU-specific
+    /// dispatch, so tests cover the code other CPUs run.
+    #[cfg(test)]
+    pub(super) fn portable_margins<F: FeatureValue>(
+        &self,
+        model: &LgbModel,
+        rows: &[F],
+    ) -> Vec<f64> {
+        let num_features = model.num_features;
+        let mut margins = vec![0.0; rows.len() / num_features];
+        for (tile, scores) in rows
+            .chunks(num_features * TILE_ROWS)
+            .zip(margins.chunks_mut(TILE_ROWS))
+        {
+            match self {
+                Self::QuickScorer(kernel) => kernel.score_tile_generic(tile, scores),
+                Self::Lockstep(kernel) => kernel.score_tile(tile, scores),
+            }
+        }
+        margins
     }
 
     #[cfg(test)]
@@ -414,6 +438,25 @@ impl QuickScorer {
     }
 
     fn score_tile<F: FeatureValue>(&self, tile: &[F], margins: &mut [f64]) {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2.
+            unsafe { self.score_tile_avx2(tile, margins) };
+            return;
+        }
+        self.score_tile_generic(tile, margins);
+    }
+
+    /// `score_tile_generic` compiled with AVX2: wider mask updates, the same
+    /// scalar `f64` additions in the same order.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn score_tile_avx2<F: FeatureValue>(&self, tile: &[F], margins: &mut [f64]) {
+        self.score_tile_generic(tile, margins);
+    }
+
+    #[inline(always)]
+    fn score_tile_generic<F: FeatureValue>(&self, tile: &[F], margins: &mut [f64]) {
         let num_features = self.keys.num_features;
         let mut state = vec![[u32::MAX; QUICKSCORER_ROWS]; self.leaves.len()];
         let mut lane_keys = [[0u8; 2 * MAX_FAST_FEATURES]; QUICKSCORER_ROWS];
@@ -432,7 +475,7 @@ impl QuickScorer {
     }
 
     /// Keep full groups statically sized for vectorization; tails do no work for padding.
-    #[inline]
+    #[inline(always)]
     fn score_group<F: FeatureValue, const FULL: bool>(
         &self,
         rows: &[F],
@@ -557,7 +600,7 @@ pub(crate) struct RowSpecialization {
 /// Pruned trees by pattern, with their total node count.
 #[derive(Debug, Default)]
 struct PrunedCache {
-    by_pattern: std::collections::HashMap<PatternKey, std::sync::Arc<PrunedTrees>>,
+    by_pattern: std::collections::HashMap<PatternKey, std::sync::Arc<ChainedTrees>>,
     nodes: usize,
 }
 
@@ -568,9 +611,10 @@ const MAX_NAN_FEATURES: usize = 64;
 /// Smallest row group that gets pruned trees; smaller groups use the full
 /// trees together, so their lanes stay filled and few patterns are built.
 const MIN_PRUNED_GROUP: usize = 8;
-/// Most pruned-tree nodes one specialization keeps (8 bytes each, 8 MiB in
-/// all); it clears them when full, which bounds the memory pruning adds.
-const MAX_PRUNED_NODES: usize = 1 << 20;
+/// Most pruned-tree nodes one specialization keeps (16 bytes each with
+/// their values, 8 MiB in all); it clears them when full, which bounds the
+/// memory pruning adds.
+const MAX_PRUNED_NODES: usize = 1 << 19;
 
 impl RowSpecialization {
     /// `None` when the lists exceed the pattern capacity or name a feature
@@ -619,19 +663,35 @@ struct PatternKey {
     nan: u64,
 }
 
-/// Lockstep trees with every split a pattern fixes replaced by its taken child.
-#[derive(Debug)]
-struct PrunedTrees {
-    nodes: Vec<u64>,
-    /// First node of each tree in `nodes`, in model order.
-    starts: Vec<usize>,
+/// Trees laid out for chained walks: each lane walks its own row through a
+/// chunk of consecutive trees without waiting for the other lanes.
+///
+/// Nodes keep the breadth-first word layout of [`Lockstep`], with two changes:
+/// a leaf word points to the root of the next tree in its chunk (bits 32..64)
+/// and reads key offset 0, and each chunk ends with a sentinel that points to
+/// itself. A lane adds `values[index]` at every node it leaves: the leaf
+/// value at leaves, and `-0.0`, the exact additive identity, elsewhere. So
+/// each row still adds its leaf values in tree order.
+#[derive(Debug, Clone)]
+struct ChainedTrees {
+    words: Vec<u64>,
+    values: Vec<f64>,
+    /// First node of each chunk; the last entry is one past the final sentinel.
+    chunk_starts: Vec<usize>,
 }
+
+/// Trees walked per chunk; a chunk's nodes stay hot in L1 across a tile.
+/// 16 beat 4, 32, 64 and whole models on the production nameless booster.
+const CHAIN_CHUNK_TREES: usize = 16;
 
 /// Lockstep traversal over `u8` keys for trees with at most 256 leaves.
 ///
 /// Trees are renumbered breadth first, so each internal node's children are
-/// adjacent and later, and leaves become self-looping pseudo-nodes. Each node
-/// is one `u64`:
+/// adjacent and later, and leaves become self-looping pseudo-nodes. These
+/// `nodes` are the source for pruning; scoring walks the [`ChainedTrees`]
+/// built from them, where each lane moves on to its next tree as soon as it
+/// reaches a leaf instead of waiting for the deepest lane. Each node is one
+/// `u64`:
 /// - bits 0..8: `hi`; the row moves to the right child when its key is
 ///   greater. Internal nodes have `hi <= 254`; leaves have [`LEAF_HI`].
 /// - bits 8..16: leaf index within the tree (leaves only).
@@ -640,7 +700,8 @@ struct PrunedTrees {
 ///   Leaves store their own index.
 ///
 /// Rows are transposed into groups of [`LOCKSTEP_LANES`], laid out as
-/// `[slot][lane]`, and each group walks a tree until no lane moves.
+/// `[slot][lane]`, and each group walks a chunk of trees until every lane
+/// reaches the chunk's end.
 #[derive(Debug, Clone)]
 pub(super) struct Lockstep {
     keys: KeyTable,
@@ -648,6 +709,8 @@ pub(super) struct Lockstep {
     leaves: Vec<f64>,
     /// `(first node, first leaf)` per tree, in model order.
     trees: Vec<(usize, usize)>,
+    /// The full trees in chained layout; `nodes` stays the pruning source.
+    chained: ChainedTrees,
 }
 
 impl Lockstep {
@@ -681,13 +744,95 @@ impl Lockstep {
                 position += 1;
             }
         }
-        let plan = Self {
+        let mut plan = Self {
             keys,
             nodes,
             leaves,
             trees,
+            chained: ChainedTrees {
+                words: Vec::new(),
+                values: Vec::new(),
+                chunk_starts: Vec::new(),
+            },
         };
-        plan.invariants_hold().then_some(plan)
+        if !plan.invariants_hold() {
+            return None;
+        }
+        let starts: Vec<usize> = plan.trees.iter().map(|&(first, _)| first).collect();
+        plan.chained = plan.chain(&plan.nodes, &starts)?;
+        Some(plan)
+    }
+
+    /// Relays out breadth-first trees (the plan's own, or pruned copies whose
+    /// tree `t` occupies `starts[t]..starts[t + 1]`) for chained walks, or
+    /// `None` if the result breaks an invariant the walk relies on.
+    fn chain(&self, nodes: &[u64], starts: &[usize]) -> Option<ChainedTrees> {
+        let tree_count = starts.len();
+        let tree_end = |tree: usize| starts.get(tree + 1).copied().unwrap_or(nodes.len());
+        let chunk_count = tree_count.div_ceil(CHAIN_CHUNK_TREES);
+        let mut words = Vec::with_capacity(nodes.len() + chunk_count);
+        let mut values = Vec::with_capacity(nodes.len() + chunk_count);
+        let mut chunk_starts = Vec::with_capacity(chunk_count + 1);
+        for chunk_first in (0..tree_count).step_by(CHAIN_CHUNK_TREES) {
+            let chunk_end = (chunk_first + CHAIN_CHUNK_TREES).min(tree_count);
+            let old_base = starts[chunk_first];
+            let new_base = words.len();
+            chunk_starts.push(new_base);
+            let renumber = |old: usize| -> u64 { (old - old_base + new_base) as u64 };
+            for tree in chunk_first..chunk_end {
+                // The next tree's root, or this chunk's sentinel after the last tree.
+                let next_root = renumber(tree_end(tree));
+                let first_leaf = self.trees[tree].1;
+                for &word in &nodes[starts[tree]..tree_end(tree)] {
+                    if word as u8 == LEAF_HI {
+                        let leaf = usize::from((word >> 8) as u8);
+                        words.push(u64::from(LEAF_HI) | (next_root << 32));
+                        values.push(self.leaves[first_leaf + leaf]);
+                    } else {
+                        words.push((word & 0xFFFF_FFFF) | (renumber((word >> 32) as usize) << 32));
+                        values.push(-0.0);
+                    }
+                }
+            }
+            let sentinel = words.len() as u64;
+            words.push(u64::from(LEAF_HI) | (sentinel << 32));
+            values.push(-0.0);
+        }
+        chunk_starts.push(words.len());
+        let chained = ChainedTrees {
+            words,
+            values,
+            chunk_starts,
+        };
+        self.chain_invariants_hold(&chained).then_some(chained)
+    }
+
+    /// Checks every invariant the chained walk's unchecked indexing relies on:
+    /// within each chunk, every node but the sentinel points forward to a
+    /// node of the same chunk (internal nodes to a pair of them), the sentinel
+    /// points to itself, and every key offset leaves room for all lanes.
+    fn chain_invariants_hold(&self, chained: &ChainedTrees) -> bool {
+        let key_block = 2 * self.keys.num_features * LOCKSTEP_LANES;
+        chained.words.len() == chained.values.len()
+            && chained.chunk_starts.first() == Some(&0)
+            && chained.chunk_starts.last() == Some(&chained.words.len())
+            && chained.chunk_starts.windows(2).all(|bounds| {
+                let (first, end) = (bounds[0], bounds[1]);
+                let sentinel = end - 1;
+                first < end
+                    && chained.words[sentinel] == u64::from(LEAF_HI) | ((sentinel as u64) << 32)
+                    && (first..sentinel).all(|index| {
+                        let word = chained.words[index];
+                        let target = (word >> 32) as usize;
+                        let key_offset = usize::from((word >> 16) as u16);
+                        let in_block = key_offset + LOCKSTEP_LANES <= key_block;
+                        if word as u8 == LEAF_HI {
+                            in_block && index < target && target <= sentinel
+                        } else {
+                            in_block && index < target && target + 1 < sentinel
+                        }
+                    })
+            })
     }
 
     /// Checks every invariant `score_tile`'s unchecked indexing relies on.
@@ -750,25 +895,25 @@ impl Lockstep {
         &self,
         pattern: &PatternKey,
         spec: &RowSpecialization,
-    ) -> std::sync::Arc<PrunedTrees> {
+    ) -> Option<std::sync::Arc<ChainedTrees>> {
         if let Ok(cache) = spec.pruned.read() {
             if let Some(found) = cache.by_pattern.get(pattern) {
-                return found.clone();
+                return Some(found.clone());
             }
         }
-        let built = std::sync::Arc::new(self.prune(pattern, spec));
+        let built = std::sync::Arc::new(self.prune(pattern, spec)?);
         if let Ok(mut cache) = spec.pruned.write() {
             if let Some(found) = cache.by_pattern.get(pattern) {
-                return found.clone();
+                return Some(found.clone());
             }
-            if cache.nodes + built.nodes.len() > MAX_PRUNED_NODES {
+            if cache.nodes + built.words.len() > MAX_PRUNED_NODES {
                 cache.by_pattern.clear();
                 cache.nodes = 0;
             }
-            cache.nodes += built.nodes.len();
+            cache.nodes += built.words.len();
             cache.by_pattern.insert(*pattern, built.clone());
         }
-        built
+        Some(built)
     }
 
     /// Rebuild every tree breadth first, following the fixed splits.
@@ -778,7 +923,7 @@ impl Lockstep {
     /// pattern fixes both keys of a value feature. A NaN key goes left on the
     /// NaN-left slot (0 never exceeds `hi`) and right on the NaN-right slot
     /// (255 always does).
-    fn prune(&self, pattern: &PatternKey, spec: &RowSpecialization) -> PrunedTrees {
+    fn prune(&self, pattern: &PatternKey, spec: &RowSpecialization) -> Option<ChainedTrees> {
         let num_features = self.keys.num_features;
         let resolve = |mut index: usize| -> usize {
             loop {
@@ -832,8 +977,7 @@ impl Lockstep {
                 position += 1;
             }
         }
-        nodes.shrink_to_fit();
-        PrunedTrees { nodes, starts }
+        self.chain(&nodes, &starts)
     }
 
     /// Margins of `rows`, each group of rows sharing a pattern scored on its
@@ -865,27 +1009,28 @@ impl Lockstep {
                 .map(|(_, row)| *row as usize)
                 .collect();
             if group.len() >= MIN_PRUNED_GROUP {
-                let pruned = self.pruned_trees(&ordered[start].0, spec);
-                self.score_row_group(rows, margins, &group, &pruned.nodes, Some(&pruned.starts));
+                match self.pruned_trees(&ordered[start].0, spec) {
+                    Some(pruned) => self.score_row_group(rows, margins, &group, &pruned),
+                    None => full_tree_rows.extend(group),
+                }
             } else {
                 full_tree_rows.extend(group);
             }
             start = end;
         }
         if !full_tree_rows.is_empty() {
-            self.score_row_group(rows, margins, &full_tree_rows, &self.nodes, None);
+            self.score_row_group(rows, margins, &full_tree_rows, &self.chained);
         }
     }
 
-    /// Lockstep over the chosen rows on `nodes`; `starts` gives each tree's
-    /// root there, or `None` for the plan's own trees.
+    /// Chained walks of the chosen rows over `trees`: the plan's own trees or
+    /// pruned copies of them.
     fn score_row_group<F: FeatureValue>(
         &self,
         rows: &[F],
         margins: &mut [f64],
         group: &[usize],
-        nodes: &[u64],
-        starts: Option<&[usize]>,
+        trees: &ChainedTrees,
     ) {
         const LANES: usize = LOCKSTEP_LANES;
         let num_features = self.keys.num_features;
@@ -903,17 +1048,7 @@ impl Lockstep {
         }
         // Each row's margin starts from its incoming value and adds leaves in tree order.
         let mut group_margins: Vec<f64> = group.iter().map(|&row| margins[row]).collect();
-        for (tree_index, &(first_node, first_leaf)) in self.trees.iter().enumerate() {
-            let root = starts.map_or(first_node, |starts| starts[tree_index]);
-            for (block_index, scores) in group_margins.chunks_mut(LANES).enumerate() {
-                let block = &keys[block_index * key_block..][..key_block];
-                if scores.len() == LANES {
-                    self.score_group_on::<true>(nodes, block, scores, root, first_leaf);
-                } else {
-                    self.score_group_on::<false>(nodes, block, scores, root, first_leaf);
-                }
-            }
-        }
+        Self::walk_chunks(trees, &keys, key_block, &mut group_margins);
         for (position, &row_index) in group.iter().enumerate() {
             margins[row_index] = group_margins[position];
         }
@@ -934,74 +1069,73 @@ impl Lockstep {
                 group[(num_features + feature) * LOCKSTEP_LANES + lane] = nan_right;
             }
         }
-        let full_rows = row_count / LOCKSTEP_LANES * LOCKSTEP_LANES;
+        Self::walk_chunks(&self.chained, &keys, key_block, margins);
+    }
+
+    /// Adds each row's leaf values to `margins`, chunk by chunk, so a chunk's
+    /// nodes serve every group of rows while they are hot in cache.
+    fn walk_chunks(trees: &ChainedTrees, keys: &[u8], key_block: usize, margins: &mut [f64]) {
+        let full_rows = margins.len() / LOCKSTEP_LANES * LOCKSTEP_LANES;
         let full_keys = full_rows / LOCKSTEP_LANES * key_block;
-        for &(first_node, first_leaf) in &self.trees {
-            let (full_margins, tail_margins) = margins.split_at_mut(full_rows);
+        let (full_margins, tail_margins) = margins.split_at_mut(full_rows);
+        for bounds in trees.chunk_starts.windows(2) {
+            let (root, sentinel) = (bounds[0], bounds[1] - 1);
             for (group, scores) in keys[..full_keys]
                 .chunks_exact(key_block)
                 .zip(full_margins.chunks_exact_mut(LOCKSTEP_LANES))
             {
-                self.score_group::<true>(group, scores, first_node, first_leaf);
+                Self::walk_chunk::<true>(trees, group, scores, root, sentinel);
             }
             if !tail_margins.is_empty() {
-                self.score_group::<false>(&keys[full_keys..], tail_margins, first_node, first_leaf);
+                Self::walk_chunk::<false>(trees, &keys[full_keys..], tail_margins, root, sentinel);
             }
         }
     }
 
-    #[inline]
-    fn score_group<const FULL: bool>(
-        &self,
-        group: &[u8],
-        margins: &mut [f64],
-        first_node: usize,
-        first_leaf: usize,
-    ) {
-        self.score_group_on::<FULL>(&self.nodes, group, margins, first_node, first_leaf);
-    }
-
-    /// `score_group` on `nodes`: the plan's trees or pruned copies of them,
-    /// whose words keep the plan's slots, thresholds and leaf indices.
+    /// Walks each lane's row from `root` through one chunk until every lane
+    /// reaches the chunk's `sentinel`, adding the value of each node it leaves.
     #[inline(always)]
-    fn score_group_on<const FULL: bool>(
-        &self,
-        nodes: &[u64],
+    fn walk_chunk<const FULL: bool>(
+        trees: &ChainedTrees,
         group: &[u8],
         margins: &mut [f64],
-        first_node: usize,
-        first_leaf: usize,
+        root: usize,
+        sentinel: usize,
     ) {
         let lane_count = if FULL { LOCKSTEP_LANES } else { margins.len() };
-        let mut lanes = [first_node; LOCKSTEP_LANES];
+        let mut lanes = [root; LOCKSTEP_LANES];
+        let mut sums = [0.0f64; LOCKSTEP_LANES];
+        sums[..lane_count].copy_from_slice(&margins[..lane_count]);
         loop {
-            let mut moved = 0usize;
-            for (lane, index) in lanes[..lane_count].iter_mut().enumerate() {
-                // SAFETY: `invariants_hold` proved at construction that
-                // walks from `first_node` stay inside this tree's node
-                // range and that key offsets plus any lane stay inside
-                // one `key_block`-sized group. Partial groups use fewer lanes
-                // without changing that validated key stride.
-                let (word, key) = unsafe {
-                    let word = *nodes.get_unchecked(*index);
+            let mut pending = 0usize;
+            for (lane, (index, sum)) in lanes[..lane_count]
+                .iter_mut()
+                .zip(&mut sums[..lane_count])
+                .enumerate()
+            {
+                // SAFETY: `chain_invariants_hold` proved that walks from a
+                // chunk's first node only move forward inside the chunk and
+                // stop at its sentinel, and that key offsets plus any lane stay
+                // inside one `key_block`-sized group. Partial groups use fewer
+                // lanes without changing that validated key stride.
+                let (word, key, value) = unsafe {
+                    let word = *trees.words.get_unchecked(*index);
                     let key_offset = usize::from((word >> 16) as u16);
-                    (word, *group.get_unchecked(key_offset + lane))
+                    (
+                        word,
+                        *group.get_unchecked(key_offset + lane),
+                        *trees.values.get_unchecked(*index),
+                    )
                 };
+                *sum += value;
                 let next = (word >> 32) as usize + usize::from(key > word as u8);
-                moved |= next ^ *index;
+                pending |= next ^ sentinel;
                 *index = next;
             }
-            if moved == 0 {
+            if pending == 0 {
                 break;
             }
         }
-        for (margin, &index) in margins.iter_mut().zip(&lanes[..lane_count]) {
-            // SAFETY: no active lane moved, so each is on a leaf, whose
-            // leaf index `invariants_hold` bounded by this tree's leaves.
-            *margin += unsafe {
-                let leaf = usize::from((*nodes.get_unchecked(index) >> 8) as u8);
-                *self.leaves.get_unchecked(first_leaf + leaf)
-            };
-        }
+        margins[..lane_count].copy_from_slice(&sums[..lane_count]);
     }
 }

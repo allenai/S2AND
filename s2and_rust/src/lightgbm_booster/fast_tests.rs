@@ -357,6 +357,9 @@ fn check_kernel(model: &LgbModel, kernel: &str, sweep_row_counts: bool, label: &
     let plan = FastPlan::build(model).unwrap_or_else(|| panic!("{label}: no fast plan"));
     assert_eq!(plan.kernel_name(), kernel, "{label}");
     let rows = adversarial_rows(model, 1001, 0x9E37_79B9_7F4A_7C15);
+    let expected = predict_rows(model, &rows, model.num_features, 1, false);
+    let portable = plan.portable_margins(model, &rows);
+    assert_same_bits(&portable, &expected, &rows, &format!("{label} portable"));
     if sweep_row_counts {
         assert_row_count_sweep(model, &plan, &rows, label);
     } else {
@@ -684,6 +687,46 @@ fn catastrophic_cancellation_sums_keep_tree_order() {
             .collect();
         check_both_kernels(2, &trees, true, &format!("cancellation {leaf_values:?}"));
     }
+}
+
+#[test]
+fn chained_walks_cross_chunk_boundaries() {
+    let pool = |rng: &mut Rng| -> Vec<f64> {
+        let mut values = vec![f64::NEG_INFINITY, -K, -0.0, 0.0, K, 0.5, 1.0, f64::INFINITY];
+        values.extend((0..10).map(|_| (rng.unit() - 0.5) * 6.0));
+        values
+    };
+    let mut rng = Rng(0xC4A1_ED6E_0000_0001);
+    let num_features = 4;
+    let pools: Vec<Vec<f64>> = (0..num_features).map(|_| pool(&mut rng)).collect();
+    // Chunks hold 16 trees. Single leaves and huge cancelling leaves sit at
+    // chunk edges, so a wrong link or a reordered sum changes the bits.
+    let trees: Vec<Node> = (0..50)
+        .map(|index| match index {
+            15 | 32 => Node::Leaf(1e20),
+            16 | 47 => Node::Leaf(-1e20),
+            48 => random_tree(&mut rng, 60, &pools, &NAN_AND_NONE_DECISION_TYPES),
+            _ => {
+                let leaves = 1 + rng.below(40);
+                random_tree(&mut rng, leaves, &pools, &NAN_AND_NONE_DECISION_TYPES)
+            }
+        })
+        .collect();
+    let model = parse(num_features, &trees);
+    check_kernel(&model, "lockstep", true, "chunk edges");
+    let plan = FastPlan::build(&model).expect("fast plan");
+    let templates = adversarial_rows(&model, 3, 0xED6E);
+    let mut rows = adversarial_rows(&model, 333, 0xC4A1);
+    for row in rows.chunks_exact_mut(num_features) {
+        row[0] = templates[rng.below(3) * num_features];
+        if rng.below(2) == 0 {
+            row[1] = f64::NAN;
+        }
+    }
+    let spec = RowSpecialization::new(0, num_features, vec![0], vec![1, 2]).expect("fits");
+    let expected = predict_rows(&model, &rows, num_features, 1, false);
+    let actual = plan.predict_rows_specialized(&model, &rows, false, &spec);
+    assert_same_bits(&actual, &expected, &rows, "chunk edges pruned");
 }
 
 /// One stump on feature 0 per threshold in `values`, cycling through NaN/None

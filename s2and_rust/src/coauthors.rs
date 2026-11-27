@@ -915,7 +915,6 @@ unsafe fn gram_min_sum_avx2(grams1: &[(u32, u32)], grams2: &[(u32, u32)], stop_a
         let total = _mm_add_epi32(quarter, _mm_shuffle_epi32::<0b01>(quarter));
         u64::from(_mm_cvtsi128_si32(total) as u32)
     };
-    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
     let (n1, n2) = (grams1.len(), grams2.len());
     let (mut i, mut j) = (0usize, 0usize);
     let mut sums = _mm256_setzero_si256();
@@ -932,14 +931,10 @@ unsafe fn gram_min_sum_avx2(grams1: &[(u32, u32)], grams2: &[(u32, u32)], stop_a
             continue;
         }
         let (keys1, counts1) = load(grams1, i);
-        let (keys2, counts2) = load(grams2, j);
-        for rotation in 0..GRAM_BLOCK as i32 {
-            let index = _mm256_and_si256(
-                _mm256_add_epi32(lanes, _mm256_set1_epi32(rotation)),
-                _mm256_set1_epi32(7),
-            );
-            let equal = _mm256_cmpeq_epi32(keys1, _mm256_permutevar8x32_epi32(keys2, index));
-            let smaller = _mm256_min_epu32(counts1, _mm256_permutevar8x32_epi32(counts2, index));
+        // Broadcast each of the other side's entries from memory: a load, no shuffle.
+        for &(key2, count2) in grams2.get_unchecked(j..j + GRAM_BLOCK) {
+            let equal = _mm256_cmpeq_epi32(keys1, _mm256_set1_epi32(key2 as i32));
+            let smaller = _mm256_min_epu32(counts1, _mm256_set1_epi32(count2 as i32));
             sums = _mm256_add_epi32(sums, _mm256_and_si256(equal, smaller));
         }
         if lane_sum(sums) >= stop_at {
@@ -963,25 +958,62 @@ unsafe fn gram_min_sum_avx2(grams1: &[(u32, u32)], grams2: &[(u32, u32)], stop_a
     sum
 }
 
-/// Count of `key` in a sorted gram list, found by galloping from the
-/// previous lookup; keys must be looked up in increasing order.
-struct GramCursor<'a> {
+/// Count of `key` in a sorted gram list, found by scanning forward from the
+/// previous lookup eight entries per AVX2 compare; keys must be looked up in
+/// increasing order. Lookups land a few entries apart, where a gallop's
+/// data-dependent branches mispredict.
+#[cfg(target_arch = "x86_64")]
+struct GramScan<'a> {
     grams: &'a [(u32, u32)],
     next: usize,
 }
 
-impl GramCursor<'_> {
-    fn count(&mut self, key: u32) -> u32 {
-        let rest = &self.grams[self.next..];
-        match gallop(rest, key, |(gram, _)| *gram) {
-            Ok(offset) => {
-                self.next += offset + 1;
-                rest[offset].1
+#[cfg(target_arch = "x86_64")]
+impl GramScan<'_> {
+    /// # Safety
+    /// The CPU supports AVX2.
+    #[inline(always)]
+    unsafe fn count(&mut self, key: u32) -> u32 {
+        use std::arch::x86_64::*;
+        let grams = self.grams;
+        // SAFETY: the caller guarantees AVX2; each load reads the eight
+        // entries `next..next + 8`, which the loop condition keeps in bounds.
+        unsafe {
+            // Bias both sides so signed compares order the unsigned keys.
+            let bias = _mm256_set1_epi32(i32::MIN);
+            let target = _mm256_set1_epi32((key ^ 0x8000_0000) as i32);
+            while self.next + 8 <= grams.len() {
+                let at = grams.as_ptr().add(self.next) as *const __m256i;
+                let low = _mm256_xor_si256(_mm256_loadu_si256(at), bias);
+                let high = _mm256_xor_si256(_mm256_loadu_si256(at.add(1)), bias);
+                // Keys sit in the even dwords; keys below the target form a prefix.
+                let below_low =
+                    _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(target, low)));
+                let below_high =
+                    _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(target, high)));
+                let below = (below_low as u32 & 0x55) | ((below_high as u32 & 0x55) << 8);
+                if below != 0x5555 {
+                    // Odd bits set, so the trailing ones are the below-keys' bits.
+                    self.next += ((!(below | 0xAAAA)).trailing_zeros() / 2) as usize;
+                    let (gram, count) = *grams.get_unchecked(self.next);
+                    if gram == key {
+                        self.next += 1;
+                        return count;
+                    }
+                    return 0;
+                }
+                self.next += 8;
             }
-            Err(offset) => {
-                self.next += offset;
-                0
+        }
+        while self.next < grams.len() && grams[self.next].0 < key {
+            self.next += 1;
+        }
+        match grams.get(self.next) {
+            Some(&(gram, count)) if gram == key => {
+                self.next += 1;
+                count
             }
+            _ => 0,
         }
     }
 }
@@ -989,17 +1021,19 @@ impl GramCursor<'_> {
 /// Over the grams of either own author that both papers have: the smaller
 /// paper count minus the smaller count without the own authors. Subtracted
 /// from the sum of smaller paper counts, it gives the coauthor intersection.
-fn own_gram_excess(
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn own_gram_excess_avx2(
     paper1: &PaperCoauthors,
     own1: &[(u32, u32)],
     paper2: &PaperCoauthors,
     own2: &[(u32, u32)],
 ) -> u64 {
-    let mut counts1 = GramCursor {
+    let mut counts1 = GramScan {
         grams: &paper1.grams,
         next: 0,
     };
-    let mut counts2 = GramCursor {
+    let mut counts2 = GramScan {
         grams: &paper2.grams,
         next: 0,
     };
@@ -1019,7 +1053,8 @@ fn own_gram_excess(
             _ => 0,
         };
         let (own_count1, own_count2) = (own_count(own1, &mut a), own_count(own2, &mut b));
-        let (count1, count2) = (counts1.count(key), counts2.count(key));
+        // SAFETY: AVX2 is enabled here.
+        let (count1, count2) = unsafe { (counts1.count(key), counts2.count(key)) };
         if count1 > 0 && count2 > 0 {
             // Each paper's count includes its own author's.
             excess +=
@@ -1100,7 +1135,8 @@ fn removed_gram_jaccard_with(
         if shared >= stop_at {
             return 1.0;
         }
-        let intersection = shared - own_gram_excess(paper1, own1, paper2, own2);
+        // SAFETY: AVX2 was detected above.
+        let intersection = shared - unsafe { own_gram_excess_avx2(paper1, own1, paper2, own2) };
         return capped_gram_jaccard(intersection, sum1, sum2);
     }
     let _ = (allow_simd, shorter, longer);
@@ -1466,6 +1502,73 @@ mod tests {
                         "{stop_at} {partial} {full}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The galloping lookup `GramScan` replaced; the reference in its test.
+    struct GramCursor<'a> {
+        grams: &'a [(u32, u32)],
+        next: usize,
+    }
+
+    impl GramCursor<'_> {
+        fn count(&mut self, key: u32) -> u32 {
+            let rest = &self.grams[self.next..];
+            match gallop(rest, key, |(gram, _)| *gram) {
+                Ok(offset) => {
+                    self.next += offset + 1;
+                    rest[offset].1
+                }
+                Err(offset) => {
+                    self.next += offset;
+                    0
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn gram_scans_match_galloping_lookups() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut rng = Lcg(31);
+        for round in 0..5_000 {
+            // Odd rounds spread keys over the whole u32 range, so the scan's
+            // biased signed compare sees keys on both sides of 2^31.
+            let stride = if round % 2 == 0 { 1 } else { 800_000 };
+            let universe = 1 + rng.below(5_000);
+            let spread = |grams: Vec<(u32, u32)>| -> Vec<(u32, u32)> {
+                grams
+                    .into_iter()
+                    .map(|(key, count)| (key * stride, count))
+                    .collect()
+            };
+            let grams = spread(random_grams(&mut rng, universe, 400));
+            let mut queries: Vec<u32> = grams
+                .iter()
+                .filter(|_| rng.below(3) == 0)
+                .map(|(key, _)| *key)
+                .collect();
+            let misses = rng.below(60);
+            queries.extend((0..misses).map(|_| rng.below(universe) as u32 * stride));
+            queries.sort_unstable();
+            queries.dedup();
+            let mut scan = GramScan {
+                grams: &grams,
+                next: 0,
+            };
+            let mut cursor = GramCursor {
+                grams: &grams,
+                next: 0,
+            };
+            for key in queries {
+                // SAFETY: AVX2 was detected above.
+                let scanned = unsafe { scan.count(key) };
+                assert_eq!(scanned, cursor.count(key), "round {round} key {key}");
+                assert_eq!(scan.next, cursor.next, "round {round} key {key}");
             }
         }
     }

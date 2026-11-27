@@ -20,13 +20,31 @@ Follow the [release process](../docs/release.md) for production runs.
 | `intake/build_identity_evidence.py` | Join and audit Gold ORCID labels against a frozen Arrow snapshot |
 | `intake/assign_block_roles.py` | Deterministically partition production blocks into ORCID-disjoint 1.5 training, tuning, and test pools |
 | `intake/gate_public_snapshot.py` | Intake-once S2AG paper filtering, abstract redaction, email scrubbing, and `population_corrections.json` generation |
-| `judging/review_packets.py` | Leak-proof blind Sol 6.2 review packet builder, embedded ORCID control injector, and pre-launch validator |
+| `judging/review_packets.py` | Blind review packet builder, embedded ORCID control injector, and pre-launch validator; `judged_bank.py` reuses its renderer |
+| `judging/decision_capture.py` | Record one final linker decision per signature during `sweep_eps_on_linking_gold --capture-dir` |
 | `judging/judged_bank.py` | [Assemble blind author-pair packages, merge frozen verdicts, and check planted controls](../docs/judged_bank.md) |
 | `linker/linker_source_bundle.py` | Assemble and preflight the fresh linker-source bundle and public-data root from reviewed inputs. Use only when the accepted support or replay Arrow roots change; see [data preparation](intake/README.md) |
 | `intake/generate_canonical_name_tuples.py` | Deterministically generate the canonical tuple text file from the reviewed source artifact |
 | `intake/counts/generate_author_counts_from_athena.py` | Export author-table name counts from Athena and build an immutable native `name_counts_index/` (AI2 staff only); see [count producers](intake/counts/README.md) |
 | `intake/counts/generate_name_counts_from_parquet.py` | Build a canonical binary `name_counts_index/` from reviewed weighted raw-name Parquet files. Invoke with `python -m`. |
 | `intake/counts/generate_orcid_name_prefix_counts.py` | Convert one reviewed, guardrailed CSV export into canonical ORCID prefix-count JSON bound to the packaged tuple artifact; invoke with `python -m` |
+
+### 1.5 training data (stage 0 to linker)
+
+The [1.5 runbook](../docs/v15_training_design.md) gives the order and commands.
+
+| Script | What it does |
+|---|---|
+| `intake/requests_to_datasets.py` | Convert production Arrow request bundles into a training snapshot |
+| `intake/build_freeze_input.py` | Build the role allocator input from exported signature evidence and source strata |
+| `intake/attach_manual_labels.py` | Re-attach corpus-keyed manual labels to a verified stage-0 snapshot |
+| `intake/build_v14_training_inventory.py` | Build the 1.4 training inventory from private, corpus-keyed ORCID labels |
+| `intake/check_v14_training_overlap.py` | Check the sealed test role against the 1.4 training signature inventory |
+| `pairwise/mine_pairwise_pairs.py` | Mine 1.4 errors and random controls from frozen `fit_pool` blocks |
+| `linker/build_linker_inputs.py` | Build held-out request lists and ORCID-hidden 1.4 assignments |
+| `linker/build_linker_task_tables.py` | Freeze top-25 linker fitting windows and blind-review gate windows |
+| `linker/blind_gate_metrics.py` | Score query outcomes on fully judged `gate_thresh` windows (older JSONL review path) |
+| `eps/orcid_b3.py` | Keep giant-block ORCID references outside prediction and score known identities |
 
 ### Tutorials
 
@@ -71,7 +89,7 @@ Use [the data guide](../docs/data.md) to download them.
 
 ### Shared helpers (`common/`)
 
-Code that several stages import. Stage folders import from here, not from each other's private helpers.
+Code that several stages import. Put new shared helpers here rather than importing another stage's private helpers.
 
 | Module | What it holds |
 |---|---|
@@ -80,6 +98,9 @@ Code that several stages import. Stage folders import from here, not from each o
 | `common/block_roles.py` | Read frozen block roles and apply their ORCID scoring policy |
 | `common/distance_policy.py` | `DISTANCE_POLICY_VERSION`, which EPS curves and linker task tables record |
 | `common/email_redaction.py` | Hash and scrub emails, and scan trees for plaintext emails |
+| `common/identity_ledger.py` | Read the verified identity evidence for exported block signatures |
+| `common/linker_seeds.py` | Read frozen pre-attachment seed membership |
+| `common/stage0_invariants.py` | Check invariants shared by stage-0 producers and consumers |
 | `common/initial_query_sources.py` | Verify derived query origins against the source signature tables |
 | `common/orcid_references.py` | `EXCLUDED_ORCID_GROUPS` and the external ORCID reference-label reader |
 | `common/release_root_checks.py` | `validate_release_root`, the local Arrow release-root check; `release/verification/validate_local_arrow_release.py` is its command line |

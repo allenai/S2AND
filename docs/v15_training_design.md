@@ -162,11 +162,11 @@ where the curve reaches 0.80. Give undecided items half credit and report both s
 The bank supports a first cutoff estimate. Its initial-only bias check crossed at 0.738 versus 0.792
 for the weighted cutoff sample. Bank bias check (internal report `judged_bank/README.md`) · [Bank commands](judged_bank.md)
 
-In step 9, judge `t_full` on real incremental requests, including cases where both arms abstain.
+Before release, judge `t_full` on incremental requests, including cases where both arms abstain.
 Full-name probabilities were poorly calibrated for the right links the candidate dropped. The shipped
 fitted gate recovered them using other evidence. Compare a lower `t_full` with a fitted gate for full
 names only. Keep the fitted gate only if judged evidence shows the cutoff fails.
-Full-name analysis (internal report `fullname_drop/analyze.py`) · Step 9 (internal report `NEXT_STEPS.md`)
+Full-name analysis (internal report `fullname_drop/analyze.py`)
 
 For the cutoff candidate, stamp the reviewed EPS and cutoffs without refitting. Use the no-sweep form
 because the sweep's giant F1 tolerance can reject 0.38. Substitute the reviewed EPS if it moved.

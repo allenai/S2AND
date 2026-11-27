@@ -24,7 +24,7 @@
 | Stage | Scripts | Output |
 | --- | --- | --- |
 | Intake | [`convert_to_arrow.py`](../scripts/intake/convert_to_arrow.py), [`build_identity_evidence.py`](../scripts/intake/build_identity_evidence.py), [`assign_block_roles.py`](../scripts/intake/assign_block_roles.py) | Arrow datasets, verified identity evidence, and frozen block roles |
-| Judging | [`review_packets.py`](../scripts/judging/review_packets.py) | Blind review packets, control keys, and judge scores |
+| Judging | [`decision_capture.py`](../scripts/judging/decision_capture.py), [`judged_bank.py`](../scripts/judging/judged_bank.py), [`review_packets.py`](../scripts/judging/review_packets.py) | Captured runtime decisions, blind packages, the judged-pair bank, and judge checks |
 | Pairwise | [`prepare_pairwise_inputs.py`](../scripts/pairwise/prepare_pairwise_inputs.py), [`package_pairwise_inputs.py`](../scripts/pairwise/package_pairwise_inputs.py), [`train_pairwise.py`](../scripts/pairwise/train_pairwise.py), [`release_pairwise.py`](../scripts/pairwise/release_pairwise.py) | Portable pairwise inputs, both boosters and benchmark EPS. `release_pairwise.py evaluate-heldout` scores the held-out test after the linker stage writes a complete model |
 | Linker | [`build_linker_task_tables.py`](../scripts/linker/build_linker_task_tables.py), [`linker_source_bundle.py`](../scripts/linker/linker_source_bundle.py), [`train_linker_and_finalize.py`](../scripts/linker/train_linker_and_finalize.py) | Frozen task tables, a complete model, and linker evaluation |
 | Clustering threshold (EPS) | [`sweep_eps_on_linking_gold.py`](../scripts/eps/sweep_eps_on_linking_gold.py), [`plot_b3_eps_sweeps.py`](../scripts/eps/plot_b3_eps_sweeps.py), [`apply_reviewed_eps.py`](../scripts/eps/apply_reviewed_eps.py) | ORCID B-cubed curves and a complete bundle with the reviewed threshold |
@@ -47,7 +47,7 @@
 | Name-count index and producers | [`name_counts_index.py`](../s2and/name_counts_index.py), [intake count commands](../scripts/intake/counts/README.md) |
 | Name-conflict repair | [`corrections/name_conflict_repair.py`](../s2and/corrections/name_conflict_repair.py) |
 | Retained seed memberships | [`corrections/seed_merging.py`](../s2and/corrections/seed_merging.py) |
-| Linker ranker and gate fitting | [`fit.py`](../s2and/incremental_linking_training/fit.py) runs it, using [`ranker.py`](../s2and/incremental_linking_training/ranker.py), [`gate.py`](../s2and/incremental_linking_training/gate.py) and [`evaluate.py`](../s2and/incremental_linking_training/evaluate.py) |
+| Linker ranker fitting and cutoff gate | [`fit.py`](../s2and/incremental_linking_training/fit.py) runs it, using [`ranker.py`](../s2and/incremental_linking_training/ranker.py), [`gate.py`](../s2and/incremental_linking_training/gate.py) (`cutoff_gate_config`) and [`evaluate.py`](../s2and/incremental_linking_training/evaluate.py) |
 | Thread and memory budgets | [`thread_config.py`](../s2and/thread_config.py), [`memory_budget.py`](../s2and/memory_budget.py) |
 | Local and hosted CI policy | [`run_ci_locally.py`](../scripts/dev/run_ci_locally.py) |
 

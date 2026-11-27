@@ -88,8 +88,12 @@ uv run --no-sync python scripts/linker/train_linker_and_finalize.py \
   --pairwise-model-path "$RUN/calibrated/production_model_v1.3.1" \
   --name-counts-index-root "$ROOT/name_counts_index" \
   --output-dir "$RUN/complete" \
+  --gate-cutoffs "$T_FULL" "$T_INIT" \
   --n-jobs 12
 ```
+
+Set `T_FULL` and `T_INIT` to the judged gate cutoffs for full-name and initial-only queries.
+See [the 1.5 runbook](v15_training_design.md) for how to judge them.
 
 The step computes incremental features with the calibrated pairwise model and fits the linker.
 It writes the complete model, reloads it, and evaluates the declared linker test split.

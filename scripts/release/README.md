@@ -132,12 +132,14 @@ uv run --no-sync python scripts/linker/train_linker_and_finalize.py `
   --pairwise-model-path $CalibratedModel `
   --name-counts-index-root "$Root/name_counts_index" `
   --output-dir "$RunRoot/complete" `
+  --gate-cutoffs $TFull $TInit `
   --n-jobs 12 `
   --total-ram-bytes 137438953472
 ```
 
 The finalizer computes features, fits once, writes the complete model, reloads it, and evaluates the declared linker test split.
-The derived feature configuration aligns gate calibration with the active retrieval window.
+Set `$TFull` and `$TInit` to the judged gate cutoffs ([1.5 runbook](../../docs/v15_training_design.md)).
+The trainer stamps them as the gate and fits only the ranker.
 The run report retains evaluation diagnostics and both feature summaries.
 Its complete output uses the calibrated model's basename.
 The complete model includes the incremental booster, gate metadata, and target JSON.

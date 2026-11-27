@@ -140,7 +140,10 @@ diagnostics. Merge review and pass bar (internal report `gate_shape_blind/PASS_B
 
 Set `t_full` for full-name queries and `t_init` for initial-only queries after training. Rejudge these
 probability cutoffs for each release ranker. With the 1.4 heads and the refit ranker, `t_init` is 0.792
-and judged cost is flat from 0.74 to 0.89. `t_full` is provisional at 0.702. Use probability alone.
+and judged cost is flat from 0.74 to 0.89. `t_full` is 0.868, the isotonic 0.80 crossing on held-out
+full-name requests. On 16 fresh blocks it beat shipped 1.4 by 5.15 cost per 100 full-name decisions
+[2.26, 6.49]. Refit probabilities are overconfident on fresh full names. Use probability alone.
+Full-name holdout (internal report `fullname_holdout/RESULT.md`) · Confirmation (internal report `fullname_confirm/RESULT.md`)
 A top-two score margin failed independent confirmation. Cutoff result (internal report `gate_cutoff_blind/RESULT.md`) · Margin result (internal report `margin_confirm/RESULT.md`)
 
 Use the cutoff pass bar (internal report `gate_cutoff_blind/PASS_BAR.md`) as the method. Freeze the
@@ -162,11 +165,12 @@ where the curve reaches 0.80. Give undecided items half credit and report both s
 The bank supports a first cutoff estimate. Its initial-only bias check crossed at 0.738 versus 0.792
 for the weighted cutoff sample. Bank bias check (internal report `judged_bank/README.md`) · [Bank commands](judged_bank.md)
 
-Before release, judge `t_full` on incremental requests, including cases where both arms abstain.
-Full-name probabilities were poorly calibrated for the right links the candidate dropped. The shipped
-fitted gate recovered them using other evidence. Compare a lower `t_full` with a fitted gate for full
-names only. Keep the fitted gate only if judged evidence shows the cutoff fails.
-Full-name analysis (internal report `fullname_drop/analyze.py`)
+Judge `t_full` on simulated incremental requests. In blocks that neither ranker trained on, hold out
+each block's newest whole publication years as queries, and cluster the older signatures at the
+reviewed EPS as seeds. Include cases where both arms abstain. Then confirm the chosen cutoff against
+the incumbent on fresh blocks, judging only the decisions where they disagree. If the cutoff fails,
+test a two-parameter gate on `logit(p)` and target cluster size next, not a many-feature fitted gate.
+The ranker trains only on gold-scored candidates, so it is overconfident on small unlabeled clusters at runtime.
 
 For the cutoff candidate, stamp the reviewed EPS and cutoffs without refitting. Use the no-sweep form
 because the sweep's giant F1 tolerance can reject 0.38. Substitute the reviewed EPS if it moved.

@@ -142,6 +142,18 @@ impl ComponentOverlap {
     pub(crate) fn has_zero_numerators(&self) -> bool {
         self.coauthor == 0.0 && self.non_mega_coauthor == 0.0 && self.affiliation == 0.0
     }
+
+    /// Every field, floats as bits, for exact comparisons in tests.
+    #[cfg(test)]
+    pub(crate) fn bits(&self) -> (u32, u32, u64, u64, u64) {
+        (
+            self.coauthor_hits,
+            self.non_mega_coauthor_hits,
+            self.coauthor.to_bits(),
+            self.non_mega_coauthor.to_bits(),
+            self.affiliation.to_bits(),
+        )
+    }
 }
 
 fn counter_hits_and_numerator(
@@ -393,19 +405,22 @@ impl CounterPostings {
         frequencies
     }
 
-    /// Add each term's postings to `overlaps`, in `terms` order.
+    /// Add each term's postings to `overlaps`, in `terms` order; return how
+    /// many postings that walked.
     fn accumulate(
         &self,
         terms: &[RetrievalQueryTerm],
         weights: &[f64],
         overlaps: &mut [ComponentOverlap],
         add: fn(&mut ComponentOverlap, f64, f64),
-    ) {
+    ) -> usize {
+        let mut walked = 0;
         for (term, weight) in terms.iter().zip(weights) {
             let Ok(position) = self.hashes.binary_search(&term.hash) else {
                 continue;
             };
             let range = self.offsets[position] as usize..self.offsets[position + 1] as usize;
+            walked += range.len();
             for (component, share) in self.components[range.clone()]
                 .iter()
                 .zip(&self.shares[range])
@@ -413,8 +428,25 @@ impl CounterPostings {
                 add(&mut overlaps[*component as usize], *weight, *share);
             }
         }
+        walked
+    }
+
+    /// Reset every entry of `overlaps` that `accumulate` touched for `terms`.
+    fn clear(&self, terms: &[RetrievalQueryTerm], overlaps: &mut [ComponentOverlap]) {
+        for term in terms {
+            let Ok(position) = self.hashes.binary_search(&term.hash) else {
+                continue;
+            };
+            let range = self.offsets[position] as usize..self.offsets[position + 1] as usize;
+            for component in &self.components[range] {
+                overlaps[*component as usize] = ComponentOverlap::default();
+            }
+        }
     }
 }
+
+/// How many entries a full reset of the overlap buffer costs per posting reset.
+const RESET_WALK_COST: usize = 4;
 
 /// Inverted coauthor, non-mega coauthor and affiliation counters of a retriever.
 #[derive(Default)]
@@ -479,10 +511,60 @@ impl OverlapIndex {
         component_count: usize,
     ) -> Vec<ComponentOverlap> {
         let mut overlaps = vec![ComponentOverlap::default(); component_count];
-        self.coauthor.accumulate(
+        self.accumulate_overlaps(query, prepared, &mut overlaps);
+        overlaps
+    }
+
+    /// `component_overlaps` in this thread's reused buffer, passed to `use_overlaps`.
+    ///
+    /// Planning walks one query at a time on each thread. A fresh buffer per
+    /// query cost an allocation and a write of every summary's entry; the
+    /// reused one resets only the entries the query's postings touched.
+    pub(crate) fn with_component_overlaps<T>(
+        &self,
+        query: &RetrievalQueryData,
+        prepared: &PreparedQuery,
+        component_count: usize,
+        use_overlaps: impl FnOnce(&[ComponentOverlap]) -> T,
+    ) -> T {
+        thread_local! {
+            static SCRATCH: std::cell::Cell<Vec<ComponentOverlap>> =
+                const { std::cell::Cell::new(Vec::new()) };
+        }
+        // Take the buffer out, so a nested call on this thread gets its own.
+        let mut overlaps = SCRATCH.take();
+        if overlaps.len() != component_count {
+            overlaps.clear();
+            overlaps.resize(component_count, ComponentOverlap::default());
+        }
+        let walked = self.accumulate_overlaps(query, prepared, &mut overlaps);
+        let result = use_overlaps(&overlaps);
+        // A posting's reset is a scattered store; a full reset streams. Walk
+        // the postings again only when they are few.
+        if walked.saturating_mul(RESET_WALK_COST) <= overlaps.len() {
+            self.coauthor.clear(&query.coauthor_terms, &mut overlaps);
+            self.non_mega_coauthor
+                .clear(&query.coauthor_terms, &mut overlaps);
+            self.affiliation
+                .clear(&query.affiliation_terms, &mut overlaps);
+        } else {
+            overlaps.fill(ComponentOverlap::default());
+        }
+        SCRATCH.set(overlaps);
+        result
+    }
+
+    /// Add a query's postings to zeroed `overlaps`; return how many it walked.
+    fn accumulate_overlaps(
+        &self,
+        query: &RetrievalQueryData,
+        prepared: &PreparedQuery,
+        overlaps: &mut [ComponentOverlap],
+    ) -> usize {
+        let coauthor = self.coauthor.accumulate(
             &query.coauthor_terms,
             &prepared.coauthor.weights,
-            &mut overlaps,
+            overlaps,
             |overlap, weight, share| {
                 overlap.coauthor_hits += 1;
                 if weight > 0.0 {
@@ -490,10 +572,10 @@ impl OverlapIndex {
                 }
             },
         );
-        self.non_mega_coauthor.accumulate(
+        let non_mega_coauthor = self.non_mega_coauthor.accumulate(
             &query.coauthor_terms,
             &prepared.non_mega_coauthor.weights,
-            &mut overlaps,
+            overlaps,
             |overlap, weight, share| {
                 overlap.non_mega_coauthor_hits += 1;
                 if weight > 0.0 {
@@ -501,16 +583,16 @@ impl OverlapIndex {
                 }
             },
         );
-        self.affiliation.accumulate(
+        let affiliation = self.affiliation.accumulate(
             &query.affiliation_terms,
             &prepared.affiliation.weights,
-            &mut overlaps,
+            overlaps,
             |overlap, weight, share| {
                 if weight > 0.0 {
                     overlap.affiliation += weight * share;
                 }
             },
         );
-        overlaps
+        coauthor + non_mega_coauthor + affiliation
     }
 }

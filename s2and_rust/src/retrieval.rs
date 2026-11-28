@@ -896,33 +896,42 @@ impl RustHybridCentroidRetriever {
             return selection;
         }
 
-        let middle_filtered: Vec<usize> = candidate_indices
-            .iter()
-            .copied()
-            .filter(|idx| {
-                !has_middle_initial_conflict(
-                    &query_data.middle_initial_hashes,
-                    &self.summaries[*idx].middle_initial_counts,
-                )
-            })
-            .collect();
-        if !middle_filtered.is_empty() {
-            candidate_indices = middle_filtered;
-        }
-
-        let year_filtered: Vec<usize> = candidate_indices
-            .iter()
-            .copied()
-            .filter(|idx| {
-                !has_impossible_year_conflict(
-                    query_data.year,
-                    &self.summaries[*idx],
-                    RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
-                )
-            })
-            .collect();
-        if !year_filtered.is_empty() {
-            candidate_indices = year_filtered;
+        // Drop middle-initial conflicts unless that drops every candidate, then
+        // impossible years among those kept unless that drops every one. Both
+        // tests run in one pass over the summaries, and one more keeps the result.
+        let check_middle = !query_data.middle_initial_hashes.is_empty();
+        let check_year = query_data.year.is_some();
+        if check_middle || check_year {
+            const MIDDLE_OK: u8 = 1;
+            const YEAR_OK: u8 = 2;
+            let flags: Vec<u8> = candidate_indices
+                .iter()
+                .map(|&idx| {
+                    let summary = &self.summaries[idx];
+                    let middle_ok = !check_middle
+                        || !has_middle_initial_conflict(
+                            &query_data.middle_initial_hashes,
+                            &summary.middle_initial_counts,
+                        );
+                    let year_ok = !check_year
+                        || !has_impossible_year_conflict(
+                            query_data.year,
+                            summary,
+                            RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+                        );
+                    (if middle_ok { MIDDLE_OK } else { 0 }) | (if year_ok { YEAR_OK } else { 0 })
+                })
+                .collect();
+            let filter_middle = flags.iter().any(|flag| flag & MIDDLE_OK != 0);
+            let kept_by_middle = |flag: u8| !filter_middle || flag & MIDDLE_OK != 0;
+            let filter_year = flags
+                .iter()
+                .any(|&flag| kept_by_middle(flag) && flag & YEAR_OK != 0);
+            let mut flags = flags.into_iter();
+            candidate_indices.retain(|_| {
+                let flag = flags.next().expect("one flag per candidate");
+                kept_by_middle(flag) && (!filter_year || flag & YEAR_OK != 0)
+            });
         }
 
         RetrievalCandidateSelection {
@@ -2090,18 +2099,7 @@ pub(crate) fn chooser_summary_features(
     let title_score =
         counter_query_overlap_hashes(&query.title_hashes, &summary.title_counts, summary.size)
             as f32;
-    let specter_centroid_score = match (
-        query.specter.as_ref(),
-        query.specter_norm,
-        summary.specter_centroid.as_ref(),
-        summary.specter_centroid_norm,
-    ) {
-        (Some(query_specter), Some(query_norm), Some(summary_specter), Some(summary_norm)) => {
-            cosine_sim_with_norms(query_specter, query_norm, summary_specter, summary_norm) as f32
-        }
-        _ => 0.0,
-    };
-    let specter_exemplar_score = specter_exemplar_score(query, summary) as f32;
+    let (specter_centroid_score, specter_exemplar_score) = chooser_specter_scores(query, summary);
     [
         middle_score,
         affiliation_score,
@@ -2112,6 +2110,108 @@ pub(crate) fn chooser_summary_features(
         specter_centroid_score,
         specter_exemplar_score,
     ]
+}
+
+/// The chooser's centroid cosine and best exemplar cosine (at least 0.0), as f32.
+///
+/// Equals `cosine_sim_with_norms` of the centroid and the fold of
+/// `specter_exemplar_score`, bit for bit. Each dot keeps its sequential f64
+/// sum; the sums run side by side, so their add latencies overlap.
+fn chooser_specter_scores(
+    query: &RetrievalQueryData,
+    summary: &RetrievalSummaryData,
+) -> (f32, f32) {
+    let (Some(query_specter), Some(query_norm)) = (query.specter.as_ref(), query.specter_norm)
+    else {
+        return (0.0, 0.0);
+    };
+    let query_specter: &[f32] = query_specter;
+    let len = query_specter.len();
+    let centroid = match (
+        summary.specter_centroid.as_ref(),
+        summary.specter_centroid_norm,
+    ) {
+        (Some(vector), Some(norm)) => Some((&vector[..], norm)),
+        _ => None,
+    };
+    // Cosines `cosine_sim_with_norms` returns without a dot are set here;
+    // the others are filled from the side-by-side sums below.
+    let mut vectors: Vec<(&[f32], f64)> = Vec::with_capacity(1 + summary.exemplar_vectors.len());
+    vectors.extend(centroid);
+    vectors.extend(
+        summary
+            .exemplar_vectors
+            .iter()
+            .map(|vector| &vector[..])
+            .zip(summary.exemplar_norms.iter().copied()),
+    );
+    let mut cosines = vec![0.0f64; vectors.len()];
+    let mut dotted: [usize; SEQUENTIAL_DOT_GROUP] = [0; SEQUENTIAL_DOT_GROUP];
+    let mut group = 0;
+    let flush = |dotted: &[usize], cosines: &mut [f64]| {
+        let mut group_vectors: [&[f32]; SEQUENTIAL_DOT_GROUP] = [&[]; SEQUENTIAL_DOT_GROUP];
+        for (slot, &index) in dotted.iter().enumerate() {
+            group_vectors[slot] = vectors[index].0;
+        }
+        let dots = sequential_dots(query_specter, &group_vectors[..dotted.len()]);
+        for (slot, &index) in dotted.iter().enumerate() {
+            cosines[index] = dots[slot] / (query_norm * vectors[index].1);
+        }
+    };
+    for (index, &(vector, norm)) in vectors.iter().enumerate() {
+        if vector.len() != len {
+            cosines[index] = f64::NAN;
+        } else if query_norm == 0.0 || norm == 0.0 {
+            cosines[index] = 0.0;
+        } else {
+            dotted[group] = index;
+            group += 1;
+            if group == SEQUENTIAL_DOT_GROUP {
+                flush(&dotted, &mut cosines);
+                group = 0;
+            }
+        }
+    }
+    if group > 0 {
+        flush(&dotted[..group], &mut cosines);
+    }
+    let exemplar_start = usize::from(centroid.is_some());
+    let centroid_score = if centroid.is_some() { cosines[0] } else { 0.0 };
+    let exemplar_score = cosines[exemplar_start..]
+        .iter()
+        .copied()
+        .fold(0.0f64, f64::max);
+    (centroid_score as f32, exemplar_score as f32)
+}
+
+/// Vectors whose sequential dots `sequential_dots` sums side by side.
+const SEQUENTIAL_DOT_GROUP: usize = 5;
+
+/// `dot_f32_as_f64_scalar(query, vector)` for each of up to
+/// `SEQUENTIAL_DOT_GROUP` vectors of the query's length, bit for bit.
+fn sequential_dots(query: &[f32], vectors: &[&[f32]]) -> [f64; SEQUENTIAL_DOT_GROUP] {
+    fn group<const N: usize>(query: &[f32], vectors: &[&[f32]]) -> [f64; SEQUENTIAL_DOT_GROUP] {
+        let len = query.len();
+        let vectors: [&[f32]; N] = std::array::from_fn(|slot| &vectors[slot][..len]);
+        let mut sums = [0.0f64; N];
+        for (index, value) in query.iter().enumerate() {
+            let value = f64::from(*value);
+            for slot in 0..N {
+                sums[slot] += value * f64::from(vectors[slot][index]);
+            }
+        }
+        let mut padded = [0.0f64; SEQUENTIAL_DOT_GROUP];
+        padded[..N].copy_from_slice(&sums);
+        padded
+    }
+    match vectors.len() {
+        0 => [0.0; SEQUENTIAL_DOT_GROUP],
+        1 => group::<1>(query, vectors),
+        2 => group::<2>(query, vectors),
+        3 => group::<3>(query, vectors),
+        4 => group::<4>(query, vectors),
+        _ => group::<5>(query, vectors),
+    }
 }
 
 pub(crate) fn checked_retrieved_row_index(
@@ -3370,6 +3470,162 @@ mod overlap_index_tests {
             let exact = fused_specter_score(&queries[0], &retriever.summaries[0]);
             assert!(exact > 0.99);
             assert_eq!(tight[0][0], f32_at_or_above(exact));
+        }
+    }
+
+    #[test]
+    fn chooser_specter_scores_match_sequential_cosines_bit_for_bit() {
+        let mut rng = Lcg(211);
+        let mut summaries = synthetic_summaries();
+        let base = summaries[0].clone();
+        let lengths = [16usize, 15];
+        for (index, exemplar_count) in [0usize, 1, 4, 5, 6, 9].into_iter().enumerate() {
+            let mut crowded = base.clone();
+            crowded.component_key = format!("crowded{index}");
+            crowded.exemplar_vectors = (0..exemplar_count)
+                .map(|slot| {
+                    let len = lengths[usize::from(slot % 3 == 2)];
+                    (0..len)
+                        .map(|_| rng.below(1000) as f32 / 500.0 - 1.0)
+                        .collect()
+                })
+                .collect();
+            crowded.exemplar_norms = crowded
+                .exemplar_vectors
+                .iter()
+                .map(|values| vector_norm_f32(values))
+                .collect();
+            if exemplar_count > 1 {
+                // A zero norm scores 0.0 and a NaN norm stays NaN.
+                crowded.exemplar_norms[1] = 0.0;
+            }
+            if exemplar_count > 3 {
+                crowded.exemplar_norms[3] = f64::NAN;
+            }
+            if index % 2 == 1 {
+                crowded.specter_centroid = None;
+            }
+            summaries.push(crowded);
+        }
+        let mut queries = synthetic_queries();
+        let mut zero = queries[0].clone();
+        zero.specter = Some(Arc::new(vec![0.0f32; 16].into()));
+        zero.specter_norm = Some(0.0);
+        queries.push(zero);
+        for query in &queries {
+            for summary in &summaries {
+                let reference_centroid = match (
+                    query.specter.as_ref(),
+                    query.specter_norm,
+                    summary.specter_centroid.as_ref(),
+                    summary.specter_centroid_norm,
+                ) {
+                    (Some(q), Some(qn), Some(c), Some(cn)) => {
+                        cosine_sim_with_norms(q, qn, c, cn) as f32
+                    }
+                    _ => 0.0,
+                };
+                let reference_exemplar = specter_exemplar_score(query, summary) as f32;
+                let (centroid, exemplar) = chooser_specter_scores(query, summary);
+                assert_eq!(centroid.to_bits(), reference_centroid.to_bits());
+                assert_eq!(exemplar.to_bits(), reference_exemplar.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn reused_overlap_buffers_match_fresh_ones() {
+        let retriever = RustHybridCentroidRetriever::from_summaries(synthetic_summaries(), true)
+            .expect("retriever");
+        let index = retriever.overlap_index();
+        let count = retriever.summaries.len();
+        // Twice over, so each query starts from a buffer other queries used.
+        for query in synthetic_queries().iter().chain(&synthetic_queries()) {
+            let prepared = retriever.prepare_query(query);
+            let fresh: Vec<_> = index
+                .component_overlaps(query, &prepared, count)
+                .iter()
+                .map(ComponentOverlap::bits)
+                .collect();
+            let reused: Vec<_> = index.with_component_overlaps(query, &prepared, count, |all| {
+                all.iter().map(ComponentOverlap::bits).collect()
+            });
+            assert_eq!(fresh, reused);
+        }
+    }
+
+    #[test]
+    fn fused_middle_and_year_filters_match_sequential_filters() {
+        let mut rng = Lcg(223);
+        let mut summaries = synthetic_summaries();
+        for summary in summaries.iter_mut() {
+            summary.middle_initial_counts = match rng.below(3) {
+                0 => None,
+                _ => counter(vec![(rng.below(4), 1.0)]),
+            };
+            if rng.below(4) != 0 {
+                let start = 1950 + rng.below(70) as i64;
+                summary.year_min = Some(start);
+                summary.year_max = Some(start + rng.below(30) as i64);
+            }
+        }
+        let retriever =
+            RustHybridCentroidRetriever::from_summaries(summaries, true).expect("retriever");
+        let reference = |query: &RetrievalQueryData, mut indices: Vec<usize>| -> Vec<usize> {
+            let middle: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|idx| {
+                    !has_middle_initial_conflict(
+                        &query.middle_initial_hashes,
+                        &retriever.summaries[*idx].middle_initial_counts,
+                    )
+                })
+                .collect();
+            if !middle.is_empty() {
+                indices = middle;
+            }
+            let year: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|idx| {
+                    !has_impossible_year_conflict(
+                        query.year,
+                        &retriever.summaries[*idx],
+                        RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+                    )
+                })
+                .collect();
+            if !year.is_empty() {
+                indices = year;
+            }
+            indices
+        };
+        let count = retriever.summaries.len();
+        for (number, query) in synthetic_queries().iter().enumerate() {
+            for (middle, year) in [
+                (vec![], None),
+                (vec![1u64], None),
+                (vec![], Some(1940i64)),
+                (vec![2, 3], Some(1990)),
+                (vec![99], Some(2100)),
+                (vec![99], Some(1800)),
+            ] {
+                let mut query = query.clone();
+                query.middle_initial_hashes = middle;
+                query.year = year;
+                // Candidate sets: all, every third, and one summary.
+                for indices in [
+                    (0..count).collect::<Vec<_>>(),
+                    (0..count).filter(|idx| (idx + number) % 3 == 0).collect(),
+                    vec![number % count],
+                ] {
+                    let fused = retriever
+                        .hard_filtered_candidate_indices_for_query(&query, indices.clone());
+                    assert!(!fused.return_all);
+                    assert_eq!(fused.indices, reference(&query, indices));
+                }
+            }
         }
     }
 

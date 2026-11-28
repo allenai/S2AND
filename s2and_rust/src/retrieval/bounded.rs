@@ -216,13 +216,40 @@ impl RustHybridCentroidRetriever {
             return PlanFirstPass::Done(Vec::new());
         }
         let prepared = self.prepare_query(query_data);
-        let overlaps =
-            self.overlap_index()
-                .component_overlaps(query_data, &prepared, self.summaries.len());
+        self.overlap_index().with_component_overlaps(
+            query_data,
+            &prepared,
+            self.summaries.len(),
+            |overlaps| {
+                self.plan_first_pass_with_overlaps(
+                    query_data,
+                    &prepared,
+                    overlaps,
+                    candidate_indices,
+                    top_k,
+                    centroid_bounds,
+                    name_terms,
+                )
+            },
+        )
+    }
+
+    /// `plan_first_pass` given the query's weights and overlaps.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_first_pass_with_overlaps(
+        &self,
+        query_data: &RetrievalQueryData,
+        prepared: &PreparedQuery,
+        overlaps: &[ComponentOverlap],
+        candidate_indices: &[usize],
+        top_k: usize,
+        centroid_bounds: &[f32],
+        name_terms: &[f64],
+    ) -> PlanFirstPass {
         let exact = |idx: usize| {
             (
                 idx,
-                self.score_candidate(query_data, &prepared, &overlaps, idx, None, None, None),
+                self.score_candidate(query_data, prepared, overlaps, idx, None, None, None),
             )
         };
         if candidate_indices.len() <= top_k {
@@ -249,7 +276,7 @@ impl RustHybridCentroidRetriever {
                     if zero_overlaps_score_zero && overlap.has_zero_numerators() {
                         (0.0, 0.0)
                     } else {
-                        overlap_scores(query_data, &prepared, &self.summaries[idx], overlap)
+                        overlap_scores(query_data, prepared, &self.summaries[idx], overlap)
                     };
                 let rest = weights.coauthor * coauthor
                     + weights.affiliation * affiliation
@@ -283,9 +310,10 @@ impl RustHybridCentroidRetriever {
         let mut survivors = Vec::new();
         for &(_, rest, idx) in &entries[first_pass..] {
             let x = centroid_bounds[idx];
+            let finite = x.is_finite();
             let specter_loose = if !has_specter {
                 0.0
-            } else if x.is_finite() {
+            } else if finite {
                 let ball = self.specter_balls[idx].expect("finite centroid bounds have a ball");
                 ball_bound(x, ball)
             } else {
@@ -297,10 +325,13 @@ impl RustHybridCentroidRetriever {
             }
             // A zero SPECTER bound is exact, and summaries with more vectors
             // than the fused kernel holds have no finite bound: score now.
-            let summary = &self.summaries[idx];
-            let unbounded = summary.exemplar_vectors.len()
-                + usize::from(summary.specter_centroid.is_some())
-                > 5;
+            // A finite centroid bound implies a ball, and only summaries the
+            // kernel holds have one, so only the others need the summary read,
+            // which missed the cache for most of a block's survivors.
+            let unbounded = !finite && {
+                let summary = &self.summaries[idx];
+                summary.exemplar_vectors.len() + usize::from(summary.specter_centroid.is_some()) > 5
+            };
             if !has_specter || unbounded {
                 scored.push(exact(idx));
             } else {

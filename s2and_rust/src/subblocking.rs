@@ -1,45 +1,23 @@
-use arrow::record_batch::RecordBatch;
+use crate::{HashMap, HashSet};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::Bound;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
+use rayon::prelude::*;
+use std::collections::{hash_map::Entry, BTreeMap};
 use std::time::Instant;
 
-use crate::arrow_batch_lookup::IndexedArrowReadStats;
+use crate::arrow_dataset::ArrowDatasetResources;
 use crate::constraints::same_prefix_tokens;
 use crate::features::word_ngrams_counter_python_compat;
 use crate::orcid::normalize_orcid_owned;
-use crate::raw_arrow::arrow_io::{
-    arrow_column_index, arrow_optional_string_list, ArrowI64Column, ArrowStringColumn,
-};
-use crate::raw_arrow::paths::extract_path_mapping_string;
-use crate::raw_arrow::readers::{
-    read_raw_arrow_paper_authors_with_optional_index, read_raw_arrow_specter_with_optional_index,
-    read_raw_arrow_with_optional_index,
-};
+use crate::rayon_pool::install_with_optional_rayon_pool;
 use crate::text_compat::{
-    compute_block_compat, contains_non_ascii_name_dash, ensure_unidecode_for_text,
-    normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
+    canonicalize_name_parts_compat, compute_block_compat, ensure_unidecode_for_text,
+    normalize_text_compat_from_map,
 };
 use crate::{
     extract_affiliation_stopwords, extract_required_string_set, fnv64_update, py_len, FNV_OFFSET,
 };
-
-pub(crate) fn subblock_tokens_from_key(subblock_key: &str) -> Vec<String> {
-    let mut values = HashSet::new();
-    for raw_token in subblock_key.split(',') {
-        let token = raw_token
-            .trim()
-            .split_once('|')
-            .map_or(raw_token.trim(), |(token, _rest)| token.trim());
-        if py_len(&token) > 1 {
-            values.insert(token.to_string());
-        }
-    }
-    let mut out: Vec<String> = values.into_iter().collect();
-    out.sort_unstable();
-    out
-}
 
 #[derive(Clone)]
 pub(crate) struct SubblockingSignatureRow {
@@ -47,26 +25,11 @@ pub(crate) struct SubblockingSignatureRow {
     pub(crate) paper_id: String,
     pub(crate) first: String,
     pub(crate) middle: String,
+    // D9 needs the raw last name to decide whether joined capitals are initials.
+    pub(crate) last: String,
     pub(crate) affiliations: Vec<String>,
     pub(crate) orcid: Option<String>,
     pub(crate) position: Option<i64>,
-}
-
-pub(crate) fn spill_non_ascii_dash_first_for_subblocking(
-    raw_first: &str,
-    first: &str,
-    middle: &str,
-) -> (String, String) {
-    if raw_first.contains('-') || !contains_non_ascii_name_dash(raw_first) {
-        return (first.to_string(), middle.to_string());
-    }
-    let first_parts: Vec<&str> = first.split_whitespace().collect();
-    if first_parts.len() <= 1 {
-        return (first.to_string(), middle.to_string());
-    }
-    let mut middle_parts: Vec<&str> = first_parts[1..].to_vec();
-    middle_parts.extend(middle.split_whitespace());
-    (first_parts[0].to_string(), middle_parts.join(" "))
 }
 
 pub(crate) fn normalize_subblocking_signature_rows(
@@ -75,106 +38,105 @@ pub(crate) fn normalize_subblocking_signature_rows(
     unidecode_char_map: &HashMap<char, String>,
 ) {
     for row in rows.iter_mut() {
-        let raw_first = row.first.clone();
-        let (first, middle) = split_first_middle_hyphen_aware_compat(
+        let (first, middle, _last) = canonicalize_name_parts_compat(
             &row.first,
             &row.middle,
+            &row.last,
             name_prefixes,
-            unidecode_char_map,
+            Some(unidecode_char_map),
         );
-        let (first, middle) =
-            spill_non_ascii_dash_first_for_subblocking(&raw_first, &first, &middle);
         row.first = first;
         row.middle = middle;
     }
 }
 
-pub(crate) fn read_subblocking_signature_rows_from_batches(
-    path: &str,
-    batches: Vec<RecordBatch>,
-    keep_signature_ids: Option<&HashSet<String>>,
-) -> PyResult<HashMap<String, SubblockingSignatureRow>> {
-    let mut out = HashMap::new();
-    for batch in batches {
-        let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
-        let signature_id_values =
-            ArrowStringColumn::from_string_array(signature_id_col.as_ref(), "signature_id")?;
-        let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
-        let paper_id_values =
-            ArrowStringColumn::from_string_array(paper_id_col.as_ref(), "paper_id")?;
-        let first_col = batch.column(arrow_column_index(&batch, "author_first", path)?);
-        let first_values =
-            ArrowStringColumn::from_string_array(first_col.as_ref(), "author_first")?;
-        let middle_col = batch.column(arrow_column_index(&batch, "author_middle", path)?);
-        let middle_values =
-            ArrowStringColumn::from_string_array(middle_col.as_ref(), "author_middle")?;
-        let affiliations_col =
-            batch.column(arrow_column_index(&batch, "author_affiliations", path)?);
-        let orcid_col = batch.column(arrow_column_index(&batch, "author_orcid", path)?);
-        let orcid_values =
-            ArrowStringColumn::from_string_array(orcid_col.as_ref(), "author_orcid")?;
-        let position_col = batch.column(arrow_column_index(&batch, "author_position", path)?);
-        let position_values =
-            ArrowI64Column::from_i64_array(position_col.as_ref(), "author_position")?;
-        for row in 0..batch.num_rows() {
-            let signature_id_value = signature_id_values.required_value(row, "signature_id")?;
-            if keep_signature_ids.map_or(false, |keep| !keep.contains(signature_id_value.as_ref()))
-            {
-                continue;
-            }
-            if signature_id_value.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "signatures Arrow cannot contain empty signature_id values",
-                ));
-            }
-            let signature_id = signature_id_value.into_owned();
-            match out.entry(signature_id.clone()) {
-                Entry::Occupied(entry) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "signatures Arrow contains duplicate signature_id: {:?}",
-                        entry.key()
-                    )));
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(SubblockingSignatureRow {
-                        signature_id,
-                        paper_id: paper_id_values
-                            .required_value(row, "paper_id")?
-                            .into_owned(),
-                        first: first_values.optional_owned(row).unwrap_or_default(),
-                        middle: middle_values.optional_owned(row).unwrap_or_default(),
-                        affiliations: arrow_optional_string_list(
-                            affiliations_col.as_ref(),
-                            row,
-                            "author_affiliations",
-                        )?,
-                        orcid: orcid_values
-                            .optional_owned(row)
-                            .and_then(|value| normalize_orcid_owned(&value)),
-                        position: position_values.optional_value(row, "author_position")?,
-                    });
+// A compound keys as its joined form only when the block shows that spelling much more often than
+// the split spelling, so that distinct names such as "qi an" and "qian" stay apart on weak evidence.
+pub(crate) const COMPOUND_JOIN_RATIO: usize = 8;
+
+/// Replace canonical first/middle names with the names that key subblocks.
+///
+/// Mirrors `s2and.subblocking.subblocking_name_parts`: a canonical first with two or more tokens
+/// keys as one token. All-initial compounds and compounds without strong joined-form evidence
+/// split ("j d" -> "j" + "d", "hui min" -> "hui" + "min"). A compound joins ("huimin") when the
+/// joined canonical first has at most `maximum_size` records and more than `COMPOUND_JOIN_RATIO`
+/// times the split-form records, with one added to each count. The counts use canonical names of
+/// all rows, so call this once on the whole request.
+pub(crate) fn apply_subblocking_key_names(
+    rows: &mut [SubblockingSignatureRow],
+    maximum_size: usize,
+) {
+    let rewrites: Vec<(usize, String, String)> = {
+        let mut first_counts: HashMap<&str, usize> = HashMap::default();
+        let mut split_counts: HashMap<(&str, &str), usize> = HashMap::default();
+        for row in rows.iter() {
+            *first_counts.entry(row.first.as_str()).or_insert(0) += 1;
+            if !row.first.contains(' ') {
+                if let Some(middle_head) = row.middle.split_whitespace().next() {
+                    *split_counts
+                        .entry((row.first.as_str(), middle_head))
+                        .or_insert(0) += 1;
                 }
             }
         }
+        rows.iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let tokens: Vec<&str> = row.first.split_whitespace().collect();
+                if tokens.len() < 2 {
+                    return None;
+                }
+                let joined = tokens.concat();
+                let n_join = first_counts.get(joined.as_str()).copied().unwrap_or(0);
+                let n_split = split_counts
+                    .get(&(tokens[0], tokens[1]))
+                    .copied()
+                    .unwrap_or(0);
+                if tokens.iter().any(|token| py_len(token) > 1)
+                    && n_join <= maximum_size
+                    && n_join + 1 > COMPOUND_JOIN_RATIO * (n_split + 1)
+                {
+                    return Some((index, joined, row.middle.clone()));
+                }
+                let mut middle_tokens = tokens[1..].to_vec();
+                if !row.middle.is_empty() {
+                    middle_tokens.push(row.middle.as_str());
+                }
+                Some((index, tokens[0].to_string(), middle_tokens.join(" ")))
+            })
+            .collect()
+    };
+    for (index, first, middle) in rewrites {
+        rows[index].first = first;
+        rows[index].middle = middle;
     }
-    Ok(out)
 }
 
-pub(crate) fn read_subblocking_signature_rows_with_optional_index(
-    path: &str,
-    index_path: Option<&str>,
-    keep_signature_ids: Option<&HashSet<String>>,
-) -> PyResult<(
-    HashMap<String, SubblockingSignatureRow>,
-    IndexedArrowReadStats,
-)> {
-    read_raw_arrow_with_optional_index(
-        path,
-        index_path,
-        "signature_id",
-        keep_signature_ids,
-        read_subblocking_signature_rows_from_batches,
-    )
+pub(crate) fn read_subblocking_signature_rows(
+    dataset: &ArrowDatasetResources,
+    keep_signature_ids: &HashSet<String>,
+    num_threads: usize,
+) -> PyResult<HashMap<String, SubblockingSignatureRow>> {
+    let (signatures, _stats) =
+        dataset.read_signatures(Some(keep_signature_ids), Some(num_threads))?;
+    Ok(signatures
+        .into_iter()
+        .map(|(signature_id, signature)| {
+            (
+                signature_id.clone(),
+                SubblockingSignatureRow {
+                    signature_id,
+                    paper_id: signature.paper_id,
+                    first: signature.author_first,
+                    middle: signature.author_middle,
+                    last: signature.author_last,
+                    affiliations: signature.affiliations,
+                    orcid: signature.orcid,
+                    position: signature.position,
+                },
+            )
+        })
+        .collect())
 }
 
 #[derive(Clone)]
@@ -465,47 +427,6 @@ impl NativeGraphSubblockingConfig {
     }
 }
 
-pub(crate) struct NativeGraphArrowPaths {
-    pub(crate) paper_authors_path: String,
-    pub(crate) paper_authors_batch_index_path: String,
-    pub(crate) specter_path: String,
-    pub(crate) specter_batch_index_path: String,
-}
-
-impl NativeGraphArrowPaths {
-    pub(crate) fn from_py(paths: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let paper_authors_path = extract_path_mapping_string(paths, "paper_authors", true)?
-            .expect("required paper_authors path exists");
-        let paper_authors_batch_index_path =
-            extract_path_mapping_string(paths, "paper_authors_batch_index", true)?
-                .expect("required paper_authors_batch_index path exists");
-        let (specter_path, specter_batch_index_path) =
-            if let Some(path) = extract_path_mapping_string(paths, "specter", false)? {
-                let index_path = extract_path_mapping_string(paths, "specter_batch_index", true)?
-                    .expect("required specter_batch_index path exists");
-                (path, index_path)
-            } else if let Some(path) = extract_path_mapping_string(paths, "specter2", false)? {
-                let index_path =
-                    match extract_path_mapping_string(paths, "specter2_batch_index", false)? {
-                        Some(value) => value,
-                        None => extract_path_mapping_string(paths, "specter_batch_index", true)?
-                            .expect("required specter_batch_index path exists"),
-                    };
-                (path, index_path)
-            } else {
-                return Err(pyo3::exceptions::PyKeyError::new_err(
-                    "Arrow path bundle is missing required key: specter or specter2",
-                ));
-            };
-        Ok(Self {
-            paper_authors_path,
-            paper_authors_batch_index_path,
-            specter_path,
-            specter_batch_index_path,
-        })
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct NativeGraphSignatureEvidence {
     pub(crate) embedding: Vec<f32>,
@@ -735,53 +656,18 @@ pub(crate) fn native_graph_weighted_edge_score(
         + config.affiliation_weight * jaccard(&left.affiliation_keys, &right.affiliation_keys)
 }
 
-pub(crate) fn score_native_graph_candidate_edge(
-    edge_scores: &mut HashMap<(usize, usize), f64>,
-    left_index: usize,
-    right_index: usize,
-    evidences: &[NativeGraphSignatureEvidence],
-    config: &NativeGraphSubblockingConfig,
-) {
-    if left_index == right_index {
-        return;
-    }
-    let left = left_index.min(right_index);
-    let right = left_index.max(right_index);
-    let cosine_similarity =
-        dot_f32(&evidences[left].embedding, &evidences[right].embedding).max(0.0);
-    let score = native_graph_weighted_edge_score(
-        cosine_similarity,
-        &evidences[left],
-        &evidences[right],
-        config,
-    );
-    if score < config.min_edge_score {
-        return;
-    }
-    match edge_scores.entry((left, right)) {
-        Entry::Occupied(mut entry) => {
-            if score > *entry.get() {
-                entry.insert(score);
-            }
-        }
-        Entry::Vacant(entry) => {
-            entry.insert(score);
-        }
-    }
-}
-
 pub(crate) fn score_native_graph_candidate_edge_from_cosine(
     edge_scores: &mut HashMap<(usize, usize), f64>,
     left_index: usize,
     right_index: usize,
     cosine_similarity: f64,
-    evidences: &[NativeGraphSignatureEvidence],
+    evidences: &[&NativeGraphSignatureEvidence],
     config: &NativeGraphSubblockingConfig,
 ) {
     let score = native_graph_weighted_edge_score(
         cosine_similarity.max(0.0),
-        &evidences[left_index],
-        &evidences[right_index],
+        evidences[left_index],
+        evidences[right_index],
         config,
     );
     if score < config.min_edge_score {
@@ -810,24 +696,27 @@ pub(crate) fn prune_native_graph_edge_scores(
         .iter()
         .map(|(key, value)| (*key, *value))
         .collect();
-    strongest.sort_by(|left, right| {
+    let compare = |left: &((usize, usize), f64), right: &((usize, usize), f64)| {
         right
             .1
             .total_cmp(&left.1)
-            .then_with(|| left.0 .0.cmp(&right.0 .0).reverse())
-            .then_with(|| left.0 .1.cmp(&right.0 .1).reverse())
-    });
+            .then_with(|| left.0 .0.cmp(&right.0 .0))
+            .then_with(|| left.0 .1.cmp(&right.0 .1))
+    };
+    strongest.select_nth_unstable_by(max_candidate_edges, compare);
+    // Keep the original insertion order for later walks over the score map.
     strongest.truncate(max_candidate_edges);
+    strongest.par_sort_unstable_by(compare);
     edge_scores.clear();
     edge_scores.extend(strongest);
 }
 
 pub(crate) fn exact_native_graph_edge_scores(
-    evidences: &[NativeGraphSignatureEvidence],
+    evidences: &[&NativeGraphSignatureEvidence],
     config: &NativeGraphSubblockingConfig,
 ) -> HashMap<(usize, usize), f64> {
     let neighbor_count = evidences.len().min((config.neighbors + 1).max(2));
-    let mut edge_scores = HashMap::<(usize, usize), f64>::new();
+    let mut edge_scores = HashMap::<(usize, usize), f64>::default();
     for left_index in 0..evidences.len() {
         let mut neighbors: Vec<(usize, f64)> = (0..evidences.len())
             .map(|right_index| {
@@ -888,7 +777,7 @@ pub(crate) fn splitmix_normal_pair(state: &mut u64) -> (f64, f64) {
 
 pub(crate) fn projection_seed(signature_ids: &[String], random_seed: u64) -> u64 {
     let mut state = FNV_OFFSET ^ random_seed;
-    let mut sorted = signature_ids.to_vec();
+    let mut sorted: Vec<_> = signature_ids.iter().collect();
     sorted.sort_unstable();
     for signature_id in sorted {
         state = fnv64_update(state, signature_id.as_bytes());
@@ -899,13 +788,38 @@ pub(crate) fn projection_seed(signature_ids: &[String], random_seed: u64) -> u64
 
 pub(crate) fn projection_native_graph_edge_scores(
     signature_ids: &[String],
-    evidences: &[NativeGraphSignatureEvidence],
+    evidences: &[&NativeGraphSignatureEvidence],
     config: &NativeGraphSubblockingConfig,
     random_seed: u64,
     dimension: usize,
 ) -> HashMap<(usize, usize), f64> {
-    let mut edge_scores = HashMap::<(usize, usize), f64>::new();
+    let mut edge_scores = HashMap::<(usize, usize), f64>::default();
     let mut state = projection_seed(signature_ids, random_seed);
+    // Finish and prune each projection before the next one. Score a bounded
+    // tile of edges on the pool so all workers share one graph and score map.
+    const EDGE_TILE: usize = 4096;
+    let mut edges = Vec::with_capacity(EDGE_TILE);
+    let mut order = Vec::with_capacity(evidences.len());
+    let flush_edges = |edges: &mut Vec<((usize, usize), f64)>, scores: &mut HashMap<_, _>| {
+        edges
+            .par_iter_mut()
+            .for_each(|&mut ((left, right), ref mut score)| {
+                let left = evidences[left];
+                let right = evidences[right];
+                *score = native_graph_weighted_edge_score(
+                    dot_f32(&left.embedding, &right.embedding).max(0.0),
+                    left,
+                    right,
+                    config,
+                );
+            });
+        for (pair, score) in edges.drain(..) {
+            if score < config.min_edge_score {
+                continue;
+            }
+            scores.insert(pair, score);
+        }
+    };
     for _projection_index in 0..config.projection_count {
         let mut projection = vec![0.0_f32; dimension];
         let mut offset = 0usize;
@@ -927,12 +841,12 @@ pub(crate) fn projection_native_graph_edge_scores(
                 *value = (f64::from(*value) / projection_norm) as f32;
             }
         }
-        let mut order: Vec<(usize, f64)> = evidences
-            .iter()
+        evidences
+            .par_iter()
             .enumerate()
             .map(|(index, evidence)| (index, dot_f32(&evidence.embedding, &projection)))
-            .collect();
-        order.sort_by(|left, right| {
+            .collect_into_vec(&mut order);
+        order.par_sort_unstable_by(|left, right| {
             left.1
                 .total_cmp(&right.1)
                 .then_with(|| left.0.cmp(&right.0))
@@ -949,9 +863,13 @@ pub(crate) fn projection_native_graph_edge_scores(
                 if edge_scores.contains_key(&(left, right)) {
                     continue;
                 }
-                score_native_graph_candidate_edge(&mut edge_scores, left, right, evidences, config);
+                edges.push(((left, right), 0.0));
+                if edges.len() == EDGE_TILE {
+                    flush_edges(&mut edges, &mut edge_scores);
+                }
             }
         }
+        flush_edges(&mut edges, &mut edge_scores);
         prune_native_graph_edge_scores(&mut edge_scores, config.max_candidate_edges);
     }
     edge_scores
@@ -959,14 +877,14 @@ pub(crate) fn projection_native_graph_edge_scores(
 
 pub(crate) fn add_sparse_native_graph_edge_scores(
     edge_scores: &mut HashMap<(usize, usize), f64>,
-    evidences: &[NativeGraphSignatureEvidence],
+    evidences: &[&NativeGraphSignatureEvidence],
     config: &NativeGraphSubblockingConfig,
 ) -> SparseEvidenceStats {
     let mut stats = SparseEvidenceStats {
         sparse_evidence_neighbors: config.sparse_evidence_neighbors,
         ..SparseEvidenceStats::default()
     };
-    let mut postings: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut postings: HashMap<String, Vec<usize>> = HashMap::default();
     for (index, evidence) in evidences.iter().enumerate() {
         if config.sparse_evidence_include_coauthors {
             for value in evidence.coauthor_blocks.iter() {
@@ -1018,8 +936,8 @@ pub(crate) fn add_sparse_native_graph_edge_scores(
                 .max(0.0);
                 let score = native_graph_weighted_edge_score(
                     cosine_similarity,
-                    &evidences[left_index],
-                    &evidences[right_index],
+                    evidences[left_index],
+                    evidences[right_index],
                     config,
                 );
                 if score < config.sparse_evidence_min_weight {
@@ -1102,7 +1020,7 @@ pub(crate) fn ordered_native_graph_components(
     uf: &mut NativeGraphUnionFind,
 ) -> (Vec<Vec<String>>, Vec<usize>, HashMap<usize, usize>) {
     let mut root_by_index = Vec::with_capacity(signature_ids.len());
-    let mut components_by_root: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut components_by_root: HashMap<usize, Vec<String>> = HashMap::default();
     for (index, signature_id) in signature_ids.iter().enumerate() {
         let root = uf.find(index);
         root_by_index.push(root);
@@ -1143,7 +1061,7 @@ pub(crate) fn native_component_adjacency(
     component_id_by_root: &HashMap<usize, usize>,
     aggregate: bool,
 ) -> HashMap<usize, HashMap<usize, f64>> {
-    let mut adjacency: HashMap<usize, HashMap<usize, f64>> = HashMap::new();
+    let mut adjacency: HashMap<usize, HashMap<usize, f64>> = HashMap::default();
     for ((left_index, right_index), score) in edge_scores {
         let left_component = component_id_by_root[&root_by_index[*left_index]];
         let right_component = component_id_by_root[&root_by_index[*right_index]];
@@ -1184,7 +1102,7 @@ pub(crate) fn component_affinities_to_bins(
     adjacency: &HashMap<usize, HashMap<usize, f64>>,
     top_k: usize,
 ) -> HashMap<usize, f64> {
-    let mut scores_by_bin: HashMap<usize, Vec<f64>> = HashMap::new();
+    let mut scores_by_bin: HashMap<usize, Vec<f64>> = HashMap::default();
     if let Some(neighbors) = adjacency.get(&component_id) {
         for (neighbor_component_id, score) in neighbors {
             if let Some(bin_index) = component_to_bin.get(neighbor_component_id) {
@@ -1192,7 +1110,7 @@ pub(crate) fn component_affinities_to_bins(
             }
         }
     }
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for (bin_index, mut scores) in scores_by_bin {
         if top_k > 0 && scores.len() > top_k {
             scores.sort_by(|left, right| right.total_cmp(left));
@@ -1265,7 +1183,7 @@ pub(crate) fn pack_native_component_ids_greedy(
     });
     let mut bins: Vec<Vec<usize>> = Vec::new();
     let mut bin_sizes: Vec<usize> = Vec::new();
-    let mut component_to_bin: HashMap<usize, usize> = HashMap::new();
+    let mut component_to_bin: HashMap<usize, usize> = HashMap::default();
     for component_id in component_order {
         let component_size = components[component_id].len();
         if component_size > target_subblock_size {
@@ -1273,7 +1191,7 @@ pub(crate) fn pack_native_component_ids_greedy(
                 "Graph component size {component_size} exceeds target_subblock_size={target_subblock_size}"
             )));
         }
-        let mut candidate_bins: HashMap<usize, f64> = HashMap::new();
+        let mut candidate_bins: HashMap<usize, f64> = HashMap::default();
         if use_aggregate {
             for (bin_index, affinity) in component_affinities_to_bins(
                 component_id,
@@ -1377,7 +1295,7 @@ pub(crate) fn local_move_native_component_bins(
         .collect();
     for _pass_index in 0..passes {
         let mut moved = false;
-        let mut component_to_bin: HashMap<usize, usize> = HashMap::new();
+        let mut component_to_bin: HashMap<usize, usize> = HashMap::default();
         for (bin_index, component_ids) in working_bins.iter().enumerate() {
             for component_id in component_ids {
                 component_to_bin.insert(*component_id, bin_index);
@@ -1498,10 +1416,10 @@ pub(crate) fn native_graph_cluster(
 ) -> PyResult<HashMap<String, Vec<String>>> {
     let fallback_start = Instant::now();
     if signature_ids.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(HashMap::default());
     }
     if signature_ids.len() <= target_subblock_size {
-        return Ok(HashMap::from([("0".to_string(), signature_ids)]));
+        return Ok(HashMap::from_iter([("0".to_string(), signature_ids)]));
     }
     let config = config.effective_for_group(signature_ids.len());
     if config.neighbor_mode == "exact" && signature_ids.len() > config.max_exact_knn_group_size {
@@ -1518,7 +1436,7 @@ pub(crate) fn native_graph_cluster(
                 "Arrow graph subblocking evidence is missing required signature: {signature_id:?}"
             ))
         })?;
-        evidences.push(evidence.clone());
+        evidences.push(evidence);
     }
     let edge_start = Instant::now();
     let mut edge_scores = if config.neighbor_mode == "exact" {
@@ -1546,7 +1464,7 @@ pub(crate) fn native_graph_cluster(
         .iter()
         .map(|((left, right), score)| (*score, *left, *right))
         .collect();
-    sorted_edges.sort_by(|left, right| {
+    sorted_edges.par_sort_unstable_by(|left, right| {
         right
             .0
             .total_cmp(&left.0)
@@ -1604,7 +1522,7 @@ pub(crate) fn native_graph_cluster(
 pub(crate) fn collect_native_graph_signature_groups(
     signature_groups: &[Vec<String>],
 ) -> Vec<String> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut out = Vec::new();
     for group in signature_groups {
         for signature_id in group {
@@ -1618,18 +1536,18 @@ pub(crate) fn collect_native_graph_signature_groups(
 
 pub(crate) fn build_native_graph_evidence_store(
     py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
+    dataset: &ArrowDatasetResources,
     row_by_signature_id: &HashMap<String, SubblockingSignatureRow>,
     fallback_signature_groups: &[Vec<String>],
     telemetry: &mut NativeGraphTelemetry,
+    num_threads: usize,
 ) -> PyResult<NativeGraphEvidenceStore> {
     let load_start = Instant::now();
-    let graph_paths = NativeGraphArrowPaths::from_py(paths)?;
     let fallback_signature_ids = collect_native_graph_signature_groups(fallback_signature_groups);
     telemetry.load_metrics.signatures_record_batches_scanned = 0;
     telemetry.load_metrics.signatures_rows_scanned = fallback_signature_ids.len();
     telemetry.load_metrics.signatures_rows_loaded = fallback_signature_ids.len();
-    let mut paper_ids = HashSet::<String>::new();
+    let mut paper_ids = HashSet::<String>::default();
     for signature_id in fallback_signature_ids.iter() {
         let row = row_by_signature_id.get(signature_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
@@ -1648,16 +1566,10 @@ pub(crate) fn build_native_graph_evidence_store(
         }
         paper_ids.insert(row.paper_id.clone());
     }
-    let (paper_authors, paper_author_stats) = read_raw_arrow_paper_authors_with_optional_index(
-        &graph_paths.paper_authors_path,
-        Some(&graph_paths.paper_authors_batch_index_path),
-        &paper_ids,
-    )?;
-    let (specter_by_paper_id, specter_stats) = read_raw_arrow_specter_with_optional_index(
-        &graph_paths.specter_path,
-        Some(&graph_paths.specter_batch_index_path),
-        &paper_ids,
-    )?;
+    let (paper_authors, paper_author_stats) =
+        py.allow_threads(|| dataset.read_paper_authors(&paper_ids, Some(num_threads)))?;
+    let (specter_by_paper_id, specter_stats) =
+        py.allow_threads(|| dataset.read_specter(&paper_ids, Some(num_threads)))?;
     telemetry.load_metrics.paper_authors_record_batches_scanned = paper_author_stats.batches_read;
     telemetry.load_metrics.paper_authors_rows_scanned = paper_author_stats.rows_scanned;
     telemetry.load_metrics.paper_authors_rows_loaded =
@@ -1667,7 +1579,7 @@ pub(crate) fn build_native_graph_evidence_store(
     telemetry.load_metrics.specter_rows_loaded = specter_by_paper_id.len();
 
     let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-    let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+    let mut unidecode_char_map: HashMap<char, String> = HashMap::default();
     for signature_id in fallback_signature_ids.iter() {
         let row = row_by_signature_id
             .get(signature_id)
@@ -1682,20 +1594,22 @@ pub(crate) fn build_native_graph_evidence_store(
         }
     }
 
-    let dimension = specter_by_paper_id.values().next().map_or(0usize, Vec::len);
-    let mut signatures = HashMap::with_capacity(fallback_signature_ids.len());
-    for signature_id in fallback_signature_ids {
+    let dimension = specter_by_paper_id
+        .values()
+        .next()
+        .map_or(0usize, |values| values.len());
+    let build_evidence = |signature_id: String| {
         let row = row_by_signature_id
             .get(&signature_id)
             .expect("fallback signature row exists after validation");
         let embedding = specter_by_paper_id
             .get(&row.paper_id)
-            .cloned()
+            .map(|values| values.to_vec())
             .unwrap_or_else(|| vec![0.0; dimension]);
         let position = row
             .position
             .expect("fallback signature row author_position was validated");
-        let mut coauthor_blocks = HashSet::new();
+        let mut coauthor_blocks = HashSet::default();
         if let Some(authors) = paper_authors.get(&row.paper_id) {
             for (author_position, author_name) in authors {
                 if *author_position == position {
@@ -1703,12 +1617,9 @@ pub(crate) fn build_native_graph_evidence_store(
                 }
                 let trimmed = author_name.trim();
                 if trimmed.is_empty() {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "paper_authors Arrow cannot contain empty author_name values",
-                    ));
+                    continue;
                 }
-                let normalized =
-                    normalize_text_compat_from_map(trimmed, false, &unidecode_char_map);
+                let normalized = normalize_text_compat_from_map(trimmed, &unidecode_char_map);
                 let block = compute_block_compat(&normalized);
                 if !block.is_empty() {
                     coauthor_blocks.insert(block);
@@ -1719,8 +1630,7 @@ pub(crate) fn build_native_graph_evidence_store(
             .affiliations
             .iter()
             .filter_map(|affiliation| {
-                let normalized =
-                    normalize_text_compat_from_map(affiliation, false, &unidecode_char_map);
+                let normalized = normalize_text_compat_from_map(affiliation, &unidecode_char_map);
                 if normalized.is_empty() {
                     None
                 } else {
@@ -1730,18 +1640,26 @@ pub(crate) fn build_native_graph_evidence_store(
             .collect();
         let affiliation_text = normalized_affiliations.join(" ");
         let affiliation_keys: HashSet<String> =
-            word_ngrams_counter_python_compat(&affiliation_text, &affiliation_stopwords)
+            word_ngrams_counter_python_compat(&affiliation_text, &affiliation_stopwords, true)
                 .into_keys()
                 .collect();
-        signatures.insert(
+        (
             signature_id,
             NativeGraphSignatureEvidence {
                 embedding: normalize_f32_vector(embedding, dimension),
                 coauthor_blocks,
                 affiliation_keys,
             },
-        );
-    }
+        )
+    };
+    let signatures = py.allow_threads(|| {
+        install_with_optional_rayon_pool(Some(num_threads), || {
+            fallback_signature_ids
+                .into_par_iter()
+                .map(build_evidence)
+                .collect()
+        })
+    });
     telemetry.load_seconds = load_start.elapsed().as_secs_f64();
     Ok(NativeGraphEvidenceStore {
         signatures,
@@ -1751,48 +1669,51 @@ pub(crate) fn build_native_graph_evidence_store(
 
 #[derive(Default)]
 pub(crate) struct OrderedSubblocks {
-    pub(crate) entries: Vec<(String, Vec<String>)>,
+    entries: Vec<Option<(String, Vec<String>)>>,
+    by_key: HashMap<String, usize>,
 }
 
 impl OrderedSubblocks {
     pub(crate) fn insert(&mut self, key: String, signature_ids: Vec<String>) {
-        if let Some((_existing_key, existing_values)) = self
-            .entries
-            .iter_mut()
-            .find(|(existing_key, _)| *existing_key == key)
-        {
-            *existing_values = signature_ids;
-        } else {
-            self.entries.push((key, signature_ids));
+        match self.by_key.entry(key.clone()) {
+            Entry::Occupied(index) => self.entries[*index.get()] = Some((key, signature_ids)),
+            Entry::Vacant(index) => {
+                index.insert(self.entries.len());
+                self.entries.push(Some((key, signature_ids)));
+            }
         }
     }
 
     pub(crate) fn remove(&mut self, key: &str) -> Option<Vec<String>> {
-        let position = self
-            .entries
-            .iter()
-            .position(|(existing_key, _)| existing_key == key)?;
-        Some(self.entries.remove(position).1)
+        self.entries[self.by_key.remove(key)?]
+            .take()
+            .map(|(_, values)| values)
     }
 
     pub(crate) fn get(&self, key: &str) -> Option<&Vec<String>> {
-        self.entries
-            .iter()
-            .find(|(existing_key, _)| existing_key == key)
-            .map(|(_key, values)| values)
+        self.entries[*self.by_key.get(key)?]
+            .as_ref()
+            .map(|(_, values)| values)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
-        self.entries.iter().map(|(key, values)| (key, values))
+        self.entries
+            .iter()
+            .flatten()
+            .map(|(key, values)| (key, values))
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.by_key.len()
     }
 
+    fn into_entries(self) -> impl Iterator<Item = (String, Vec<String>)> {
+        self.entries.into_iter().flatten()
+    }
+
+    #[cfg(test)]
     pub(crate) fn to_hashmap(&self) -> HashMap<String, Vec<String>> {
-        self.entries
-            .iter()
+        self.iter()
             .map(|(key, values)| (key.clone(), values.clone()))
             .collect()
     }
@@ -1913,7 +1834,7 @@ pub(crate) fn prefix_counts(
     signature_ids: &[String],
     width: usize,
 ) -> Vec<PrefixCount> {
-    let mut counts: HashMap<String, PrefixCount> = HashMap::new();
+    let mut counts: HashMap<String, PrefixCount> = HashMap::default();
     for (index, (name, signature_id)) in names.iter().zip(signature_ids.iter()).enumerate() {
         let prefix = py_prefix(name, width);
         let entry = counts.entry(prefix.clone()).or_insert_with(|| PrefixCount {
@@ -1948,23 +1869,10 @@ pub(crate) fn subdivide_helper_rust(
     let mut output = OrderedSubblocks::default();
     let mut output_cant_subdivide = OrderedSubblocks::default();
     let max_len = names.iter().map(|name| py_len(name)).max().unwrap_or(0);
-    let mut clean_break = false;
 
     for width in starting_k..=max_len {
         let counts = prefix_counts(&names, &signature_ids, width);
-        let good_size_counts: Vec<&PrefixCount> = counts
-            .iter()
-            .filter(|count| count.count <= maximum_size)
-            .collect();
-        if good_size_counts.is_empty() {
-            for count in counts.iter() {
-                output_cant_subdivide.insert(count.name.clone(), count.signature_ids.clone());
-            }
-            clean_break = true;
-            break;
-        }
-
-        for count in good_size_counts {
+        for count in counts.iter().filter(|count| count.count <= maximum_size) {
             output.insert(count.name.clone(), count.signature_ids.clone());
         }
 
@@ -1983,12 +1891,47 @@ pub(crate) fn subdivide_helper_rust(
         }
         names = next_names;
         signature_ids = next_signature_ids;
+        if names.is_empty() {
+            break;
+        }
     }
 
-    if !names.is_empty() && !clean_break {
-        output_cant_subdivide.insert("final".to_string(), signature_ids);
+    if !names.is_empty() {
+        for count in prefix_counts(&names, &signature_ids, max_len) {
+            output_cant_subdivide.insert(count.name, count.signature_ids);
+        }
     }
     (output, output_cant_subdivide)
+}
+
+/// Return the no-middle bucket of each first-name dead end, keyed by the key first name, in
+/// dead-end order. Dead ends without a no-middle record are left out.
+///
+/// A dead end is a key first name with more than `maximum_size` records, so prefix subdivision
+/// cannot split it. Its records without a key middle name share one middle-name bucket. Over
+/// the cap, the graph fallback cuts that bucket into pieces, and one person's records can land
+/// in different pieces. Prediction reunites the records of each bucket across pieces after bulk
+/// clustering, so the planner reports them.
+pub(crate) fn no_middle_dead_end_buckets(
+    dead_ends: &OrderedSubblocks,
+    row_by_signature_id: &HashMap<String, SubblockingSignatureRow>,
+) -> Vec<(String, Vec<String>)> {
+    dead_ends
+        .iter()
+        .map(|(first, signature_ids)| {
+            let bucket: Vec<String> = signature_ids
+                .iter()
+                .filter(|signature_id| {
+                    row_by_signature_id
+                        .get(*signature_id)
+                        .is_some_and(|row| row.middle.is_empty())
+                })
+                .cloned()
+                .collect();
+            (first.clone(), bucket)
+        })
+        .filter(|(_first, bucket)| !bucket.is_empty())
+        .collect()
 }
 
 pub(crate) fn specter_labeled_subblock_stats(subblocks: &OrderedSubblocks) -> (usize, usize) {
@@ -2003,43 +1946,10 @@ pub(crate) fn specter_labeled_subblock_stats(subblocks: &OrderedSubblocks) -> (u
     (subblock_count, signature_count)
 }
 
-pub(crate) struct SubblockMergeMetadata {
-    pub(crate) size: usize,
-    pub(crate) first_name: String,
-    pub(crate) middle_name: Option<String>,
-    pub(crate) name_for_splits: Option<String>,
-    pub(crate) lookup: Option<String>,
-}
-
-pub(crate) fn subblock_merge_candidate_metadata(key: &str, size: usize) -> SubblockMergeMetadata {
-    let key_parts: Vec<&str> = key.split('|').collect();
-    let first_name = key_parts.first().copied().unwrap_or_default().to_string();
-    // Match s2and/subblocking.py:1543-1554: only emit a middle_name when the second
-    // segment explicitly carries a `key=value` token, mirroring Python's
-    // `if "=" in key_parts[1]` guard. Returning `Some("")` for an `=`-less segment
-    // would silently make the subblock eligible for merge fan-out against other
-    // empty-middle subblocks.
-    let middle_name = key_parts
-        .get(1)
-        .and_then(|part| part.split_once('='))
-        .map(|(_left, right)| right.to_string());
-    let name_for_splits = if py_len(&first_name) > 1 {
-        Some(first_name.clone())
-    } else if py_len(&first_name) == 1 && middle_name.is_some() {
-        middle_name.clone()
-    } else {
-        None
-    };
-    let lookup = name_for_splits
-        .as_ref()
-        .map(|name| name.split(' ').next().unwrap_or_default().to_string());
-    SubblockMergeMetadata {
-        size,
-        first_name,
-        middle_name,
-        name_for_splits,
-        lookup,
-    }
+struct MergeableSubblock<'a> {
+    key: &'a str,
+    size: usize,
+    middle: Option<&'a str>,
 }
 
 pub(crate) fn common_prefix_char_count(left: &str, right: &str) -> usize {
@@ -2049,75 +1959,436 @@ pub(crate) fn common_prefix_char_count(left: &str, right: &str) -> usize {
         .count()
 }
 
-pub(crate) fn sorted_subblock_merge_candidates(
-    output: &OrderedSubblocks,
+fn subblock_merge_candidates<'a>(
+    output: &'a OrderedSubblocks,
     maximum_size: usize,
-    first_k_letter_counts_sorted: &HashMap<String, HashMap<String, f64>>,
-) -> PyResult<Vec<((String, String), f64)>> {
-    let mut metadata: HashMap<String, SubblockMergeMetadata> = HashMap::new();
-    let mut mergeable_keys = Vec::<String>::new();
-    for (key, values) in output.iter() {
-        if values.len() >= maximum_size {
-            continue;
-        }
-        let row = subblock_merge_candidate_metadata(key, values.len());
-        if row.name_for_splits.is_none() {
-            continue;
-        }
-        metadata.insert(key.clone(), row);
-        mergeable_keys.push(key.clone());
+    counts: &HashMap<String, HashMap<String, f64>>,
+) -> (Vec<MergeableSubblock<'a>>, Vec<(usize, usize, f64)>) {
+    let mut rows = Vec::new();
+    let mut groups: BTreeMap<(bool, &str, &str), Vec<usize>> = BTreeMap::new();
+    for (key, members) in output
+        .iter()
+        .filter(|(_, members)| members.len() < maximum_size)
+    {
+        let mut parts = key.split('|');
+        let first = parts.next().unwrap_or_default();
+        // A segment without '=' is not an empty middle name.
+        let middle = parts
+            .next()
+            .and_then(|part| part.split_once('='))
+            .map(|(_, value)| value);
+        let (multi_letter, name) = match py_len(first) {
+            0 => continue,
+            1 => match middle {
+                Some(name) => (false, name),
+                None => continue,
+            },
+            _ => (true, first),
+        };
+        let token = name.split_whitespace().next().unwrap_or_default();
+        groups
+            .entry((multi_letter, token, name))
+            .or_default()
+            .push(rows.len());
+        rows.push(MergeableSubblock {
+            key,
+            size: members.len(),
+            middle,
+        });
     }
 
-    let mut candidates = Vec::<((String, String), f64)>::new();
-    for left_index in 0..mergeable_keys.len() {
-        for right_index in (left_index + 1)..mergeable_keys.len() {
-            let left_key = &mergeable_keys[left_index];
-            let right_key = &mergeable_keys[right_index];
-            let left = metadata.get(left_key).expect("merge metadata exists");
-            let right = metadata.get(right_key).expect("merge metadata exists");
-            if left.size + right.size > maximum_size {
-                continue;
+    let mut candidates = Vec::new();
+    let mut add = |left: &[usize], right: &[usize], score: Option<f64>| {
+        for &i in left {
+            for &j in right {
+                if rows[i].size + rows[j].size > maximum_size || (score.is_none() && i >= j) {
+                    continue;
+                }
+                let score = score.unwrap_or_else(|| {
+                    let prefix = match (rows[i].middle, rows[j].middle) {
+                        (Some(a), Some(b)) => common_prefix_char_count(a, b),
+                        _ => 0,
+                    };
+                    1e10 + prefix as f64
+                });
+                candidates.push((i.min(j), i.max(j), score));
             }
-            let both_multi_letter = py_len(&left.first_name) > 1 && py_len(&right.first_name) > 1;
-            let both_single_letter_with_middle = py_len(&left.first_name) == 1
-                && py_len(&right.first_name) == 1
-                && left.middle_name.is_some()
-                && right.middle_name.is_some();
-            if !both_multi_letter && !both_single_letter_with_middle {
-                continue;
-            }
+        }
+    };
 
-            let left_name = left.name_for_splits.as_ref().expect("merge name exists");
-            let right_name = right.name_for_splits.as_ref().expect("merge name exists");
-            let pair = (left_key.clone(), right_key.clone());
-            if left_name == right_name {
-                let score = match (&left.middle_name, &right.middle_name) {
-                    (Some(left_middle), Some(right_middle)) => {
-                        common_prefix_char_count(left_middle, right_middle)
-                    }
-                    _ => 0,
-                };
-                candidates.push((pair, 1e10 + score as f64));
-            } else if same_prefix_tokens(left_name, right_name) {
-                let score = py_len(left_name).min(py_len(right_name));
-                candidates.push((pair, 1e5 + score as f64));
-            } else if let (Some(left_lookup), Some(right_lookup)) = (&left.lookup, &right.lookup) {
-                if let Some(right_counts) = first_k_letter_counts_sorted.get(left_lookup) {
-                    if let Some(score) = right_counts.get(right_lookup) {
-                        candidates.push((pair, *score));
-                    }
+    for (&(multi, token, name), members) in &groups {
+        add(members, members, None);
+
+        // Token compatibility requires one first token to prefix the other.
+        // Visit only that lexical range, then check the remaining tokens.
+        if !token.is_empty() {
+            for (&(other_multi, other_token, other), others) in groups.range((multi, token, "")..) {
+                if other_multi != multi || !other_token.starts_with(token) {
+                    break;
+                }
+                if other_token == token && other <= name {
+                    continue;
+                }
+                if same_prefix_tokens(name, other) {
+                    add(
+                        members,
+                        others,
+                        Some(1e5 + py_len(name).min(py_len(other)) as f64),
+                    );
                 }
             }
         }
+
+        if let Some(priors) = counts.get(name) {
+            for (other, &score) in priors {
+                let other_token = other.split_whitespace().next().unwrap_or_default();
+                let Some(others) = groups.get(&(multi, other_token, other.as_str())) else {
+                    continue;
+                };
+                if name == other || same_prefix_tokens(name, other) {
+                    continue;
+                }
+                // Use the score stored under the lexically smaller name when
+                // the artifact has both orientations.
+                if name > other.as_str()
+                    && counts
+                        .get(other)
+                        .is_some_and(|reverse| reverse.contains_key(name))
+                {
+                    continue;
+                }
+                add(members, others, Some(score));
+            }
+        }
     }
-    candidates.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| right.0 .0.cmp(&left.0 .0))
-            .then_with(|| right.0 .1.cmp(&left.0 .1))
+    candidates.sort_unstable_by(|&(a, b, score), &(c, d, other)| {
+        other
+            .total_cmp(&score)
+            .then_with(|| rows[c].key.cmp(rows[a].key))
+            .then_with(|| rows[d].key.cmp(rows[b].key))
     });
-    Ok(candidates)
+    (rows, candidates)
+}
+
+#[cfg(test)]
+pub(crate) fn sorted_subblock_merge_candidates(
+    output: &OrderedSubblocks,
+    maximum_size: usize,
+    counts: &HashMap<String, HashMap<String, f64>>,
+) -> PyResult<Vec<((String, String), f64)>> {
+    let (rows, candidates) = subblock_merge_candidates(output, maximum_size, counts);
+    Ok(candidates
+        .into_iter()
+        .map(|(left, right, score)| {
+            (
+                (rows[left].key.to_owned(), rows[right].key.to_owned()),
+                score,
+            )
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod subdivision_tests {
+    use super::{
+        apply_subblocking_key_names, no_middle_dead_end_buckets, prune_native_graph_edge_scores,
+        sorted_subblock_merge_candidates, subdivide_helper_rust, OrderedSubblocks,
+        SubblockingSignatureRow,
+    };
+    use crate::HashMap;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn native_graph_edge_pruning_breaks_score_ties_by_ascending_pair() {
+        let mut edge_scores = HashMap::from_iter([((0, 3), 1.0), ((0, 1), 1.0), ((0, 2), 1.0)]);
+
+        prune_native_graph_edge_scores(&mut edge_scores, 2);
+
+        assert_eq!(
+            edge_scores,
+            HashMap::from_iter([((0, 1), 1.0), ((0, 2), 1.0)])
+        );
+    }
+
+    #[test]
+    fn subdivision_advances_past_oversized_shared_prefixes() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["anna", "anne", "anny"]),
+            strings(&["s1", "s2", "s3"]),
+            1,
+            2,
+        );
+
+        assert_eq!(
+            output
+                .iter()
+                .map(|(key, ids)| (key.clone(), ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("anna".to_string(), strings(&["s1"])),
+                ("anne".to_string(), strings(&["s2"])),
+                ("anny".to_string(), strings(&["s3"])),
+            ]
+        );
+        assert!(dead_ends.len() == 0);
+    }
+
+    #[test]
+    fn subdivision_groups_terminal_failures_by_exact_full_name() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["anna", "anna", "anne", "anne"]),
+            strings(&["s1", "s2", "s3", "s4"]),
+            1,
+            2,
+        );
+
+        assert!(output.len() == 0);
+        assert_eq!(
+            dead_ends
+                .iter()
+                .map(|(key, ids)| (key.clone(), ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("anna".to_string(), strings(&["s1", "s2"])),
+                ("anne".to_string(), strings(&["s3", "s4"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_name_does_not_overwrite_a_longer_prefix() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["ann", "ann", "anna"]),
+            strings(&["s1", "s2", "s3"]),
+            1,
+            2,
+        );
+
+        assert_eq!(
+            output
+                .iter()
+                .map(|(key, ids)| (key.clone(), ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![("anna".to_string(), strings(&["s3"]))]
+        );
+        assert_eq!(
+            dead_ends
+                .iter()
+                .map(|(key, ids)| (key.clone(), ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![("ann".to_string(), strings(&["s1", "s2"]))]
+        );
+        let mut members: Vec<&str> = output
+            .iter()
+            .chain(dead_ends.iter())
+            .flat_map(|(_key, values)| values.iter().map(String::as_str))
+            .collect();
+        members.sort_unstable();
+        assert_eq!(members, vec!["s1", "s2", "s3"]);
+    }
+
+    #[test]
+    fn subdivision_keeps_empty_and_repeated_terminal_names_separate() {
+        let (output, dead_ends) = subdivide_helper_rust(
+            strings(&["", "", "a", "a"]),
+            strings(&["s1", "s2", "s3", "s4"]),
+            1,
+            1,
+        );
+
+        assert!(output.len() == 0);
+        assert_eq!(
+            dead_ends
+                .iter()
+                .map(|(key, ids)| (key.clone(), ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("".to_string(), strings(&["s1", "s2"])),
+                ("a".to_string(), strings(&["s3", "s4"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_full_name_drives_merge_scoring() {
+        let mut output = OrderedSubblocks::default();
+        output.insert("chen|middle=w".to_string(), strings(&["s1"]));
+        output.insert("cheng".to_string(), strings(&["s2"]));
+
+        let candidates =
+            sorted_subblock_merge_candidates(&output, 2, &HashMap::default()).expect("valid keys");
+
+        assert_eq!(
+            candidates,
+            vec![(("chen|middle=w".to_string(), "cheng".to_string()), 100004.0)]
+        );
+    }
+
+    /// Key names of the first `targets` rows after the rule runs on `targets` plus `context` rows.
+    fn key_names(
+        targets: &[(&str, &str)],
+        context: &[(&str, &str, usize)],
+        maximum_size: usize,
+    ) -> Vec<(String, String)> {
+        let row = |first: &str, middle: &str| SubblockingSignatureRow {
+            signature_id: String::new(),
+            paper_id: String::new(),
+            first: first.to_string(),
+            middle: middle.to_string(),
+            last: String::new(),
+            affiliations: Vec::new(),
+            orcid: None,
+            position: None,
+        };
+        let mut rows: Vec<SubblockingSignatureRow> = targets
+            .iter()
+            .map(|(first, middle)| row(first, middle))
+            .collect();
+        for (first, middle, count) in context {
+            rows.extend((0..*count).map(|_| row(first, middle)));
+        }
+        apply_subblocking_key_names(&mut rows, maximum_size);
+        rows.into_iter()
+            .take(targets.len())
+            .map(|row| (row.first, row.middle))
+            .collect()
+    }
+
+    fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|(first, middle)| (first.to_string(), middle.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn all_initial_compounds_key_as_initials_even_with_joined_evidence() {
+        let observed = key_names(
+            &[("j d", ""), ("j d", "t"), ("j d t", "")],
+            &[("jd", "", 50)],
+            100,
+        );
+
+        assert_eq!(observed, pairs(&[("j", "d"), ("j", "d t"), ("j", "d t")]));
+    }
+
+    #[test]
+    fn compound_joins_only_above_the_ratio() {
+        // (n_join + 1) / (n_split + 1) must be above 8: 8/1 splits and 9/1 joins.
+        assert_eq!(
+            key_names(&[("hui min", "x")], &[("huimin", "", 7)], 100),
+            pairs(&[("hui", "min x")])
+        );
+        assert_eq!(
+            key_names(&[("hui min", "x")], &[("huimin", "", 8)], 100),
+            pairs(&[("huimin", "x")])
+        );
+        // Split-form records ("hui" with a middle that starts with "min") raise the bar.
+        assert_eq!(
+            key_names(
+                &[("hui min", "")],
+                &[("huimin", "", 15), ("hui", "min jie", 1)],
+                100
+            ),
+            pairs(&[("hui", "min")])
+        );
+        assert_eq!(
+            key_names(
+                &[("hui min", "")],
+                &[("huimin", "", 16), ("hui", "minh", 1), ("hui min", "", 3)],
+                100
+            ),
+            pairs(&[("huimin", "")])
+        );
+    }
+
+    #[test]
+    fn compound_does_not_join_a_first_name_above_the_cap() {
+        assert_eq!(
+            key_names(&[("qi an", "")], &[("qian", "", 20)], 20),
+            pairs(&[("qian", "")])
+        );
+        assert_eq!(
+            key_names(&[("qi an", "")], &[("qian", "", 21)], 20),
+            pairs(&[("qi", "an")])
+        );
+    }
+
+    #[test]
+    fn no_middle_dead_ends_cover_only_key_names_over_the_cap() {
+        let row = |signature_id: &str, first: &str, middle: &str| SubblockingSignatureRow {
+            signature_id: signature_id.to_string(),
+            paper_id: String::new(),
+            first: first.to_string(),
+            middle: middle.to_string(),
+            last: String::new(),
+            affiliations: Vec::new(),
+            orcid: None,
+            position: None,
+        };
+        // "wei" has 5 key records over a cap of 3. "wen" fits, and "w" is in the single-letter group.
+        // "hao" is a second dead end. "han" is a dead end without a no-middle record.
+        let mut rows = vec![
+            row("s0", "wei", ""),
+            row("s1", "wei", "min"),
+            row("s2", "wei", ""),
+            row("s3", "wen", ""),
+            row("s4", "w", ""),
+            row("s5", "wei", ""),
+            // The compound keys as "wei" with middle "lan", so it is not a no-middle record.
+            row("s6", "wei lan", ""),
+            row("s7", "hao", ""),
+            row("s8", "hao", ""),
+            row("s9", "hao", "x"),
+            row("s10", "hao", "y"),
+            row("s11", "han", "a"),
+            row("s12", "han", "b"),
+            row("s13", "han", "c"),
+            row("s14", "han", "d"),
+        ];
+        apply_subblocking_key_names(&mut rows, 3);
+        let row_by_signature_id: HashMap<String, SubblockingSignatureRow> = rows
+            .iter()
+            .map(|row| (row.signature_id.clone(), row.clone()))
+            .collect();
+        let (names, signature_ids): (Vec<String>, Vec<String>) = rows
+            .iter()
+            .filter(|row| row.first.chars().count() > 1)
+            .map(|row| (row.first.clone(), row.signature_id.clone()))
+            .unzip();
+        let (_output, dead_ends) = subdivide_helper_rust(names, signature_ids, 3, 2);
+
+        assert_eq!(
+            no_middle_dead_end_buckets(&dead_ends, &row_by_signature_id),
+            vec![
+                ("wei".to_string(), strings(&["s0", "s2", "s5"])),
+                ("hao".to_string(), strings(&["s7", "s8"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn three_token_compounds_join_all_tokens_or_split_after_the_first() {
+        assert_eq!(
+            key_names(
+                &[("xiao yu ting", "m"), ("xiao yu ting", "")],
+                &[("xiaoyuting", "", 9)],
+                100
+            ),
+            pairs(&[("xiaoyuting", "m"), ("xiaoyuting", "")])
+        );
+        assert_eq!(
+            key_names(
+                &[("xiao yu ting", "m")],
+                &[("xiaoyuting", "", 9), ("xiao", "yu", 1)],
+                100
+            ),
+            pairs(&[("xiao", "yu ting m")])
+        );
+    }
 }
 
 pub(crate) fn merge_small_subblocks(
@@ -2125,117 +2396,47 @@ pub(crate) fn merge_small_subblocks(
     maximum_size: usize,
     first_k_letter_counts_sorted: &HashMap<String, HashMap<String, f64>>,
 ) -> PyResult<()> {
-    let candidates =
-        sorted_subblock_merge_candidates(output, maximum_size, first_k_letter_counts_sorted)?;
-    let mut merging_log: BTreeMap<usize, HashSet<String>> = BTreeMap::new();
-    let mut inverse_merging_log: HashMap<String, usize> = HashMap::new();
-    let mut cluster_id = 0usize;
-
-    for (pair, _score) in candidates {
-        let pair_1_cluster_id = inverse_merging_log.get(&pair.0).copied();
-        let pair_2_cluster_id = inverse_merging_log.get(&pair.1).copied();
-        if pair_1_cluster_id.is_none() && pair_2_cluster_id.is_none() {
-            let mut keys = HashSet::new();
-            keys.insert(pair.0.clone());
-            keys.insert(pair.1.clone());
-            merging_log.insert(cluster_id, keys);
-            inverse_merging_log.insert(pair.0.clone(), cluster_id);
-            inverse_merging_log.insert(pair.1.clone(), cluster_id);
-            cluster_id += 1;
-        } else if pair_1_cluster_id.is_some()
-            && pair_2_cluster_id.is_some()
-            && pair_1_cluster_id == pair_2_cluster_id
-        {
+    let (rows, candidates) =
+        subblock_merge_candidates(output, maximum_size, first_k_letter_counts_sorted);
+    let mut parent: Vec<usize> = (0..rows.len()).collect();
+    let mut sizes: Vec<usize> = rows.iter().map(|row| row.size).collect();
+    let mut merge_ids = vec![None; rows.len()];
+    let mut next_id = 0;
+    for (left, right, _) in candidates {
+        let left = find_orcid_subblock_root(&mut parent, left);
+        let right = find_orcid_subblock_root(&mut parent, right);
+        if left == right || sizes[left] + sizes[right] > maximum_size {
             continue;
-        } else {
-            let proposed_cluster = match (pair_1_cluster_id, pair_2_cluster_id) {
-                (Some(left_id), Some(right_id)) if left_id != right_id => merging_log
-                    .get(&left_id)
-                    .expect("left merge cluster exists")
-                    .union(
-                        merging_log
-                            .get(&right_id)
-                            .expect("right merge cluster exists"),
-                    )
-                    .cloned()
-                    .collect::<HashSet<_>>(),
-                (Some(left_id), None) => {
-                    let mut cluster = merging_log
-                        .get(&left_id)
-                        .expect("left merge cluster exists")
-                        .clone();
-                    cluster.insert(pair.0.clone());
-                    cluster.insert(pair.1.clone());
-                    cluster
-                }
-                (None, Some(right_id)) => {
-                    let mut cluster = merging_log
-                        .get(&right_id)
-                        .expect("right merge cluster exists")
-                        .clone();
-                    cluster.insert(pair.0.clone());
-                    cluster.insert(pair.1.clone());
-                    cluster
-                }
-                _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "This should never happen",
-                    ))
-                }
-            };
-            let size_of_proposed: usize = proposed_cluster
-                .iter()
-                .map(|key| output.get(key).map_or(0, Vec::len))
-                .sum();
-            if size_of_proposed <= maximum_size {
-                if let Some(left_id) = pair_1_cluster_id {
-                    merging_log.insert(left_id, proposed_cluster.clone());
-                    if let Some(right_id) = pair_2_cluster_id {
-                        merging_log.remove(&right_id);
-                    }
-                    for key in proposed_cluster {
-                        inverse_merging_log.insert(key, left_id);
-                    }
-                } else if let Some(right_id) = pair_2_cluster_id {
-                    merging_log.insert(right_id, proposed_cluster.clone());
-                    for key in proposed_cluster {
-                        inverse_merging_log.insert(key, right_id);
-                    }
-                }
-            }
         }
+        // Keep the existing merge ID, preferring the left side when both
+        // already merged, so combined keys are appended in the same order.
+        let id = merge_ids[left].or(merge_ids[right]).unwrap_or_else(|| {
+            next_id += 1;
+            next_id
+        });
+        parent[right] = left;
+        sizes[left] += sizes[right];
+        merge_ids[left] = Some(id);
     }
 
-    let mut counter_of_keys: HashMap<String, usize> = HashMap::new();
-    for keys_to_merge in merging_log.values() {
-        for key in keys_to_merge {
-            *counter_of_keys.entry(key.clone()).or_insert(0) += 1;
+    let mut merging: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let root = find_orcid_subblock_root(&mut parent, index);
+        if let Some(id) = merge_ids[root] {
+            merging.entry(id).or_default().push(row.key.to_owned());
         }
     }
-    if counter_of_keys.values().any(|count| *count != 1) {
-        return Err(pyo3::exceptions::PyAssertionError::new_err(
-            "A subblock key appears in more than one merge cluster",
-        ));
-    }
-
-    let merge_cluster_ids: Vec<usize> = merging_log.keys().copied().collect();
-    for merge_cluster_id in merge_cluster_ids {
-        let mut keys_to_merge: Vec<String> = merging_log
-            .get(&merge_cluster_id)
-            .expect("merge cluster exists")
+    for mut keys in merging.into_values() {
+        keys.sort_unstable();
+        let key_of_keys = keys.join(", ");
+        let members = keys
             .iter()
+            .filter_map(|key| output.get(key))
+            .flatten()
             .cloned()
             .collect();
-        keys_to_merge.sort_unstable();
-        let key_of_keys = keys_to_merge.join(", ");
-        let mut signature_ids_stacked = Vec::<String>::new();
-        for key in keys_to_merge.iter() {
-            if let Some(values) = output.get(key) {
-                signature_ids_stacked.extend(values.iter().cloned());
-            }
-        }
-        output.insert(key_of_keys, signature_ids_stacked);
-        for key in keys_to_merge {
+        output.insert(key_of_keys, members);
+        for key in keys {
             output.remove(&key);
         }
     }
@@ -2265,104 +2466,73 @@ pub(crate) fn apply_orcid_subblocking(
     row_by_signature_id: &HashMap<String, SubblockingSignatureRow>,
     maximum_size: usize,
     telemetry: &mut SubblockingTelemetry,
-) {
-    let subblock_ids: Vec<String> = output.iter().map(|(key, _values)| key.clone()).collect();
-    let mut sig_id_to_subblock_index: HashMap<String, usize> = HashMap::new();
-    let mut sig_id_order = Vec::<String>::new();
-    for (subblock_index, (_subblock_id, sig_ids)) in output.entries.iter().enumerate() {
-        for sig_id in sig_ids {
-            if !sig_id_to_subblock_index.contains_key(sig_id) {
-                sig_id_order.push(sig_id.clone());
+) -> PyResult<()> {
+    let subblock_ids: Vec<&str> = output.iter().map(|(key, _)| key.as_str()).collect();
+    let mut seen_signatures = HashSet::default();
+    let mut orcid_indices = HashMap::default();
+    let mut orcid_groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (index, (key, members)) in output.iter().enumerate() {
+        for id in members {
+            if !seen_signatures.insert(id) {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                    "duplicate signature_id {id:?} reached ORCID subblocking in subblock {key:?}; upstream subblocking must produce a complete partition"
+                )));
             }
-            sig_id_to_subblock_index.insert(sig_id.clone(), subblock_index);
-        }
-    }
-
-    let mut orcid_to_sig_ids: HashMap<String, Vec<String>> = HashMap::new();
-    let mut orcid_order = Vec::<String>::new();
-    for sig_id in sig_id_order.iter() {
-        let Some(row) = row_by_signature_id.get(sig_id) else {
-            continue;
-        };
-        let Some(orcid_raw) = row.orcid.as_ref() else {
-            continue;
-        };
-        let Some(orcid) = normalize_orcid_owned(orcid_raw) else {
-            continue;
-        };
-        if !orcid_to_sig_ids.contains_key(&orcid) {
-            orcid_order.push(orcid.clone());
-        }
-        orcid_to_sig_ids
-            .entry(orcid)
-            .or_default()
-            .push(sig_id.clone());
-    }
-
-    let mut parent: Vec<usize> = (0..subblock_ids.len()).collect();
-    let mut orcid_to_subblock_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    for orcid in orcid_order.iter() {
-        let Some(orcid_sig_ids) = orcid_to_sig_ids.get(orcid) else {
-            continue;
-        };
-        let mut seen_subblock_indices = HashSet::<usize>::new();
-        let mut unique_subblock_indices = Vec::<usize>::new();
-        for sig_id in orcid_sig_ids {
-            let Some(subblock_index) = sig_id_to_subblock_index.get(sig_id).copied() else {
+            let Some(orcid) = row_by_signature_id
+                .get(id)
+                .and_then(|row| row.orcid.as_ref())
+                .and_then(|orcid| normalize_orcid_owned(orcid))
+            else {
                 continue;
             };
-            if seen_subblock_indices.insert(subblock_index) {
-                unique_subblock_indices.push(subblock_index);
+            let group_index = *orcid_indices.entry(orcid).or_insert_with(|| {
+                orcid_groups.push((0, Vec::new()));
+                orcid_groups.len() - 1
+            });
+            let (count, blocks) = &mut orcid_groups[group_index];
+            *count += 1;
+            // All members of a subblock are visited together.
+            if blocks.last() != Some(&index) {
+                blocks.push(index);
             }
         }
-        if unique_subblock_indices.len() <= 1 {
-            continue;
-        }
-        let first_subblock_index = unique_subblock_indices[0];
-        for subblock_index in unique_subblock_indices.iter().skip(1).copied() {
-            union_orcid_subblocks(&mut parent, first_subblock_index, subblock_index);
-        }
-        orcid_to_subblock_indices.insert(orcid.clone(), unique_subblock_indices);
     }
+    drop(seen_signatures);
+    drop(orcid_indices);
 
-    let mut components_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
-    let mut component_roots = Vec::<usize>::new();
-    let mut seen_roots = HashSet::<usize>::new();
-    for subblock_index in 0..subblock_ids.len() {
-        let root = find_orcid_subblock_root(&mut parent, subblock_index);
-        components_by_root
-            .entry(root)
-            .or_default()
-            .push(subblock_index);
-        if seen_roots.insert(root) {
+    let mut parent: Vec<usize> = (0..subblock_ids.len()).collect();
+    orcid_groups.retain(|(_, blocks)| blocks.len() > 1);
+    for (_, blocks) in &orcid_groups {
+        for &index in &blocks[1..] {
+            union_orcid_subblocks(&mut parent, blocks[0], index);
+        }
+    }
+    let mut components_by_root = vec![Vec::new(); subblock_ids.len()];
+    let mut component_roots = Vec::new();
+    for index in 0..subblock_ids.len() {
+        let root = find_orcid_subblock_root(&mut parent, index);
+        if components_by_root[root].is_empty() {
             component_roots.push(root);
         }
+        components_by_root[root].push(index);
     }
 
-    let mut skipped_orcid_counts_by_root: HashMap<usize, Vec<(String, usize)>> = HashMap::new();
-    for orcid in orcid_order.iter() {
-        let Some(unique_subblock_indices) = orcid_to_subblock_indices.get(orcid) else {
-            continue;
-        };
-        let root = find_orcid_subblock_root(&mut parent, unique_subblock_indices[0]);
-        let total_orcid_sig_count = orcid_to_sig_ids.get(orcid).map_or(0usize, Vec::len);
-        skipped_orcid_counts_by_root
-            .entry(root)
-            .or_default()
-            .push((orcid.clone(), total_orcid_sig_count));
+    let mut orcid_counts_by_root = vec![(0, 0); subblock_ids.len()];
+    for (signature_count, blocks) in orcid_groups {
+        let root = find_orcid_subblock_root(&mut parent, blocks[0]);
+        orcid_counts_by_root[root].0 += 1;
+        orcid_counts_by_root[root].1 += signature_count;
     }
 
     let mut merge_actions = Vec::<(String, Vec<String>, Vec<String>)>::new();
     for root in component_roots {
-        let Some(component_indices) = components_by_root.get(&root) else {
-            continue;
-        };
+        let component_indices = &components_by_root[root];
         if component_indices.len() <= 1 {
             continue;
         }
-        let mut unique_subblock_ids: Vec<String> = component_indices
+        let mut unique_subblock_ids: Vec<&str> = component_indices
             .iter()
-            .map(|index| subblock_ids[*index].clone())
+            .map(|index| subblock_ids[*index])
             .collect();
         unique_subblock_ids.sort_by(|left, right| {
             let left_score = left.matches("specter").count() * 10 + left.matches('|').count();
@@ -2375,13 +2545,9 @@ pub(crate) fn apply_orcid_subblocking(
             .map(|subblock_id| output.get(subblock_id).map_or(0, Vec::len))
             .sum();
         if total_subblock_sig_count > maximum_size {
-            if let Some(skipped_orcid_counts) = skipped_orcid_counts_by_root.get(&root) {
-                for (_orcid, total_orcid_sig_count) in skipped_orcid_counts {
-                    telemetry.orcid_merge_skipped_due_to_capacity_count += 1;
-                    telemetry.orcid_merge_skipped_due_to_capacity_signature_count +=
-                        *total_orcid_sig_count;
-                }
-            }
+            let (orcids, signatures) = orcid_counts_by_root[root];
+            telemetry.orcid_merge_skipped_due_to_capacity_count += orcids;
+            telemetry.orcid_merge_skipped_due_to_capacity_signature_count += signatures;
             continue;
         }
 
@@ -2392,7 +2558,11 @@ pub(crate) fn apply_orcid_subblocking(
                 signature_ids_stacked.extend(values.iter().cloned());
             }
         }
-        merge_actions.push((key_of_keys, signature_ids_stacked, unique_subblock_ids));
+        merge_actions.push((
+            key_of_keys,
+            signature_ids_stacked,
+            unique_subblock_ids.into_iter().map(str::to_owned).collect(),
+        ));
     }
 
     for (key_of_keys, signature_ids_stacked, unique_subblock_ids) in merge_actions {
@@ -2401,6 +2571,7 @@ pub(crate) fn apply_orcid_subblocking(
         }
         output.insert(key_of_keys, signature_ids_stacked);
     }
+    Ok(())
 }
 
 pub(crate) fn extract_string_vec_entries(
@@ -2414,27 +2585,35 @@ pub(crate) fn extract_string_vec_entries(
     Ok(out)
 }
 
+/// The subblocks, the planner telemetry, and the records in the no-middle bucket of a first-name
+/// dead end (see `no_middle_dead_end_buckets`).
+pub(crate) type SubblockPlan = (
+    HashMap<String, Vec<String>>,
+    Py<PyDict>,
+    Vec<(String, Vec<String>)>,
+);
+
 pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
-    rows: Vec<SubblockingSignatureRow>,
+    dataset: &ArrowDatasetResources,
+    mut rows: Vec<SubblockingSignatureRow>,
     maximum_size: usize,
     first_k_letter_counts_sorted: HashMap<String, HashMap<String, f64>>,
     graph_config: NativeGraphSubblockingConfig,
     random_seed: u64,
     use_orcid_subblocking: bool,
-) -> PyResult<(HashMap<String, Vec<String>>, Py<PyDict>)> {
+    num_threads: usize,
+    firsts_for_seed_ids: Option<HashSet<String>>,
+) -> PyResult<SubblockPlan> {
     if maximum_size == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "maximum_size must be positive",
         ));
     }
+    // From here on, row names are subblock key names. The graph and ORCID steps read no names.
+    apply_subblocking_key_names(&mut rows, maximum_size);
 
-    let signature_ids: Vec<String> = rows.iter().map(|row| row.signature_id.clone()).collect();
-    let row_by_signature_id: HashMap<String, SubblockingSignatureRow> = rows
-        .iter()
-        .map(|row| (row.signature_id.clone(), row.clone()))
-        .collect();
+    let input_count = rows.len();
     let single_letter_flags: Vec<bool> = rows.iter().map(|row| py_len(&row.first) <= 1).collect();
     let single_letter_count = single_letter_flags
         .iter()
@@ -2467,6 +2646,15 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
             multi_signature_ids.push(row.signature_id.clone());
         }
     }
+    let row_by_signature_id: HashMap<String, SubblockingSignatureRow> = rows
+        .into_iter()
+        .map(|row| (row.signature_id.clone(), row))
+        .collect();
+    if row_by_signature_id.len() != input_count {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "subblocking signature rows must contain unique signature_id values",
+        ));
+    }
 
     let (mut output, output_cant_subdivide) =
         subdivide_helper_rust(multi_first_names, multi_signature_ids, maximum_size, 2);
@@ -2475,9 +2663,11 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
         .iter()
         .map(|(_key, values)| values.len())
         .sum();
+    let no_middle_dead_ends =
+        no_middle_dead_end_buckets(&output_cant_subdivide, &row_by_signature_id);
 
     let mut output_for_specter = OrderedSubblocks::default();
-    for (key, sig_ids_loop) in output_cant_subdivide.entries {
+    for (key, sig_ids_loop) in output_cant_subdivide.into_entries() {
         let middle_names_loop: Vec<String> = sig_ids_loop
             .iter()
             .filter_map(|signature_id| row_by_signature_id.get(signature_id))
@@ -2485,14 +2675,13 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
             .collect();
         let (output_loop, output_cant_subdivide_loop) =
             subdivide_helper_rust(middle_names_loop, sig_ids_loop, maximum_size, 1);
-        for (key_loop, values) in output_loop.entries {
+        for (key_loop, values) in output_loop.into_entries() {
             output.insert(format!("{key}|middle={key_loop}"), values);
         }
-        for (key_loop, values) in output_cant_subdivide_loop.entries {
+        for (key_loop, values) in output_cant_subdivide_loop.into_entries() {
             output_for_specter.insert(format!("{key}|middle={key_loop}"), values);
         }
     }
-
     if single_signature_ids.len() <= maximum_size {
         if !single_signature_ids.is_empty() {
             output.insert(first_letter.clone(), single_signature_ids);
@@ -2500,10 +2689,10 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     } else {
         let (output_single_letter_first_name, output_cant_subdivide_single_letter_first_name) =
             subdivide_helper_rust(single_middle_names, single_signature_ids, maximum_size, 1);
-        for (key, values) in output_single_letter_first_name.entries {
+        for (key, values) in output_single_letter_first_name.into_entries() {
             output.insert(format!("{first_letter}|middle={key}"), values);
         }
-        for (key, values) in output_cant_subdivide_single_letter_first_name.entries {
+        for (key, values) in output_cant_subdivide_single_letter_first_name.into_entries() {
             output_for_specter.insert(format!("{first_letter}|middle={key}"), values);
         }
     }
@@ -2530,14 +2719,15 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     } else {
         Some(build_native_graph_evidence_store(
             py,
-            paths,
+            dataset,
             &row_by_signature_id,
             &fallback_signature_groups,
             &mut graph_telemetry,
+            num_threads,
         )?)
     };
 
-    for (key, sig_ids_loop) in output_for_specter.entries {
+    for (key, sig_ids_loop) in output_for_specter.into_entries() {
         if sig_ids_loop.len() <= maximum_size {
             telemetry.specter_non_invoked_candidate_block_count += 1;
             telemetry.specter_non_invoked_candidate_signature_count += sig_ids_loop.len();
@@ -2550,14 +2740,19 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
                     "Native graph fallback evidence store was not loaded for an oversized group",
                 )
             })?;
-            let mut specter_clustering = native_graph_cluster(
-                sig_ids_loop,
-                store,
-                maximum_size,
-                &graph_config,
-                random_seed,
-                &mut graph_telemetry,
-            )?;
+            // Keep one group's edge map resident. The pool works within that group.
+            let mut specter_clustering = py.allow_threads(|| {
+                install_with_optional_rayon_pool(Some(num_threads), || {
+                    native_graph_cluster(
+                        sig_ids_loop,
+                        store,
+                        maximum_size,
+                        &graph_config,
+                        random_seed,
+                        &mut graph_telemetry,
+                    )
+                })
+            })?;
             let mut keys: Vec<String> = specter_clustering.keys().cloned().collect();
             keys.sort_unstable();
             for key_loop in keys {
@@ -2569,6 +2764,7 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
         }
     }
 
+    drop(graph_store);
     let (pre_merge_specter_subblock_count, pre_merge_specter_signature_count) =
         specter_labeled_subblock_stats(&output);
     telemetry.pre_merge_subblock_count = output.len();
@@ -2583,15 +2779,17 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
             &row_by_signature_id,
             maximum_size,
             &mut telemetry,
-        );
+        )?;
     }
 
-    let input_set: HashSet<String> = signature_ids.into_iter().collect();
-    let output_set: HashSet<String> = output
+    // Remove each ID once to catch both omissions and duplicate memberships.
+    let mut remaining: HashSet<&str> = row_by_signature_id.keys().map(String::as_str).collect();
+    let covers_input = output
         .iter()
-        .flat_map(|(_key, values)| values.iter().cloned())
-        .collect();
-    if input_set != output_set {
+        .flat_map(|(_, members)| members)
+        .all(|id| remaining.remove(id.as_str()))
+        && remaining.is_empty();
+    if !covers_input {
         return Err(pyo3::exceptions::PyAssertionError::new_err(
             "Subblocking did not produce a complete partition",
         ));
@@ -2604,46 +2802,70 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
     telemetry.final_specter_labeled_signature_count = final_specter_signature_count;
     let telemetry_dict = telemetry.to_dict(py)?;
     insert_native_graph_telemetry(py, telemetry_dict.bind(py), &graph_telemetry)?;
-    Ok((output.to_hashmap(), telemetry_dict))
+    if let Some(seed_ids) = firsts_for_seed_ids {
+        let firsts = PyDict::new(py);
+        for (_, members) in output.iter() {
+            // Seed packing can change the representative only in a subblock
+            // that contains a seed. The other subblocks keep their first member.
+            let count = if !seed_ids.is_empty() && members.iter().any(|id| seed_ids.contains(id)) {
+                members.len()
+            } else {
+                1
+            };
+            for id in members.iter().take(count) {
+                firsts.set_item(id, &row_by_signature_id[id].first)?;
+            }
+        }
+        telemetry_dict
+            .bind(py)
+            .set_item("subblock_firsts", firsts)?;
+    }
+    Ok((
+        output.into_entries().collect(),
+        telemetry_dict,
+        no_middle_dead_ends,
+    ))
 }
 
 #[pyfunction]
 #[pyo3(signature = (
-    paths,
+    dataset,
     signature_ids,
     maximum_size,
     first_k_letter_counts_sorted,
     graph_config = None,
     random_seed = 0,
-    use_orcid_subblocking = true
+    use_orcid_subblocking = true,
+    *,
+    num_threads = 1,
+    firsts_for_seed_ids = None
 ))]
 pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
+    dataset: PyRef<'_, crate::arrow_dataset::ArrowDataset>,
     signature_ids: Vec<String>,
     maximum_size: usize,
     first_k_letter_counts_sorted: HashMap<String, HashMap<String, f64>>,
     graph_config: Option<&Bound<'_, PyAny>>,
     random_seed: u64,
     use_orcid_subblocking: bool,
-) -> PyResult<(HashMap<String, Vec<String>>, Py<PyDict>)> {
-    let signatures_path = extract_path_mapping_string(paths, "signatures", true)?
-        .expect("required signatures path exists");
-    let signatures_index_path =
-        extract_path_mapping_string(paths, "signatures_batch_index", false)?;
-    let mut seen_signature_ids = HashSet::<String>::new();
-    let mut requested_signature_ids = Vec::<String>::new();
-    for signature_id in signature_ids {
-        if seen_signature_ids.insert(signature_id.clone()) {
-            requested_signature_ids.push(signature_id);
+    num_threads: usize,
+    firsts_for_seed_ids: Option<HashSet<String>>,
+) -> PyResult<SubblockPlan> {
+    let dataset = dataset.shared();
+    let mut seen_signature_ids = HashSet::<String>::default();
+    for signature_id in &signature_ids {
+        if !seen_signature_ids.insert(signature_id.clone()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Subblocking signature_ids must be unique after string coercion: {signature_id:?}"
+            )));
         }
     }
+    let requested_signature_ids = signature_ids;
     let keep_signature_ids: HashSet<String> = requested_signature_ids.iter().cloned().collect();
-    let (subblocking_rows, _read_stats) = read_subblocking_signature_rows_with_optional_index(
-        &signatures_path,
-        signatures_index_path.as_deref(),
-        Some(&keep_signature_ids),
-    )?;
+    let mut subblocking_rows = py.allow_threads(|| {
+        read_subblocking_signature_rows(&dataset, &keep_signature_ids, num_threads)
+    })?;
     let missing_signature_ids: Vec<String> = requested_signature_ids
         .iter()
         .filter(|signature_id| !subblocking_rows.contains_key(*signature_id))
@@ -2657,31 +2879,34 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     }
 
     let mut signature_rows: Vec<SubblockingSignatureRow> = requested_signature_ids
-        .iter()
+        .into_iter()
         .map(|signature_id| {
             subblocking_rows
-                .get(signature_id)
+                .remove(&signature_id)
                 .expect("requested signature exists after missing check")
-                .clone()
         })
         .collect();
+    drop(subblocking_rows);
     let text_module = py.import("s2and.text")?;
     let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
-    let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+    let mut unidecode_char_map: HashMap<char, String> = HashMap::default();
     for row in signature_rows.iter() {
         ensure_unidecode_for_text(&row.first, &mut unidecode_char_map)?;
         ensure_unidecode_for_text(&row.middle, &mut unidecode_char_map)?;
+        ensure_unidecode_for_text(&row.last, &mut unidecode_char_map)?;
     }
     normalize_subblocking_signature_rows(&mut signature_rows, &name_prefixes, &unidecode_char_map);
 
     make_subblocks_with_telemetry_from_rows_native_graph(
         py,
-        paths,
+        &dataset,
         signature_rows,
         maximum_size,
         first_k_letter_counts_sorted,
         NativeGraphSubblockingConfig::from_py(graph_config)?,
         random_seed,
         use_orcid_subblocking,
+        num_threads,
+        firsts_for_seed_ids,
     )
 }

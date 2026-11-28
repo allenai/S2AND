@@ -134,21 +134,8 @@ def promoted_linker_feature_columns() -> tuple[str, ...]:
     return PROMOTED_LINKER_FEATURE_COLUMNS
 
 
-def _has_column(row_features: Any, column: str) -> bool:
-    if isinstance(row_features, Mapping):
-        return column in row_features
-    columns = getattr(row_features, "columns", None)
-    if columns is not None:
-        return column in columns
-    try:
-        row_features[column]
-    except (KeyError, TypeError):
-        return False
-    return True
-
-
-def _coerce_row_feature_column(row_features: Any, column: str, row_count: int) -> np.ndarray:
-    if not _has_column(row_features, column):
+def _coerce_row_feature_column(row_features: Mapping[str, Any], column: str, row_count: int) -> np.ndarray:
+    if column not in row_features:
         raise KeyError(f"Missing row-level linker feature column: {column}")
     values = np.asarray(row_features[column], dtype=np.float32)
     if values.ndim != 1:
@@ -185,7 +172,7 @@ def _pairwise_feature_columns_to_matrix(
 
 def assemble_linker_feature_matrix(
     candidate_batch: LinkerCandidateBatch,
-    row_features: Any,
+    row_features: Mapping[str, Any],
     *,
     pairwise_stats: PairwiseAggregateStats,
     feature_columns: Sequence[str] = PROMOTED_LINKER_FEATURE_COLUMNS,

@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 
 pub(crate) fn count_initials(s: &str) -> HashMap<char, usize> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::default();
     for part in s.split(' ') {
         if !part.is_empty() {
             if let Some(ch) = part.chars().next() {
@@ -12,62 +12,670 @@ pub(crate) fn count_initials(s: &str) -> HashMap<char, usize> {
     counts
 }
 
+#[cfg(test)]
+// Compare-time equivalence for canonical last names: joined and spaced
+// spellings of one surname are equivalent ("ou yang" == "ouyang"), and so are
+// listed spelling variants and Slavic -sky endings. Deliberate canonical_v2
+// compare-time policy (not a legacy artifact shim); mirrors
+// s2and.text.canonical_lasts_equivalent.
 pub(crate) fn lasts_equivalent_for_constraint(l1: &str, l2: &str) -> bool {
     if l1 == l2 {
         return true;
     }
-    l1.replace(' ', "") == l2.replace(' ', "")
+    surname_family(l1) == surname_family(l2)
+}
+
+// Blocking puts both spellings of a listed surname under one block key, so the
+// constraint must not veto them. Same file as s2and.text.surname_variant_map.
+// Build info exposes it, so a stale build fails the test-session check.
+pub(crate) const SURNAME_VARIANTS: &str =
+    include_str!("../../s2and/data/s2and_surname_variants_canonical.txt");
+
+fn surname_variants() -> &'static HashMap<&'static str, &'static str> {
+    static VARIANTS: std::sync::OnceLock<HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    VARIANTS.get_or_init(|| {
+        SURNAME_VARIANTS
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                line.split_once(',')
+                    .expect("surname variant lines are `variant,canonical`")
+            })
+            .collect()
+    })
+}
+
+// Longest first is not needed: no ending is a suffix of another.
+const SLAVIC_SKY_ENDINGS: [&str; 7] = ["skiy", "skyi", "skyy", "skii", "skij", "skyj", "sky"];
+
+/// The compare-time form of a canonical last name.
+///
+/// Removes spaces, maps a listed spelling variant to its canonical spelling,
+/// and writes a Slavic -sky ending after two letters as -skii. Mirrors
+/// `s2and.text.canonical_surname_family`.
+pub(crate) fn surname_family(last: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let compact: Cow<'_, str> = if last.contains(' ') {
+        Cow::Owned(last.replace(' ', ""))
+    } else {
+        Cow::Borrowed(last)
+    };
+    let mapped: Cow<'_, str> = match surname_variants().get(compact.as_ref()) {
+        Some(canonical) => Cow::Borrowed(*canonical),
+        None => compact,
+    };
+    for ending in SLAVIC_SKY_ENDINGS {
+        if let Some(stem) = mapped.strip_suffix(ending) {
+            let bytes = stem.as_bytes();
+            let two_letters = bytes.len() >= 2
+                && bytes[bytes.len() - 2..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase());
+            if two_letters {
+                return Cow::Owned(format!("{stem}skii"));
+            }
+            break;
+        }
+    }
+    mapped
 }
 
 pub(crate) fn same_prefix_tokens(a: &str, b: &str) -> bool {
-    let mut ita = a.split_whitespace();
-    let mut itb = b.split_whitespace();
-    loop {
-        match (ita.next(), itb.next()) {
-            (Some(x), Some(y)) => {
-                if !(x.starts_with(y) || y.starts_with(x)) {
-                    return false;
-                }
-            }
-            _ => return true,
+    same_prefix_token_iters(a.split_whitespace(), b.split_whitespace())
+}
+
+/// Name inputs of the hard constraint for one signature, split once.
+///
+/// Blocks compare every pair, so splitting per signature instead of per pair
+/// removes most of the constraint's string work.
+pub(crate) struct ConstraintNameKey<'a> {
+    last: &'a str,
+    /// `surname_family(last)`; it borrows `last` when nothing changes.
+    last_family: std::borrow::Cow<'a, str>,
+    first_initial: Option<char>,
+    first_tokens: Vec<&'a str>,
+    middle_tokens: Vec<&'a str>,
+    /// The summary `middle_names_conflict_small` would build from
+    /// `middle_tokens`, when it depends on this signature alone.
+    middle_summary: Option<MiddleSummary<'a>>,
+    cjk_given_name: Option<&'a str>,
+}
+
+impl<'a> ConstraintNameKey<'a> {
+    /// `cjk_given_name` holds the prepared value from `cjk_given_name_for_constraint`.
+    pub(crate) fn new(
+        first: &'a str,
+        middle: &'a str,
+        last: &'a str,
+        cjk_given_name: Option<&'a str>,
+    ) -> Self {
+        let last_family = surname_family(last);
+        let mut middle_tokens: Vec<&'a str> = middle.split_whitespace().collect();
+        spell_middle_tokens(&mut middle_tokens, cjk_given_name);
+        let middle_summary = MiddleSummary::new(&middle_tokens);
+        Self {
+            last,
+            last_family,
+            cjk_given_name,
+            first_initial: if first.is_empty() {
+                None
+            } else {
+                first.chars().next()
+            },
+            first_tokens: first.split_whitespace().collect(),
+            middle_tokens,
+            middle_summary,
         }
     }
 }
 
+/// The sorted, deduplicated middle-name summary of one signature.
+///
+/// Pairs built two `SmallMiddleSummary` values each; most of the constraint's
+/// remaining time went there. A summary depends on the other signature only
+/// through dropped affixes, so keys with an affix token keep the per-pair path.
+struct MiddleSummary<'a> {
+    words: Vec<&'a str>,
+    initials: Vec<char>,
+    chars: Vec<char>,
+}
+
+impl<'a> MiddleSummary<'a> {
+    /// The summary of `tokens`, or None when `middle_names_conflict_small`
+    /// would skip a token or use the hash-set version for these tokens.
+    fn new(tokens: &[&'a str]) -> Option<Self> {
+        if tokens.len() > SMALL_MIDDLE_TOKENS
+            || tokens
+                .iter()
+                .any(|token| token.is_empty() || crate::is_dropped_affix(token))
+        {
+            return None;
+        }
+        let mut summary = Self {
+            words: Vec::new(),
+            initials: Vec::new(),
+            chars: Vec::new(),
+        };
+        for token in tokens.iter().copied() {
+            let mut chars = token.chars();
+            if let Some(initial) = chars.next() {
+                summary.initials.push(initial);
+            }
+            if chars.next().is_some() {
+                summary.words.push(token);
+                summary.chars.extend(token.chars());
+                if summary.chars.len() > SMALL_MIDDLE_CHARS {
+                    return None;
+                }
+            }
+        }
+        for values in [&mut summary.words] {
+            let count = sort_dedup(values);
+            values.truncate(count);
+        }
+        for values in [&mut summary.initials, &mut summary.chars] {
+            let count = sort_dedup(values);
+            values.truncate(count);
+        }
+        Some(summary)
+    }
+}
+
+/// `middle_names_conflict_small` on the signatures' precomputed summaries.
+fn middle_summaries_conflict(
+    summary_1: &MiddleSummary<'_>,
+    summary_2: &MiddleSummary<'_>,
+    middle_1: &[&str],
+    middle_2: &[&str],
+) -> bool {
+    if middle_1.is_empty() || middle_2.is_empty() {
+        return false;
+    }
+    let conflicting_initials = !summary_1.initials.is_empty()
+        && !summary_2.initials.is_empty()
+        && sorted_disjoint(&summary_1.initials, &summary_2.initials);
+    let conflicting_full_names = !summary_1.words.is_empty()
+        && !summary_2.words.is_empty()
+        && sorted_disjoint(&summary_1.words, &summary_2.words)
+        && summary_1.chars != summary_2.chars
+        && !same_prefix_token_iters(middle_1.iter().copied(), middle_2.iter().copied());
+    conflicting_initials || conflicting_full_names
+}
+
+/// Whether two `given_name_for_constraint` values are compared whole as CJK given names:
+/// both complete, with the same CJK script tag (H, K or G) as their first byte.
+pub(crate) fn cjk_given_names_comparable(given_1: &str, given_2: &str) -> bool {
+    !given_1.is_empty()
+        && !given_2.is_empty()
+        && given_1.as_bytes()[0] == given_2.as_bytes()[0]
+        && matches!(given_1.as_bytes()[0], b'H' | b'K' | b'G')
+}
+
+/// Split a joined-capitals middle back into initials (mirrors Python
+/// `spell_middle_initials`): with the S value "Sip", tokens ["ip"] become ["i", "p"].
+pub(crate) fn spell_middle_tokens<'a>(tokens: &mut Vec<&'a str>, value: Option<&'a str>) {
+    let Some(spelled) = value.and_then(|value| value.strip_prefix('S')) else {
+        return;
+    };
+    if tokens.last() == Some(&spelled) {
+        tokens.pop();
+        // Split by character, as Python does.
+        tokens.extend(
+            spelled
+                .char_indices()
+                .map(|(index, ch)| &spelled[index..index + ch.len_utf8()]),
+        );
+    }
+}
+
+/// The middle name with a joined-capitals middle split into initials, for the per-pair
+/// reference rule; `None` when nothing changes.
+#[cfg(test)]
+pub(crate) fn spelled_middle(middle: &str, value: Option<&str>) -> Option<String> {
+    let mut tokens: Vec<&str> = middle.split_whitespace().collect();
+    let before = tokens.len();
+    spell_middle_tokens(&mut tokens, value);
+    (tokens.len() != before).then(|| tokens.join(" "))
+}
+
+/// Whether a value is a joined-initials reading (tag J or W).
+pub(crate) fn is_joined_reading(value: Option<&str>) -> bool {
+    matches!(value.and_then(|v| v.as_bytes().first()), Some(b'J' | b'W'))
+}
+
+/// Whether a joined-initials reading spells the other name exactly (mirrors Python
+/// `joined_initials_match`). The other name needs a full first name. For J readings its
+/// first and middle tokens must have exactly these initials in order, and every later
+/// token must be an initial or at least four letters, so "Ji" does not match "Jong In".
+/// For W readings it must be the initial and then exactly that word. An `other_value`
+/// with tag S splits the joined middle back into initials first.
+pub(crate) fn joined_initials_match<'t>(
+    reading: &str,
+    tokens: impl Iterator<Item = &'t str>,
+    other_value: Option<&str>,
+) -> bool {
+    spelled_reading_forms(tokens, other_value)
+        .iter()
+        .any(|form| form == reading)
+}
+
+/// The joined-initials readings a name spells exactly, at most two (mirrors Python
+/// `spelled_reading_forms`): the J reading of its initials when every later token is an
+/// initial or at least four letters, and with exactly two tokens the W reading of its
+/// initial and second word. The name needs a full first name.
+pub(crate) fn spelled_reading_forms<'t>(
+    tokens: impl Iterator<Item = &'t str>,
+    other_value: Option<&str>,
+) -> Vec<String> {
+    let mut tokens: Vec<&str> = tokens.collect();
+    // "Johanna IP" canonicalizes to "johanna ip"; read it as "johanna i p".
+    spell_middle_tokens(&mut tokens, other_value);
+    let mut forms = Vec::new();
+    let Some(first) = tokens.first() else {
+        return forms;
+    };
+    if first.chars().count() < 2 {
+        return forms;
+    }
+    if tokens[1..].iter().all(|token| {
+        let length = token.chars().count();
+        length == 1 || length >= 4
+    }) {
+        let mut form = String::from("J");
+        form.extend(tokens.iter().filter_map(|token| token.chars().next()));
+        forms.push(form);
+    }
+    if tokens.len() == 2 {
+        let initial = first.chars().next().unwrap_or_default();
+        forms.push(format!("W{initial} {}", tokens[1]));
+    }
+    forms
+}
+
+/// Apply the joined-initials reading to an ordinary conflict verdict. Only one side may
+/// use its reading; two readings keep the ordinary verdict.
+pub(crate) fn joined_initials_reconcile<'t>(
+    ordinary_conflict: bool,
+    given_1: Option<&str>,
+    given_2: Option<&str>,
+    tokens_1: impl Iterator<Item = &'t str>,
+    tokens_2: impl Iterator<Item = &'t str>,
+) -> bool {
+    if !ordinary_conflict {
+        return false;
+    }
+    match (is_joined_reading(given_1), is_joined_reading(given_2)) {
+        (true, false) => !joined_initials_match(given_1.unwrap_or(""), tokens_2, given_2),
+        (false, true) => !joined_initials_match(given_2.unwrap_or(""), tokens_1, given_1),
+        _ => true,
+    }
+}
+
+/// Return whether two signatures' names violate the hard constraint.
+///
+/// Matches the name steps of `RustFeaturizer::constraint_value_from_records`:
+/// last names, CJK given names, first initials, first-name compatibility, then
+/// middle names, with the joined-initials reading (`joined_initials_reconcile`).
+/// `first_aliases` answers the name-tuple lookup, which only runs for first
+/// names that share no prefix.
+pub(crate) fn constraint_names_conflict(
+    key_1: &ConstraintNameKey<'_>,
+    key_2: &ConstraintNameKey<'_>,
+    first_aliases: impl FnOnce() -> bool,
+) -> bool {
+    if key_1.last != key_2.last && key_1.last_family != key_2.last_family {
+        return true;
+    }
+    // Incomplete or cross-script CJK given names keep the ordinary rules below.
+    if let (Some(given_1), Some(given_2)) = (key_1.cjk_given_name, key_2.cjk_given_name) {
+        if cjk_given_names_comparable(given_1, given_2) {
+            return given_1 != given_2;
+        }
+    }
+    joined_initials_reconcile(
+        ordinary_names_conflict(key_1, key_2, first_aliases),
+        key_1.cjk_given_name,
+        key_2.cjk_given_name,
+        key_1
+            .first_tokens
+            .iter()
+            .chain(&key_1.middle_tokens)
+            .copied(),
+        key_2
+            .first_tokens
+            .iter()
+            .chain(&key_2.middle_tokens)
+            .copied(),
+    )
+}
+
+/// The first-initial, first-name and middle-name part of `constraint_names_conflict`.
+fn ordinary_names_conflict(
+    key_1: &ConstraintNameKey<'_>,
+    key_2: &ConstraintNameKey<'_>,
+    first_aliases: impl FnOnce() -> bool,
+) -> bool {
+    if let (Some(c1), Some(c2)) = (key_1.first_initial, key_2.first_initial) {
+        if c1 != c2 {
+            return true;
+        }
+    }
+    let has_first_1 = !key_1.first_tokens.is_empty();
+    let has_first_2 = !key_2.first_tokens.is_empty();
+    let same_prefix = has_first_1
+        && has_first_2
+        && same_prefix_token_iters(
+            key_1.first_tokens.iter().copied(),
+            key_2.first_tokens.iter().copied(),
+        );
+    if has_first_1 && has_first_2 && !same_prefix && !first_aliases() {
+        return true;
+    }
+    let has_tail = key_1.first_tokens.len() > 1 || key_2.first_tokens.len() > 1;
+    if has_tail && (!has_first_1 || !has_first_2 || same_prefix) {
+        let mut tokens_1 = key_1.first_tokens
+            [uncovered_first_tail_start(&key_1.first_tokens, &key_2.first_tokens)..]
+            .to_vec();
+        let mut tokens_2 = key_2.first_tokens
+            [uncovered_first_tail_start(&key_2.first_tokens, &key_1.first_tokens)..]
+            .to_vec();
+        tokens_1.extend_from_slice(&key_1.middle_tokens);
+        tokens_2.extend_from_slice(&key_2.middle_tokens);
+        return middle_names_conflict_small(&tokens_1, &tokens_2);
+    }
+    if let (Some(summary_1), Some(summary_2)) = (&key_1.middle_summary, &key_2.middle_summary) {
+        return middle_summaries_conflict(
+            summary_1,
+            summary_2,
+            &key_1.middle_tokens,
+            &key_2.middle_tokens,
+        );
+    }
+    middle_names_conflict_small(&key_1.middle_tokens, &key_2.middle_tokens)
+}
+
+/// Token and character capacities of the stack summaries in
+/// `middle_names_conflict_small`; longer names use `middle_names_conflict`.
+const SMALL_MIDDLE_TOKENS: usize = 16;
+const SMALL_MIDDLE_CHARS: usize = 96;
+
+/// The sorted, deduplicated summary of one side's middle tokens.
+struct SmallMiddleSummary<'a> {
+    words: [&'a str; SMALL_MIDDLE_TOKENS],
+    word_count: usize,
+    initials: [char; SMALL_MIDDLE_TOKENS],
+    initial_count: usize,
+    chars: [char; SMALL_MIDDLE_CHARS],
+    char_count: usize,
+}
+
+impl<'a> SmallMiddleSummary<'a> {
+    /// Summarize `tokens` like `middle_token_summary`, skipping dropped
+    /// affixes that both sides contain. Return None past the capacities.
+    fn new(tokens: &[&'a str], other: &[&str]) -> Option<Self> {
+        let mut summary = Self {
+            words: [""; SMALL_MIDDLE_TOKENS],
+            word_count: 0,
+            initials: ['\0'; SMALL_MIDDLE_TOKENS],
+            initial_count: 0,
+            chars: ['\0'; SMALL_MIDDLE_CHARS],
+            char_count: 0,
+        };
+        for token in tokens.iter().copied() {
+            if token.is_empty() || (crate::is_dropped_affix(token) && other.contains(&token)) {
+                continue;
+            }
+            let mut chars = token.chars();
+            if let Some(initial) = chars.next() {
+                summary.initials[summary.initial_count] = initial;
+                summary.initial_count += 1;
+            }
+            if chars.next().is_some() {
+                summary.words[summary.word_count] = token;
+                summary.word_count += 1;
+                for ch in token.chars() {
+                    if summary.char_count == SMALL_MIDDLE_CHARS {
+                        return None;
+                    }
+                    summary.chars[summary.char_count] = ch;
+                    summary.char_count += 1;
+                }
+            }
+        }
+        summary.word_count = sort_dedup(&mut summary.words[..summary.word_count]);
+        summary.initial_count = sort_dedup(&mut summary.initials[..summary.initial_count]);
+        summary.char_count = sort_dedup(&mut summary.chars[..summary.char_count]);
+        Some(summary)
+    }
+
+    fn words(&self) -> &[&'a str] {
+        &self.words[..self.word_count]
+    }
+
+    fn initials(&self) -> &[char] {
+        &self.initials[..self.initial_count]
+    }
+
+    fn chars(&self) -> &[char] {
+        &self.chars[..self.char_count]
+    }
+}
+
+/// Sort `values` and move its distinct values to the front; return their count.
+fn sort_dedup<T: Ord + Copy>(values: &mut [T]) -> usize {
+    values.sort_unstable();
+    let mut count = 0;
+    for index in 0..values.len() {
+        if count == 0 || values[index] != values[count - 1] {
+            values[count] = values[index];
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Return whether two sorted, deduplicated slices share no value.
+fn sorted_disjoint<T: Ord>(left: &[T], right: &[T]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => return false,
+        }
+    }
+    true
+}
+
+/// `middle_names_conflict` on stack arrays instead of hash sets.
+///
+/// Pairs dominate constraint time, and their middle names are short, so the
+/// summaries fit on the stack. Longer names take the hash-set version.
+pub(crate) fn middle_names_conflict_small(middle_1: &[&str], middle_2: &[&str]) -> bool {
+    if middle_1.is_empty() || middle_2.is_empty() {
+        return false;
+    }
+    if middle_1.len() > SMALL_MIDDLE_TOKENS || middle_2.len() > SMALL_MIDDLE_TOKENS {
+        return middle_names_conflict(middle_1, middle_2);
+    }
+    let (Some(summary_1), Some(summary_2)) = (
+        SmallMiddleSummary::new(middle_1, middle_2),
+        SmallMiddleSummary::new(middle_2, middle_1),
+    ) else {
+        return middle_names_conflict(middle_1, middle_2);
+    };
+    let conflicting_initials = !summary_1.initials().is_empty()
+        && !summary_2.initials().is_empty()
+        && sorted_disjoint(summary_1.initials(), summary_2.initials());
+    let conflicting_full_names = !summary_1.words().is_empty()
+        && !summary_2.words().is_empty()
+        && sorted_disjoint(summary_1.words(), summary_2.words())
+        && summary_1.chars() != summary_2.chars()
+        && !same_prefix_token_iters(middle_1.iter().copied(), middle_2.iter().copied());
+    conflicting_initials || conflicting_full_names
+}
+
+fn same_prefix_token_iters<'a>(
+    mut ita: impl Iterator<Item = &'a str>,
+    mut itb: impl Iterator<Item = &'a str>,
+) -> bool {
+    let mut saw_pair = false;
+    loop {
+        match (ita.next(), itb.next()) {
+            (Some(x), Some(y)) => {
+                saw_pair = true;
+                if !(x.starts_with(y) || y.starts_with(x)) {
+                    return false;
+                }
+            }
+            _ => return saw_pair,
+        }
+    }
+}
+
+/// Return the index where the uncovered later first-name tokens start.
+///
+/// Mirrors `s2and.text._uncovered_first_tail`: the other first name covers its
+/// aligned positions, and the remainder of its last token covers the next
+/// tokens ("xiaoqing" covers "xiao qing"). The first token never spills.
+fn uncovered_first_tail_start(tokens: &[&str], other: &[&str]) -> usize {
+    let mut start = other.len().max(1);
+    if start >= tokens.len() {
+        return tokens.len();
+    }
+    if let Some(last) = other.last() {
+        let aligned = tokens[other.len() - 1];
+        let mut rest = last.strip_prefix(aligned).unwrap_or("");
+        while !rest.is_empty() && start < tokens.len() {
+            let token = tokens[start];
+            if let Some(remaining) = rest.strip_prefix(token) {
+                rest = remaining;
+            } else if token.starts_with(rest) {
+                rest = "";
+            } else {
+                break;
+            }
+            start += 1;
+        }
+    }
+    start
+}
+
+#[cfg(test)]
+/// Return the middle-name tokens that the hard name constraint compares.
+///
+/// Mirrors `s2and.text.constraint_middle_tokens`. Call it only for compatible
+/// first names.
+pub(crate) fn constraint_middle_tokens<'a>(
+    first_1: &'a str,
+    middle_1: &'a str,
+    first_2: &'a str,
+    middle_2: &'a str,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut tokens_1: Vec<&'a str> = Vec::new();
+    let mut tokens_2: Vec<&'a str> = Vec::new();
+    // A dash-bound first group ("jean daniel") matches by prefix only on its
+    // aligned tokens. Its uncovered later tokens must also pass the middle
+    // rule, as for "jean" + "daniel". An alias match covers the full first
+    // name. Single-token first names have no tail, so most pairs skip this.
+    let has_tail =
+        first_1.split_whitespace().nth(1).is_some() || first_2.split_whitespace().nth(1).is_some();
+    if has_tail
+        && (first_1.split_whitespace().next().is_none()
+            || first_2.split_whitespace().next().is_none()
+            || same_prefix_tokens(first_1, first_2))
+    {
+        let first_tokens_1: Vec<&'a str> = first_1.split_whitespace().collect();
+        let first_tokens_2: Vec<&'a str> = first_2.split_whitespace().collect();
+        tokens_1.extend_from_slice(
+            &first_tokens_1[uncovered_first_tail_start(&first_tokens_1, &first_tokens_2)..],
+        );
+        tokens_2.extend_from_slice(
+            &first_tokens_2[uncovered_first_tail_start(&first_tokens_2, &first_tokens_1)..],
+        );
+    }
+    tokens_1.extend(middle_1.split_whitespace());
+    tokens_2.extend(middle_2.split_whitespace());
+    (tokens_1, tokens_2)
+}
+
+/// Return the full words, initials and full-word letters of middle tokens.
+fn middle_token_summary<'a>(
+    tokens: &[&'a str],
+    overlapping_affixes: &HashSet<&str>,
+) -> (HashSet<&'a str>, HashSet<char>, HashSet<char>) {
+    let mut words = HashSet::default();
+    let mut initials = HashSet::default();
+    let mut word_chars = HashSet::default();
+    for token in tokens.iter().copied() {
+        if token.is_empty() || overlapping_affixes.contains(token) {
+            continue;
+        }
+        if let Some(initial) = token.chars().next() {
+            initials.insert(initial);
+        }
+        if crate::py_len(token) > 1 {
+            words.insert(token);
+            word_chars.extend(token.chars());
+        }
+    }
+    (words, initials, word_chars)
+}
+
+/// Return whether two middle-name token lists violate the hard name rule.
+///
+/// Mirrors the middle-name step of `ANDData._get_constraint`.
+pub(crate) fn middle_names_conflict(middle_1: &[&str], middle_2: &[&str]) -> bool {
+    if middle_1.is_empty() || middle_2.is_empty() {
+        return false;
+    }
+    let middle_1_set: HashSet<&str> = middle_1.iter().copied().collect();
+    let middle_2_set: HashSet<&str> = middle_2.iter().copied().collect();
+    let overlapping_affixes: HashSet<&str> = middle_1_set
+        .intersection(&middle_2_set)
+        .copied()
+        .filter(|token| crate::is_dropped_affix(token))
+        .collect();
+    let (words_1, initials_1, chars_1) = middle_token_summary(middle_1, &overlapping_affixes);
+    let (words_2, initials_2, chars_2) = middle_token_summary(middle_2, &overlapping_affixes);
+    let conflicting_initials =
+        !initials_1.is_empty() && !initials_2.is_empty() && initials_1.is_disjoint(&initials_2);
+    let conflicting_full_names = !words_1.is_empty()
+        && !words_2.is_empty()
+        && words_1.is_disjoint(&words_2)
+        && chars_1 != chars_2
+        && !same_prefix_token_iters(middle_1.iter().copied(), middle_2.iter().copied());
+    conflicting_initials || conflicting_full_names
+}
+
+#[cfg(test)]
 pub(crate) fn name_tuple_contains(
     map: &HashMap<String, HashSet<String>>,
     a: &str,
     b: &str,
 ) -> bool {
-    // Directed lookup to match the Python reference, which tests `(a, b) in name_tuples`
-    // in argument order only (see `first_names_name_compatible` in s2and/text.py). The
-    // shipped tuples file lists both directions, so symmetric pairs still match.
+    // Alias ingestion stores both directions, so the hot constraint path needs
+    // one hash lookup while remaining order-independent.
     map.get(a).map_or(false, |vals| vals.contains(b))
 }
 
-fn first_name_forms(value: &str) -> (String, String, String) {
-    let normalized = value.to_string();
-    let parts: Vec<&str> = normalized.split_whitespace().collect();
-    let joined = parts.join("");
-    let token = parts
-        .first()
-        .map_or_else(|| normalized.clone(), |part| (*part).to_string());
-    (normalized, joined, token)
-}
-
+#[cfg(test)]
 pub(crate) fn first_names_name_compatible(
     first_1: &str,
     first_2: &str,
     name_tuples: &HashMap<String, HashSet<String>>,
 ) -> bool {
+    if first_1.split_whitespace().next().is_none() || first_2.split_whitespace().next().is_none() {
+        // Missing first-name evidence is unknown, not an incompatibility signal.
+        return true;
+    }
     if same_prefix_tokens(first_1, first_2) {
         return true;
     }
-    let forms_1 = first_name_forms(first_1);
-    let forms_2 = first_name_forms(first_2);
-    name_tuple_contains(name_tuples, &forms_1.0, &forms_2.0)
-        || name_tuple_contains(name_tuples, &forms_1.1, &forms_2.1)
-        || name_tuple_contains(name_tuples, &forms_1.2, &forms_2.2)
+    // canonical_v2: the regenerated name-tuple artifact is keyed on full
+    // canonical first names, so the fields are probed exactly as given.
+    name_tuple_contains(name_tuples, first_1, first_2)
 }
 
 #[cfg(test)]
@@ -75,15 +683,181 @@ mod tests {
     use super::*;
 
     #[test]
+    fn joined_initials_reconcile_only_exact_spellings() {
+        let conflict = |a: (&str, &str, Option<&str>), b: (&str, &str, Option<&str>)| {
+            let key_a = ConstraintNameKey::new(a.0, a.1, "hahn", a.2);
+            let key_b = ConstraintNameKey::new(b.0, b.1, "hahn", b.2);
+            constraint_names_conflict(&key_a, &key_b, || false)
+        };
+        // "Ka" against "Kristan Allan" and "Kristian A.".
+        assert!(!conflict(
+            ("ka", "", Some("Jka")),
+            ("kristan", "allan", None)
+        ));
+        assert!(!conflict(("kristian", "a", None), ("ka", "", Some("Jka"))));
+        // "MArfan" against "Mohammad Arfan" but not "Mohammad Arif".
+        assert!(!conflict(
+            ("marfan", "", Some("Wm arfan")),
+            ("mohammad", "arfan", None)
+        ));
+        assert!(conflict(
+            ("marfan", "", Some("Wm arfan")),
+            ("mohammad", "arif", None)
+        ));
+        // Too few names, short romanized syllables, and two readings keep the veto.
+        assert!(conflict(("ka", "", Some("Jka")), ("kristian", "", None)));
+        assert!(conflict(("ji", "", Some("Jji")), ("jong", "in", None)));
+        assert!(conflict(("ka", "", Some("Jka")), ("ki", "", Some("Jki"))));
+        // A joined-capitals middle ("Johanna IP") is spelled out; one middle initial is not enough.
+        assert!(!conflict(
+            ("jip", "", Some("Jjip")),
+            ("johanna", "ip", Some("Sip"))
+        ));
+        assert!(!conflict(
+            ("johanna", "ip", Some("Sip")),
+            ("jip", "", Some("Jjip"))
+        ));
+        assert!(conflict(("jip", "", Some("Jjip")), ("johanna", "ip", None)));
+        assert!(conflict(("jip", "", Some("Jjip")), ("johanna", "i", None)));
+        // The spelled middle also holds against full middle names.
+        assert!(!conflict(
+            ("johanna", "ip", Some("Sip")),
+            ("johanna", "inge petra", None)
+        ));
+        assert!(conflict(
+            ("johanna", "ip", Some("Sip")),
+            ("johanna", "karin maria", None)
+        ));
+        assert!(conflict(
+            ("johanna", "ip", None),
+            ("johanna", "inge petra", None)
+        ));
+    }
+
+    #[test]
+    fn surname_family_matches_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/surname_family_examples.json"
+        ))
+        .expect("parse surname family fixture");
+        for case in fixture["cases"].as_array().expect("fixture cases") {
+            let last = case["last"].as_str().unwrap();
+            assert_eq!(
+                surname_family(last),
+                case["family"].as_str().unwrap(),
+                "{last}"
+            );
+        }
+        assert!(lasts_equivalent_for_constraint("muller", "mueller"));
+        assert!(!lasts_equivalent_for_constraint("xue", "xu"));
+        let a = ConstraintNameKey::new("gero", "", "muller", None);
+        let b = ConstraintNameKey::new("gero", "", "mueller", None);
+        assert!(!constraint_names_conflict(&a, &b, || false));
+    }
+
+    #[test]
+    fn different_cjk_given_names_conflict_and_equal_ones_do_not() {
+        let name_tuples: HashMap<String, HashSet<String>> = HashMap::default();
+        let conflict = |a: (&str, &str, bool), b: (&str, &str, bool)| {
+            // Values carry a script tag; these names stand for Han given names. A name
+            // without letters stands for an incomplete transliteration, an empty value.
+            let given_a: String = if a.0.is_empty() && a.1.is_empty() {
+                String::new()
+            } else {
+                std::iter::once("H")
+                    .chain([a.0, a.1].into_iter().flat_map(str::split_whitespace))
+                    .collect()
+            };
+            let given_b: String = if b.0.is_empty() && b.1.is_empty() {
+                String::new()
+            } else {
+                std::iter::once("H")
+                    .chain([b.0, b.1].into_iter().flat_map(str::split_whitespace))
+                    .collect()
+            };
+            let key_a = ConstraintNameKey::new(a.0, a.1, "ling mu", a.2.then_some(&given_a));
+            let key_b = ConstraintNameKey::new(b.0, b.1, "ling mu", b.2.then_some(&given_b));
+            constraint_names_conflict(&key_a, &key_b, || {
+                name_tuple_contains(&name_tuples, a.0, b.0)
+            })
+        };
+        // 重喜 / 重郷 / 重憲, 勝央 / 勝彦 and 孝徳 / 孝: syllables match by prefix.
+        assert!(conflict(("zhong", "xi", true), ("zhong", "xiang", true)));
+        assert!(conflict(("zhong", "xiang", true), ("zhong", "xian", true)));
+        assert!(conflict(("sheng", "yang", true), ("sheng", "yan", true)));
+        assert!(conflict(("xiao", "de", true), ("xiao", "", true)));
+        // 민 / 민수 and ひろ / ひろし: one token that prefixes the other.
+        assert!(conflict(("min", "", true), ("minsu", "", true)));
+        // The same given name, also split across first and middle or spaced.
+        assert!(!conflict(("zhong", "xi", true), ("zhong", "xi", true)));
+        assert!(!conflict(("min su", "", true), ("minsu", "", true)));
+        assert!(!conflict(("hi", "rosi", true), ("hiro", "si", true)));
+        // A romanized side keeps the plain rules.
+        assert!(!conflict(("zhong", "xi", true), ("zhong", "xiang", false)));
+        assert!(!conflict(("xiao", "", false), ("xiao", "de", true)));
+        // A CJK name without transliterated letters is missing evidence.
+        assert!(!conflict(("", "", true), ("zhong", "xi", true)));
+    }
+
+    #[test]
     fn name_tuple_compatibility_does_not_apply_extra_case_normalization() {
-        let name_tuples =
-            HashMap::from([("Bill".to_string(), HashSet::from(["William".to_string()]))]);
+        let mut name_tuples = HashMap::default();
+        crate::insert_name_tuple_alias(&mut name_tuples, "Bill".to_string(), "William".to_string());
 
         assert!(first_names_name_compatible("Bill", "William", &name_tuples));
+        assert!(first_names_name_compatible("William", "Bill", &name_tuples));
         assert!(!first_names_name_compatible(
             "bill",
             "william",
             &name_tuples
         ));
+    }
+
+    #[test]
+    fn empty_prefix_tokens_are_not_positive_evidence() {
+        assert!(!same_prefix_tokens("", "alice"));
+        assert!(!same_prefix_tokens("", ""));
+        assert!(first_names_name_compatible(
+            "",
+            "alice",
+            &HashMap::default()
+        ));
+    }
+
+    fn conflict(first_1: &str, middle_1: &str, first_2: &str, middle_2: &str) -> bool {
+        let (tokens_1, tokens_2) = constraint_middle_tokens(first_1, middle_1, first_2, middle_2);
+        middle_names_conflict(&tokens_1, &tokens_2)
+    }
+
+    #[test]
+    fn dash_bound_first_tail_joins_the_middle_comparison() {
+        assert!(!conflict("j d", "t", "j", "d"));
+        assert!(conflict("chi hung", "", "c", "m"));
+        assert!(!conflict("jean daniel", "", "jean", "daniel"));
+        assert!(conflict("jean daniel", "", "jean", "paul"));
+        assert!(!conflict("j d", "t", "jean daniel", ""));
+        assert!(!conflict("", "d", "j d", ""));
+    }
+
+    #[test]
+    fn covered_first_tokens_stay_out_of_the_middle_comparison() {
+        assert!(conflict("jean pierre", "a", "jean pierre", "b"));
+        assert!(conflict("j d", "t", "j d", "s"));
+        assert!(!conflict("xiao qing", "", "xiaoqing", "frank"));
+        assert!(conflict("j d", "t", "jd", "s"));
+        assert_eq!(
+            constraint_middle_tokens("j d", "t", "jean", "d"),
+            (vec!["d", "t"], vec!["d"])
+        );
+    }
+
+    #[test]
+    fn alias_matched_first_tail_stays_out_of_the_middle_comparison() {
+        assert_eq!(
+            constraint_middle_tokens("abol ghasem", "", "ali", "r"),
+            (Vec::<&str>::new(), vec!["r"])
+        );
+        assert!(!conflict("abol ghasem", "", "ali", "r"));
+        assert!(conflict("abol ghasem", "m", "ali", "r"));
     }
 }

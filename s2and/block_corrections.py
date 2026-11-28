@@ -1,0 +1,67 @@
+"""Compatibility imports. The code lives in `s2and.corrections.block_corrections`."""
+
+from __future__ import annotations
+
+import math as math
+from collections import defaultdict as defaultdict
+from collections.abc import Callable as Callable
+from collections.abc import Mapping as Mapping
+from collections.abc import Sequence as Sequence
+from collections.abc import Set as Set
+from dataclasses import dataclass as dataclass
+from dataclasses import field as field
+from typing import Any as Any
+from typing import cast as cast
+
+import numpy as np  # noqa: F401
+
+from s2and.arrow_inputs import arrow_string_array as arrow_string_array
+from s2and.consts import LARGE_DISTANCE as LARGE_DISTANCE
+from s2and.consts import YEAR_DIFF_CAP as YEAR_DIFF_CAP
+from s2and.corrections.block_corrections import _NAME_RULE_CONFLICT as _NAME_RULE_CONFLICT
+from s2and.corrections.block_corrections import _REMOVED_REPAIR_SETTINGS as _REMOVED_REPAIR_SETTINGS
+from s2and.corrections.block_corrections import BlockCodes as BlockCodes
+from s2and.corrections.block_corrections import BlockCorrections as BlockCorrections
+from s2and.corrections.block_corrections import _close_pair_settings as _close_pair_settings
+from s2and.corrections.block_corrections import _common_surname as _common_surname
+from s2and.corrections.block_corrections import _count_small_blocks as _count_small_blocks
+from s2and.corrections.block_corrections import _dataset_name_rules_alone_forbid as _dataset_name_rules_alone_forbid
+from s2and.corrections.block_corrections import _in_two_required_groups as _in_two_required_groups
+from s2and.corrections.block_corrections import _reading_fields as _reading_fields
+from s2and.corrections.block_corrections import _repair_settings as _repair_settings
+from s2and.corrections.block_corrections import _request_small_block_signatures as _request_small_block_signatures
+from s2and.corrections.block_corrections import _rust_name_rules_alone_forbid as _rust_name_rules_alone_forbid
+from s2and.corrections.block_corrections import _spans_a_year_gap as _spans_a_year_gap
+from s2and.corrections.block_corrections import _split_close_code as _split_close_code
+from s2and.corrections.block_corrections import _wanted as _wanted
+from s2and.corrections.block_corrections import arrow_small_block_signatures as arrow_small_block_signatures
+from s2and.corrections.block_corrections import average_linkage_cut as average_linkage_cut
+from s2and.corrections.block_corrections import correction_fingerprint as correction_fingerprint
+from s2and.corrections.block_corrections import corrections_copy_codes as corrections_copy_codes
+from s2and.corrections.block_corrections import corrections_from_dataset as corrections_from_dataset
+from s2and.corrections.block_corrections import corrections_from_rust_featurizer as corrections_from_rust_featurizer
+from s2and.corrections.block_corrections import dataset_small_block_signatures as dataset_small_block_signatures
+from s2and.corrections.block_corrections import orcid_join_enabled as orcid_join_enabled
+from s2and.corrections.block_corrections import year_gap_split_enabled as year_gap_split_enabled
+from s2and.feature_port import _get_rust_featurizer as _get_rust_featurizer
+from s2and.model_pairwise import FastCluster as FastCluster
+from s2and.name_conflict_repair import BONUS_MAX_PLAIN_AVERAGE as BONUS_MAX_PLAIN_AVERAGE
+from s2and.name_conflict_repair import BONUS_MIN_CLOSE_SHARE as BONUS_MIN_CLOSE_SHARE
+from s2and.name_conflict_repair import BONUS_MIN_SIDE_MENTIONS as BONUS_MIN_SIDE_MENTIONS
+from s2and.name_conflict_repair import MIN_BLOCK_SIZE as MIN_BLOCK_SIZE
+from s2and.name_conflict_repair import REPAIR_ROUNDS as REPAIR_ROUNDS
+from s2and.name_conflict_repair import NameConflictRepair as NameConflictRepair
+from s2and.name_conflict_repair import has_full_first_name as has_full_first_name
+from s2and.name_conflict_repair import repair_name_conflicts_in_block as repair_name_conflicts_in_block
+from s2and.pair_codes import HARD_CODE as HARD_CODE
+from s2and.pair_codes import certain_close_code as certain_close_code
+from s2and.pair_codes import quantize_distances as quantize_distances
+from s2and.rust_calls import get_constraints_matrix_indexed_rust as get_constraints_matrix_indexed_rust
+from s2and.text import canonicalize_name_parts as canonicalize_name_parts
+from s2and.text import given_name_for_constraint as given_name_for_constraint
+from s2and.text import is_joined_reading as is_joined_reading
+from s2and.text import normalize_orcid as normalize_orcid
+from s2and.text import spelled_reading_forms as spelled_reading_forms
+from s2and.year_gap_split import SMALL_SURNAME_BLOCK as SMALL_SURNAME_BLOCK
+from s2and.year_gap_split import split_year_gaps as split_year_gaps
+from s2and.year_gap_split import split_years as split_years

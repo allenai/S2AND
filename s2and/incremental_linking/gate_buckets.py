@@ -12,12 +12,6 @@ FirstNameBucket = Literal["single_letter_first", "multi_letter_first"]
 QueryView = Literal["full", "initial_only"]
 
 _LETTERS_RE = re.compile(r"[A-Za-z]+")
-_VALID_FIRST_NAME_BUCKETS: frozenset[str] = frozenset(
-    {
-        "single_letter_first",
-        "multi_letter_first",
-    }
-)
 _VALID_QUERY_VIEWS: frozenset[str] = frozenset({"full", "initial_only"})
 
 
@@ -47,22 +41,12 @@ def first_name_bucket_array(
     views = np.asarray(query_views, dtype=object)
     if tokens.ndim != 1 or views.ndim != 1 or len(tokens) != len(views):
         raise ValueError(
-            "query_first_tokens and query_views must be 1D arrays with equal length: "
-            f"{tokens.shape} != {views.shape}"
+            f"query_first_tokens and query_views must be 1D arrays with equal length: {tokens.shape} != {views.shape}"
         )
     return np.asarray(
         [first_name_bucket_from_token_view(token, view) for token, view in zip(tokens, views, strict=True)],
         dtype=object,
     )
-
-
-def validate_first_name_bucket(value: Any) -> FirstNameBucket:
-    """Validate a materialized first-name bucket value."""
-
-    bucket = str(value)
-    if bucket not in _VALID_FIRST_NAME_BUCKETS:
-        raise ValueError(f"Unknown promoted gate first_name_bucket: {bucket!r}")
-    return cast(FirstNameBucket, bucket)
 
 
 def validate_query_view(value: Any) -> QueryView:
@@ -72,14 +56,3 @@ def validate_query_view(value: Any) -> QueryView:
     if view not in _VALID_QUERY_VIEWS:
         raise ValueError(f"Unknown retrieval query_view: {view!r}")
     return cast(QueryView, view)
-
-
-def normalize_query_views(query_view: str | Sequence[str], query_count: int) -> QueryView | tuple[QueryView, ...]:
-    """Validate scalar or per-query retrieval view input."""
-
-    if isinstance(query_view, str):
-        return validate_query_view(query_view)
-    views = tuple(validate_query_view(value) for value in query_view)
-    if len(views) != int(query_count):
-        raise ValueError(f"query_view length must match queries: {len(views)} != {int(query_count)}")
-    return views

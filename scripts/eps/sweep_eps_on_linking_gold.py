@@ -1,0 +1,1334 @@
+"""Sweep FastCluster EPS values against an ORCID-masked identity B3 reference.
+
+Load Arrow linker-replay datasets, plan target-bearing blocks, and compute
+pairwise distances through the native Arrow featurizer. Reuse each subblock
+linkage across the EPS grid.
+
+"""
+
+# ruff: noqa: E402
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import json
+import logging
+import math
+import os
+import pickle
+import shutil
+import sys
+import time
+from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.ipc as ipc
+
+from s2and._sha256 import sha256_file as _hash_file
+from s2and.arrow_inputs import ArrowDataset
+from s2and.block_corrections import arrow_small_block_signatures, year_gap_split_enabled
+from s2and.incremental_linking.attach_reuse import AttachReuse
+from scripts.common.initial_query_sources import MAP_SHA256_FIELD, load_initial_query_sources
+from scripts.eps.sweep_curves import (
+    CLUSTERING_SOURCE,
+    DEFAULT_OUTPUT_ROOT,
+    DISTANCE_POLICY_VERSION,
+    SINGLETON_INCLUSIVE_CURVE,
+    arrow_dataset_dir,
+    sha1_text,
+    write_json,
+)
+from scripts.judging.decision_capture import DecisionCapture
+
+
+@dataclass(frozen=True)
+class CachedBlockClusters:
+    """One subblock with the production cluster label of each signature at every swept EPS."""
+
+    block_key: str
+    signature_ids: list[str]
+    labels_by_eps: dict[float, list[int]]
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--arrow-root", type=Path, required=True)
+    parser.add_argument(
+        "--replay-bundle", default=None, help="Select a declared replay catalog from a combined snapshot."
+    )
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
+    parser.add_argument("--score-mode", choices=["orcid-b3"], default="orcid-b3")
+    parser.add_argument("--block-role-assignments", type=Path, help="Require the frozen eps_cal block roles.")
+    parser.add_argument(
+        "--reference-labels",
+        type=Path,
+        default=None,
+        help="Optional external parquet (signature_id, orcid) for the ORCID B3 reference.",
+    )
+    parser.add_argument(
+        "--allow-all-reference-identities",
+        action="store_true",
+        help="Use all reference identities without final-test exclusion (only for block-disjoint E-Cal/test pools).",
+    )
+    parser.add_argument(
+        "--expected-initial-query-map-sha256", help="Require this frozen initial-query source-map SHA-256."
+    )
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--distance-cache-dir", type=Path, default=None)
+    parser.add_argument("--n-jobs", type=int, default=8)
+    parser.add_argument("--total-ram-bytes", type=int, default=48 * 1024**3)
+    parser.add_argument("--batching-threshold", type=int, required=True, help="Maximum size of a subblock.")
+    parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
+    # ORCID B3 needs hidden ORCIDs, so both settings are fixed. They stay in
+    # plans and cache keys so plan readers can reject other settings.
+    parser.set_defaults(use_orcid_subblocking=False, suppress_orcid_constraints=True)
+    parser.add_argument("--eps-start", type=float, default=0.40)
+    parser.add_argument("--eps-stop", type=float, default=0.80)
+    parser.add_argument("--eps-step", type=float, default=0.05)
+    parser.add_argument("--eps-values", nargs="*", type=float, default=None)
+    parser.add_argument("--dry-run", action="store_true", help="Plan subblocks and pair counts without pairwise work.")
+    parser.add_argument(
+        "--compute-missing-dists",
+        action="store_true",
+        help="Compute and cache missing Arrow/Rust pairwise distance matrices. Without this, missing caches fail fast.",
+    )
+    parser.add_argument("--overwrite-dists", action="store_true")
+    parser.add_argument(
+        "--max-subblocks",
+        type=int,
+        default=None,
+        help="Optional smoke limit after subblock selection.",
+    )
+    parser.add_argument(
+        "--allow-full-run",
+        action="store_true",
+        help="Permit --compute-missing-dists without --max-subblocks.",
+    )
+    parser.add_argument(
+        "--subblock-selection",
+        choices=["gold-heavy", "smallest"],
+        default="gold-heavy",
+        help="Ordering used with --max-subblocks.",
+    )
+    parser.add_argument("--write-assignments", action="store_true")
+    parser.add_argument("--capture-dir", type=Path, help="Write final linker decisions per block at one explicit EPS.")
+    parser.add_argument(
+        "--route",
+        choices=["production", "bulk"],
+        default="production",
+        help=(
+            "production scores predict_from_arrow output: bulk clustering from cached distances, then the "
+            "no-middle reunite step and initial-only attachment through the linker. bulk scores bulk "
+            "clustering of each target subblock alone, for --max-subblocks smoke runs and diagnostics."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+BULK_ONLY_CURVE = "eps_b3_bulk_only.tsv"
+
+
+def _signature_ids_digest(signature_ids: Iterable[str]) -> str:
+    """Return a stable digest for a sequence of signature ids."""
+
+    return sha1_text("\n".join(str(sig_id) for sig_id in signature_ids))
+
+
+def _safe_cache_name(dataset: str, index: int, block_key: str) -> str:
+    """Return a filesystem-safe distance cache filename."""
+
+    return f"{dataset}_{index:03d}_{sha1_text(block_key)[:12]}.pkl"
+
+
+def _eps_values(args: argparse.Namespace, model_eps: float | None) -> list[float]:
+    """Return sorted EPS values, including model EPS when it falls in range.
+
+    A capture run records exactly its one explicit EPS. Adding the model EPS there would replay a
+    second EPS into the same capture files.
+    """
+
+    if args.eps_values:
+        values = [round(float(value), 10) for value in args.eps_values]
+    else:
+        count = int(round((args.eps_stop - args.eps_start) / args.eps_step))
+        values = [round(args.eps_start + i * args.eps_step, 10) for i in range(count + 1)]
+        values = [value for value in values if value <= args.eps_stop + 1e-9]
+    capturing = getattr(args, "capture_dir", None) is not None
+    if model_eps is not None and not capturing and args.eps_start <= model_eps <= args.eps_stop:
+        values.append(round(float(model_eps), 10))
+    return sorted(set(values))
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    """Validate cheap CLI invariants before doing I/O."""
+
+    if args.n_jobs <= 0:
+        raise ValueError("--n-jobs must be > 0")
+    if args.total_ram_bytes <= 0:
+        raise ValueError("--total-ram-bytes must be > 0")
+    if args.batching_threshold <= 0:
+        raise ValueError("--batching-threshold must be > 0")
+    if args.pair_chunk_size <= 0:
+        raise ValueError("--pair-chunk-size must be > 0")
+    if args.eps_step <= 0:
+        raise ValueError("--eps-step must be > 0")
+    if args.eps_stop < args.eps_start:
+        raise ValueError("--eps-stop must be >= --eps-start")
+    if not all(math.isfinite(value) for value in (args.eps_start, args.eps_stop, args.eps_step)):
+        raise ValueError("EPS grid values must be finite")
+    if not all(math.isfinite(value) and 0 <= value <= 1 for value in _eps_values(args, None)):
+        raise ValueError("EPS values must be finite and within [0, 1]")
+    if args.max_subblocks is not None and args.max_subblocks <= 0:
+        raise ValueError("--max-subblocks must be > 0 when set")
+    if args.compute_missing_dists and args.max_subblocks is None and not args.allow_full_run:
+        raise ValueError("--compute-missing-dists requires --max-subblocks or explicit --allow-full-run")
+    if args.use_orcid_subblocking or not args.suppress_orcid_constraints:
+        raise ValueError("ORCID-B3 requires hidden ORCID constraints and hidden ORCID subblocking")
+    if getattr(args, "block_role_assignments", None) is not None and not args.allow_all_reference_identities:
+        raise ValueError("--block-role-assignments requires --allow-all-reference-identities")
+    if args.route == "production" and args.max_subblocks is not None:
+        raise ValueError("--route production clusters whole blocks; use --route bulk with --max-subblocks")
+    if getattr(args, "capture_dir", None) is not None and (
+        args.route != "production" or args.dry_run or len(args.eps_values or ()) != 1
+    ):
+        raise ValueError("--capture-dir requires a production replay with one explicit --eps-values value")
+
+
+def _output_dir(args: argparse.Namespace) -> Path:
+    """Return the output directory for one dataset."""
+
+    if args.output_dir is not None:
+        return args.output_dir
+    return DEFAULT_OUTPUT_ROOT / args.dataset
+
+
+def _optional_str(value: Any) -> str | None:
+    """Return a string or None for nullable Arrow/Pandas scalar values."""
+
+    if value is None or pd.isna(value):
+        return None
+    return str(value)
+
+
+def _read_target_blocks(
+    args: argparse.Namespace,
+    arrow_dataset: ArrowDataset,
+    target_signature_ids: set[str],
+) -> dict[str, list[str]]:
+    """Return every signature of each Arrow block that holds a target signature.
+
+    Native subblocking reads signature metadata from Arrow itself, so planning needs only block membership.
+    """
+
+    with arrow_dataset.use() as lease, lease.open_file("signatures") as infile:
+        with pa.PythonFile(infile, mode="r") as source:
+            table = ipc.open_file(source).read_all()
+    missing = sorted({"signature_id", "author_block"} - set(table.column_names))
+    if missing:
+        raise ValueError(f"Arrow signatures table is missing planning columns: {missing}")
+
+    table = table.select(["signature_id", "author_block"])
+    pc_any = cast(Any, pc)
+    excluded = getattr(args, "_excluded_signature_ids", frozenset())
+    if excluded:
+        excluded_values = pa.array(sorted(excluded), type=table["signature_id"].type)
+        table = table.filter(pc_any.invert(pc_any.is_in(table["signature_id"], value_set=excluded_values)))
+    target_values = pa.array(sorted(target_signature_ids), type=table["signature_id"].type)
+    target_table = table.filter(pc_any.is_in(table["signature_id"], value_set=target_values))
+    found_target_ids = {str(signature_id) for signature_id in target_table["signature_id"].to_pylist()}
+    missing_target_ids = sorted(target_signature_ids - found_target_ids)
+    if missing_target_ids:
+        raise ValueError(f"Arrow signatures table is missing target signature ids: {missing_target_ids[:10]}")
+
+    target_blocks = sorted({_optional_str(block_key) or "" for block_key in target_table["author_block"].to_pylist()})
+    block_column = pc.fill_null(table["author_block"], "")
+    block_values = pa.array(target_blocks, type=block_column.type)
+    data = table.filter(pc_any.is_in(block_column, value_set=block_values)).to_pydict()
+    block_dict: dict[str, list[str]] = defaultdict(list)
+    for signature_id, block_key in zip(data["signature_id"], data["author_block"], strict=True):
+        block_dict[_optional_str(block_key) or ""].append(str(signature_id))
+    return dict(block_dict)
+
+
+def _select_subblock_rows(
+    rows: list[dict[str, Any]],
+    selection: str,
+    max_subblocks: int | None,
+) -> list[dict[str, Any]]:
+    """Order and optionally limit selected subblock rows."""
+
+    if max_subblocks is None:
+        return rows
+    if selection == "gold-heavy":
+        ordered = sorted(
+            rows,
+            key=lambda row: (-int(row["intra_gold_pair_count"]), int(row["pair_count"]), str(row["block_key"])),
+        )
+    elif selection == "smallest":
+        rows_with_gold = [row for row in rows if int(row["intra_gold_pair_count"]) > 0 and int(row["pair_count"]) > 0]
+        fallback_rows = [row for row in rows if row not in rows_with_gold]
+        ordered = sorted(
+            rows_with_gold,
+            key=lambda row: (int(row["pair_count"]), int(row["signature_count"]), str(row["block_key"])),
+        ) + sorted(
+            fallback_rows,
+            key=lambda row: (int(row["pair_count"]), int(row["signature_count"]), str(row["block_key"])),
+        )
+    else:
+        raise ValueError(f"Unknown subblock selection: {selection}")
+    return ordered[:max_subblocks]
+
+
+def _build_arrow_subblocked_block_dict(
+    *,
+    args: argparse.Namespace,
+    clusterer: Any,
+    block_dict: Mapping[str, list[str]],
+    target_signature_ids: set[str],
+    arrow_dataset: ArrowDataset,
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Subblock target-bearing blocks with the production native planner."""
+
+    from s2and.subblocking import _make_subblocks_with_telemetry_arrow_rust, _resolve_graph_subblocking_config
+
+    config = _resolve_graph_subblocking_config(getattr(clusterer, "subblocking_graph_config", None))
+    threshold = int(args.batching_threshold)
+    subblocked: dict[str, list[str]] = {}
+    telemetry_rows: list[dict[str, Any]] = []
+    for block_key, signature_ids in sorted(block_dict.items()):
+        signature_ids = [str(signature_id) for signature_id in signature_ids]
+        if not (target_signature_ids & set(signature_ids)):
+            continue
+        if len(signature_ids) <= threshold:
+            subblocked[str(block_key)] = signature_ids
+            continue
+
+        started = time.perf_counter()
+        subblocks, telemetry, _ = _make_subblocks_with_telemetry_arrow_rust(
+            arrow_dataset,
+            signature_ids,
+            maximum_size=threshold,
+            first_k_letter_counts_sorted=clusterer._subblocking_prefix_counts(),
+            graph_subblocking_config=config,
+            graph_subblocking_random_seed=int(getattr(clusterer, "random_state", 0) or 0),
+            use_orcid_subblocking=bool(args.use_orcid_subblocking),
+        )
+        seconds = time.perf_counter() - started
+        output_ids = [signature_id for members in subblocks.values() for signature_id in members]
+        if len(output_ids) != len(set(output_ids)) or sorted(output_ids) != sorted(signature_ids):
+            raise ValueError(f"Native subblocking must return every input signature exactly once: {block_key}")
+        for subblock_key in sorted(subblocks):
+            subblock_signatures = [str(signature_id) for signature_id in subblocks[subblock_key]]
+            if len(subblock_signatures) > threshold:
+                raise ValueError(
+                    f"Arrow subblocking produced oversized subblock {block_key}|subblock={subblock_key}: "
+                    f"{len(subblock_signatures)} > {threshold}"
+                )
+            subblocked[f"{block_key}|subblock={subblock_key}"] = subblock_signatures
+
+        telemetry_rows.append(
+            {
+                "block_key": str(block_key),
+                "input_signature_count": len(signature_ids),
+                "output_subblock_count": len(subblocks),
+                "seconds": round(seconds, 3),
+                "subblocking_telemetry": telemetry,
+            }
+        )
+    return subblocked, telemetry_rows
+
+
+def _plan_subblocks(
+    args: argparse.Namespace,
+    clusterer: Any,
+    block_dict: dict[str, list[str]],
+    gold: pd.DataFrame,
+    arrow_dataset: ArrowDataset,
+) -> tuple[dict[str, list[str]], dict[str, Any], dict[str, list[str]]]:
+    """Plan target subblocks from Arrow metadata and Arrow-backed subblocking.
+
+    Returns:
+        The selected target subblocks, the plan record, and every subblock of the target blocks.
+    """
+
+    target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(gold["member_signature_id"].astype(str))
+    subblocked, subblocking_telemetry = _build_arrow_subblocked_block_dict(
+        args=args,
+        clusterer=clusterer,
+        block_dict=block_dict,
+        target_signature_ids=target_signature_ids,
+        arrow_dataset=arrow_dataset,
+    )
+    selected: dict[str, list[str]] = {}
+    subblock_rows: list[dict[str, Any]] = []
+    signature_to_subblock: dict[str, str] = {}
+    for block_key, signature_ids in sorted(subblocked.items()):
+        signature_ids = [str(sig_id) for sig_id in signature_ids]
+        for signature_id in signature_ids:
+            signature_to_subblock[signature_id] = block_key
+        target_count = len(target_signature_ids & set(signature_ids))
+        if target_count == 0:
+            continue
+        pair_count = len(signature_ids) * (len(signature_ids) - 1) // 2
+        selected[block_key] = signature_ids
+        subblock_rows.append(
+            {
+                "block_key": block_key,
+                "signature_count": len(signature_ids),
+                "target_signature_count": target_count,
+                "pair_count": pair_count,
+            }
+        )
+
+    gold_subblocks = pd.DataFrame(
+        {
+            "_query_subblock": gold["query_signature_id"].map(signature_to_subblock),
+            "_member_subblock": gold["member_signature_id"].map(signature_to_subblock),
+            "label": gold["label"].to_numpy(),
+        }
+    )
+    gold_subblocks = gold_subblocks[
+        gold_subblocks["_query_subblock"].notna()
+        & gold_subblocks["_member_subblock"].notna()
+        & (gold_subblocks["_query_subblock"] == gold_subblocks["_member_subblock"])
+    ].copy()
+    intra_counts = gold_subblocks.groupby("_query_subblock", sort=False).size()
+    intra_positive_counts = (
+        gold_subblocks[gold_subblocks["label"].astype(int) == 1].groupby("_query_subblock", sort=False).size()
+    )
+    intra_negative_counts = (
+        gold_subblocks[gold_subblocks["label"].astype(int) == 0].groupby("_query_subblock", sort=False).size()
+    )
+    for row in subblock_rows:
+        block_key = str(row["block_key"])
+        row["intra_gold_pair_count"] = int(intra_counts.get(block_key, 0))
+        row["intra_gold_positive_count"] = int(intra_positive_counts.get(block_key, 0))
+        row["intra_gold_negative_count"] = int(intra_negative_counts.get(block_key, 0))
+
+    selected_rows = _select_subblock_rows(subblock_rows, args.subblock_selection, args.max_subblocks)
+    selected = {str(row["block_key"]): selected[str(row["block_key"])] for row in selected_rows}
+
+    selected_signature_ids = {sig_id for signature_ids in selected.values() for sig_id in signature_ids}
+    covered_target_signature_ids = target_signature_ids & selected_signature_ids
+    plan = {
+        "dataset": args.dataset,
+        "batching_threshold": int(args.batching_threshold),
+        "gold_rows": int(len(gold)),
+        "gold_queries": int(gold["query_signature_id"].nunique()),
+        "gold_target_signature_count": int(len(target_signature_ids)),
+        "covered_target_signature_count": int(len(covered_target_signature_ids)),
+        "missing_target_signature_count": int(len(target_signature_ids - covered_target_signature_ids)),
+        "base_blocks": {block_key: len(signature_ids) for block_key, signature_ids in block_dict.items()},
+        "selected_subblock_count": len(selected),
+        "selected_signature_count": int(sum(len(ids) for ids in selected.values())),
+        "selected_pair_count": int(sum(row["pair_count"] for row in selected_rows)),
+        "subblock_selection": args.subblock_selection,
+        "subblocking_backend": "arrow-rust-native-graph",
+        "subblocking_telemetry": subblocking_telemetry,
+        "subblocks": selected_rows,
+    }
+    return selected, plan, subblocked
+
+
+def _cache_metadata(
+    args: argparse.Namespace,
+    block_key: str,
+    signature_ids: list[str],
+    arrow_generation_id: str,
+) -> dict[str, Any]:
+    """Return metadata that must match for a cached distance vector."""
+
+    from s2and import __version__ as s2and_version
+    from s2and.model import Clusterer, _orcid_name_waiver_setting
+
+    model_fingerprint = _model_fingerprint(args)
+    return {
+        "dataset": args.dataset,
+        **model_fingerprint,
+        "arrow_root": str(args.arrow_root.resolve()),
+        "arrow_generation_id": arrow_generation_id,
+        "block_key": block_key,
+        "signature_count": len(signature_ids),
+        "signature_ids_digest": _signature_ids_digest(signature_ids),
+        "pair_count": len(signature_ids) * (len(signature_ids) - 1) // 2,
+        "batching_threshold": int(args.batching_threshold),
+        "pair_chunk_size": int(args.pair_chunk_size),
+        "use_orcid_subblocking": bool(args.use_orcid_subblocking),
+        "suppress_orcid_constraints": bool(args.suppress_orcid_constraints),
+        "orcid_feature_ids_hidden": bool(args.suppress_orcid_constraints),
+        # Hidden ORCIDs waive nothing. The loaded model holds the class default.
+        "orcid_name_waiver": None if args.suppress_orcid_constraints else _orcid_name_waiver_setting(Clusterer),
+        "distance_source": "arrow-rust",
+        "distance_policy_version": DISTANCE_POLICY_VERSION,
+        # A release can change the name rules, and with them the distances.
+        "s2and_version": s2and_version,
+    }
+
+
+def _is_non_pairwise_bundle_relpath(rel_path: str) -> bool:
+    top = rel_path.split("/", 1)[0]
+    return top in {"incremental_linker", "reproducibility"}
+
+
+def _canonical_pairwise_clusterer_bytes(clusterer_path: Path) -> bytes:
+    """Return canonical JSON bytes for pairwise-distance-determining clusterer settings."""
+    payload = json.loads(clusterer_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        # Linker, EPS, and release version do not change bulk pairwise distances.
+        filtered = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"incremental_linker", "production_model_release_version"}
+        }
+        if isinstance(filtered.get("best_params"), dict):
+            filtered["best_params"] = {k: v for k, v in filtered["best_params"].items() if k != "eps"}
+        if isinstance(filtered.get("cluster_model"), dict):
+            cm = dict(filtered["cluster_model"])
+            if isinstance(cm.get("params"), dict):
+                cm["params"] = {k: v for k, v in cm["params"].items() if k != "eps"}
+            cm.pop("eps", None)
+            filtered["cluster_model"] = cm
+        return json.dumps(filtered, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return clusterer_path.read_bytes()
+
+
+def _pairwise_model_sha256(model_path: Path) -> str | None:
+    """Hash only the pairwise-distance-determining parts of a model bundle.
+
+    Include the pairwise feature contract from the production manifest.
+    Ignore linker, gate, target-spec, and EPS variants for distance reuse.
+    """
+    if not model_path.exists():
+        return None
+    if model_path.is_file():
+        return _hash_file(model_path)
+    digest = hashlib.sha256()
+    digest.update(b"s2and-pairwise-model-fingerprint-v2\0")
+    has_pairwise_dir = (model_path / "pairwise").is_dir()
+    for child in sorted(candidate for candidate in model_path.rglob("*") if candidate.is_file()):
+        rel_path = child.relative_to(model_path).as_posix()
+        if _is_non_pairwise_bundle_relpath(rel_path):
+            continue
+        if has_pairwise_dir and rel_path == "manifest.json":
+            manifest = json.loads(child.read_text(encoding="utf-8"))
+            digest.update(json.dumps(manifest.get("feature_contract_version")).encode("utf-8") + b"\0")
+            continue
+        rel_bytes = rel_path.encode("utf-8")
+        digest.update(len(rel_bytes).to_bytes(8, "little", signed=False))
+        digest.update(rel_bytes)
+        if rel_path == "clusterer.json":
+            canonical = _canonical_pairwise_clusterer_bytes(child)
+            digest.update(len(canonical).to_bytes(8, "little", signed=False))
+            digest.update(canonical)
+            continue
+        child_stat = child.stat()
+        digest.update(int(child_stat.st_size).to_bytes(8, "little", signed=False))
+        with child.open("rb") as infile:
+            for chunk in iter(lambda: infile.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _path_stat_cache_key(path: Path) -> tuple[Any, ...]:
+    if not path.exists():
+        return ("missing", str(path))
+    stat = path.stat()
+    if path.is_file():
+        return ("file", str(path), int(stat.st_size), int(stat.st_mtime_ns))
+    if path.is_dir():
+        entries: list[tuple[str, int, int]] = []
+        for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+            rel_path = child.relative_to(path).as_posix()
+            child_stat = child.stat()
+            entries.append(
+                (
+                    rel_path,
+                    int(child_stat.st_size),
+                    int(child_stat.st_mtime_ns),
+                )
+            )
+        return ("dir", str(path), tuple(entries))
+    return ("other", str(path), int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _hash_directory(path: Path) -> tuple[int, int, str]:
+    digest = hashlib.sha256()
+    digest.update(b"s2and-directory-fingerprint-v1\0")
+    total_size = 0
+    max_mtime_ns = int(path.stat().st_mtime_ns)
+    for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+        rel_path = child.relative_to(path).as_posix()
+        child_stat = child.stat()
+        total_size += int(child_stat.st_size)
+        max_mtime_ns = max(max_mtime_ns, int(child_stat.st_mtime_ns))
+        rel_bytes = rel_path.encode("utf-8")
+        digest.update(len(rel_bytes).to_bytes(8, "little", signed=False))
+        digest.update(rel_bytes)
+        digest.update(int(child_stat.st_size).to_bytes(8, "little", signed=False))
+        with child.open("rb") as infile:
+            for chunk in iter(lambda: infile.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return total_size, max_mtime_ns, digest.hexdigest()
+
+
+def _model_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
+    """Return a stable fingerprint for the model artifact used by distance caches."""
+
+    model_path = args.model_path.resolve()
+    model_stat = model_path.stat() if model_path.exists() else None
+    if model_stat is None:
+        return {
+            "model_path": str(model_path),
+            "model_size": None,
+            "model_mtime_ns": None,
+            "model_sha256": None,
+            "pairwise_model_sha256": None,
+        }
+    cache_key = _path_stat_cache_key(model_path)
+    cached = getattr(args, "_s2and_model_fingerprint_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        return dict(cached[1])
+    if model_path.is_dir():
+        model_size, model_mtime_ns, model_sha256 = _hash_directory(model_path)
+    else:
+        model_size = int(model_stat.st_size)
+        model_mtime_ns = int(model_stat.st_mtime_ns)
+        model_sha256 = _hash_file(model_path)
+    fingerprint = {
+        "model_path": str(model_path),
+        "model_size": model_size,
+        "model_mtime_ns": model_mtime_ns,
+        "model_sha256": model_sha256,
+        "pairwise_model_sha256": _pairwise_model_sha256(model_path),
+    }
+    try:
+        args._s2and_model_fingerprint_cache = (cache_key, dict(fingerprint))
+    except Exception:
+        pass
+    return fingerprint
+
+
+def _distance_cache_path(cache_dir: Path, dataset: str, index: int, block_key: str) -> Path:
+    """Return the cache path for one subblock."""
+
+    return cache_dir / _safe_cache_name(dataset, index, block_key)
+
+
+def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> Any:
+    """Load one cached distance matrix after validating metadata."""
+
+    with path.open("rb") as infile:
+        payload = pickle.load(infile)
+    metadata = dict(payload.get("metadata", {}))
+    if not expected_metadata.get("pairwise_model_sha256"):
+        raise ValueError(f"Distance cache validation requires a non-null pairwise_model_sha256 for {path}")
+    for key in [
+        "dataset",
+        "pairwise_model_sha256",
+        "arrow_root",
+        "arrow_generation_id",
+        "distance_source",
+        "distance_policy_version",
+        "block_key",
+        "signature_count",
+        "signature_ids_digest",
+        "use_orcid_subblocking",
+        "suppress_orcid_constraints",
+        "orcid_feature_ids_hidden",
+        "orcid_name_waiver",
+        "s2and_version",
+    ]:
+        # A cache from an older script lacks the newer fields; reject it.
+        if key not in metadata or metadata[key] != expected_metadata.get(key):
+            raise ValueError(f"Distance cache metadata mismatch for {path}: key={key}")
+    return payload["dist"]
+
+
+def _build_arrow_featurizer(
+    clusterer: Any,
+    arrow_dataset: ArrowDataset,
+    signature_ids: Sequence[str],
+) -> Any:
+    """Build a Rust featurizer from the retained Arrow dataset."""
+
+    from s2and.feature_port import build_rust_featurizer_from_arrow_dataset
+
+    return build_rust_featurizer_from_arrow_dataset(
+        arrow_dataset,
+        signature_ids=signature_ids,
+        name_tuples=None,
+        preprocess=True,
+        num_threads=int(clusterer.n_jobs),
+        use_orcid_id=not bool(clusterer.suppress_orcid),
+    )
+
+
+def _ensure_distance_caches(
+    args: argparse.Namespace,
+    clusterer: Any,
+    selected_subblocks: dict[str, list[str]],
+    cache_dir: Path,
+    arrow_dataset: ArrowDataset,
+) -> list[dict[str, Any]]:
+    """Ensure Arrow/Rust distance caches exist for selected subblocks.
+
+    Cache file names number subblocks in the given order, which callers keep stable.
+    """
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    original_batch_size = clusterer.batch_size
+    clusterer.batch_size = int(args.pair_chunk_size)
+    arrow_generation_id = arrow_dataset.generation_id
+    cache_rows: list[dict[str, Any]] = []
+    rows_by_block: dict[str, dict[str, Any]] = {}
+    blocks_to_compute: dict[str, list[str]] = {}
+    try:
+        for index, (block_key, signature_ids) in enumerate(selected_subblocks.items()):
+            metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
+            cache_path = _distance_cache_path(cache_dir, args.dataset, index, block_key)
+            row = {
+                **metadata,
+                "cache_path": str(cache_path),
+                "cache_exists_before": cache_path.exists(),
+                "computed": False,
+                "seconds": 0.0,
+            }
+            if cache_path.exists() and not args.overwrite_dists:
+                _load_cached_distance(cache_path, metadata)
+                cache_rows.append(row)
+                continue
+            if len(signature_ids) <= 1:
+                cache_rows.append(row)
+                continue
+            if not args.compute_missing_dists:
+                raise SystemExit(
+                    f"Missing distance cache for block {block_key!r}: {cache_path}. "
+                    "Pass --compute-missing-dists to run Arrow/Rust pairwise prediction."
+                )
+            cache_rows.append(row)
+            rows_by_block[block_key] = row
+            blocks_to_compute[block_key] = signature_ids
+
+        if blocks_to_compute:
+            featurizer_signature_ids = list(
+                dict.fromkeys(
+                    signature_id for signature_ids in blocks_to_compute.values() for signature_id in signature_ids
+                )
+            )
+            featurizer_started = time.perf_counter()
+            rust_featurizer = _build_arrow_featurizer(clusterer, arrow_dataset, featurizer_signature_ids)
+            featurizer_seconds = time.perf_counter() - featurizer_started
+            logging.info(
+                "built Arrow/Rust featurizer signatures=%d blocks=%d seconds=%.3f",
+                len(featurizer_signature_ids),
+                len(blocks_to_compute),
+                featurizer_seconds,
+            )
+
+        for block_key, signature_ids in blocks_to_compute.items():
+            started = time.perf_counter()
+            dists = clusterer.make_distance_matrices_from_rust_featurizer(
+                {block_key: signature_ids},
+                rust_featurizer,
+                pair_chunk_size=int(args.pair_chunk_size),
+                total_ram_bytes=args.total_ram_bytes,
+            )
+            seconds = time.perf_counter() - started
+            metadata = _cache_metadata(args, block_key, signature_ids, arrow_generation_id)
+            cache_path = Path(rows_by_block[block_key]["cache_path"])
+            with cache_path.open("wb") as outfile:
+                pickle.dump({"metadata": metadata, "dist": dists[block_key]}, outfile, protocol=pickle.HIGHEST_PROTOCOL)
+            row = rows_by_block[block_key]
+            row["computed"] = True
+            row["seconds"] = round(seconds, 3)
+            row["featurizer_batch_signature_count"] = len(featurizer_signature_ids)
+            row["featurizer_batch_seconds"] = round(featurizer_seconds, 3)
+            logging.info(
+                "cached Arrow/Rust distances block=%s signatures=%d pairs=%d seconds=%.3f path=%s",
+                block_key,
+                len(signature_ids),
+                metadata["pair_count"],
+                seconds,
+                cache_path,
+            )
+    finally:
+        clusterer.batch_size = original_batch_size
+    return cache_rows
+
+
+class _CachedDistances(Mapping[str, Any]):
+    """Cached distance vectors by subblock key, with one in memory at a time.
+
+    Production clusters the subblocks in order and reads each matrix once, so loading on access
+    keeps peak memory at one matrix. ``rows`` records what was loaded and how long each subblock took.
+    """
+
+    def __init__(self, loaders: Mapping[str, tuple[Path, Mapping[str, Any], int]]) -> None:
+        self._loaders = loaders
+        self._key: str | None = None
+        self._dist: Any = None
+        self._started = 0.0
+        self.rows: dict[str, dict[str, Any]] = {}
+
+    def close_row(self) -> None:
+        """Record the time since the current subblock was loaded: its load, linkage, cuts and repair."""
+        if self._key is not None and "seconds" not in self.rows[self._key]:
+            self.rows[self._key]["seconds"] = round(time.perf_counter() - self._started, 3)
+
+    def __getitem__(self, key: str) -> Any:
+        if key == self._key:
+            return self._dist
+        self.close_row()
+        cache_path, metadata, signature_count = self._loaders[key]
+        # Drop the previous matrix before the next one loads.
+        self._dist = None
+        self._started = time.perf_counter()
+        dist = _load_cached_distance(cache_path, metadata)
+        pair_count = signature_count * (signature_count - 1) // 2
+        if getattr(dist, "ndim", None) != 1 or len(dist) != pair_count:
+            raise ValueError(
+                f"Cached distance vector for block {key} must be 1-D with {pair_count} pairs, "
+                f"got shape={getattr(dist, 'shape', None)}"
+            )
+        logging.info("Clustering block %s from cached distances (signatures=%d)", key, signature_count)
+        self._key, self._dist = key, dist
+        self.rows[key] = {"signature_count": signature_count, "pair_count": pair_count}
+        return dist
+
+    def __iter__(self) -> Any:
+        return iter(self._loaders)
+
+    def __len__(self) -> int:
+        return len(self._loaders)
+
+
+def _cluster_cached_blocks(
+    *,
+    args: argparse.Namespace,
+    clusterer: Any,
+    selected_subblocks: dict[str, list[str]],
+    cache_dir: Path,
+    arrow_dataset: ArrowDataset,
+    eps_values: Sequence[float],
+) -> tuple[dict[str, CachedBlockClusters], list[dict[str, Any]]]:
+    """Cluster every subblock at every EPS with production code, from cached distances.
+
+    ``Clusterer.predict_eps_grid_from_rust_featurizer`` links each subblock once, cuts it at each
+    EPS and applies every later production step of block clustering, such as name-conflict repair.
+    """
+
+    eps_grid = [float(eps) for eps in eps_values]
+    arrow_generation_id = arrow_dataset.generation_id
+    subblocks = {key: [str(signature_id) for signature_id in members] for key, members in selected_subblocks.items()}
+    # A subblock of one signature has no cached matrix; it is its own cluster at every EPS.
+    labels: dict[str, dict[float, list[int]]] = {
+        key: {eps: [0] * len(members) for eps in eps_grid} for key, members in subblocks.items() if len(members) <= 1
+    }
+    loaders = {
+        key: (
+            _distance_cache_path(cache_dir, args.dataset, index, key),
+            _cache_metadata(args, key, members, arrow_generation_id),
+            len(members),
+        )
+        for index, (key, members) in enumerate(subblocks.items())
+        if len(members) > 1
+    }
+    distances = _CachedDistances(loaders)
+    if loaders:
+        clustered = {key: subblocks[key] for key in loaders}
+        # Name-conflict repair reads first-name and ORCID facts from the featurizer.
+        rust_featurizer = _build_arrow_featurizer(
+            clusterer,
+            arrow_dataset,
+            list(dict.fromkeys(signature_id for members in clustered.values() for signature_id in members)),
+        )
+        # Production decides small surname blocks before subblocking, from the whole request block.
+        # A subblock under SMALL_SURNAME_BLOCK must not count as a small surname block.
+        small_block_signatures = None
+        if year_gap_split_enabled(clusterer):
+            with arrow_dataset.use() as lease:
+                small_block_signatures = arrow_small_block_signatures(
+                    lease, {"request": [signature_id for members in subblocks.values() for signature_id in members]}
+                )
+        signature_ids, ids_by_eps = clusterer.predict_eps_grid_from_rust_featurizer(
+            clustered, rust_featurizer, distances, eps_grid, small_block_signatures=small_block_signatures
+        )
+        distances.close_row()
+        del rust_featurizer
+        offset = 0
+        for key, members in clustered.items():
+            if signature_ids[offset : offset + len(members)] != members:
+                raise ValueError(f"Production clustering reordered the signatures of block {key}")
+            labels[key] = {
+                eps: [int(label) for label in ids_by_eps[eps][offset : offset + len(members)]] for eps in eps_grid
+            }
+            offset += len(members)
+    blocks = {key: CachedBlockClusters(key, members, labels[key]) for key, members in subblocks.items()}
+    rows = [
+        {
+            "block_key": key,
+            "signature_count": len(members),
+            "pair_count": len(members) * (len(members) - 1) // 2,
+            "clustered": key in loaders,
+            "seconds": distances.rows.get(key, {}).get("seconds", 0.0),
+        }
+        for key, members in subblocks.items()
+    ]
+    return blocks, rows
+
+
+def _cluster_assignments_for_eps(
+    *,
+    eps: float,
+    cluster_blocks: Mapping[str, CachedBlockClusters],
+) -> dict[str, str]:
+    """Return the bulk cluster of every signature in the given subblocks at one EPS."""
+
+    assignments: dict[str, str] = {}
+    for block_key, block in sorted(cluster_blocks.items()):
+        for signature_id, label in zip(block.signature_ids, block.labels_by_eps[float(eps)], strict=True):
+            assignments[str(signature_id)] = f"{block_key}_{label}"
+    return assignments
+
+
+def _cache_order(
+    selected_subblocks: Mapping[str, list[str]], all_subblocks: Mapping[str, list[str]] | None
+) -> dict[str, list[str]]:
+    """Order target subblocks first, then any other subblocks, each group by key.
+
+    Target subblocks keep the cache file names of bulk-route runs; other subblocks append after them.
+    """
+    ordered = dict(sorted(selected_subblocks.items()))
+    if all_subblocks is not None:
+        ordered.update(sorted((key, value) for key, value in all_subblocks.items() if key not in ordered))
+    return ordered
+
+
+def _write_orcid_free_dataset(source_dir: Path, target_dir: Path) -> Path:
+    """Write a dataset copy whose signatures carry no ORCID; link every other table.
+
+    Production code reads ORCIDs in several native ingest paths. Removing them from the data hides them
+    from every path at once, as ORCID-B3 scoring requires. The copy records the source manifest digest,
+    and a retry reuses it only for the same source. It is built beside the target and renamed into
+    place, so a stopped build never looks complete.
+    """
+    from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
+    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index
+
+    # The manifest does not hash the name-count index it points to, so bind that too.
+    source_manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
+    index_dir = source_manifest.get("paths", {}).get("name_counts_index")
+    index_manifest = (source_dir / index_dir / "manifest.json").resolve() if index_dir else None
+    index_digest = _hash_file(index_manifest) if index_manifest is not None and index_manifest.is_file() else "none"
+    source_digest = f"{_hash_file(source_dir / 'manifest.json')}:{index_digest}"
+    marker_name = "source_manifest.sha256"
+    if target_dir.exists():
+        marker = target_dir / marker_name
+        if marker.is_file() and marker.read_text(encoding="utf-8").strip() == source_digest:
+            return target_dir
+        raise ValueError(
+            f"ORCID-free dataset copy was made from another source or is incomplete: {target_dir}; "
+            "remove it or use a new output directory"
+        )
+    final_dir = target_dir
+    target_dir = final_dir.with_name(final_dir.name + ".partial")
+    if target_dir.exists():
+        # Only this function writes the staging directory; a leftover is an interrupted build.
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True)
+    manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
+    paths: dict[str, Path] = {key: (source_dir / value).resolve() for key, value in manifest["paths"].items()}
+    for key, path in list(paths.items()):
+        if key in {"signatures", "signatures_batch_index", "name_counts_index"}:
+            continue
+        # Manifests accept only files inside their directory; a hard link avoids copying large tables.
+        link = target_dir / path.name
+        if not link.exists():
+            try:
+                os.link(path, link)
+            except OSError:
+                shutil.copy2(path, link)
+        paths[key] = link
+    signatures_path = target_dir / "signatures.arrow"
+    rows = 0
+    with pa.memory_map(str(paths["signatures"]), "r") as source:
+        reader = ipc.open_file(source)
+        schema = reader.schema
+        orcid_index = schema.get_field_index("author_orcid")
+        with signatures_path.open("wb") as sink, ipc.new_file(sink, schema) as writer:
+            # Keep the batch layout so only the ORCID column differs.
+            for batch_index in range(reader.num_record_batches):
+                batch = reader.get_batch(batch_index)
+                columns = list(batch.columns)
+                if orcid_index >= 0:
+                    columns[orcid_index] = pa.nulls(batch.num_rows, type=schema.field(orcid_index).type)
+                writer.write_batch(pa.RecordBatch.from_arrays(columns, schema=schema))
+                rows += batch.num_rows
+    index_path = target_dir / "signatures.signatures_batch_index.bin"
+    write_arrow_batch_lookup_index(signatures_path, index_path, key_column="signature_id", table_name="signatures")
+    paths["signatures"] = signatures_path
+    paths["signatures_batch_index"] = index_path
+    write_arrow_artifact_manifest(build_arrow_artifact_manifest(paths, target_dir), target_dir)
+    with pa.memory_map(str(signatures_path), "r") as written:
+        table = ipc.open_file(written).read_all()
+        keeps_rows_without_orcids = table.num_rows == rows and (
+            "author_orcid" not in table.column_names or table["author_orcid"].null_count == rows
+        )
+    del table
+    if not keeps_rows_without_orcids:
+        raise ValueError(f"ORCID-free dataset copy kept ORCID values or lost rows: {target_dir}")
+    (target_dir / marker_name).write_text(source_digest + "\n", encoding="utf-8", newline="\n")
+    target_dir.rename(final_dir)
+    return final_dir
+
+
+def _production_assignments_for_eps(
+    *,
+    eps: float,
+    clusterer: Any,
+    block_dict: Mapping[str, list[str]],
+    cluster_blocks: Mapping[str, CachedBlockClusters],
+    arrow_dataset: ArrowDataset,
+    args: argparse.Namespace,
+    attach_reuse: AttachReuse | None = None,
+) -> dict[str, str]:
+    """Run production prediction at one EPS, with bulk clusters from the cached distances.
+
+    Production subblocks each block, clusters the full-name subblocks in bulk, reunites no-middle
+    records that the size cap split, and attaches initial-only groups through the linker. The bulk
+    clusters were computed once for every EPS; the later steps run production code at this EPS.
+    """
+
+    def bulk_clusters(groups: Mapping[str, list[str]]) -> dict[str, list[str]]:
+        clusters: dict[str, list[str]] = defaultdict(list)
+        for subblock_key in sorted(groups):
+            members = [str(signature_id) for signature_id in groups[subblock_key]]
+            block = cluster_blocks.get(subblock_key)
+            # Exact reuse needs the cached clusters to cover the same members in the same order.
+            if block is None or block.signature_ids != members:
+                raise ValueError(f"No cached clusters match production subblock {subblock_key!r}")
+            for signature_id, label in zip(members, block.labels_by_eps[float(eps)], strict=True):
+                clusters[f"{subblock_key}_{label}"].append(signature_id)
+        return dict(clusters)
+
+    request = {str(key): [str(signature_id) for signature_id in members] for key, members in block_dict.items()}
+    if all(len(members) <= int(args.batching_threshold) for members in request.values()):
+        # Production does not subblock these blocks, so its output is the cached bulk clustering.
+        clusters = bulk_clusters(request)
+    else:
+        # Residual clustering inside attachment passes uses the model's own EPS.
+        clusterer.cluster_model.set_params(eps=eps)
+        clusters, _ = clusterer._predict_from_arrow_request(
+            request,
+            arrow_dataset,
+            batching_threshold=int(args.batching_threshold),
+            total_ram_bytes=int(args.total_ram_bytes),
+            bulk_clusters=bulk_clusters,
+            attach_reuse=attach_reuse,
+        )
+    assignments: dict[str, str] = {}
+    for cluster_id, members in clusters.items():
+        for signature_id in members:
+            if str(signature_id) in assignments:
+                raise ValueError(f"Production prediction placed {signature_id} in two clusters")
+            assignments[str(signature_id)] = str(cluster_id)
+    if set(assignments) != {str(signature_id) for members in block_dict.values() for signature_id in members}:
+        raise ValueError("Production prediction must assign every block signature")
+    return assignments
+
+
+def _configure_runtime_environment(args: argparse.Namespace) -> None:
+    """Configure thread environment variables."""
+
+    os.environ["OMP_NUM_THREADS"] = str(args.n_jobs)
+    os.environ["RAYON_NUM_THREADS"] = str(args.n_jobs)
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    """Run one dataset EPS sweep and return the summary payload."""
+
+    _validate_args(args)
+    _configure_runtime_environment(args)
+    output_dir = _output_dir(args).resolve()
+    # Protect completed sweeps written before the proxy mode was retired.
+    if any((output_dir / name).exists() for name in ("eps_b3.tsv", "eps_overall.tsv", "summary.json")):
+        raise FileExistsError("Use a fresh sweep output; reuse --distance-cache-dir for unchanged distances")
+    snapshot_root = args.arrow_root.resolve()
+    query_sources = load_initial_query_sources(
+        snapshot_root,
+        arrow_datasets={},
+        expected_sha256=getattr(args, "expected_initial_query_map_sha256", None),
+    )
+
+    from s2and.production_model import load_production_model
+
+    dataset_root = arrow_dataset_dir(snapshot_root, args.dataset, args.replay_bundle)
+    with ArrowDataset.open(
+        dataset_root,
+        require_specter=True,
+        require_name_counts_index=True,
+    ) as arrow_dataset:
+        query_sources.validate_arrow_dataset(args.dataset, arrow_dataset)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(output_dir / "eps_sweep.log", encoding="utf-8"),
+            ],
+        )
+        clusterer = load_production_model(args.model_path)
+        clusterer.n_jobs = int(args.n_jobs)
+        clusterer.suppress_orcid = bool(args.suppress_orcid_constraints)
+        model_eps = None
+        best_params = getattr(clusterer, "best_params", None)
+        if isinstance(best_params, Mapping) and "eps" in best_params:
+            model_eps = float(best_params["eps"])
+
+        from scripts.common.block_roles import BLOCK_BINDINGS_FIELD, load_block_roles
+        from scripts.common.identity_ledger import ledger_for_roles
+        from scripts.eps.orcid_b3 import (
+            ORCID_ERROR_RECORDS,
+            final_test_query_identities,
+            load_external_reference_labels,
+            planning_targets,
+            read_reference,
+            reviewed_error_records,
+            score_assignments,
+        )
+
+        allow_all = bool(getattr(args, "allow_all_reference_identities", False))
+        roles_path = getattr(args, "block_role_assignments", None)
+        block_roles = load_block_roles(roles_path) if roles_path is not None else None
+        ledger = ledger_for_roles(getattr(args, "identity_evidence", None), block_roles)
+        if block_roles is not None and block_roles.role_for(args.dataset) != "eps_cal":
+            raise ValueError(f"Dataset {args.dataset!r} is not in the frozen eps_cal pool")
+        external_path = getattr(args, "reference_labels", None)
+        external_labels = (
+            load_external_reference_labels(external_path, dataset=args.dataset) if external_path is not None else None
+        )
+        test_identities = (
+            frozenset() if allow_all else final_test_query_identities(snapshot_root, args.dataset, query_sources)
+        )
+        error_records = (
+            reviewed_error_records(snapshot_root, args.dataset)
+            if (snapshot_root / ORCID_ERROR_RECORDS).is_file() or not allow_all
+            else frozenset()
+        )
+        reference = read_reference(
+            arrow_dataset,
+            snapshot_root,
+            args.dataset,
+            test_identities=test_identities,
+            error_records=error_records,
+            query_sources=query_sources,
+            external_labels=external_labels,
+            allow_all_identities=allow_all,
+            block_roles=block_roles,
+            ledger=ledger,
+        )
+        if unmatched := reference.stats.get("external_labels_unmatched", 0):
+            raise ValueError(f"Unmatched external ORCID labels for {args.dataset!r}: {unmatched}")
+        identity_reference = reference.repeated
+        diagnostic_reference = reference.with_singletons
+        reference_stats = dict(reference.stats)
+        if external_path is not None:
+            reference_stats["reference_labels_path"] = str(external_path.resolve())
+            reference_stats["reference_labels_sha256"] = _hash_file(external_path)
+        args._excluded_signature_ids = reference.excluded_copies
+        # The singleton-inclusive reference contains the repeated one, so one plan covers both curves.
+        gold = planning_targets(args.dataset, diagnostic_reference)
+        reference_path = output_dir / "orcid_reference.parquet"
+        pd.DataFrame(
+            {
+                "signature_id": list(diagnostic_reference),
+                "orcid": list(diagnostic_reference.values()),
+                "repeated": [signature in identity_reference for signature in diagnostic_reference],
+            }
+        ).to_parquet(reference_path, index=False)
+        reference_stats["sha256"] = _hash_file(reference_path)
+        target_signature_ids = set(gold["query_signature_id"].astype(str)) | set(
+            gold["member_signature_id"].astype(str)
+        )
+        block_dict = _read_target_blocks(args, arrow_dataset, target_signature_ids)
+        selected_subblocks, plan, all_subblocks = _plan_subblocks(args, clusterer, block_dict, gold, arrow_dataset)
+        plan["model_eps"] = model_eps
+        plan["model_manifest_sha256"] = _hash_file(args.model_path / "manifest.json")
+        plan["score_mode"] = args.score_mode
+        plan["reference"] = reference_stats
+        if ledger is not None:
+            plan[BLOCK_BINDINGS_FIELD] = ledger.roles.bindings_for({args.dataset})
+        plan[MAP_SHA256_FIELD] = query_sources.sha256
+        plan["limited_run"] = args.max_subblocks is not None
+        plan["gold_selection"] = dict.fromkeys(("task_splits", "max_queries_per_dataset", "target_kind"))
+        plan["use_orcid_subblocking"] = bool(args.use_orcid_subblocking)
+        plan["suppress_orcid_constraints"] = bool(args.suppress_orcid_constraints)
+        plan["total_ram_bytes"] = int(args.total_ram_bytes)
+        plan["eps_values"] = _eps_values(args, model_eps)
+        plan["gold_path"] = None
+        plan["gold_sha256"] = None
+        plan["model_path"] = str(args.model_path.resolve())
+        plan["arrow_root"] = str(args.arrow_root.resolve())
+        plan["arrow_manifest"] = str(dataset_root / "manifest.json")
+        plan["arrow_generation_id"] = arrow_dataset.generation_id
+        plan["distance_source"] = "arrow-rust"
+        plan["planning_source"] = "Arrow signatures with production native graph subblocking"
+        plan["clustering_source"] = CLUSTERING_SOURCE
+        plan["route"] = args.route
+        plan["distance_policy_version"] = DISTANCE_POLICY_VERSION
+        write_json(output_dir / "plan.json", plan)
+        pd.DataFrame(plan["subblocks"]).to_csv(output_dir / "target_subblocks.tsv", sep="\t", index=False)
+
+        if args.dry_run:
+            return {"plan": plan, "outputs": {"plan": str(output_dir / "plan.json")}}
+
+        cache_dir = args.distance_cache_dir.resolve() if args.distance_cache_dir else output_dir / "distance_caches"
+        # The production route attaches records across every subblock of a block, so it caches all of them.
+        cache_subblocks = _cache_order(selected_subblocks, all_subblocks if args.route == "production" else None)
+        cache_rows = _ensure_distance_caches(args, clusterer, cache_subblocks, cache_dir, arrow_dataset)
+        pd.DataFrame(cache_rows).to_csv(output_dir / "distance_caches.tsv", sep="\t", index=False)
+        cluster_blocks, linkage_rows = _cluster_cached_blocks(
+            args=args,
+            clusterer=clusterer,
+            selected_subblocks=cache_subblocks,
+            cache_dir=cache_dir,
+            arrow_dataset=arrow_dataset,
+            eps_values=_eps_values(args, model_eps),
+        )
+    pd.DataFrame(linkage_rows).to_csv(output_dir / "linkage_builds.tsv", sep="\t", index=False)
+    selected_cluster_blocks = {key: cluster_blocks[key] for key in selected_subblocks}
+    production_root = (
+        _write_orcid_free_dataset(dataset_root, output_dir / "orcid_free_arrow") if args.route == "production" else None
+    )
+
+    b3_rows: list[dict[str, Any]] = []
+    bulk_b3_rows: list[dict[str, Any]] = []
+    diagnostic_rows: list[dict[str, Any]] = []
+    capture_dir = getattr(args, "capture_dir", None)
+    capture = DecisionCapture()
+    assignment_dir = output_dir / "assignments"
+    if args.write_assignments:
+        assignment_dir.mkdir(exist_ok=True)
+    with contextlib.ExitStack() as production_stack:
+        production_dataset = (
+            None
+            if production_root is None
+            else production_stack.enter_context(
+                ArrowDataset.open(production_root, require_specter=True, require_name_counts_index=True)
+            )
+        )
+        attach_reuse = None if production_dataset is None else production_stack.enter_context(AttachReuse())
+        for eps in _eps_values(args, model_eps):
+            started = time.perf_counter()
+            bulk_assignments = _cluster_assignments_for_eps(
+                eps=eps,
+                cluster_blocks=selected_cluster_blocks,
+            )
+            with capture.patched() if capture_dir is not None else contextlib.nullcontext():
+                assignments = (
+                    bulk_assignments
+                    if production_dataset is None
+                    else _production_assignments_for_eps(
+                        eps=eps,
+                        clusterer=clusterer,
+                        block_dict=block_dict,
+                        cluster_blocks=cluster_blocks,
+                        arrow_dataset=production_dataset,
+                        args=args,
+                        attach_reuse=attach_reuse,
+                    )
+                )
+            seconds = time.perf_counter() - started
+            if capture_dir is not None:
+                capture.write(capture_dir, blocks=block_dict, eps=eps)
+            b3_row = score_assignments(identity_reference, assignments, eps)
+            b3_row["cluster_seconds"] = round(seconds, 6)
+            b3_rows.append(b3_row)
+            diagnostic_rows.append(score_assignments(diagnostic_reference, assignments, eps))
+            if production_dataset is not None:
+                bulk_b3_rows.append(score_assignments(identity_reference, bulk_assignments, eps))
+            logging.info("eps=%s orcid_b3=%s coverage=%s", eps, b3_row["f1"], b3_row["reference_coverage"])
+            if args.write_assignments:
+                assignment_path = assignment_dir / f"assignments_eps_{str(eps).replace('.', 'p')}.parquet"
+                pd.DataFrame(
+                    {"signature_id": list(assignments.keys()), "cluster_id": list(assignments.values())}
+                ).to_parquet(assignment_path, index=False)
+
+    b3 = pd.DataFrame(b3_rows)
+    b3.to_csv(output_dir / "eps_b3.tsv", sep="\t", index=False)
+    pd.DataFrame(diagnostic_rows).to_csv(output_dir / SINGLETON_INCLUSIVE_CURVE, sep="\t", index=False)
+    outputs = {
+        "plan": str(output_dir / "plan.json"),
+        "eps_b3": str(output_dir / "eps_b3.tsv"),
+        "eps_b3_with_singletons": str(output_dir / SINGLETON_INCLUSIVE_CURVE),
+    }
+    if bulk_b3_rows:
+        # Bulk clustering alone, before the linker steps; a diagnostic, not the selection curve.
+        pd.DataFrame(bulk_b3_rows).to_csv(output_dir / BULK_ONLY_CURVE, sep="\t", index=False)
+        outputs["eps_b3_bulk_only"] = str(output_dir / BULK_ONLY_CURVE)
+    if capture_dir is not None:
+        outputs["decision_captures"] = str(capture_dir.resolve())
+    summary = {
+        "plan": plan,
+        "distance_cache_rows": cache_rows,
+        "linkage_rows": linkage_rows,
+        "outputs": outputs,
+    }
+    summary["plan_sha256"] = _hash_file(output_dir / "plan.json")
+    summary["score_sha256"] = _hash_file(output_dir / "eps_b3.tsv")
+    summary["singleton_inclusive_score_sha256"] = _hash_file(output_dir / SINGLETON_INCLUSIVE_CURVE)
+    write_json(output_dir / "summary.json", summary)
+    return summary
+
+
+def _compact_stdout_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a compact payload for CLI stdout."""
+
+    plan = summary.get("plan", {})
+    outputs = summary.get("outputs", {})
+    if not isinstance(plan, Mapping):
+        return dict(summary)
+    compact: dict[str, Any] = {
+        "dataset": plan.get("dataset"),
+        "distance_source": plan.get("distance_source"),
+        "arrow_manifest": plan.get("arrow_manifest"),
+        "selected_subblock_count": plan.get("selected_subblock_count"),
+        "selected_signature_count": plan.get("selected_signature_count"),
+        "selected_pair_count": plan.get("selected_pair_count"),
+        "eps_values": plan.get("eps_values"),
+        "outputs": outputs,
+    }
+    subblocks = plan.get("subblocks")
+    if isinstance(subblocks, list):
+        compact["subblocks"] = subblocks
+    if "distance_cache_rows" in summary:
+        compact["distance_cache_rows"] = summary["distance_cache_rows"]
+    return compact
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run the sweep CLI."""
+
+    summary = run(parse_args(argv))
+    print(json.dumps(_compact_stdout_summary(summary), indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
